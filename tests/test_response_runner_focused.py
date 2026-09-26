@@ -10004,3 +10004,31 @@ async def test_a_due_response_hands_its_final_request_to_the_skill_review(tmp_pa
     final = captured.messages[-1]
     assert (final.role, bool(final.content), final.tool_calls) == ("assistant", True, None)
     assert "skill_manage" in {tool.name for tool in captured.tools if isinstance(tool, Function)}
+
+
+def test_stopping_a_review_never_fails_an_approval_continuation(tmp_path: Path) -> None:
+    """A continuation whose stored identity no longer resolves still resumes; only the review bookkeeping is skipped."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    reviews = MagicMock()
+    runner.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="ready",
+        execution_identity={"channel": "matrix"},
+    )
+    with capture_logs() as logs:
+        runner._cancel_approval_skill_review(continuation)
+    reviews.cancel.assert_not_called()
+    assert any(log["event"] == "Could not stop the skill review of an approval continuation" for log in logs)

@@ -13,9 +13,10 @@ import contextvars
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
@@ -121,8 +122,8 @@ class SkillReviewRunner:
             # The lock lives in the storage root, because the primary takes no lock inside a workspace worker code shares.
             lock_name = f"{hashlib.sha256(str(skills_root).encode()).hexdigest()[:32]}.lock"
             async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning_locks" / lock_name):
-                archived = await progress.track(
-                    asyncio.to_thread(
+                archived = await run_blocking_until_complete(
+                    partial(
                         archive_unused_skills,
                         skills_root,
                         archive_after_days=settings.archive_after_days,
@@ -149,8 +150,8 @@ class SkillReviewRunner:
         except Exception:
             outcome = "failed"
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
-        # Every exit, a stop included, waits for the archival and writes it started, which land even after a timeout
-        # or a stop cancels the review, so they are recorded as the learner's before the count is settled.
+        # Archival and writes land before a timeout or a stop goes through, so every exit, a stop included, settles the
+        # count with every change the learner made.
         finish = asyncio.ensure_future(self._finish(key, entry, progress, outcome))
         while not finish.done():
             try:
@@ -179,7 +180,6 @@ class SkillReviewRunner:
             await self._notify(entry.agent, identity, changes)
 
     async def _finish(self, key: str, claimed: QueueEntry, progress: ReviewProgress, outcome: _Outcome) -> _Outcome:
-        await progress.settled()
         if progress.changes:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.

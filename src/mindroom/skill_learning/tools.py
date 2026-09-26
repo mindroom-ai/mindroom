@@ -15,8 +15,9 @@ import weakref
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.skill_learning.library import (
     SkillEditError,
     SkillFile,
@@ -31,7 +32,7 @@ from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
 from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     from agno.skills import Skills
 
@@ -40,9 +41,29 @@ if TYPE_CHECKING:
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
+_ACTIONS: tuple[str, ...] = get_args(SkillAction)
 # Agno runs the tool calls of one reply concurrently, and chat and a review may change one library at once, while each
 # change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they take turns.
 _LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def _library_turn(skills_root: Path) -> asyncio.Lock:
+    """Return the lock every skill tool of one skills directory in this process takes turns with."""
+    return _LIBRARY_TURNS.setdefault(skills_root, asyncio.Lock())
+
+
+@dataclass(frozen=True)
+class SkillChange:
+    """One ``skill_manage`` call."""
+
+    action: str
+    name: str
+    content: str | None = None
+    old_string: str | None = None
+    new_string: str | None = None
+    file_path: str | None = None
+    file_content: str | None = None
+    replace_all: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,26 +115,22 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
 
 @dataclass
 class ReviewProgress:
-    """What a review changed so far, and its file work, which finishes even after a timeout or a stop."""
+    """The skills a review changed, recorded as each write lands."""
 
     changes: dict[str, str] = field(default_factory=dict)
-    writes: set[asyncio.Future[Any]] = field(default_factory=set)
 
-    def track[T](
-        self,
-        operation: Awaitable[T],
-        on_done: Callable[[asyncio.Future[T]], None] | None = None,
-    ) -> Awaitable[T]:
-        """Run file work that a cancelled review must not abandon halfway."""
-        future = asyncio.ensure_future(operation)
-        if on_done is not None:
-            future.add_done_callback(on_done)
-        self.writes.add(future)
-        return asyncio.shield(future)
 
-    async def settled(self) -> None:
-        """Wait until all file work the review started has landed or failed."""
-        await asyncio.gather(*self.writes, return_exceptions=True)
+async def manage_skill_in_chat(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    skills_root: Path,
+    change: SkillChange,
+) -> str:
+    """Apply one chat-time change to the library as it is once this call's turn comes."""
+    async with _library_turn(skills_root):
+        catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
+        return await SkillTools(skills_root, catalog.entries, catalog.reserved_names)._apply(change)
 
 
 @dataclass
@@ -129,7 +146,7 @@ class SkillTools:
 
     def __post_init__(self) -> None:
         """Share one turn lock with every other user of the same skills directory in this process."""
-        self._turn = _LIBRARY_TURNS.setdefault(self.skills_root, asyncio.Lock())
+        self._turn = _library_turn(self.skills_root)
 
     @property
     def learner(self) -> bool:
@@ -214,39 +231,53 @@ class SkillTools:
         replace_all: bool = False,
     ) -> str:
         """Apply one skill change; the agent-facing schema is ``SkillManageTools.skill_manage``."""
+        change = SkillChange(action, name, content, old_string, new_string, file_path, file_content, replace_all)
         async with self._turn:
-            entry = self.catalog.get(name)
-            if action != "create" and (refusal := self._edit_refusal(name, entry)) is not None:
-                return refusal
-            # An adopted skill may live in a directory named differently from its frontmatter name.
-            directory = name if entry is None or entry.directory is None else entry.directory
-            relative_path = file_path or SKILL_FILENAME
-            try:
-                if action == "create":
-                    await self._create(name, _required(content, "content"))
-                elif action == "patch":
-                    read = await self._current(directory, relative_path)
-                    patched = _patched(read, directory, relative_path, old_string, new_string, replace_all)
-                    await self._write(name, directory, relative_path, patched, read)
-                elif action == "edit":
-                    edited = _required(content, "content")
-                    await self._write(
-                        name,
-                        directory,
-                        SKILL_FILENAME,
-                        edited,
-                        await self._current(directory, SKILL_FILENAME),
-                    )
-                elif action == "write_file":
-                    target = _required(file_path, "file_path")
-                    written = _required(file_content, "file_content")
-                    await self._write(name, directory, target, written, await self._current(directory, target))
-                else:
-                    target = _required(file_path, "file_path")
-                    await self._remove(name, directory, target, await self._current(directory, target))
-            except (OSError, ValueError) as exc:
-                return _refusal(str(exc))
-            return _reply({"success": True, "action": action, "name": name, "file_path": relative_path})
+            return await self._apply(change)
+
+    async def _apply(self, change: SkillChange) -> str:
+        # A review's entrypoint runs without Agno's argument validation, so the action is checked here.
+        if change.action not in _ACTIONS:
+            return _refusal(f"Unknown action {change.action!r}; use one of {', '.join(_ACTIONS)}.")
+        entry = self.catalog.get(change.name)
+        if change.action != "create" and (refusal := self._edit_refusal(change.name, entry)) is not None:
+            return refusal
+        # An adopted skill may live in a directory named differently from its frontmatter name.
+        directory = change.name if entry is None or entry.directory is None else entry.directory
+        try:
+            relative_path = await self._change(change, directory)
+        except (OSError, ValueError) as exc:
+            return _refusal(str(exc))
+        return _reply({"success": True, "action": change.action, "name": change.name, "file_path": relative_path})
+
+    async def _change(self, change: SkillChange, directory: str) -> str:
+        """Apply a validated change and return the file it changed."""
+        name = change.name
+        if change.action == "create":
+            await self._create(name, _required(change.content, "content"))
+            return SKILL_FILENAME
+        if change.action == "edit":
+            await self._write(
+                name,
+                directory,
+                SKILL_FILENAME,
+                _required(change.content, "content"),
+                await self._current(directory, SKILL_FILENAME),
+            )
+            return SKILL_FILENAME
+        if change.action == "patch":
+            target = change.file_path or SKILL_FILENAME
+            read = await self._current(directory, target)
+            patched = _patched(read, directory, target, change.old_string, change.new_string, change.replace_all)
+            await self._write(name, directory, target, patched, read)
+            return target
+        target = _required(change.file_path, "file_path")
+        if change.action == "write_file":
+            content = _required(change.file_content, "file_content")
+            await self._write(name, directory, target, content, await self._current(directory, target))
+        else:
+            await self._remove(name, directory, target, await self._current(directory, target))
+        return target
 
     def _edit_refusal(self, name: str, entry: _CatalogEntry | None) -> str | None:
         if entry is None:
@@ -258,20 +289,17 @@ class SkillTools:
         return None
 
     async def _file(self, operation: Callable[[], None], *, name: str, action: str) -> None:
-        """Run one file change in a thread; a review's change finishes even when a timeout cancels the review.
+        """Run one file change in a thread that lands before a cancellation goes through, keeping this turn held.
 
-        A review records the change when the write lands, so a notice after a timeout still names it.
+        A review records the change when the write lands, so a notice after a timeout or a stop still names it.
         """
-        if self.progress is None:
+
+        async def change() -> None:
             await asyncio.to_thread(operation)
-            return
-        progress = self.progress
+            if self.progress is not None:
+                self.progress.changes.setdefault(name, action)
 
-        def record(done: asyncio.Future[None]) -> None:
-            if not done.cancelled() and done.exception() is None:
-                progress.changes.setdefault(name, action)
-
-        await progress.track(asyncio.to_thread(operation), on_done=record)
+        await run_coroutine_until_complete(change())
 
     async def _current(self, directory: str, relative_path: str) -> SkillFile | None:
         """Return the version a write builds on: the review's last read of it, or in chat the file as it is now."""

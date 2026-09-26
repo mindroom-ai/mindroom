@@ -207,11 +207,13 @@ A review that already changed skills before failing, timing out, or being stoppe
 Like Hermes' default review, the review forks the final model request of the response that made the conversation due.
 It sends that request again on the same model, with the same tools, the model's final answer, and the review prompt appended, so the provider can serve the conversation from its prompt cache and the review sees it verbatim, including every tool call and result.
 On a stored OpenAI Responses conversation, the fork continues from the response with `previous_response_id`, so the provider rebuilds the same conversation.
-Only the skill tools run; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use.
+Only the skill tools run in MindRoom; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use.
+Provider-hosted tools the request offered, such as a provider's web search, stay available to the fork, because the provider runs them.
 Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
 The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
 
 The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, and when the final request cannot be forked because the response ended on a tool call, offered no `skill_manage`, or needs approval for a skill tool.
+Unlike Hermes' fork, which compacts the conversation between its requests, the fork resends the whole conversation with each request, so a response whose final request already used more than a quarter of the review's input budget is replayed as a digest too.
 A replay without its own `skill_learning.model` runs on the model the response used, or for an approved continuation on the agent's model for that room and thread.
 A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
 Older tool results are left out, and a very long message keeps its start and end.
@@ -224,7 +226,7 @@ Like Hermes, each request adds the input tokens the provider reported, prompt-ca
 A digest replay's transcript may use a quarter of that budget, estimated at four characters per token.
 A review makes at most 16 tool calls and stops after `timeout_seconds`.
 The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
-It also lists the agent's skills and who owns each.
+It also lists the skill tools the review can run, and the agent's skills and who owns each.
 Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configuration/index.md#built-in-prompt-overrides).
 
 ### Skill tools

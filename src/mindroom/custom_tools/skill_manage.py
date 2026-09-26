@@ -6,12 +6,11 @@ agent's request offered; this is the one tool it writes skills with.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.skill_learning.tools import SkillAction, SkillTools, load_skill_catalog
+from mindroom.skill_learning.tools import SkillAction, SkillChange, manage_skill_in_chat
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,21 +59,10 @@ class SkillManageTools(Toolkit):
             replace_all: Replace every occurrence of old_string instead of exactly one.
 
         """
-        catalog = await asyncio.to_thread(
-            load_skill_catalog,
+        return await manage_skill_in_chat(
             self._config,
             self._runtime_paths,
             self._agent_name,
             self._skills_root,
-        )
-        tools = SkillTools(self._skills_root, catalog.entries, catalog.reserved_names)
-        return await tools.skill_manage(
-            action,
-            name,
-            content=content,
-            old_string=old_string,
-            new_string=new_string,
-            file_path=file_path,
-            file_content=file_content,
-            replace_all=replace_all,
+            SkillChange(action, name, content, old_string, new_string, file_path, file_content, replace_all),
         )

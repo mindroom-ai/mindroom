@@ -2123,16 +2123,17 @@ class ResponseRunner:
         )
 
     def _cancel_approval_skill_review(self, continuation: ApprovalContinuation) -> None:
-        """Stop the running review of the conversation an agent continuation resumes."""
-        if continuation.entity_kind == "agent" and self._learns_skills(continuation.entity_name):
-            self._cancel_skill_review(
-                continuation.entity_name,
-                continuation.session_id,
-                parse_tool_execution_identity_payload(
-                    continuation.execution_identity,
-                    error_prefix="Approval continuation execution_identity",
-                ),
+        """Stop the running review of the conversation an agent continuation resumes; it never fails the continuation."""
+        if continuation.entity_kind != "agent" or not self._learns_skills(continuation.entity_name):
+            return
+        try:
+            execution_identity = parse_tool_execution_identity_payload(
+                continuation.execution_identity,
+                error_prefix="Approval continuation execution_identity",
             )
+            self._cancel_skill_review(continuation.entity_name, continuation.session_id, execution_identity)
+        except (TypeError, ValueError):
+            self.deps.logger.exception("Could not stop the skill review of an approval continuation")
 
     def _skill_review(
         self,
@@ -2207,7 +2208,7 @@ class ResponseRunner:
         self._cancel_skill_review(self.deps.agent_name, session_id, execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
             return None, runtime
-        capture = SkillReviewCapture(runtime.active_model_name)
+        capture = SkillReviewCapture()
         queue = self._skill_review(
             agent_name=self.deps.agent_name,
             session_id=session_id,

@@ -15,7 +15,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.metrics import RunMetrics
+from agno.metrics import BaseMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.tools.function import Function
@@ -56,7 +56,20 @@ _FALLBACK_INPUT_TOKENS = 120_000
 _CHARS_PER_TOKEN = 4
 # A digest replay resends its transcript on every request of the review, so it may use a quarter of the budget.
 _TRANSCRIPT_BUDGET_SHARE = 4
-_SKILL_TOOL_NAMES = ("get_skill_instructions", "get_skill_reference", "get_skill_script", "skill_manage")
+# The skill tools a review runs, as the review prompt describes them.
+_SKILL_TOOL_LINES = {
+    "get_skill_instructions": "get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its "
+    "support files.",
+    "get_skill_reference": "get_skill_reference(skill_name, reference_path): load one support file under references/.",
+    "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/; scripts "
+    "never run in a review.",
+    "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
+    '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
+    '(file_path and file_content), or "remove_file" (file_path).',
+}
+# Without compaction between its requests, a fork resends the whole conversation each time, so a conversation that
+# already used more than this share of the review budget is replayed as a digest to leave room for several requests.
+_FORK_BUDGET_SHARE = 4
 
 
 @dataclass(frozen=True)
@@ -83,13 +96,13 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
 def _review_tools(
     schemas: Iterable[Function | dict[str, Any]],
     tools: SkillTools,
-) -> tuple[list[Function | dict[str, Any]], list[str]]:
+) -> tuple[list[Function | dict[str, Any]], list[str], bool]:
     """Keep every tool definition of the agent's request, but run only the skill tools, as the review's.
 
     Each copy keeps its definition's fields, so the request's tools stay byte-identical. Like Hermes' denial message,
     every other tool answers with the skill tools the review can use. A tool that needs approval or external execution
     stays a plain definition, which Agno answers with "The requested tool does not exist or is not available." instead of
-    pausing the review. Returns the tools and the names of the skill tools that run.
+    pausing the review. Returns the tools, the skill tools that run, and whether a skill tool needs approval.
     """
     entrypoints: dict[str, Callable[..., Any]] = {
         "get_skill_instructions": tools.get_skill_instructions,
@@ -97,13 +110,8 @@ def _review_tools(
         "get_skill_script": tools.get_skill_script,
         "skill_manage": tools.skill_manage,
     }
-    runnable = [
-        tool.name
-        for tool in schemas
-        if isinstance(tool, Function)
-        and tool.name in entrypoints
-        and not (tool.requires_confirmation or tool.external_execution)
-    ]
+    skill_tools = [tool for tool in schemas if isinstance(tool, Function) and tool.name in entrypoints]
+    runnable = [tool.name for tool in skill_tools if not (tool.requires_confirmation or tool.external_execution)]
 
     async def deny(**_arguments: object) -> str:
         return f"This tool is not available during a skill review; only {_listing(runnable)} run here."
@@ -117,7 +125,7 @@ def _review_tools(
         else:
             entrypoint = entrypoints.get(tool.name, deny)
             review_tools.append(Function(**tool.to_dict(), entrypoint=entrypoint, skip_entrypoint_processing=True))
-    return review_tools, runnable
+    return review_tools, runnable, len(runnable) < len(skill_tools)
 
 
 def _listing(names: Sequence[str]) -> str:
@@ -129,8 +137,10 @@ def _review_prompt(config: Config, catalog: SkillCatalog, runnable: Sequence[str
         f"- {entry.name} ({entry.owner}): {entry.description}"
         for entry in sorted(catalog.entries.values(), key=lambda item: item.name)
     )
+    tool_lines = "\n".join(f"- {_SKILL_TOOL_LINES[name]}" for name in runnable)
     return (
-        f"{config.get_prompt('SKILL_REVIEW_PROMPT')}\nSkills and their owners:\n{owners or '(none yet)'}\n\n"
+        f"{config.get_prompt('SKILL_REVIEW_PROMPT')}\nTools:\n{tool_lines}\n\n"
+        f"Skills and their owners:\n{owners or '(none yet)'}\n\n"
         f"You can only call {_listing(runnable)} in this review; every other tool answers that it is not available, "
         "so do not call one."
     )
@@ -150,8 +160,12 @@ def _fork(
     # A loop that stopped after a tool call, or whose last request was refused, left no final answer to continue.
     if final is None or final.role != "assistant" or final.tool_calls or not final.content:
         return None
-    review_tools, runnable = _review_tools(captured.tools, tools)
-    if "skill_manage" not in runnable:
+    sent = _context_tokens(config, captured.model, captured.model_name, final.metrics) if final.metrics else 0
+    if sent * _FORK_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
+        return None
+    review_tools, runnable, needs_approval = _review_tools(captured.tools, tools)
+    # A review cannot give approval, and a patch without its read tool is always refused, so all skill tools must run.
+    if needs_approval or "skill_manage" not in runnable:
         return None
     return _ReviewRequest(
         model=captured.model,
@@ -237,7 +251,7 @@ async def _replay(
         budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _TRANSCRIPT_BUDGET_SHARE,
     )
     schemas = await asyncio.to_thread(_agent_skill_schemas, config, runtime_paths, agent_name, skills_root, catalog)
-    review_tools, runnable = _review_tools(schemas, tools)
+    review_tools, runnable, _needs_approval = _review_tools(schemas, tools)
     model = model_loading.get_model_instance(config, runtime_paths, model_name, execution_identity=identity)
     install_model_call_cap(model, entity_name=agent_name)
     evidence = (
@@ -253,16 +267,16 @@ async def _replay(
     )
 
 
-def _context_tokens(config: Config, review: _ReviewRequest, metrics: RunMetrics) -> int:
-    """Return the input the review has sent so far, counting prompt-cache reads and writes."""
+def _context_tokens(config: Config, model: Model, model_name: str, metrics: BaseMetrics) -> int:
+    """Return the input that requests reported, counting prompt-cache reads and writes."""
     return (
         context_input_tokens_from_counts(
             input_tokens=metrics.input_tokens,
             cache_read_tokens=metrics.cache_read_tokens,
             cache_write_tokens=metrics.cache_write_tokens,
-            provider=review.model.provider,
-            configured_provider=config.models[review.model_name].provider,
-            model_id=review.model.id,
+            provider=model.provider,
+            configured_provider=config.models[model_name].provider,
+            model_id=model.id,
         )
         or 0
     )
@@ -309,7 +323,7 @@ async def review_conversation(
 
     def allow_request() -> bool:
         # Like Hermes, the review ends before its next request once the input it sent reached the budget.
-        if (spent := _context_tokens(config, review, metrics)) < budget_tokens:
+        if (spent := _context_tokens(config, review.model, review.model_name, metrics)) < budget_tokens:
             return True
         logger.info("Skill review reached its input budget", budget_tokens=budget_tokens, spent_tokens=spent)
         return False
@@ -333,13 +347,17 @@ async def review_conversation(
         # Only the review's own replies, whose metrics give the usage report its requests.
         run.messages = messages[len(review.messages) :]
         if run.messages:
-            await _record_usage(run, invocation_id, config, runtime_paths, agent_name, session_id, identity)
+            try:
+                await _record_usage(run, invocation_id, config, runtime_paths, agent_name, session_id, identity)
+            except Exception:
+                # Usage is bookkeeping; its failure must never turn a stop or a finished review into a failure.
+                logger.exception("Could not record skill review usage", agent=agent_name)
     logger.info(
         "Skill review model run finished",
         agent=agent_name,
         forked=review.forked,
         model_requests=sum(1 for message in run.messages if message.role == "assistant"),
-        input_tokens=_context_tokens(config, review, metrics),
+        input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
         cache_read_tokens=metrics.cache_read_tokens,
     )
 

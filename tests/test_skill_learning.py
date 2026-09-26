@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import os
 import threading
@@ -29,11 +28,13 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
+from mindroom.mid_turn import QueuedMessage
 from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -42,7 +43,7 @@ from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.skill_learning.tools import ReviewProgress, load_skill_catalog
+from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -1767,13 +1768,14 @@ async def _answer(
     capture: SkillReviewCapture,
     tools: Sequence[Function | dict[str, Any]],
     run_id: str = "r1",
+    model_name: str = "default",
 ) -> None:
     """Run one agent response loop whose final request the capture records, as a primary attempt does."""
     messages = [
         Message(role="system", content="You are Mind, a deployment assistant."),
         Message(role="user", content="Deploy the web service"),
     ]
-    with capture.observe(model, run_id=run_id):
+    with capture.observe(model, run_id=run_id, model_name=model_name):
         await model.aresponse(messages=messages, tools=list(tools), run_response=RunOutput(run_id=run_id))
 
 
@@ -1796,7 +1798,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     config, paths = _learning_agent_with_a_skill(tmp_path)
     shell_calls: list[str] = []
     model = _model()
-    capture = SkillReviewCapture("default")
+    capture = SkillReviewCapture()
     await _answer(model, capture, _agent_tools(config, paths, shell_calls))
     model.script = [
         ("shell", {"cmd": "cat ~/.ssh/id_ed25519"}),
@@ -1823,10 +1825,18 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reason",
-    ["other review model", "no final answer", "no skill_manage", "skill tool needs approval", "no capture"],
+    [
+        "other review model",
+        "no final answer",
+        "no skill_manage",
+        "skill_manage needs approval",
+        "skill reader needs approval",
+        "conversation too long to fork",
+        "no capture",
+    ],
 )
 async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tmp_path: Path, reason: str) -> None:
-    """Another review model, a loop that ended on a tool call, or a request without a usable skill_manage replays."""
+    """A request the review cannot use whole, or one too long for several review requests, is replayed instead."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
     config.models["small"] = ModelConfig(provider="openai", id="gpt-6-astra-mini")
     tools = _agent_tools(config, paths, [])
@@ -1834,17 +1844,24 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
         config.agents["mind"].skill_learning.model = "small"
     elif reason == "no skill_manage":
         tools = [tool for tool in tools if tool.name != "skill_manage"]
-    elif reason == "skill tool needs approval":
-        (skill_manage,) = [tool for tool in tools if tool.name == "skill_manage"]
-        skill_manage.requires_confirmation = True
+    elif reason.endswith("needs approval"):
+        gated = "skill_manage" if reason.startswith("skill_manage") else "get_skill_instructions"
+        (tool,) = [tool for tool in tools if tool.name == gated]
+        tool.requires_confirmation = True
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
-    capture = SkillReviewCapture("default")
+    capture = SkillReviewCapture()
     await _answer(primary, capture, tools)
     if reason == "no final answer":
         capture = replace(
             capture,
             latest=replace(capture.latest, messages=capture.latest.messages[:-1]) if capture.latest else None,
         )
+    elif reason == "conversation too long to fork":
+        assert capture.latest is not None
+        final_metrics = capture.latest.messages[-1].metrics
+        assert final_metrics is not None
+        # The final request already used more than a quarter of the default 120,000-token review budget.
+        final_metrics.input_tokens = 40_000
     replay = _model()
     with patch("mindroom.model_loading.get_model_instance", return_value=replay):
         await _review(config, paths, captured=None if reason == "no capture" else capture.latest)
@@ -1859,8 +1876,8 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent(tmp_pat
     config, paths = _learning_agent_with_a_skill(tmp_path)
     tools = _agent_tools(config, paths, [])
     model = _model()
-    capture = SkillReviewCapture("default")
-    with capture.observe(model, run_id="r1"):
+    capture = SkillReviewCapture()
+    with capture.observe(model, run_id="r1", model_name="default"):
         await model.aresponse(
             messages=[Message(role="user", content="helper request")],
             tools=tools,
@@ -1954,7 +1971,7 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(tm
                 api_key="test-key",
                 http_options=HttpOptions(httpx_async_client=http_client, retry_options=HttpRetryOptions(attempts=1)),
             )
-        capture = SkillReviewCapture("default")
+        capture = SkillReviewCapture()
         await _answer(model, capture, _agent_tools(config, paths, []))
         await _review(config, paths, captured=capture.latest)
     primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
@@ -2012,19 +2029,20 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
 
 @pytest.mark.asyncio
 async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
-    """The response's context variables, such as its queued-message and mid-turn state, never reach the review."""
+    """The response's queued-message state never reaches the review, though the reused model keeps its notice hook."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    response_state: contextvars.ContextVar[str | None] = contextvars.ContextVar("response_state", default=None)
-    seen: list[str | None] = []
-
-    async def review(**_kwargs: object) -> None:
-        seen.append(response_state.get())
-
-    response_state.set("queued notice pending")
-    with patch.object(runner_module, "review_conversation", review):
-        await _review_due(config, paths, _queue(config, paths))
-    assert seen == [None]
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    notice = "Pause tool use and summarize before handling the newer message."
+    install_queued_message_notice_hook(model, notice_text=notice)
+    due = _queue(config, paths)
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        queued_message_signal_context(_PendingMessage()),
+    ):
+        await _review_due(config, paths, due)
+    assert len(model.requests) == 2
+    assert all(notice not in content for request in model.requests for content in request)
 
 
 @pytest.mark.asyncio
@@ -2071,8 +2089,8 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
     config, paths = _learning_agent_with_a_skill(tmp_path)
     config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-astra-thread")
     primary = _model(("shell", {"cmd": "make deploy"}))
-    capture = SkillReviewCapture("thread")
-    await _answer(primary, capture, _agent_tools(config, paths, []))
+    capture = SkillReviewCapture()
+    await _answer(primary, capture, _agent_tools(config, paths, []), model_name="thread")
     assert capture.latest is not None
     unforkable = replace(capture.latest, messages=capture.latest.messages[:-1])
     replay = _model()
@@ -2080,3 +2098,122 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
         await _review(config, paths, captured=unforkable)
     assert load.call_args.args[2] == "thread"
     assert len(replay.requests) == 1
+
+
+@dataclass
+class _PendingMessage:
+    """A response's queued-message state with one newer human message waiting."""
+
+    def has_pending_human_messages(self) -> bool:
+        return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),)
+
+
+@pytest.mark.asyncio
+async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
+    """A dynamic continuation can switch models, so the review forks the final attempt's model, not the first one's."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-astra-thread")
+    config.agents["mind"].skill_learning.model = "thread"
+    model = _model()
+    capture = SkillReviewCapture()
+    tools = _agent_tools(config, paths, [])
+    await _answer(model, capture, tools, run_id="r1", model_name="default")
+    await _answer(model, capture, tools, run_id="r2", model_name="thread")
+    assert capture.latest is not None
+    assert (capture.latest.run_id, capture.latest.model_name) == ("r2", "thread")
+    await _review(config, paths, captured=capture.latest)
+    assert len(model.requests) == 3, "the review forked the final attempt on the configured review model"
+
+
+@pytest.mark.asyncio
+async def test_unknown_skill_actions_are_refused(tmp_path: Path) -> None:
+    """A review's entrypoint runs without Agno's argument validation, so Hermes' delete never removes a file."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    await tools.get_skill_reference("deploy-checks", "notes.md")
+    refused = json.loads(await tools.skill_manage("delete", "deploy-checks", file_path="references/notes.md"))  # type: ignore[arg-type]
+    assert "Unknown action 'delete'" in refused["error"]
+    assert (root / "deploy-checks/references/notes.md").read_text() == "Notes."
+
+
+@pytest.mark.asyncio
+async def test_a_chat_skill_and_its_support_file_can_be_created_in_one_reply(tmp_path: Path) -> None:
+    """Chat calls take turns and load the library when their turn comes, so a new skill is visible to the next call."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    tools = SkillManageTools("mind", config, paths, root)
+    created, written = await asyncio.gather(
+        tools.skill_manage("create", "handwritten", content=HANDWRITTEN),
+        tools.skill_manage("write_file", "handwritten", file_path="references/notes.md", file_content="Notes."),
+    )
+    assert json.loads(created)["success"] is True
+    assert json.loads(written)["success"] is True
+    assert (root / "handwritten/references/notes.md").read_text() == "Notes."
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_review_keeps_its_turn_until_its_write_lands(tmp_path: Path) -> None:
+    """A chat call waiting behind a stopped review sees the skill the review was writing, never a half-done library."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    writing = threading.Event()
+    real_create = library.create_skill
+
+    def slow_create(*args: object, **kwargs: Any) -> None:  # noqa: ANN401
+        writing.set()
+        time.sleep(1)
+        real_create(*args, **kwargs)
+
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    runner = _runner(paths)
+    chat = SkillManageTools("mind", config, paths, _skills_root(config, paths))
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.tools.create_skill", slow_create),
+    ):
+        due = _queue(config, paths)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
+        assert await asyncio.to_thread(writing.wait, 10)
+        runner.cancel(due[0])
+        written = await chat.skill_manage(
+            "write_file",
+            "deploy-checks",
+            file_path="references/notes.md",
+            file_content="Notes.",
+        )
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+    assert json.loads(written)["success"] is True
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_usage_write_never_hides_a_stop(tmp_path: Path) -> None:
+    """Usage is bookkeeping, so a storage error while recording it leaves a stopped review stopped, not failed."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model()
+    model.release = asyncio.Event()
+    model.released_requests = 1
+    model.script = [("get_skill_instructions", {"skill_name": "missing"})]
+    runner = _runner(paths)
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock(side_effect=OSError("disk full"))),
+    ):
+        due = _queue(config, paths)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
+        await asyncio.wait_for(model.blocked.get(), timeout=10)
+        await asyncio.wait_for(runner.stop(), timeout=10)
+    assert task.cancelled()
+    assert _entries(paths)["mind:session"]["failures"] == 0
