@@ -850,24 +850,11 @@ def desktop_run(
             _run_bridge(
                 runtime_paths=runtime_paths,
                 session=session,
-                controller_user_id=config.controller.user_id,
-                controller_device_id=config.controller.device_id,
-                controller_ed25519=config.controller.ed25519,
-                allow_requester=frozenset(config.allowed_requester_ids),
-                allow_agent=frozenset(config.allowed_agent_names),
-                allow_app=frozenset(config.allowed_app_ids),
+                config=config,
                 allow_control=allow_control,
                 lease_minutes=lease_minutes,
-                max_screenshot_width=config.capture.max_screenshot_width,
-                jpeg_quality=config.capture.jpeg_quality,
-                browser_extension=config.browser.enabled,
-                browser_executable=config.browser.executable_path,
-                browser_user_data_dir=config.browser.user_data_dir,
-                browser_timeout_seconds=config.browser.timeout_seconds,
-                http_headers=http_headers,
-                file_roots=config.files.roots,
-                shell_enabled=config.shell.enabled,
                 shell_auto_approve_minutes=shell_auto_approve_minutes,
+                http_headers=http_headers,
             ),
         )
     except KeyboardInterrupt:
@@ -1007,68 +994,27 @@ async def _run_bridge(
     *,
     runtime_paths: RuntimePaths,
     session: DesktopMatrixSession,
-    controller_user_id: str,
-    controller_device_id: str,
-    controller_ed25519: str,
-    allow_requester: frozenset[str],
-    allow_agent: frozenset[str],
-    allow_app: frozenset[str],
+    config: NativeDesktopConfig,
     allow_control: bool,
     lease_minutes: int,
-    max_screenshot_width: int,
-    jpeg_quality: int,
-    browser_extension: bool = False,
-    browser_executable: Path | None = None,
-    browser_user_data_dir: Path | None = None,
-    browser_timeout_seconds: int = 90,
-    http_headers: Mapping[str, str] | None = None,
-    file_roots: tuple[Path, ...] = (),
-    shell_enabled: bool = False,
     shell_auto_approve_minutes: int | None = None,
+    http_headers: Mapping[str, str] | None = None,
 ) -> None:
+    """Run one terminal-owned bridge for the resolved configuration; control and auto-approval last this run only."""
     from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
     from mindroom.desktop.bridge_components import build_desktop_bridge  # noqa: PLC0415
-    from mindroom.desktop.native_config import (  # noqa: PLC0415
-        NativeBrowserConfig,
-        NativeCaptureConfig,
-        NativeDesktopConfig,
-        NativeFilesConfig,
-        NativeShellConfig,
-    )
     from mindroom.desktop.session import (  # noqa: PLC0415
         open_desktop_client,
         prepare_desktop_client,
     )
     from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
     from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
-    from mindroom.matrix.olm_to_device import PinnedMatrixDevice, resolve_pinned_device  # noqa: PLC0415
+    from mindroom.matrix.olm_to_device import resolve_pinned_device  # noqa: PLC0415
 
     # Folder and shell access need no GUI permissions.
-    if allow_app:
+    if config.allowed_app_ids:
         _request_required_desktop_permissions()
-    # The shared builder reads only the capability fields; this run's configuration is never saved.
-    config = NativeDesktopConfig(
-        revision=0,
-        enabled=True,
-        controller=PinnedMatrixDevice(
-            user_id=controller_user_id,
-            device_id=controller_device_id,
-            ed25519=controller_ed25519,
-        ),
-        allowed_requester_ids=tuple(allow_requester),
-        allowed_agent_names=tuple(allow_agent),
-        allowed_app_ids=tuple(allow_app),
-        capture=NativeCaptureConfig(max_screenshot_width=max_screenshot_width, jpeg_quality=jpeg_quality),
-        browser=NativeBrowserConfig(
-            enabled=browser_extension,
-            executable_path=browser_executable,
-            user_data_dir=browser_user_data_dir,
-            timeout_seconds=browser_timeout_seconds,
-        ),
-        files=NativeFilesConfig(file_roots),
-        shell=NativeShellConfig(enabled=shell_enabled),
-    )
     owner = None
     components: DesktopBridgeComponents | None = None
     registration = None
@@ -1094,14 +1040,9 @@ async def _run_bridge(
         await prepare_desktop_client(client)
 
         _announce_bridge(
+            config,
             allow_control=allow_control,
             lease_minutes=lease_minutes,
-            allow_requester=allow_requester,
-            allow_agent=allow_agent,
-            allow_app=allow_app,
-            browser_extension=browser_extension,
-            file_roots=file_roots,
-            shell_enabled=shell_enabled,
             shell_auto_approve_minutes=shell_auto_approve_minutes,
         )
         transport = DesktopTransport(owner.source, wait_for_capacity=bridge.wait_for_capacity)
@@ -1111,7 +1052,7 @@ async def _run_bridge(
                 asyncio.create_task(transport.run(), name="desktop_transport"),
             ),
         )
-        if shell_enabled:
+        if config.shell.enabled:
             approvals = asyncio.create_task(
                 serve_terminal_shell_approvals(bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
                 name="desktop_shell_approvals",
@@ -1176,28 +1117,23 @@ def _terminal_input_fd() -> int | None:
 
 
 def _announce_bridge(
+    config: NativeDesktopConfig,
     *,
     allow_control: bool,
     lease_minutes: int,
-    allow_requester: frozenset[str],
-    allow_agent: frozenset[str],
-    allow_app: frozenset[str],
-    browser_extension: bool,
-    file_roots: tuple[Path, ...] = (),
-    shell_enabled: bool = False,
-    shell_auto_approve_minutes: int | None = None,
+    shell_auto_approve_minutes: int | None,
 ) -> None:
     """Show the locally granted authority; the observe-only input mode describes applications only."""
     _console.print("[green]Desktop bridge online.[/green]")
-    _print_plain(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
-    _print_plain(f"Allowed agents: {', '.join(sorted(allow_agent))}")
-    if allow_app:
+    _print_plain(f"Allowed requesters: {', '.join(sorted(config.allowed_requester_ids))}")
+    _print_plain(f"Allowed agents: {', '.join(sorted(config.allowed_agent_names))}")
+    if config.allowed_app_ids:
         mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
-        _print_plain(f"Applications ({mode}): {', '.join(sorted(allow_app))}")
+        _print_plain(f"Applications ({mode}): {', '.join(sorted(config.allowed_app_ids))}")
     else:
         _print_plain("Applications: none")
-    _print_plain(f"Read-only folders: {', '.join(str(root) for root in file_roots) or 'none'}")
-    if not shell_enabled:
+    _print_plain(f"Read-only folders: {', '.join(str(root) for root in config.files.roots) or 'none'}")
+    if not config.shell.enabled:
         _print_plain("Shell commands: disabled")
     else:
         _print_plain(
@@ -1207,9 +1143,9 @@ def _announce_bridge(
             from mindroom.desktop.shell_prompt import auto_approval_notice  # noqa: PLC0415
 
             _print_plain(auto_approval_notice(shell_auto_approve_minutes))
-    if browser_extension:
+    if config.browser.enabled:
         _console.print("Playwright browser extension: enabled for the active installed browser profile")
-    if allow_app:
+    if config.allowed_app_ids:
         _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
 
 

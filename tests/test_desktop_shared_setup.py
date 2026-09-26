@@ -203,12 +203,9 @@ def test_cli_run_uses_app_settings_and_remains_observe_only(
 
     assert result.exit_code == 0, result.output
     args = bridge.await_args.kwargs
-    assert args["controller_device_id"] == "CLOUD"
-    assert args["allow_app"] == frozenset({"com.apple.TextEdit"})
-    assert args["allow_agent"] == frozenset({"mind"})
-    assert args["max_screenshot_width"] == 1200
-    assert args["jpeg_quality"] == 75
+    assert args["config"] == saved
     assert args["allow_control"] is False
+    assert args["shell_auto_approve_minutes"] is None
     assert load_native_config(path) == saved
 
 
@@ -291,8 +288,10 @@ def test_cli_run_keeps_relative_browser_path_support(
     )
 
     assert result.exit_code == 0, result.output
-    assert bridge.await_args.kwargs["browser_executable"] == (root / "browser").resolve()
-    assert bridge.await_args.kwargs["browser_user_data_dir"] == root.resolve()
+    browser = bridge.await_args.kwargs["config"].browser
+    assert browser.enabled is True
+    assert browser.executable_path == (root / "browser").resolve()
+    assert browser.user_data_dir == root.resolve()
 
 
 def test_idle_host_refreshes_external_changes_and_removal(shared_setup: SimpleNamespace) -> None:
@@ -375,10 +374,8 @@ def test_access_saves_folders_and_shell_for_the_native_loader_and_run(
 
     assert run.exit_code == 0, run.output
     kwargs = bridge.await_args.kwargs
-    assert kwargs["file_roots"] == (folder,)
-    assert kwargs["shell_enabled"] is True
+    assert kwargs["config"] == saved
     assert kwargs["shell_auto_approve_minutes"] is None
-    assert kwargs["allow_app"] == frozenset({"com.apple.TextEdit"})
     assert load_native_config(path) == saved
 
 
@@ -531,9 +528,9 @@ def test_folder_and_shell_run_skips_gui_dependencies(
 
     assert result.exit_code == 0, result.output
     kwargs = bridge.await_args.kwargs
-    assert kwargs["allow_app"] == frozenset()
-    assert kwargs["file_roots"] == (folder,)
-    assert kwargs["shell_enabled"] is True
+    assert kwargs["config"].allowed_app_ids == ()
+    assert kwargs["config"].files.roots == (folder,)
+    assert kwargs["config"].shell.enabled is True
     assert kwargs["shell_auto_approve_minutes"] == 5
 
 

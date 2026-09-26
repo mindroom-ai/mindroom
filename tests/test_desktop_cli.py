@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,11 +20,40 @@ from typer.testing import CliRunner
 import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.login_method import DesktopLoginMethod
+from mindroom.desktop.native_config import (
+    NativeBrowserConfig,
+    NativeCaptureConfig,
+    NativeDesktopConfig,
+    NativeFilesConfig,
+    NativeShellConfig,
+)
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 runner = CliRunner()
+
+
+def _run_config(
+    *,
+    apps: tuple[str, ...] = ("com.example.Editor",),
+    roots: tuple[Path, ...] = (),
+    shell_enabled: bool = False,
+) -> NativeDesktopConfig:
+    """Return the resolved configuration a terminal run passes to the bridge."""
+    return NativeDesktopConfig(
+        revision=1,
+        enabled=True,
+        controller=PinnedMatrixDevice("@cloud:example.org", "CLOUD", "fingerprint"),
+        allowed_requester_ids=("@alice:example.org",),
+        allowed_agent_names=("computer",),
+        allowed_app_ids=apps,
+        capture=NativeCaptureConfig(max_screenshot_width=1600, jpeg_quality=80),
+        browser=NativeBrowserConfig(),
+        files=NativeFilesConfig(roots),
+        shell=NativeShellConfig(enabled=shell_enabled),
+    )
 
 
 def test_native_helper_command_uses_explicit_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -719,16 +749,9 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
         session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-        controller_user_id="@cloud:example.org",
-        controller_device_id="CLOUD",
-        controller_ed25519="fingerprint",
-        allow_requester=frozenset({"@alice:example.org"}),
-        allow_agent=frozenset({"computer"}),
-        allow_app=frozenset({"com.example.Editor"}),
-        allow_control=False,
+        config=_run_config(),
+        allow_control=True,
         lease_minutes=15,
-        max_screenshot_width=1600,
-        jpeg_quality=80,
     )
 
     assert lifecycle[:3] == ["open", "resolve", "prepare"]
@@ -737,6 +760,10 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
     assert client.to_device_callbacks == []
     assert bridge_options["journal_path"] == tmp_path / "desktop_bridge" / "commands.sqlite3"
     assert bridge_options["legacy_journal_path"] == tmp_path / "desktop_bridge" / "command_journal.json"
+    policy = bridge_options["policy"]
+    assert policy.allow_control is True
+    assert policy.control_lease_expires_at_ms is not None
+    assert 14 * 60 < policy.control_lease_expires_at_ms / 1000 - time.time() <= 15 * 60
 
 
 @pytest.mark.asyncio
@@ -799,16 +826,9 @@ async def test_cli_drains_native_work_before_releasing_owner(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            controller_user_id="@cloud:example.org",
-            controller_device_id="CLOUD",
-            controller_ed25519="fingerprint",
-            allow_requester=frozenset({"@alice:example.org"}),
-            allow_agent=frozenset({"computer"}),
-            allow_app=frozenset({"com.example.Editor"}),
+            config=_run_config(),
             allow_control=False,
             lease_minutes=15,
-            max_screenshot_width=1600,
-            jpeg_quality=80,
         ),
     )
     try:
@@ -878,18 +898,9 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            controller_user_id="@cloud:example.org",
-            controller_device_id="CLOUD",
-            controller_ed25519="fingerprint",
-            allow_requester=frozenset({"@alice:example.org"}),
-            allow_agent=frozenset({"computer"}),
-            allow_app=frozenset(),
+            config=_run_config(apps=(), roots=(root,), shell_enabled=True),
             allow_control=False,
             lease_minutes=15,
-            max_screenshot_width=1600,
-            jpeg_quality=80,
-            file_roots=(root,),
-            shell_enabled=True,
             shell_auto_approve_minutes=5,
         ),
     )
