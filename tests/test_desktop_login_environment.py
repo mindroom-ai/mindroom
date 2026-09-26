@@ -119,17 +119,41 @@ async def test_missing_login_shell_uses_the_fixed_allowlist(tmp_path: Path) -> N
     assert await capture_login_environment(shell=str(tmp_path / "missing-shell")) == _expected_fallback()
 
 
+async def _wait_for_path(path: Path, *, timeout_seconds: float) -> bool:
+    """Poll for *path* to appear; under xdist load the writer can lag its own process start."""
+    deadline = time.monotonic() + timeout_seconds
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
+
+
 @pytest.mark.asyncio
 async def test_hanging_profile_is_bounded_and_its_process_group_killed(tmp_path: Path) -> None:
     """A profile that never finishes is stopped at the bound, including its background helpers."""
-    body = f"sleep 30 & echo $! > {tmp_path / 'helper.pid'}\necho $$ > {tmp_path / 'shell.pid'}\nexec sleep 30"
+    # Own pid written first, before forking the background helper, so the write that matters most
+    # under scheduling pressure has the best chance to land before the capture bound fires.
+    body = f"echo $$ > {tmp_path / 'shell.pid'}\nsleep 30 & echo $! > {tmp_path / 'helper.pid'}\nexec sleep 30"
+    # A generous bound (well above the 0.5s that flaked under xdist load) so a contended CI host
+    # still reliably schedules the fake profile's first instructions before capture falls back.
+    capture_timeout = 3.0
     started = time.monotonic()
     try:
-        environment = await capture_login_environment(shell=_fake_shell(tmp_path, body), timeout_seconds=0.5)
+        environment = await capture_login_environment(
+            shell=_fake_shell(tmp_path, body),
+            timeout_seconds=capture_timeout,
+        )
         assert environment == _expected_fallback()
-        assert time.monotonic() - started < 3
+        assert time.monotonic() - started < capture_timeout + 10
         for name in ("helper.pid", "shell.pid"):
-            pid = int((tmp_path / name).read_text())
+            path = tmp_path / name
+            if not await _wait_for_path(path, timeout_seconds=5.0):
+                pytest.fail(
+                    f"{name} never appeared: the fake profile was never scheduled before the "
+                    f"{capture_timeout}s capture bound, even under load",
+                )
+            pid = int(path.read_text())
             for _ in range(300):
                 try:
                     os.kill(pid, 0)
