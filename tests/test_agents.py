@@ -2035,7 +2035,14 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
     script_path.chmod(0o755)
     template_mtime_ns = 1_700_000_000_000_000_000
     os.utime(script_path, ns=(template_mtime_ns, template_mtime_ns))
-    os.setxattr(script_path, "user.mindroom-test", b"template")
+    xattrs_supported = False
+    if hasattr(os, "setxattr"):
+        try:
+            os.setxattr(script_path, "user.mindroom-test", b"template")
+        except OSError:
+            pass
+        else:
+            xattrs_supported = True
 
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
@@ -2068,7 +2075,8 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
         assert copied_script.exists()
         assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
         assert copied_script.stat().st_mtime_ns == template_mtime_ns
-        assert os.getxattr(copied_script, "user.mindroom-test") == b"template"
+        if xattrs_supported:
+            assert os.getxattr(copied_script, "user.mindroom-test") == b"template"
         copied_script.write_text("#!/bin/sh\necho edited\n", encoding="utf-8")
         later_file = template_dir / "LATER.md"
         later_file.write_text("later\n", encoding="utf-8")
@@ -3451,6 +3459,20 @@ def test_workspace_template_rejects_named_pipe(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must contain only regular files and directories"):
         validate_workspace_template_dir(template_dir)
+
+
+def test_copy_workspace_template_without_xattr_apis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platforms without extended-attribute APIs must still scaffold workspaces."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+    for name in ("listxattr", "getxattr", "setxattr"):
+        monkeypatch.delattr(os, name, raising=False)
+
+    _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+    assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
 
 
 @patch("mindroom.agent_storage._ConversationSqliteDb")
