@@ -402,6 +402,8 @@ class ApprovalManager:
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
+        review_arguments = full_arguments if full_arguments is not None else event_arguments
+        arguments_redacted = review_arguments != raw_arguments
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -415,6 +417,8 @@ class ApprovalManager:
             requested_at=_utcnow(),
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
         )
+        if arguments_redacted:
+            content["approvable"] = False
         if (
             grant_operation is not None
             and thread_id
