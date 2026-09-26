@@ -2,13 +2,15 @@
 
 Like Hermes' post-turn review fork, a review starts right after the response that reached the review interval and
 never delays a reply: a response starting in the same conversation cancels the running review, and the kept count lets
-the next completed reply start another. Reviews run one at a time across processes that share the storage root.
+the next completed reply start another. Reviews of one skills directory run one at a time across processes that share
+the storage root.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -57,6 +59,7 @@ class SkillReviewRunner:
     runtime_paths: RuntimePaths
     client_provider: Callable[[str], nio.AsyncClient | None]
     _reviews: dict[str, tuple[str, asyncio.Task[None]]] = field(default_factory=dict, init=False)
+    _stopped: bool = field(default=False, init=False)
 
     def start(
         self,
@@ -65,9 +68,12 @@ class SkillReviewRunner:
         entry: QueueEntry,
         captured: CapturedRequest | None,
     ) -> asyncio.Task[None] | None:
-        """Review a conversation whose count reached the interval, unless a review of it already runs."""
+        """Review a conversation whose count reached the interval, unless a review of it already runs.
+
+        After shutdown began, responses still finishing leave their count for the next start instead.
+        """
         running = self._reviews.get(key)
-        if running is not None and not running[1].done():
+        if self._stopped or (running is not None and not running[1].done()):
             return None
         task = create_background_task(
             self._review(config, key, entry, captured),
@@ -94,6 +100,7 @@ class SkillReviewRunner:
 
     async def stop(self) -> None:
         """Stop every review; the queue is durable, so a review that changed nothing runs after the next reply."""
+        self._stopped = True
         tasks = [task for _agent_name, task in self._reviews.values()]
         for task in tasks:
             task.cancel()
@@ -110,8 +117,10 @@ class SkillReviewRunner:
         outcome: _Outcome = "reviewed"
         stopped: asyncio.CancelledError | None = None
         try:
-            async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning.lock"):
-                skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, entry)
+            skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, entry)
+            # The lock lives in the storage root, because the primary takes no lock inside a workspace worker code shares.
+            lock_name = f"{hashlib.sha256(str(skills_root).encode()).hexdigest()[:32]}.lock"
+            async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning_locks" / lock_name):
                 archived = await progress.track(
                     asyncio.to_thread(
                         archive_unused_skills,
@@ -153,6 +162,9 @@ class SkillReviewRunner:
             # A bookkeeping error must not replace the cancellation.
             if (error := finish.exception()) is not None:
                 logger.error("Could not record an interrupted skill review", agent=entry.agent, exc_info=error)
+            elif settings.notify and progress.changes and identity is not None and not self._stopped:
+                # A new response or a config change stopped the review after its writes landed.
+                await self._notify(entry.agent, identity, progress.changes)
             raise stopped
         outcome = finish.result()
         changes = progress.changes

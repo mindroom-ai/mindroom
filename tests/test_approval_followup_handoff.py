@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from itertools import count
 from typing import TYPE_CHECKING, Literal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -167,9 +167,11 @@ async def test_final_approval_links_the_delivered_attempt(
 
 @pytest.mark.asyncio
 async def test_a_completed_approved_continuation_counts_its_runs_once(tmp_path: Path) -> None:
-    """The continuation counts the paused run it completes and the final run it may have moved into."""
+    """The continuation stops the conversation's running review, then counts the runs it completed once."""
     runner = await _runner_with_source(tmp_path)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    reviews = MagicMock()
+    runner.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
     await _seed_ready_continuation(runner)
     target = _target(thread_id="$thread", reply_to_event_id="$source")
     claimed = await runner.deps.approval_store.claim_approval_continuation(
@@ -194,6 +196,7 @@ async def test_a_completed_approved_continuation_counts_its_runs_once(tmp_path: 
         await runner._run_claimed_approval_lifecycle(claimed, target=target)
         assert await wait_for_background_tasks(5, owner=runner.deps.runtime)
     assert counted == [("run-1", "continued-run")]
+    reviews.cancel.assert_called_once()
 
 
 async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:

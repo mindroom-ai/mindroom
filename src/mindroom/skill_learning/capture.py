@@ -1,7 +1,8 @@
 """The final model request of a response that counts toward skill learning, kept for the review to fork.
 
 Like Hermes' review fork, the review replays that request with its tools unchanged and appends the review prompt,
-so the provider serves the conversation from its prompt cache.
+so the provider serves the conversation from its prompt cache. Only the ordinary response path records requests, and
+it builds its agent and model for that one response, so the review owns the model once the response has ended.
 """
 
 from __future__ import annotations

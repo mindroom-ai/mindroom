@@ -1738,6 +1738,7 @@ class ResponseRunner:
 
         async def continue_response(_message_id: str | None) -> None:
             nonlocal post_effect_continuation
+            self._cancel_approval_skill_review(claimed)
             try:
                 outcome, post_effect_continuation = await self._execute_claimed_approval(
                     claimed,
@@ -2105,9 +2106,10 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
         """Return the normal skill-review handoff for an agent continuation."""
-        if continuation.entity_kind != "agent" or not _requested_by_a_person(
-            restore_legacy_approval_origin(continuation),
-            continuation.request_body,
+        if (
+            continuation.entity_kind != "agent"
+            or not self._learns_skills(continuation.entity_name)
+            or not _requested_by_a_person(restore_legacy_approval_origin(continuation), continuation.request_body)
         ):
             return None
         return self._skill_review(
@@ -2119,6 +2121,18 @@ class ResponseRunner:
             ),
             capture=None,
         )
+
+    def _cancel_approval_skill_review(self, continuation: ApprovalContinuation) -> None:
+        """Stop the running review of the conversation an agent continuation resumes."""
+        if continuation.entity_kind == "agent" and self._learns_skills(continuation.entity_name):
+            self._cancel_skill_review(
+                continuation.entity_name,
+                continuation.session_id,
+                parse_tool_execution_identity_payload(
+                    continuation.execution_identity,
+                    error_prefix="Approval continuation execution_identity",
+                ),
+            )
 
     def _skill_review(
         self,
@@ -2132,10 +2146,9 @@ class ResponseRunner:
 
         Returns None without learning. ``capture`` holds the response's final request for the review to fork.
         """
-        config = self.deps.runtime.config
-        agent = config.agents.get(agent_name)
-        if agent is None or not agent.skill_learning.enabled:
+        if not self._learns_skills(agent_name):
             return None
+        config = self.deps.runtime.config
 
         async def queue(run_ids: Sequence[str]) -> None:
             due = await asyncio.to_thread(
@@ -2161,6 +2174,22 @@ class ResponseRunner:
 
         return queue
 
+    def _cancel_skill_review(
+        self,
+        agent_name: str,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> None:
+        """Like Hermes, a response starting in a conversation stops its running review; the count stays."""
+        orchestrator = self.deps.runtime.orchestrator
+        if orchestrator is not None:
+            config = self.deps.runtime.config
+            orchestrator.skill_reviews.cancel(review_key(config, agent_name, session_id, execution_identity))
+
+    def _learns_skills(self, agent_name: str) -> bool:
+        agent = self.deps.runtime.config.agents.get(agent_name)
+        return agent is not None and agent.skill_learning.enabled
+
     def _response_skill_review(
         self,
         request: ResponseRequest,
@@ -2171,16 +2200,11 @@ class ResponseRunner:
     ) -> tuple[Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None, _PreparedResponseRuntime]:
         """Stop the conversation's running review, and return a person's response's skill-review handoff.
 
-        Like Hermes, a response starting in a conversation stops its running review, whose count stays for the next
-        completed reply. The returned runtime records the response's final request for the review to fork.
+        The returned runtime records the response's final request for the review to fork.
         """
-        config = self.deps.runtime.config
-        agent = config.agents.get(self.deps.agent_name)
-        orchestrator = self.deps.runtime.orchestrator
-        if agent is None or not agent.skill_learning.enabled:
+        if not self._learns_skills(self.deps.agent_name):
             return None, runtime
-        if orchestrator is not None:
-            orchestrator.skill_reviews.cancel(review_key(config, self.deps.agent_name, session_id, execution_identity))
+        self._cancel_skill_review(self.deps.agent_name, session_id, execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
             return None, runtime
         capture = SkillReviewCapture(runtime.active_model_name)

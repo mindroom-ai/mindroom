@@ -1,9 +1,10 @@
-"""Bounded conversation evidence for one skill review, following Hermes' digest replay.
+"""Reply counting and bounded conversation evidence for a replayed skill review, following Hermes' digest replay.
 
 Hermes replays a routed review as older turns collapsed into one-line digests plus the newest messages verbatim.
-MindRoom reviews later from the persisted session, so the transcript is text rather than provider tool messages,
-which keeps it valid for every provider regardless of which tools the reviewer itself declares. Like the messages
-a Hermes review replays after context compression, it opens with the compaction summary of removed turns.
+MindRoom replays the persisted session this way when the review uses another model or cannot fork the response's
+request, as text rather than provider tool messages, which keeps it valid for every provider regardless of which tools
+the reviewer declares. Like the messages a Hermes review replays after context compression, it opens with the
+compaction summary of removed turns.
 """
 
 from __future__ import annotations

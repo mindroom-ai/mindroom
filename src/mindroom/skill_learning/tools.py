@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -39,6 +40,9 @@ if TYPE_CHECKING:
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
+# Agno runs the tool calls of one reply concurrently, and chat and a review may change one library at once, while each
+# change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they take turns.
+_LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -121,9 +125,11 @@ class SkillTools:
     reserved_names: frozenset[str]
     progress: ReviewProgress | None = None
     _reads: dict[tuple[str, str], SkillFile] = field(default_factory=dict)
-    # Agno runs the tool calls of one reply concurrently, and each write builds on the last read of its file;
-    # like Hermes, which never runs skill_manage in parallel, reads and writes take turns.
-    _turn: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _turn: asyncio.Lock = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Share one turn lock with every other user of the same skills directory in this process."""
+        self._turn = _LIBRARY_TURNS.setdefault(self.skills_root, asyncio.Lock())
 
     @property
     def learner(self) -> bool:
