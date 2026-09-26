@@ -872,8 +872,8 @@ class _InboxResponseOwnership:
 def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs, including ones the router handed off, restart resumes, and
-    replies to other agents never count toward a review; they have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, including ones the router or another agent handed on,
+    restart resumes, and replies to other agents never count toward a review; they have no human to learn from.
     """
     return (
         origin.requester_kind == SenderKind.USER
