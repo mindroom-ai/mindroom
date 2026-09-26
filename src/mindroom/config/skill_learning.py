@@ -9,7 +9,10 @@ class SkillLearningConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False, description="Review conversations and maintain learned workspace skills")
-    model: str | None = Field(default=None, description="Reviewer model alias; defaults to the agent model")
+    model: str | None = Field(
+        default=None,
+        description="Review model alias; defaults to the model of the reviewed response",
+    )
     review_interval: int = Field(
         default=10,
         ge=1,

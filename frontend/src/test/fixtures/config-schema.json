@@ -3372,7 +3372,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewer model alias; defaults to the agent model",
+          "description": "Review model alias; defaults to the model of the reviewed response",
           "title": "Model"
         },
         "review_interval": {

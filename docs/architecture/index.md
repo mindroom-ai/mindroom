@@ -56,7 +56,6 @@ MindRoom's architecture consists of several key components working together.
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
-| `orchestration/background_workers.py` | Config-gated start and stop of the memory auto-flush and skill-learning workers |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
@@ -65,12 +64,14 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
-| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, scope keys, retries, and retention |
-| `skill_learning/worker.py` | Background worker that reviews conversations whose count reached the interval and posts change notices |
-| `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
-| `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
-| `skill_learning/library.py` | Confined learner-owned skill writes, ownership provenance, history snapshots, and archival |
+| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, chat-time restarts, scope keys, retries, and retention |
+| `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
+| `skill_learning/runner.py` | Starts a review after the response that makes a conversation due, stops it when a new response starts, and posts change notices |
+| `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a digest replay on another model |
+| `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
+| `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
+| `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
+| `custom_tools/skill_manage.py` | Chat-time `skill_manage` of learning agents, like Hermes' foreground tool |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -116,7 +117,7 @@ MindRoom's architecture consists of several key components working together.
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
-| `config/skill_learning.py` | Opt-in agent settings for background skill reviews: interval, reviewer model, notices, and archival |
+| `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |

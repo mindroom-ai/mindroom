@@ -16,7 +16,6 @@ from agno.agent import Agent
 
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage, load_agent_session
-from mindroom.background_loop import WakeSignal, run_until_stopped
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
@@ -41,7 +40,7 @@ logger = get_logger(__name__)
 
 _FLUSH_STATE_FILENAME = "memory_flush_state.json"
 _STATE_LOCK = threading.Lock()
-_WAKE_SIGNAL = WakeSignal()
+_WAKE_EVENTS: set[asyncio.Event] = set()
 
 
 class _FlushSessionEntry(TypedDict, total=False):
@@ -190,6 +189,11 @@ def _write_state_unlocked(storage_path: Path, state: _FlushState) -> None:
     tmp_path.replace(path)
 
 
+def _notify_workers() -> None:
+    for wake_event in tuple(_WAKE_EVENTS):
+        wake_event.set()
+
+
 def auto_flush_enabled(config: Config) -> bool:
     """Return whether file-memory auto-flush is enabled."""
     return config.memory.auto_flush.enabled and config.uses_file_memory()
@@ -244,7 +248,7 @@ def mark_auto_flush_dirty_session(
         }
         _write_state_unlocked(storage_path, state)
 
-    _WAKE_SIGNAL.notify()
+    _notify_workers()
 
 
 def reprioritize_auto_flush_sessions(
@@ -282,7 +286,7 @@ def reprioritize_auto_flush_sessions(
             sessions[key] = entry
         _write_state_unlocked(storage_path, state)
 
-    _WAKE_SIGNAL.notify()
+    _notify_workers()
 
 
 def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
@@ -510,14 +514,21 @@ class MemoryAutoFlushWorker:
 
     async def run(self) -> None:
         """Run periodic auto-flush cycles until stopped."""
-        await run_until_stopped(stop=self._stop_event, wake=self._wake_event, signal=_WAKE_SIGNAL, cycle=self._cycle)
-
-    async def _cycle(self) -> float:
-        config = self.config_provider()
-        if config is None or not auto_flush_enabled(config):
-            return 30
-        await self._run_cycle(config)
-        return config.memory.auto_flush.flush_interval_seconds
+        _WAKE_EVENTS.add(self._wake_event)
+        try:
+            while not self._stop_event.is_set():
+                config = self.config_provider()
+                interval = 30
+                if config is not None and auto_flush_enabled(config):
+                    await self._run_cycle(config)
+                    interval = config.memory.auto_flush.flush_interval_seconds
+                self._wake_event.clear()
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+        finally:
+            _WAKE_EVENTS.discard(self._wake_event)
 
     async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0912, PLR0915
         now = _now_ts()

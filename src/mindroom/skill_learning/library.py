@@ -1,9 +1,10 @@
-"""Learner-owned workspace skill mutations with read-before-write, history, and archival.
+"""Workspace skill mutations with ownership, read-before-write, history, and archival.
 
 Every operation goes through no-follow descriptors below the resolved workspace, because worker code shares it.
 Like Hermes' ``created_by: agent`` usage records, ownership lives outside SKILL.md: a skill the learner created stays
-learner-owned when anyone later rewrites the file. Adding ``metadata.mindroom.learned: true`` hands a skill to the
-learner, and ``metadata.mindroom.pinned: true`` takes any skill away from the learner and the curator.
+learner-owned when anyone later rewrites the file, and a skill created in chat belongs to its human owner. Adding
+``metadata.mindroom.learned: true`` hands a skill to the learner, and ``metadata.mindroom.pinned: true`` takes any skill
+away from the learner and the curator. The learner changes only learner-owned skills; chat changes any workspace skill.
 """
 
 from __future__ import annotations
@@ -57,12 +58,12 @@ _HISTORY_KEEP = 10
 
 
 class SkillEditError(ValueError):
-    """A refused learner edit, worded for the reviewer model."""
+    """A refused skill edit, worded for the model that asked for it."""
 
 
 @dataclass(frozen=True)
 class SkillFile:
-    """One workspace skill file as the reviewer saw it."""
+    """One workspace skill file as a write saw it."""
 
     content: str
     digest: str
@@ -91,8 +92,8 @@ def _validate_skill_name(name: str) -> None:
         raise SkillEditError(msg)
 
 
-def _validate_markdown(name: str, content: str, *, new: bool) -> None:
-    """Check a learned SKILL.md: frontmatter ``name`` must stay ``name``, and new skills need a short description."""
+def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> None:
+    """Check a SKILL.md: frontmatter ``name`` must stay ``name``, and new skills need a short description."""
     if len(content) > _MAX_SKILL_MARKDOWN_CHARS:
         msg = (
             f"SKILL.md is {len(content)} characters; the limit is {_MAX_SKILL_MARKDOWN_CHARS}. "
@@ -121,7 +122,7 @@ def _validate_markdown(name: str, content: str, *, new: bool) -> None:
     if not body:
         msg = "SKILL.md must contain instructions after the frontmatter."
         raise SkillEditError(msg)
-    if new and not _learner_owns(frontmatter, SkillUsage(), path=name):
+    if new and learner and not _learner_owns(frontmatter, SkillUsage(), path=name):
         msg = "A new learned skill needs `metadata: {mindroom: {learned: true}}` in its frontmatter."
         raise SkillEditError(msg)
 
@@ -199,10 +200,10 @@ def support_file_paths(skills_root: Path, name: str) -> list[str]:
         ]
 
 
-def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: frozenset[str]) -> None:
-    """Create a new learner-owned skill whose name no configured or workspace skill already uses."""
+def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: frozenset[str], learner: bool) -> None:
+    """Create a skill, learner-owned when the learner writes it, whose name no configured or workspace skill uses."""
     _validate_skill_name(name)
-    _validate_markdown(name, content, new=True)
+    _validate_markdown(name, content, new=True, learner=learner)
     _validate_content(SKILL_FILENAME, content)
     if name in reserved_names:
         msg = f"A skill named {name!r} already exists; update it or choose a class-level name."
@@ -217,11 +218,12 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
-        update_skill_usage(
-            root_fd,
-            name,
-            lambda usage: usage.model_copy(update={"created_by": "learner", "created_at": now}),
-        )
+        if learner:
+            update_skill_usage(
+                root_fd,
+                name,
+                lambda usage: usage.model_copy(update={"created_by": "learner", "created_at": now}),
+            )
 
 
 def write_skill_file(
@@ -231,19 +233,20 @@ def write_skill_file(
     content: str,
     *,
     expected_digest: str | None,
+    learner: bool,
 ) -> None:
-    """Replace or add one file of a learner-owned skill that the reviewer read in its current state."""
+    """Replace or add one file of a skill whose current version the write is based on."""
     directory, filename = _split_relative_path(relative_path)
     _validate_content(relative_path, content)
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-        markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest)
+        markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
         if current is not None and current.content == content:
             # Like Hermes, an unchanged file is refused, so it never reads as an update or resets the skill's age.
             msg = f"No change was made because the new {relative_path} is identical to the current one."
             raise SkillEditError(msg)
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
-            _validate_markdown(markdown.name, content, new=False)
+            _validate_markdown(markdown.name, content, new=False, learner=learner)
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
@@ -256,14 +259,21 @@ def write_skill_file(
         _record_patch(root_fd, name)
 
 
-def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expected_digest: str | None) -> None:
-    """Remove one support file of a learner-owned skill after the reviewer read it."""
+def remove_skill_file(
+    skills_root: Path,
+    name: str,
+    relative_path: str,
+    *,
+    expected_digest: str | None,
+    learner: bool,
+) -> None:
+    """Remove one support file of a skill whose current version the removal is based on."""
     directory, filename = _split_relative_path(relative_path)
     if directory is None:
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-        _markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest)
+        _markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
         if current is None:
             msg = f"{relative_path} does not exist."
             raise SkillEditError(msg)
@@ -279,11 +289,16 @@ def _require_writable(
     name: str,
     relative_path: str,
     expected_digest: str | None,
+    *,
+    learner: bool,
 ) -> tuple[SkillFile, SkillFile | None]:
-    """Return the learner-owned SKILL.md and the current target, which must match the reviewer's last read."""
+    """Return the skill's SKILL.md and the current target, which must be the version the write is based on."""
     usage = load_skill_usage(root_fd).get(name, SkillUsage())
     markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage)
-    if markdown is None or not markdown.learned:
+    if markdown is None:
+        msg = f"Skill {name!r} has no SKILL.md."
+        raise SkillEditError(msg)
+    if learner and not markdown.learned:
         msg = (
             f"Skill {name!r} is not learner-owned. It belongs to its human owner; mention the needed change in "
             "your reply instead of editing it."
@@ -291,9 +306,12 @@ def _require_writable(
         raise SkillEditError(msg)
     current = _read_skill_file(skill_fd, name, relative_path, usage)
     if current is not None and current.digest != expected_digest:
+        loader = (
+            "get_skill_instructions" if relative_path == SKILL_FILENAME else "get_skill_reference or get_skill_script"
+        )
         msg = (
-            f"The current {relative_path} of {name!r} has not been loaded in this review. Call "
-            "skill_view for it, then retry using the content just returned."
+            f"The current {relative_path} of {name!r} is not the version this change is based on. Load it with "
+            f"{loader}, then retry using the content just returned."
         )
         raise SkillEditError(msg)
     return markdown, current
