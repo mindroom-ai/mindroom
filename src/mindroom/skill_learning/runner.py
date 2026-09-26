@@ -1,15 +1,19 @@
-"""Background worker that reviews conversations once their reply count reaches the interval."""
+"""Skill reviews started by the completed responses that make a conversation due.
+
+Like Hermes' post-turn review fork, a review starts right after the response that reached the review interval and
+never delays a reply: a response starting in the same conversation cancels the running review, and the kept count lets
+the next completed reply start another. Reviews run one at a time across processes that share the storage root.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import time
+import contextvars
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.agent_storage import load_agent_session
-from mindroom.background_loop import run_until_stopped
+from mindroom.background_tasks import create_background_task
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
@@ -17,9 +21,9 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning.library import archive_unused_skills
-from mindroom.skill_learning.queue import SKILL_LEARNING_WAKE, QueueEntry, claim_due_reviews, settle_review
-from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
-from mindroom.skill_learning.transcript import conversation_messages
+from mindroom.skill_learning.queue import settle_review
+from mindroom.skill_learning.reviewer import review_conversation
+from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.tool_system.skills import agent_workspace_skills_root
 
 if TYPE_CHECKING:
@@ -30,12 +34,13 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.skill_learning.capture import CapturedRequest
+    from mindroom.skill_learning.queue import QueueEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
-_POLL_SECONDS = 30
-_MAX_REVIEWS_PER_CYCLE = 4
+type _Outcome = Literal["reviewed", "failed", "interrupted"]
 
 
 def _skills_root(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry) -> Path:
@@ -46,94 +51,77 @@ def _skills_root(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry)
 
 
 @dataclass
-class SkillLearningWorker:
-    """Serialize reviews across processes sharing one storage root; queued conversations survive restarts."""
+class SkillReviewRunner:
+    """Own the process's running skill reviews, at most one per conversation."""
 
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
     client_provider: Callable[[str], nio.AsyncClient | None]
-    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False)
+    _reviews: dict[str, tuple[str, asyncio.Task[None]]] = field(default_factory=dict, init=False)
 
-    def stop(self) -> None:
-        """Stop at once: the queue is durable, so an interrupted review that changed nothing runs again after restart."""
-        self._stop_event.set()
-        self._wake_event.set()
-        if self._task is not None:
-            self._task.cancel()
-
-    async def run(self) -> None:
-        """Run review cycles until stopped, waking early whenever a conversation reaches its interval."""
-        self._task = asyncio.current_task()
-        await run_until_stopped(
-            stop=self._stop_event,
-            wake=self._wake_event,
-            signal=SKILL_LEARNING_WAKE,
-            cycle=self._cycle,
-        )
-
-    async def _cycle(self) -> float:
-        config = self.config_provider()
-        if config is not None:
-            try:
-                await self._run_cycle(config)
-            except Exception:
-                # A broken queue file must not end learning for every agent until the next restart.
-                logger.exception("Skill learning cycle failed")
-        return _POLL_SECONDS
-
-    async def _run_cycle(self, config: Config) -> None:
-        async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning.lock"):
-            due = await asyncio.to_thread(claim_due_reviews, config, self.runtime_paths, now=time.time())
-            # Later conversations stay due for the next cycle.
-            for key, entry in due[:_MAX_REVIEWS_PER_CYCLE]:
-                try:
-                    skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, entry)
-                    await self._review(config, key, entry, skills_root)
-                except Exception:
-                    logger.exception("Skill learning failed", agent=entry.agent, session_id=entry.session)
-                    await asyncio.to_thread(
-                        settle_review,
-                        self.runtime_paths,
-                        key,
-                        claimed=entry,
-                        outcome="failed",
-                        now=time.time(),
-                    )
-
-    async def _review(
+    def start(
         self,
         config: Config,
         key: str,
         entry: QueueEntry,
-        skills_root: Path,
-    ) -> None:
+        captured: CapturedRequest | None,
+    ) -> asyncio.Task[None] | None:
+        """Review a conversation whose count reached the interval, unless a review of it already runs."""
+        running = self._reviews.get(key)
+        if running is not None and not running[1].done():
+            return None
+        task = create_background_task(
+            self._review(config, key, entry, captured),
+            name=f"skill_review:{entry.agent}",
+            # The response's context carries its queued-message and mid-turn state, which the reused model's
+            # hooks would otherwise apply to the review's requests.
+            context=contextvars.Context(),
+        )
+        self._reviews[key] = (entry.agent, task)
+        task.add_done_callback(lambda done: self._forget(key, done))
+        return task
+
+    def cancel(self, key: str) -> None:
+        """Stop a conversation's review because a response starts in it; its count stays for the next reply."""
+        if (running := self._reviews.get(key)) is not None:
+            running[1].cancel()
+
+    def retire(self, config: Config) -> None:
+        """Stop the reviews of agents that no longer learn skills."""
+        for agent_name, task in self._reviews.values():
+            agent = config.agents.get(agent_name)
+            if agent is None or not agent.skill_learning.enabled:
+                task.cancel()
+
+    async def stop(self) -> None:
+        """Stop every review; the queue is durable, so a review that changed nothing runs after the next reply."""
+        tasks = [task for _agent_name, task in self._reviews.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _forget(self, key: str, task: asyncio.Task[None]) -> None:
+        if (running := self._reviews.get(key)) is not None and running[1] is task:
+            del self._reviews[key]
+
+    async def _review(self, config: Config, key: str, entry: QueueEntry, captured: CapturedRequest | None) -> None:
         settings = config.agents[entry.agent].skill_learning
         identity = entry.execution_identity()
         progress = ReviewProgress()
-        outcome: Literal["reviewed", "failed", "interrupted"] = "reviewed"
+        outcome: _Outcome = "reviewed"
         stopped: asyncio.CancelledError | None = None
         try:
-            archived = await progress.track(
-                asyncio.to_thread(
-                    archive_unused_skills,
-                    skills_root,
-                    archive_after_days=settings.archive_after_days,
-                    now=datetime.now(UTC),
-                ),
-            )
-            if archived:
-                logger.info("Archived unused learned skills", agent=entry.agent, archived=archived)
-            session = await asyncio.to_thread(
-                load_agent_session,
-                entry.agent,
-                config,
-                self.runtime_paths,
-                entry.session,
-                execution_identity=identity,
-            )
-            if session is not None:
+            async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning.lock"):
+                skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, entry)
+                archived = await progress.track(
+                    asyncio.to_thread(
+                        archive_unused_skills,
+                        skills_root,
+                        archive_after_days=settings.archive_after_days,
+                        now=datetime.now(UTC),
+                    ),
+                )
+                if archived:
+                    logger.info("Archived unused learned skills", agent=entry.agent, archived=archived)
                 await asyncio.wait_for(
                     review_conversation(
                         config=config,
@@ -142,8 +130,7 @@ class SkillLearningWorker:
                         session_id=entry.session,
                         identity=identity,
                         skills_root=skills_root,
-                        messages=conversation_messages(session),
-                        summary=session.summary.summary if session.summary is not None else None,
+                        captured=captured,
                         progress=progress,
                     ),
                     timeout=settings.timeout_seconds,
@@ -154,7 +141,7 @@ class SkillLearningWorker:
             outcome = "failed"
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
         # Every exit, a stop included, waits for the archival and writes it started, which land even after a timeout
-        # or a stop cancels the review, so they are recorded as the learner's before the state is settled.
+        # or a stop cancels the review, so they are recorded as the learner's before the count is settled.
         finish = asyncio.ensure_future(self._finish(key, entry, progress, outcome))
         while not finish.done():
             try:
@@ -179,26 +166,13 @@ class SkillLearningWorker:
         if settings.notify and changes and identity is not None:
             await self._notify(entry.agent, identity, changes)
 
-    async def _finish(
-        self,
-        key: str,
-        claimed: QueueEntry,
-        progress: ReviewProgress,
-        outcome: Literal["reviewed", "failed", "interrupted"],
-    ) -> Literal["reviewed", "failed", "interrupted"]:
+    async def _finish(self, key: str, claimed: QueueEntry, progress: ReviewProgress, outcome: _Outcome) -> _Outcome:
         await progress.settled()
         if progress.changes:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.
             outcome = "reviewed"
-        await asyncio.to_thread(
-            settle_review,
-            self.runtime_paths,
-            key,
-            claimed=claimed,
-            outcome=outcome,
-            now=time.time(),
-        )
+        await asyncio.to_thread(settle_review, self.runtime_paths, key, claimed=claimed, outcome=outcome)
         return outcome
 
     async def _notify(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
@@ -222,7 +196,7 @@ class SkillLearningWorker:
         try:
             delivered = await send_message_result(client, identity.room_id, content)
         except Exception:
-            # The review is already settled; a lost notice must not make it look failed and run again.
+            # The review is already settled; a lost notice must not make it look failed.
             logger.exception("Could not post skill review notice", agent=agent_name, room_id=identity.room_id)
             return
         if delivered is None:

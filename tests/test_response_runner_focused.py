@@ -9965,3 +9965,42 @@ async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path
         await coordinator.generate_response(_plain_request(_target()))
         await wait_for_background_tasks(owner=coordinator.deps.runtime)
     bot.client.room_send.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_due_response_hands_its_final_request_to_the_skill_review(tmp_path: Path, streaming: bool) -> None:
+    """The response that reaches the interval starts the review with its final model request, after stopping any."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    settings = coordinator.deps.runtime.config.agents["general"].skill_learning
+    settings.enabled = True
+    settings.review_interval = 1
+    reviews = MagicMock()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=streaming),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+    (key,) = reviews.cancel.call_args.args
+    _config, started_key, entry, captured = reviews.start.call_args.args
+    assert started_key == key
+    assert entry.replies == 1
+    assert captured is not None
+    assert captured.model is model
+    final = captured.messages[-1]
+    assert (final.role, bool(final.content), final.tool_calls) == ("assistant", True, None)
+    assert "skill_manage" in {tool.name for tool in captured.tools if isinstance(tool, Function)}

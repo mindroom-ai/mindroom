@@ -2626,7 +2626,7 @@ class TestMultiAgentOrchestrator:
                 side_effect=_recover_approval_cards_on_startup,
             ) as recover_approval_cards_on_startup,
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
-            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
         ):
             await _run_orchestrator_start_until_ready(
@@ -3833,7 +3833,7 @@ class TestMultiAgentOrchestrator:
                 new=AsyncMock(side_effect=_shutdown_approvals),
             ) as mock_shutdown_approvals,
             patch.object(orchestrator.config_reload, "cancel", new=AsyncMock()),
-            patch.object(orchestrator._memory_auto_flush, "stop", new=AsyncMock()),
+            patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
             patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
             patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=_stop_mcp_manager)),
@@ -4447,7 +4447,7 @@ class TestMultiAgentOrchestrator:
         try:
             with (
                 patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
-                patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
 
@@ -4969,7 +4969,7 @@ class TestMultiAgentOrchestrator:
                 ),
             ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
@@ -5063,7 +5063,7 @@ class TestMultiAgentOrchestrator:
                 ),
             ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
@@ -5246,45 +5246,27 @@ def _count_a_skill_learning_reply(config: Config, paths: RuntimePaths, agent_nam
 
 @pytest.mark.asyncio
 async def test_config_changes_forget_conversations_of_agents_that_stopped_learning(tmp_path: Path) -> None:
-    """While other agents keep learning, an agent that stops learning loses its queued conversations at once."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    orchestrator = orchestrator_module._MultiAgentOrchestrator(runtime_paths=paths)
-    config = Config(agents={name: AgentConfig(display_name=name) for name in ("general", "helper")})
+    """While other agents keep learning, an agent that stops learning loses its counts and its running review."""
+    config = _runtime_bound_config(
+        Config(agents={name: AgentConfig(display_name=name) for name in ("general", "helper")}),
+        tmp_path,
+    )
+    paths = runtime_paths_for(config)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths)
     for agent in config.agents.values():
         agent.skill_learning.enabled = True
-    orchestrator.config = config
     for name in config.agents:
         _count_a_skill_learning_reply(config, paths, name)
     config.agents["helper"].skill_learning.enabled = False
-    await orchestrator._sync_background_workers()
     try:
-        entries = json.loads((tmp_path / "skill_learning_state.json").read_text())["entries"]
+        with (
+            patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator.skill_reviews, "retire") as retire,
+        ):
+            await orchestrator._sync_runtime_support_services(config, start_watcher=False)
+        entries = json.loads((paths.storage_root / "skill_learning_state.json").read_text())["entries"]
         assert [entry["agent"] for entry in entries.values()] == ["general"]
+        retire.assert_called_once_with(config)
     finally:
-        await orchestrator._skill_learning.stop()
-
-
-@pytest.mark.asyncio
-async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -> None:
-    """The orchestrator keeps one skill-learning worker exactly while an agent opts in."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    orchestrator = orchestrator_module._MultiAgentOrchestrator(runtime_paths=paths)
-    config = Config(agents={"general": AgentConfig(display_name="General")})
-    orchestrator.config = config
-    await orchestrator._sync_background_workers()
-    assert not orchestrator._skill_learning.running
-    assert not list(tmp_path.glob("skill_learning*")), "a deployment that never learns gets no queue files"
-    config.agents["general"].skill_learning.enabled = True
-    await orchestrator._sync_background_workers()
-    assert orchestrator._skill_learning.running
-    first = orchestrator._skill_learning._task
-    await orchestrator._sync_background_workers()
-    assert orchestrator._skill_learning._task is first
-    _count_a_skill_learning_reply(config, paths, "general")
-    config.agents["general"].skill_learning.enabled = False
-    await orchestrator._sync_background_workers()
-    assert first is not None
-    assert first.done()
-    assert not orchestrator._skill_learning.running
-    # Entries kept through the pause would count every run made while learning was off.
-    assert json.loads((tmp_path / "skill_learning_state.json").read_text())["entries"] == {}
+        await shutdown_approval_runtime()

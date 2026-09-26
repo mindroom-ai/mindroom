@@ -25,6 +25,7 @@ from mindroom.tools import (
     memory,  # noqa: F401
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401
+    skill_manage,  # noqa: F401
 )
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools

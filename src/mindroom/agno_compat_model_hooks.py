@@ -225,7 +225,7 @@ def install_tool_result_callback(
 # derived from tool_call_limit, its once-per-run tool_call_limit_reached warning, and the skill
 # review's input budget must remain.
 # Coverage: tests/test_tool_call_budget.py,
-# tests/test_skill_learning.py::test_parallel_tool_calls_spend_the_input_budget_once_per_request, and
+# tests/test_skill_learning.py::test_the_budget_counts_what_each_request_sends, and
 # tests/test_skill_learning.py::test_reviewer_refuses_protected_skills_and_stops_at_its_budget.
 def install_response_request_gate(
     model: Model,
@@ -411,11 +411,57 @@ def temporary_async_invocation_hooks(
     try:
         yield
     finally:
-        for name, value in saved.items():
-            if value is None:
-                model_dict.pop(name, None)
-            else:
-                model_dict[name] = value
+        _restore(model_dict, saved)
+
+
+def _restore(model_dict: dict[str, object], saved: dict[str, object | None]) -> None:
+    for name, value in saved.items():
+        if value is None:
+            model_dict.pop(name, None)
+        else:
+            model_dict[name] = value
+
+
+# AGNO_COMPAT: A run's final model request is not observable.
+# Reason: Agno reports neither the messages nor the tool definitions of a response loop's last request:
+# RunOutput.messages drops messages kept out of agent memory, and the tools stay inside aresponse. The skill
+# review forks that request to read the conversation from the provider's prompt cache.
+# Upstream issue: tracking gap; no Agno issue or PR proposes a scoped observer of response loops.
+# Upstream PR: none identified.
+# Remove when: Agno reports each response loop's final messages, tools, tool choice, and response format to a
+# scoped callback; the skill review's fork of that request remains MindRoom policy.
+# Coverage: tests/test_skill_learning.py::test_the_review_fork_replays_the_final_request_through_each_adapter.
+@contextmanager
+def temporary_response_observer(model: Model, observe: Callable[[dict[str, object]], None]) -> Iterator[None]:
+    """Pass the keyword arguments of each async response loop of ``model`` to ``observe`` once the loop returns.
+
+    Agno appends every assistant and tool message to the ``messages`` it was given, so they end with the loop.
+    """
+    model_dict = vars(model)
+    saved = {name: model_dict.get(name) for name in ("aresponse", "aresponse_stream")}
+    original_response = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
+    original_response_stream = cast(
+        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
+        model.aresponse_stream,
+    )
+
+    async def response(**kwargs: object) -> ModelResponse:
+        result = await original_response(**kwargs)
+        observe(kwargs)
+        return result
+
+    async def response_stream(**kwargs: object) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
+        async with aclosing(original_response_stream(**kwargs)) as stream:
+            async for event in stream:
+                yield event
+        observe(kwargs)
+
+    model_dict["aresponse"] = response
+    model_dict["aresponse_stream"] = response_stream
+    try:
+        yield
+    finally:
+        _restore(model_dict, saved)
 
 
 # AGNO_COMPAT: Retry cycles lack public context and classification hooks.

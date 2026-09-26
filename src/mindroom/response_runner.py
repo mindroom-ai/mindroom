@@ -110,7 +110,8 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
-from mindroom.skill_learning.queue import queue_skill_review
+from mindroom.skill_learning.capture import SkillReviewCapture
+from mindroom.skill_learning.queue import queue_skill_review, review_key
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -854,6 +855,7 @@ class _PreparedResponseRuntime:
     show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
     participation: ParticipationGate | None = None
+    skill_review_capture: SkillReviewCapture | None = None
 
 
 @dataclass
@@ -2115,6 +2117,7 @@ class ResponseRunner:
                 continuation.execution_identity,
                 error_prefix="Approval continuation execution_identity",
             ),
+            capture=None,
         )
 
     def _skill_review(
@@ -2123,24 +2126,71 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
+        capture: SkillReviewCapture | None,
     ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
-        """Build the handoff that adds a response's runs to its skill review count, or None without learning."""
-        agent = self.deps.runtime.config.agents.get(agent_name)
+        """Build the handoff that counts a response's runs and starts a review when the count is due.
+
+        Returns None without learning. ``capture`` holds the response's final request for the review to fork.
+        """
+        config = self.deps.runtime.config
+        agent = config.agents.get(agent_name)
         if agent is None or not agent.skill_learning.enabled:
             return None
 
         async def queue(run_ids: Sequence[str]) -> None:
-            await asyncio.to_thread(
+            due = await asyncio.to_thread(
                 queue_skill_review,
-                self.deps.runtime.config,
+                config,
                 self.deps.runtime_paths,
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
                 run_ids=run_ids,
             )
+            orchestrator = self.deps.runtime.orchestrator
+            if due is None or orchestrator is None:
+                return
+            final = capture.latest if capture is not None else None
+            key, entry = due
+            orchestrator.skill_reviews.start(
+                config,
+                key,
+                entry,
+                final if final is not None and final.run_id == run_ids[-1] else None,
+            )
 
         return queue
+
+    def _response_skill_review(
+        self,
+        request: ResponseRequest,
+        runtime: _PreparedResponseRuntime,
+        *,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> tuple[Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None, _PreparedResponseRuntime]:
+        """Stop the conversation's running review, and return a person's response's skill-review handoff.
+
+        Like Hermes, a response starting in a conversation stops its running review, whose count stays for the next
+        completed reply. The returned runtime records the response's final request for the review to fork.
+        """
+        config = self.deps.runtime.config
+        agent = config.agents.get(self.deps.agent_name)
+        orchestrator = self.deps.runtime.orchestrator
+        if agent is None or not agent.skill_learning.enabled:
+            return None, runtime
+        if orchestrator is not None:
+            orchestrator.skill_reviews.cancel(review_key(config, self.deps.agent_name, session_id, execution_identity))
+        if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
+            return None, runtime
+        capture = SkillReviewCapture(runtime.active_model_name)
+        queue = self._skill_review(
+            agent_name=self.deps.agent_name,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            capture=capture,
+        )
+        return queue, replace(runtime, skill_review_capture=capture)
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
         """Return the normal agent-memory handoff for a completed continuation."""
@@ -3409,6 +3459,7 @@ class ResponseRunner:
             participation=runtime.participation,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
+            skill_review_capture=runtime.skill_review_capture,
         )
 
     def _notify_interrupted_response_recoverable(
@@ -5531,14 +5582,11 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
         )
-        queue_skill_review = (
-            self._skill_review(
-                agent_name=self.deps.agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
-            )
-            if _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body)
-            else None
+        queue_skill_review, runtime = self._response_skill_review(
+            request,
+            runtime,
+            session_id=session_id,
+            execution_identity=execution_identity,
         )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(

@@ -858,8 +858,8 @@ All fields are optional, and unknown fields are rejected.
 
 | Field | Type | Default | Bounds and behavior |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Count completed standalone responses and review conversations that reach the interval. |
-| `model` | string or null | `null` | Reviewer model alias from `models`; null uses the agent's model. |
+| `enabled` | boolean | `false` | Count completed standalone responses, review conversations that reach the interval, and offer the `skill_manage` tool. |
+| `model` | string or null | `null` | Review model alias from `models`; null reviews on the model the response used and reuses its prompt cache, while another model replays a digest of the conversation. |
 | `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
 | `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
 | `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |

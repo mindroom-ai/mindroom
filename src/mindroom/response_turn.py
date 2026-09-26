@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
     from mindroom.participation import ParticipationGate
+    from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -309,6 +310,8 @@ class ResponseTurnContext:
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     agent_mode: AgentMode = "standard"
+    # Set only for responses that count toward skill learning, so the review can fork their final request.
+    skill_review_capture: SkillReviewCapture | None = None
 
 
 @dataclass(frozen=True)

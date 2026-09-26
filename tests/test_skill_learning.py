@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -21,6 +21,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.tools.function import Function
 from anthropic import AsyncAnthropic
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
@@ -31,15 +32,19 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
+from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
-from mindroom.skill_learning import worker as worker_module
-from mindroom.skill_learning.reviewer import ReviewProgress, _skill_catalog, review_conversation
+from mindroom.skill_learning import runner as runner_module
+from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture
+from mindroom.skill_learning.reviewer import review_conversation
+from mindroom.skill_learning.runner import SkillReviewRunner
+from mindroom.skill_learning.tools import ReviewProgress, load_skill_catalog
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
-from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.tool_system.workspace_skills import (
     forget_missing_skill_usage,
@@ -53,6 +58,8 @@ from tests.conftest import seed_session
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
+
+    from agno.models.base import Model
 
     from mindroom.constants import RuntimePaths
 
@@ -82,7 +89,9 @@ class _ScriptedModel(SyntheticModel):
 
     script: list[_Call | list[_Call]] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
+    input_tokens: list[int] = field(default_factory=list)
     offered_tools: list[set[str]] = field(default_factory=list)
+    tool_requests: list[list[Mapping[str, Any]]] = field(default_factory=list)
     tool_parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider_tools_blocked: list[bool] = field(default_factory=list)
     failure: Exception | None = None
@@ -96,8 +105,10 @@ class _ScriptedModel(SyntheticModel):
         tools: Sequence[Mapping[str, Any]] | None = None,
         **_kwargs: object,
     ) -> ModelResponse:
-        self.requests.append([message.get_content_string() for message in messages])
+        contents = [message.get_content_string() for message in messages]
+        self.requests.append(contents)
         self.offered_tools.append({tool["function"]["name"] for tool in tools or []})
+        self.tool_requests.append(list(tools or []))
         self.tool_parameters = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools or []}
         self.provider_tools_blocked.append(provider_tools_disabled())
         self.started.set()
@@ -105,7 +116,10 @@ class _ScriptedModel(SyntheticModel):
             await self.release.wait()
         if self.failure is not None:
             raise self.failure
-        usage = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+        # Like a provider, usage reports what the request sent, so input budgets see real sizes.
+        input_tokens = sum(map(len, contents)) // 4
+        self.input_tokens.append(input_tokens)
+        usage = MessageMetrics(input_tokens=input_tokens, output_tokens=3, total_tokens=input_tokens + 3)
         if not self.script:
             return ModelResponse(content="Done.", response_usage=usage)
         step = self.script.pop(0)
@@ -200,9 +214,9 @@ def _queue(
     *,
     identity: ToolExecutionIdentity | None = None,
     run_id: str = "r1",
-) -> None:
-    """Count one seeded run as a completed response to a person."""
-    queue.queue_skill_review(
+) -> tuple[str, queue.QueueEntry] | None:
+    """Count one seeded run as a completed response to a person, returning the conversation when it is due."""
+    return queue.queue_skill_review(
         config,
         paths,
         agent_name="mind",
@@ -212,8 +226,36 @@ def _queue(
     )
 
 
-async def _cycle(config: Config, paths: RuntimePaths, client: object | None = None) -> None:
-    await SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: client)._run_cycle(config)
+def _runner(paths: RuntimePaths, client: object | None = None) -> SkillReviewRunner:
+    return SkillReviewRunner(paths, client_provider=lambda _agent: client)
+
+
+async def _review_due(
+    config: Config,
+    paths: RuntimePaths,
+    due: tuple[str, queue.QueueEntry] | None,
+    client: object | None = None,
+    captured: CapturedRequest | None = None,
+) -> None:
+    """Run the review that a completed response made due, as the response runner starts it."""
+    assert due is not None, "the conversation should have reached its review interval"
+    task = _runner(paths, client).start(config, *due, captured)
+    assert task is not None
+    await task
+
+
+async def _review(config: Config, paths: RuntimePaths, *, captured: CapturedRequest | None = None) -> None:
+    """Run one review of the seeded conversation outside the queue."""
+    await review_conversation(
+        config=config,
+        runtime_paths=paths,
+        agent_name="mind",
+        session_id="session",
+        identity=None,
+        skills_root=_skills_root(config, paths),
+        captured=captured,
+        progress=ReviewProgress(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -235,7 +277,13 @@ async def _cycle(config: Config, paths: RuntimePaths, client: object | None = No
 def test_create_rejects_invalid_or_shadowing_skills(tmp_path: Path, name: str, content: str, error: str) -> None:
     """New learned skills need Hermes' frontmatter shape, the marker, no secrets, and an unused name."""
     with pytest.raises(library.SkillEditError, match=error):
-        library.create_skill(tmp_path / "skills", name, content, reserved_names=frozenset({"mindroom-docs"}))
+        library.create_skill(
+            tmp_path / "skills",
+            name,
+            content,
+            reserved_names=frozenset({"mindroom-docs"}),
+            learner=True,
+        )
     assert not (tmp_path / "skills" / name).exists()
 
 
@@ -247,7 +295,7 @@ def test_setup_instructions_with_placeholders_are_not_credentials(tmp_path: Path
         "3. Send `Authorization: Bearer $TOKEN` and clone `ssh://git@github.com/org/repo.git`.\n"
         "4. Install `sk-learn` only in the analysis environment.\n"
     )
-    library.create_skill(root, "deploy-checks", content, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", content, reserved_names=frozenset(), learner=True)
     assert (root / "deploy-checks/SKILL.md").read_text() == content
 
 
@@ -258,24 +306,38 @@ def test_rewrites_keep_the_owner_file_mode(tmp_path: Path) -> None:
     path.chmod(0o644)
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
-    library.write_skill_file(root, "deploy-checks", "SKILL.md", LEARNED + "2. More.\n", expected_digest=current.digest)
+    library.write_skill_file(
+        root,
+        "deploy-checks",
+        "SKILL.md",
+        LEARNED + "2. More.\n",
+        expected_digest=current.digest,
+        learner=True,
+    )
     assert path.stat().st_mode & 0o777 == 0o644
 
 
 def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> None:
-    """Edits need the digest skill_view returned, never touch user skills, and keep restorable history."""
+    """Edits need the digest of the last load, never touch user skills, and keep restorable history."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     changed = LEARNED + "2. Check the logs.\n"
-    with pytest.raises(library.SkillEditError, match="has not been loaded"):
-        library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=None)
+    with pytest.raises(library.SkillEditError, match="not the version this change is based on"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=None, learner=True)
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
     assert current.learned
-    library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=current.digest)
+    library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=current.digest, learner=True)
     (root / "deploy-checks/SKILL.md").write_text(changed + "User note.\n")
-    with pytest.raises(library.SkillEditError, match="has not been loaded"):
-        library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=current.digest)
+    with pytest.raises(library.SkillEditError, match="not the version this change is based on"):
+        library.write_skill_file(
+            root,
+            "deploy-checks",
+            "SKILL.md",
+            changed,
+            expected_digest=current.digest,
+            learner=True,
+        )
     assert [path.read_text() for path in sorted((root / ".history/deploy-checks").iterdir())] == [LEARNED]
 
     manual = _write_skill(root, "handwritten", HANDWRITTEN)
@@ -283,18 +345,32 @@ def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> 
     assert loaded is not None
     assert not loaded.learned
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
-        library.write_skill_file(root, "handwritten", "references/notes.md", "notes", expected_digest=None)
+        library.write_skill_file(
+            root,
+            "handwritten",
+            "references/notes.md",
+            "notes",
+            expected_digest=None,
+            learner=True,
+        )
     assert not (manual.parent / "references").exists()
 
 
 def test_a_write_that_changes_nothing_is_refused(tmp_path: Path) -> None:
     """Like Hermes, an identical rewrite is no update: no notice, history snapshot, or reset of the skill's age."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
     with pytest.raises(library.SkillEditError, match="No change was made"):
-        library.write_skill_file(root, "deploy-checks", "SKILL.md", LEARNED, expected_digest=current.digest)
+        library.write_skill_file(
+            root,
+            "deploy-checks",
+            "SKILL.md",
+            LEARNED,
+            expected_digest=current.digest,
+            learner=True,
+        )
     assert not (root / ".history").exists()
     usage = json.loads((root / ".usage.json").read_text())["deploy-checks"]
     assert "patch_count" not in usage
@@ -303,7 +379,7 @@ def test_a_write_that_changes_nothing_is_refused(tmp_path: Path) -> None:
 def test_usage_rewrites_keep_the_file_mode(tmp_path: Path) -> None:
     """A usage record update keeps the permissions a person gave the usage file."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     (root / ".usage.json").chmod(0o644)
     record_skill_use(root / "deploy-checks")
     assert (root / ".usage.json").stat().st_mode & 0o777 == 0o644
@@ -312,17 +388,30 @@ def test_usage_rewrites_keep_the_file_mode(tmp_path: Path) -> None:
 def test_support_files_stay_directly_under_support_directories(tmp_path: Path) -> None:
     """Support writes are single files under the support directories the skill tools serve, removable after a read."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     bad_paths = ("../escape.md", "references/../x.md", "references/nested/x.md", "other/x.md", "references/.hidden")
     # Hermes' templates/ and assets/ would never reach the agent, whose skill tools serve references and scripts.
     for bad in (*bad_paths, "templates/report.md", "assets/logo.png"):
         with pytest.raises(library.SkillEditError, match="file_path"):
-            library.write_skill_file(root, "deploy-checks", bad, "x", expected_digest=None)
-    library.write_skill_file(root, "deploy-checks", "references/rollback.md", "Roll back.", expected_digest=None)
+            library.write_skill_file(root, "deploy-checks", bad, "x", expected_digest=None, learner=True)
+    library.write_skill_file(
+        root,
+        "deploy-checks",
+        "references/rollback.md",
+        "Roll back.",
+        expected_digest=None,
+        learner=True,
+    )
     assert library.support_file_paths(root, "deploy-checks") == ["references/rollback.md"]
     loaded = library.read_skill_file(root, "deploy-checks", "references/rollback.md")
     assert loaded is not None
-    library.remove_skill_file(root, "deploy-checks", "references/rollback.md", expected_digest=loaded.digest)
+    library.remove_skill_file(
+        root,
+        "deploy-checks",
+        "references/rollback.md",
+        expected_digest=loaded.digest,
+        learner=True,
+    )
     assert library.support_file_paths(root, "deploy-checks") == []
 
 
@@ -347,7 +436,15 @@ def test_learner_never_follows_links_planted_in_the_workspace(tmp_path: Path, pl
             path.unlink()
             os.mkfifo(path)
     operation = (
-        partial(library.write_skill_file, root, "deploy-checks", "references/x.md", "x", expected_digest=None)
+        partial(
+            library.write_skill_file,
+            root,
+            "deploy-checks",
+            "references/x.md",
+            "x",
+            expected_digest=None,
+            learner=True,
+        )
         if planted == "support-link"
         else partial(library.read_skill_file, root, "deploy-checks")
     )
@@ -361,7 +458,7 @@ def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
     """The deterministic curator pass archives unused learned skills, seeds adopted ones, and never deletes."""
     root = tmp_path / "skills"
     now = datetime.now(UTC)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     _write_skill(root, "adopted", LEARNED.replace("deploy-checks", "adopted"))
     _write_skill(root, "handwritten", HANDWRITTEN)
     with open_skills_root(root) as root_fd:
@@ -440,9 +537,21 @@ def test_model_replies_count_only_model_visible_runs() -> None:
         Message(role="assistant", content="copied", from_history=True),
         Message(role="assistant", content="new"),
     )
-    assert count_model_replies([_tool_turn("r1")]) == 2
-    assert count_model_replies([_tool_turn("r1"), copied, errored, child]) == 3
-    assert count_model_replies([]) == 0
+    assert count_model_replies([_tool_turn("r1")]) == (2, False)
+    assert count_model_replies([_tool_turn("r1"), copied, errored, child]) == (3, False)
+    assert count_model_replies([]) == (0, False)
+
+
+def test_a_chat_skill_manage_call_restarts_the_count() -> None:
+    """Like Hermes resetting its counter when skill_manage runs, only the replies after the last call count."""
+    saved = _run(
+        "r2",
+        Message(role="user", content="Save that as a skill"),
+        Message(role="assistant", content="", tool_calls=[{"function": {"name": "skill_manage", "arguments": "{}"}}]),
+        Message(role="tool", content="{}", tool_name="skill_manage", tool_call_id="call"),
+        Message(role="assistant", content="Saved."),
+    )
+    assert count_model_replies([_tool_turn("r1"), saved]) == (1, True)
 
 
 def test_queue_keys_conversations_by_scope_not_requester(tmp_path: Path) -> None:
@@ -462,23 +571,38 @@ def test_queue_keys_conversations_by_scope_not_requester(tmp_path: Path) -> None
     assert len(_entries(private_paths)) == 2
 
 
-def _due(config: Config, paths: RuntimePaths, now: float = 1.0) -> list[str]:
-    return [key for key, _entry in queue.claim_due_reviews(config, paths, now=now)]
-
-
 def test_completed_runs_add_up_and_a_review_subtracts_what_it_covered(tmp_path: Path) -> None:
     """Like Hermes' counter, replies add up to the interval, and replies arriving during a review count next time."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"), _tool_turn("r3"))
-    _queue(config, paths, run_id="r1")
-    assert _due(config, paths) == []
-    _queue(config, paths, run_id="r2")
-    ((key, claimed),) = queue.claim_due_reviews(config, paths, now=1.0)
-    _queue(config, paths, run_id="r3")
-    queue.settle_review(paths, key, claimed=claimed, outcome="interrupted", now=1.0)
-    assert (_entries(paths)[key]["replies"], _due(config, paths)) == (6, [key])
-    queue.settle_review(paths, key, claimed=claimed, outcome="reviewed", now=1.0)
-    assert (_entries(paths)[key]["replies"], _due(config, paths)) == (2, [])
+    assert _queue(config, paths, run_id="r1") is None
+    due = _queue(config, paths, run_id="r2")
+    assert due is not None
+    key, claimed = due
+    assert claimed.replies == 4
+    assert _queue(config, paths, run_id="r3") is not None
+    queue.settle_review(paths, key, claimed=claimed, outcome="interrupted")
+    assert _entries(paths)[key]["replies"] == 6
+    queue.settle_review(paths, key, claimed=claimed, outcome="reviewed")
+    assert _entries(paths)[key]["replies"] == 2
+
+
+def test_a_restart_during_a_review_keeps_the_replies_it_did_not_cover(tmp_path: Path) -> None:
+    """A review that began before a chat-time skill_manage call subtracts nothing from the restarted count."""
+    config, paths = _learner(tmp_path)
+    saved = _run(
+        "r2",
+        Message(role="assistant", content="", tool_calls=[{"function": {"name": "skill_manage", "arguments": "{}"}}]),
+        Message(role="assistant", content="Saved."),
+    )
+    _seed(config, paths, _tool_turn("r1"), saved)
+    due = _queue(config, paths, run_id="r1")
+    assert due is not None
+    key, claimed = due
+    assert _queue(config, paths, run_id="r2") is None
+    queue.settle_review(paths, key, claimed=claimed, outcome="reviewed")
+    entry = _entries(paths)[key]
+    assert (entry["replies"], entry["generation"]) == (1, 1)
 
 
 def test_every_run_of_one_response_counts_once(tmp_path: Path) -> None:
@@ -507,35 +631,35 @@ def test_runs_without_model_replies_add_nothing(tmp_path: Path) -> None:
     assert not (paths.storage_root / "skill_learning_state.json").exists()
 
 
-def test_failed_reviews_back_off_and_the_third_is_abandoned(tmp_path: Path) -> None:
-    """Failures keep the count behind a growing delay; the third gives those replies up like a review."""
+def test_failed_reviews_keep_their_count_and_the_third_is_abandoned(tmp_path: Path) -> None:
+    """A failure leaves the count for the next completed reply to retry; the third gives those replies up."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    due = _queue(config, paths)
+    assert due is not None
+    key, entry = due
     for attempt in (1, 2):
-        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
+        queue.settle_review(paths, key, claimed=entry, outcome="failed")
         state = _entries(paths)[key]
         assert (state["failures"], state["replies"]) == (attempt, 2)
-        assert state["next_attempt_at"] == 100.0 + 60 * 2 ** (attempt - 1)
-        assert _due(config, paths, now=101.0) == []
-        assert _due(config, paths, now=10_000.0) == [key]
-    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
+    queue.settle_review(paths, key, claimed=entry, outcome="failed")
     state = _entries(paths)[key]
     assert (state["failures"], state["replies"]) == (0, 0)
-    assert _due(config, paths, now=10_000.0) == []
 
 
-def test_idle_conversations_short_of_a_review_are_forgotten(tmp_path: Path) -> None:
-    """After 30 idle days a count below the interval is dropped, while a due one still waits for its review."""
+def test_idle_conversations_are_forgotten(tmp_path: Path) -> None:
+    """A conversation without a counted response for 30 days is dropped, since only a reply could review it."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
     _seed(config, paths, _tool_turn("d1"), _tool_turn("d2"), session_id="due")
+    _seed(config, paths, _tool_turn("n1"), session_id="new")
     with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
         _queue(config, paths)
         _queue(config, paths, "due", run_id="d1")
         _queue(config, paths, "due", run_id="d2")
-    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=31 * 86400.0)] == ["mind:due"]
+    with patch("mindroom.skill_learning.queue.time.time", return_value=31 * 86400.0):
+        _queue(config, paths, "new", run_id="n1")
+    assert set(_entries(paths)) == {"mind:new"}
 
 
 def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
@@ -544,15 +668,15 @@ def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
     _seed(config, paths, _tool_turn("r1"))
     _queue(config, paths)
     config.agents["mind"].skill_learning.enabled = False
-    assert queue.claim_due_reviews(config, paths, now=1.0) == []
+    queue.drop_retired_reviews(config, paths)
     assert _entries(paths) == {}
-    _queue(config, paths)
+    assert _queue(config, paths) is None
     assert _entries(paths) == {}
 
 
 @pytest.mark.asyncio
-async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path: Path) -> None:
-    """The review is an Agno tool loop with Hermes' three skill tools only, and its usage is recorded."""
+async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools(tmp_path: Path) -> None:
+    """Without a request to fork, the review replays the stored conversation and offers only the skill tools."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
@@ -561,13 +685,13 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
         "older-lesson",
         LEARNED.replace("deploy-checks", "older-lesson"),
         reserved_names=frozenset(),
+        learner=True,
     )
     patch_step = {"action": "patch", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("skills_list", {}),
         ("skill_manage", {**patch_step, "name": "older-lesson", "new_string": "0. Guess."}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
-        ("skill_view", {"name": "older-lesson"}),
+        ("get_skill_instructions", {"skill_name": "older-lesson"}),
         (
             "skill_manage",
             {**patch_step, "name": "older-lesson", "new_string": "1. Run the smoke test.\n2. Check logs."},
@@ -583,26 +707,30 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
             session_id="session",
             identity=None,
             skills_root=root,
-            messages=_tool_turn("r1").messages or [],
-            summary=None,
+            captured=None,
             progress=progress,
         )
     assert progress.changes == {"deploy-checks": "created", "older-lesson": "updated"}
     assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
-    assert all(tools == {"skills_list", "skill_view", "skill_manage"} for tools in model.offered_tools)
+    assert all(
+        tools == {"get_skill_instructions", "get_skill_reference", "get_skill_script", "skill_manage"}
+        for tools in model.offered_tools
+    )
     # Provider adapters must leave tool selection on, or the reviewer can never call skill_manage.
     assert not any(model.provider_tools_blocked)
-    assert "<conversation>" in model.requests[0][-1]
-    assert "tests passed" in model.requests[0][-1]
-    refused = json.loads(model.requests[2][-1])
+    evidence = model.requests[0][-1]
+    assert "<conversation>" in evidence
+    assert "tests passed" in evidence
+    assert "- older-lesson (learner): Use when deploying the web service" in evidence
+    refused = json.loads(model.requests[1][-1])
     assert refused["success"] is False
-    assert "Call skill_view" in refused["error"]
+    assert "with get_skill_instructions before patching" in refused["error"]
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
     assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
-    assert report.totals.total_tokens == 10 * len(model.requests)
+    assert report.totals.total_tokens == sum(model.input_tokens) + 3 * len(model.requests)
 
 
 @pytest.mark.asyncio
@@ -611,10 +739,10 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     leaked_line = 'password: "Zq8vN3pL7wX2kR9mT4yB6c"'
     model = _model(
-        ("skill_view", {"name": "deploy-checks"}),
+        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
         (
             "skill_manage",
             {
@@ -643,8 +771,7 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp
             session_id="session",
             identity=None,
             skills_root=root,
-            messages=_tool_turn("r1").messages or [],
-            summary=None,
+            captured=None,
             progress=progress,
         )
     patched, written = (json.loads(request[-1]) for request in model.requests[2:4])
@@ -707,6 +834,9 @@ def _gemini_reply(part: dict[str, object]) -> dict[str, object]:
     }
 
 
+_VIEW = json.dumps({"skill_name": "older-lesson"})
+
+
 @dataclass(frozen=True)
 class _ProviderWire:
     """One provider's real adapter, its HTTP replies, and how its requests offer and select tools."""
@@ -725,7 +855,11 @@ _PROVIDER_WIRES = {
                 {
                     "content": None,
                     "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}},
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_skill_instructions", "arguments": _VIEW},
+                        },
                     ],
                 },
                 "tool_calls",
@@ -743,8 +877,8 @@ _PROVIDER_WIRES = {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "skills_list",
-                    "arguments": "{}",
+                    "name": "get_skill_instructions",
+                    "arguments": _VIEW,
                     "status": "completed",
                 },
             ),
@@ -764,7 +898,10 @@ _PROVIDER_WIRES = {
     "anthropic": _ProviderWire(
         ModelConfig(provider="anthropic", id="claude-sonnet-5", api_key="test-key"),
         (
-            _claude_reply({"type": "tool_use", "id": "toolu_1", "name": "skills_list", "input": {}}, "tool_use"),
+            _claude_reply(
+                {"type": "tool_use", "id": "toolu_1", "name": "get_skill_instructions", "input": json.loads(_VIEW)},
+                "tool_use",
+            ),
             _claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"),
         ),
         lambda request: {tool["name"] for tool in request.get("tools", [])},
@@ -773,7 +910,7 @@ _PROVIDER_WIRES = {
     "google": _ProviderWire(
         ModelConfig(provider="google", id="gemini-3.8-flash", api_key="test-key"),
         (
-            _gemini_reply({"functionCall": {"name": "skills_list", "args": {}}}),
+            _gemini_reply({"functionCall": {"name": "get_skill_instructions", "args": json.loads(_VIEW)}}),
             _gemini_reply({"text": "Nothing to save."}),
         ),
         lambda request: {
@@ -788,7 +925,10 @@ _PROVIDER_WIRES = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire_name", list(_PROVIDER_WIRES))
-async def test_review_calls_skill_tools_through_each_real_provider_adapter(tmp_path: Path, wire_name: str) -> None:
+async def test_a_replayed_review_calls_skill_tools_through_each_real_provider_adapter(
+    tmp_path: Path,
+    wire_name: str,
+) -> None:
     """Every provider adapter must offer and allow the skill tools; a scripted model cannot see tool selection."""
     wire = _PROVIDER_WIRES[wire_name]
     config, paths = _learner(tmp_path)
@@ -800,6 +940,7 @@ async def test_review_calls_skill_tools_through_each_real_provider_adapter(tmp_p
         "older-lesson",
         LEARNED.replace("deploy-checks", "older-lesson"),
         reserved_names=frozenset(),
+        learner=True,
     )
     requests: list[dict[str, Any]] = []
     replies = list(wire.replies)
@@ -827,15 +968,19 @@ async def test_review_calls_skill_tools_through_each_real_provider_adapter(tmp_p
                 session_id="session",
                 identity=None,
                 skills_root=root,
-                messages=_tool_turn("r1").messages or [],
-                summary=None,
+                captured=None,
                 progress=ReviewProgress(),
             )
     assert len(requests) == 2
-    assert wire.offered(requests[0]) == {"skills_list", "skill_view", "skill_manage"}
+    assert wire.offered(requests[0]) == {
+        "get_skill_instructions",
+        "get_skill_reference",
+        "get_skill_script",
+        "skill_manage",
+    }
     assert not any(wire.selection_disabled(request) for request in requests)
-    assert "older-lesson" not in json.dumps(requests[0])
-    assert "older-lesson" in json.dumps(requests[1])
+    assert "1. Run the smoke test." not in json.dumps(requests[0])
+    assert "1. Run the smoke test." in json.dumps(requests[1])
 
 
 @pytest.mark.asyncio
@@ -843,45 +988,38 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
     """User skills stay read-only, and the review ends before a request once its input reached the budget."""
     config, paths = _learner(tmp_path, context_window=12_000)
     config.agents["mind"].skills = ["mindroom-docs"]
+    _seed(config, paths, _run("r1", Message(role="user", content="x" * 4_000), Message(role="assistant", content="ok")))
     root = _skills_root(config, paths)
     _write_skill(root, "handwritten", HANDWRITTEN)
     model = _model(
         ("skill_manage", {"action": "patch", "name": "mindroom-docs", "old_string": "a", "new_string": "b"}),
-        ("skill_view", {"name": "handwritten"}),
+        ("get_skill_instructions", {"skill_name": "handwritten"}),
         (
             "skill_manage",
             {"action": "edit", "name": "handwritten", "content": LEARNED.replace("deploy-checks", "handwritten")},
         ),
-        *[("skills_list", {})] * 12,
+        *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
     )
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=root,
-            messages=[Message(role="user", content="x" * 4_000)],
-            summary=None,
-            progress=ReviewProgress(),
-        )
-    assert "configured-owned and read-only" in json.loads(model.requests[1][-1])["error"]
+        await _review(config, paths)
+    assert "configured skill and read-only" in json.loads(model.requests[1][-1])["error"]
     assert "user-owned and read-only" in json.loads(model.requests[3][-1])["error"]
     assert model.script, "the review should have stopped before its script ran out"
+    assert sum(model.input_tokens[:-1]) < 9_000 <= sum(model.input_tokens)
     assert (root / "handwritten/SKILL.md").read_text() == HANDWRITTEN
 
 
 @pytest.mark.asyncio
-async def test_parallel_tool_calls_spend_the_input_budget_once_per_request(tmp_path: Path) -> None:
-    """Like Hermes, the budget counts what each request sends, and one reply's tool results share one request."""
+async def test_the_budget_counts_what_each_request_sends(tmp_path: Path) -> None:
+    """Like Hermes, the budget adds the input each request reported, so one reply's tool results share a request."""
     config, paths = _learner(tmp_path, context_window=40_000)
+    _seed(config, paths, _run("r1", *[Message(role="user", content="x" * 3_600) for _ in range(8)]))
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    view = ("skill_view", {"name": "deploy-checks"})
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    view = ("get_skill_instructions", {"skill_name": "deploy-checks"})
     patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
     model = _model(
         [view, view, view],
@@ -891,23 +1029,13 @@ async def test_parallel_tool_calls_spend_the_input_budget_once_per_request(tmp_p
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=root,
-            # Close to the transcript's quarter of the budget, so three separately charged results would exhaust it.
-            messages=[Message(role="user", content="x" * 3_600) for _ in range(8)],
-            summary=None,
-            progress=ReviewProgress(),
-        )
+        await _review(config, paths)
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check logs.\n")
+    assert len(model.requests) == 3
 
 
 @pytest.mark.asyncio
-async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: Path) -> None:
+async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path) -> None:
     """Model replies of completed responses add up across turns; the review and its m.notice arrive at the interval."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
@@ -916,15 +1044,12 @@ async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: 
     send = AsyncMock(return_value=object())
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.skill_learning.worker.send_message_result", send),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
-        _queue(config, paths, identity=ALICE)
-        await _cycle(config, paths, client)
-        assert model.requests == []
+        assert _queue(config, paths, identity=ALICE) is None
         assert next(iter(_entries(paths).values()))["replies"] == 2
         _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-        _queue(config, paths, identity=ALICE, run_id="r2")
-        await _cycle(config, paths, client)
+        await _review_due(config, paths, _queue(config, paths, identity=ALICE, run_id="r2"), client)
     assert model.requests
     assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
     assert next(iter(_entries(paths).values()))["replies"] == 0
@@ -945,10 +1070,9 @@ async def test_review_that_fails_after_changing_skills_is_not_repeated(tmp_path:
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock(side_effect=OSError("disk full"))),
-        patch("mindroom.skill_learning.worker.send_message_result", send),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
-        _queue(config, paths, identity=ALICE)
-        await _cycle(config, paths, object())
+        await _review_due(config, paths, _queue(config, paths, identity=ALICE), object())
     (entry,) = _entries(paths).values()
     assert (entry["failures"], entry["replies"]) == (0, 0)
     content = send.await_args.args[2]
@@ -962,7 +1086,13 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths, ALICE)
-    library.create_skill(root, "old-habit", LEARNED.replace("deploy-checks", "old-habit"), reserved_names=frozenset())
+    library.create_skill(
+        root,
+        "old-habit",
+        LEARNED.replace("deploy-checks", "old-habit"),
+        reserved_names=frozenset(),
+        learner=True,
+    )
     with open_skills_root(root) as root_fd:
         update_skill_usage(
             root_fd,
@@ -972,10 +1102,9 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
     send = AsyncMock(return_value=object())
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=_model()),
-        patch("mindroom.skill_learning.worker.send_message_result", send),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
-        _queue(config, paths, identity=ALICE)
-        await _cycle(config, paths, object())
+        await _review_due(config, paths, _queue(config, paths, identity=ALICE), object())
     assert not (root / "old-habit").exists()
     send.assert_not_awaited()
 
@@ -988,8 +1117,7 @@ async def test_private_reviews_stay_in_the_requester_workspace(tmp_path: Path) -
     _seed(config, paths, _tool_turn("b1", result="bob private result"), identity=BOB)
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths, identity=ALICE)
-        await _cycle(config, paths)
+        await _review_due(config, paths, _queue(config, paths, identity=ALICE))
     assert "tests passed" in model.requests[0][-1]
     assert "bob private result" not in model.requests[0][-1]
     assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
@@ -1009,69 +1137,88 @@ def test_unknown_review_model_is_rejected() -> None:
 async def test_skill_manage_offers_its_actions_as_a_string_enum(tmp_path: Path) -> None:
     """Providers see the action as a string enum, not the empty object a PEP 695 alias produced."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     model = _model()
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=_skills_root(config, paths),
-            messages=[Message(role="user", content="hi")],
-            summary=None,
-            progress=ReviewProgress(),
-        )
+        await _review(config, paths)
     action = model.tool_parameters["skill_manage"]["properties"]["action"]
     assert (action["type"], action["enum"]) == ("string", ["create", "patch", "edit", "write_file", "remove_file"])
 
 
 @pytest.mark.asyncio
-async def test_provider_errors_fail_the_review_and_back_off(tmp_path: Path) -> None:
-    """Agno reports provider errors as an errored run, which must count as a failed review, not a finished one."""
+async def test_provider_errors_fail_the_review_and_keep_its_count(tmp_path: Path) -> None:
+    """A provider error fails the review, which keeps its replies for the next completed reply to retry."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
     model.failure = RuntimeError("provider unavailable")
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
-        await _cycle(config, paths)
+        await _review_due(config, paths, _queue(config, paths))
     (entry,) = _entries(paths).values()
     assert (entry["failures"], entry["replies"]) == (1, 2)
-    assert entry["next_attempt_at"] > 0
 
 
 @pytest.mark.asyncio
-async def test_stop_interrupts_a_running_review_and_the_next_start_runs_it(tmp_path: Path) -> None:
-    """Shutdown does not wait for a slow review; the durable queue runs it again after restart."""
+@pytest.mark.parametrize("interruption", ["shutdown", "new response"])
+async def test_an_interrupted_review_keeps_its_count_for_the_next_reply(tmp_path: Path, interruption: str) -> None:
+    """Shutdown or a response starting in the conversation stops the review; the next completed reply runs it."""
     config, paths = _learner(tmp_path)
-    _seed(config, paths, _tool_turn("r1"))
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
     model = _model()
     model.release = asyncio.Event()
-    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    runner = _runner(paths)
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
-        task = asyncio.create_task(worker.run())
+        due = _queue(config, paths)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
         await asyncio.wait_for(model.started.wait(), timeout=10)
-        worker.stop()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
+        assert runner.start(config, *due, None) is None, "one review runs per conversation"
+        if interruption == "shutdown":
+            await asyncio.wait_for(runner.stop(), timeout=5)
+        else:
+            runner.cancel(due[0])
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
     (entry,) = _entries(paths).values()
     assert (entry["replies"], entry["failures"]) == (2, 0)
     model.release.set()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        await _cycle(config, paths)
+        await _review_due(config, paths, _queue(config, paths, run_id="r2"))
     assert len(model.requests) == 2
     assert next(iter(_entries(paths).values()))["replies"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retiring_stops_the_reviews_of_agents_that_stopped_learning(tmp_path: Path) -> None:
+    """A config change that turns learning off stops that agent's running review."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model()
+    model.release = asyncio.Event()
+    runner = _runner(paths)
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        due = _queue(config, paths)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
+        await asyncio.wait_for(model.started.wait(), timeout=10)
+        runner.retire(config)
+        assert not task.done()
+        retired = config.model_copy(deep=True)
+        retired.agents["mind"].skill_learning.enabled = False
+        runner.retire(retired)
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
+    assert task.cancelled()
 
 
 def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
     """Hand-written telemetry without a UTC offset still ages its skill instead of failing every review."""
     root = tmp_path / "skills"
     now = datetime.now(UTC)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     usage = {
         "created_by": "learner",
         "created_at": (now - timedelta(days=45)).replace(tzinfo=None).isoformat(),
@@ -1084,7 +1231,7 @@ def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
 def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> None:
     """Like Hermes, a hand-edited record keeps its own fields and never costs another skill its learner ownership."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     # The agent rewrote the learned skill and dropped its marker, so only the usage record says who owns it.
     (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("metadata:\n  mindroom:\n    learned: true\n", ""))
     _write_skill(root, "handwritten", HANDWRITTEN)
@@ -1107,7 +1254,7 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
 def test_an_unreadable_usage_file_is_left_for_a_person_to_repair(tmp_path: Path) -> None:
     """A hand edit that breaks the JSON reads as empty, but no skill load rewrites the file and drops its records."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     broken = '{"report-writing": {"created_by": "learner"},}'
     (root / ".usage.json").write_text(broken)
     record_skill_use(root / "deploy-checks")
@@ -1119,7 +1266,7 @@ def test_an_unreadable_usage_file_is_left_for_a_person_to_repair(tmp_path: Path)
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
     """A user skill the learner cannot read must not stop archival, and with it every review of the workspace."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     broken = _write_skill(root, "broken", HANDWRITTEN)
     broken.unlink()
     broken.symlink_to(tmp_path / "elsewhere.md")
@@ -1141,9 +1288,10 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
     root = _skills_root(config, paths)
     adopted = LEARNED.replace("name: deploy-checks", "name: Deploy Checklist")
     _write_skill(root, "My_Deploy", adopted)
+    _seed(config, paths, _tool_turn("r1"))
     patch_step = {"action": "patch", "name": "Deploy Checklist", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("skill_view", {"name": "Deploy Checklist"}),
+        ("get_skill_instructions", {"skill_name": "Deploy Checklist"}),
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
     )
     progress = ReviewProgress()
@@ -1158,8 +1306,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
             session_id="session",
             identity=None,
             skills_root=root,
-            messages=[Message(role="user", content="hi")],
-            summary=None,
+            captured=None,
             progress=progress,
         )
     assert progress.changes == {"Deploy Checklist": "updated"}
@@ -1168,10 +1315,10 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
 
 @pytest.mark.asyncio
 async def test_conversation_without_a_session_stops_being_due(tmp_path: Path) -> None:
-    """A conversation whose session was deleted after it counted is settled instead of claimed again every cycle."""
+    """A conversation whose session was deleted after it counted is settled instead of retried with every reply."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    _queue(config, paths)
+    due = _queue(config, paths)
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     try:
         storage.delete_session("session")
@@ -1179,37 +1326,9 @@ async def test_conversation_without_a_session_stops_being_due(tmp_path: Path) ->
         storage.close()
     model = _model()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        await _cycle(config, paths)
+        await _review_due(config, paths, due)
     assert model.requests == []
-    assert queue.claim_due_reviews(config, paths, now=datetime.now(UTC).timestamp()) == []
-
-
-@pytest.mark.asyncio
-async def test_one_failing_conversation_does_not_stop_the_cycle(tmp_path: Path) -> None:
-    """A conversation whose workspace cannot be resolved backs off alone while the rest of the cycle proceeds."""
-    config, paths = _learner(tmp_path)
-    _seed(config, paths, _tool_turn("r1"))
-    _seed(config, paths, _tool_turn("o1"), session_id="other")
-    _queue(config, paths, "other", run_id="o1")
-    _queue(config, paths)
-    original = worker_module._skills_root
-
-    def failing(config: Config, runtime_paths: RuntimePaths, entry: queue.QueueEntry) -> Path:
-        if entry.session == "other":
-            msg = "workspace unavailable"
-            raise OSError(msg)
-        return original(config, runtime_paths, entry)
-
-    model = _model()
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(worker_module, "_skills_root", failing),
-    ):
-        await _cycle(config, paths)
-    entries = _entries(paths)
-    assert entries["mind:other"]["failures"] == 1
-    assert model.requests
-    assert entries["mind:session"]["replies"] == 0
+    assert _entries(paths)["mind:session"]["replies"] == 0
 
 
 def test_transcript_cannot_close_the_evidence_block() -> None:
@@ -1231,8 +1350,7 @@ async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> N
     model = _model()
     try:
         with patch("mindroom.model_loading.get_model_instance", return_value=model):
-            _queue(config, paths)
-            await _cycle(config, paths)
+            await _review_due(config, paths, _queue(config, paths))
     finally:
         locked.chmod(0o755)
     assert model.requests
@@ -1243,6 +1361,7 @@ async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> N
 async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path) -> None:
     """Only create may name a skill the reviewer has not been shown."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     model = _model(
         ("skill_manage", {"action": "write_file", "name": "", "file_path": "references/x.md", "file_content": "x"}),
     )
@@ -1250,17 +1369,7 @@ async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path) -> None:
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=_skills_root(config, paths),
-            messages=[Message(role="user", content="hi")],
-            summary=None,
-            progress=ReviewProgress(),
-        )
+        await _review(config, paths)
     assert "Unknown skill" in json.loads(model.requests[1][-1])["error"]
     assert not _skills_root(config, paths).exists()
 
@@ -1281,11 +1390,10 @@ async def test_write_running_at_timeout_lands_before_settlement_and_is_announced
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
-        patch("mindroom.skill_learning.worker.send_message_result", send),
+        patch("mindroom.skill_learning.tools.create_skill", slow_create),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
-        _queue(config, paths, identity=ALICE)
-        await _cycle(config, paths, object())
+        await _review_due(config, paths, _queue(config, paths, identity=ALICE), object())
     entry = _entries(paths)["mind:session"]
     assert (entry["failures"], entry["replies"]) == (0, 0)
     assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
@@ -1302,66 +1410,66 @@ def test_a_malformed_scope_retires_only_its_own_conversation(tmp_path: Path) -> 
     state = json.loads(state_path.read_text())
     state["entries"]["mind:other"]["identity"] = {"channel": "matrix"}
     state_path.write_text(json.dumps(state))
-    assert [key for key, _entry in queue.claim_due_reviews(config, paths, now=1.0)] == ["mind:session"]
+    queue.drop_retired_reviews(config, paths)
     assert set(_entries(paths)) == {"mind:session"}
 
 
 def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) -> None:
-    """An entry judged stale is kept when a run is counted between the snapshot and the removal."""
+    """An entry judged retired is kept when a run is counted between the judgment and the removal."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
     _queue(config, paths)
-    state = json.loads((paths.storage_root / "skill_learning_state.json").read_text())
-    state["entries"]["mind:session"]["last_seen_at"] = 0.0
-    (paths.storage_root / "skill_learning_state.json").write_text(json.dumps(state))
+    retired = config.model_copy(deep=True)
+    retired.agents["mind"].skill_learning.enabled = False
     judge = queue._entry_is_current
 
-    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float) -> bool:
-        current = judge(config, entry, now)
+    def judge_then_queue(judged_config: Config, entry: queue.QueueEntry) -> bool:
+        current = judge(judged_config, entry)
         _queue(config, paths, run_id="r2")
         return current
 
     with patch.object(queue, "_entry_is_current", judge_then_queue):
-        queue.claim_due_reviews(config, paths, now=datetime.now(UTC).timestamp())
+        queue.drop_retired_reviews(retired, paths)
     assert _entries(paths)["mind:session"]["replies"] == 4
 
 
 @pytest.mark.asyncio
 async def test_failed_shutdown_bookkeeping_does_not_swallow_the_cancellation(tmp_path: Path) -> None:
-    """Stopping still ends the worker even when recording the interrupted review fails."""
+    """Stopping still ends the review even when recording the interrupted review fails."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
     model.release = asyncio.Event()
-    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    runner = _runner(paths)
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(worker_module, "settle_review", side_effect=OSError("disk full")),
+        patch.object(runner_module, "settle_review", side_effect=OSError("disk full")),
     ):
-        _queue(config, paths)
-        task = asyncio.create_task(worker.run())
+        due = _queue(config, paths)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
         await asyncio.wait_for(model.started.wait(), timeout=10)
-        worker.stop()
-        (result,) = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
-    assert isinstance(result, asyncio.CancelledError)
+        await asyncio.wait_for(runner.stop(), timeout=5)
+    assert task.cancelled()
 
 
 def test_learner_keeps_ownership_when_the_agent_rewrites_its_skill(tmp_path: Path) -> None:
     """Like Hermes' usage records, provenance survives a foreground rewrite that drops the frontmatter marker."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("metadata:\n  mindroom:\n    learned: true\n", ""))
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
     assert current.learned
-    library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None)
+    library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
 
 
 @pytest.mark.parametrize("description", ["Use when deploying the web service", "Use when: deploying"])
 def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, description: str) -> None:
     """Pinning a learned skill stops automatic edits and archival, even when the frontmatter is not strict YAML."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     pinned = LEARNED.replace("learned: true", "pinned: true").replace("Use when deploying the web service", description)
     (root / "deploy-checks/SKILL.md").write_text(pinned)
     with open_skills_root(root) as root_fd:
@@ -1374,7 +1482,7 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, des
     assert current is not None
     assert not current.learned
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
-        library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None)
+        library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None, learner=True)
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
 
 
@@ -1382,25 +1490,24 @@ def test_the_reviewer_catalog_uses_the_strict_ownership_check(tmp_path: Path) ->
     """A pinned skill with loose frontmatter is offered as read-only, matching what edits would decide."""
     config, paths = _learner(tmp_path)
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     loose = LEARNED.replace("learned: true", "pinned: true").replace(
         "Use when deploying the web service",
         "Use when: deploying",
     )
     (root / "deploy-checks/SKILL.md").write_text(loose)
-    catalog, _reserved = _skill_catalog(config, paths, "mind", root)
-    assert not catalog["deploy-checks"].learned
+    assert not load_skill_catalog(config, paths, "mind", root).entries["deploy-checks"].learned
 
 
 def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> None:
     """Like Hermes' frontmatter check, a learner edit must keep SKILL.md parseable, though loading stays lenient."""
     root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
     loose = LEARNED.replace("Use when deploying the web service", "Use when: deploying")
     with pytest.raises(library.SkillEditError, match="not a valid YAML mapping"):
-        library.write_skill_file(root, "deploy-checks", "SKILL.md", loose, expected_digest=current.digest)
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", loose, expected_digest=current.digest, learner=True)
     assert (root / "deploy-checks/SKILL.md").read_text() == LEARNED
 
 
@@ -1410,10 +1517,10 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     patch_step = {"action": "patch", "name": "deploy-checks"}
     model = _model(
-        ("skill_view", {"name": "deploy-checks"}),
+        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
         [
             ("skill_manage", {**patch_step, "old_string": "1. Run the smoke test.", "new_string": "1. Run smoke."}),
             ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
@@ -1427,8 +1534,7 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
             session_id="session",
             identity=None,
             skills_root=root,
-            messages=_tool_turn("r1").messages or [],
-            summary=None,
+            captured=None,
             progress=ReviewProgress(),
         )
     content = (root / "deploy-checks/SKILL.md").read_text()
@@ -1441,7 +1547,13 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     now = datetime.now(UTC)
     for name in ("deploy-checks", "old-habit"):
-        library.create_skill(root, name, LEARNED.replace("deploy-checks", name), reserved_names=frozenset())
+        library.create_skill(
+            root,
+            name,
+            LEARNED.replace("deploy-checks", name),
+            reserved_names=frozenset(),
+            learner=True,
+        )
         with open_skills_root(root) as root_fd:
             update_skill_usage(
                 root_fd,
@@ -1462,11 +1574,11 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_compaction_never_lowers_the_count_and_the_review_sees_its_summary(tmp_path: Path) -> None:
-    """Replies stay counted when compaction deletes their runs, and the summary opens the review's evidence."""
+async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary(tmp_path: Path) -> None:
+    """Replies stay counted when compaction deletes their runs, and the summary opens a replayed review's evidence."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    _queue(config, paths)
+    due = _queue(config, paths)
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     try:
         storage.delete_runs(["r1"])
@@ -1478,7 +1590,7 @@ async def test_compaction_never_lowers_the_count_and_the_review_sees_its_summary
         storage.close()
     model = _model()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        await _cycle(config, paths)
+        await _review_due(config, paths, due)
     assert len(model.requests) == 1
     evidence = model.requests[0][-1]
     assert evidence.index("release notes in the #deploys channel") < evidence.index("deployed to canary")
@@ -1513,16 +1625,16 @@ async def test_write_in_flight_at_shutdown_is_recorded_as_the_learners(tmp_path:
         real_create(*args, **kwargs)
 
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    runner = _runner(paths)
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
+        patch("mindroom.skill_learning.tools.create_skill", slow_create),
     ):
-        _queue(config, paths)
-        task = asyncio.create_task(worker.run())
+        due = _queue(config, paths)
+        assert due is not None
+        runner.start(config, *due, None)
         assert await asyncio.to_thread(writing.wait, 10)
-        worker.stop()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+        await asyncio.wait_for(runner.stop(), timeout=10)
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
     assert _entries(paths)["mind:session"]["replies"] == 0
 
@@ -1538,7 +1650,13 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
     config.agents["mind"].skill_learning.timeout_seconds = 1
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    library.create_skill(root, "old-habit", LEARNED.replace("deploy-checks", "old-habit"), reserved_names=frozenset())
+    library.create_skill(
+        root,
+        "old-habit",
+        LEARNED.replace("deploy-checks", "old-habit"),
+        reserved_names=frozenset(),
+        learner=True,
+    )
     with open_skills_root(root) as root_fd:
         update_skill_usage(
             root_fd,
@@ -1546,7 +1664,7 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
             lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
         )
     reached = threading.Event()
-    real_archive, real_create = worker_module.archive_unused_skills, library.create_skill
+    real_archive, real_create = runner_module.archive_unused_skills, library.create_skill
 
     def slow_archive(*args: object, **kwargs: Any) -> list[str]:  # noqa: ANN401
         if phase == "archival":
@@ -1558,28 +1676,28 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
         time.sleep(2)
         real_create(*args, **kwargs)
 
-    real_finish = SkillLearningWorker._finish
+    real_finish = SkillReviewRunner._finish
 
-    async def finish(self: SkillLearningWorker, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    async def finish(self: SkillReviewRunner, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         if phase == "bookkeeping":
             reached.set()
         return await real_finish(self, *args, **kwargs)
 
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    runner = _runner(paths)
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(worker_module, "archive_unused_skills", slow_archive),
-        patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
-        patch.object(SkillLearningWorker, "_finish", finish),
+        patch.object(runner_module, "archive_unused_skills", slow_archive),
+        patch("mindroom.skill_learning.tools.create_skill", slow_create),
+        patch.object(SkillReviewRunner, "_finish", finish),
     ):
-        _queue(config, paths)
-        task = asyncio.create_task(worker.run())
+        due = _queue(config, paths)
+        assert due is not None
+        runner.start(config, *due, None)
         assert await asyncio.to_thread(reached.wait, 10)
-        worker.stop()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+        await asyncio.wait_for(runner.stop(), timeout=10)
     assert not (root / "old-habit").exists()
-    # A review stopped before it wrote runs again after restart; one whose write landed is done.
+    # A review stopped before it wrote runs again after the next reply; one whose write landed is done.
     assert _entries(paths)["mind:session"]["replies"] == (2 if phase == "archival" else 0)
 
 
@@ -1589,7 +1707,7 @@ async def test_writing_over_a_binary_support_file_is_refused_not_crashed(tmp_pat
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     (root / "deploy-checks/references").mkdir()
     (root / "deploy-checks/references/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
     model = _model(
@@ -1606,9 +1724,234 @@ async def test_writing_over_a_binary_support_file_is_refused_not_crashed(tmp_pat
             session_id="session",
             identity=None,
             skills_root=root,
-            messages=_tool_turn("r1").messages or [],
-            summary=None,
+            captured=None,
             progress=ReviewProgress(),
         )
     assert json.loads(model.requests[1][-1])["success"] is False
     assert (root / "deploy-checks/references/logo.png").read_bytes().startswith(b"\x89PNG")
+
+
+def _agent_tools(config: Config, paths: RuntimePaths, shell_calls: list[str]) -> list[Function]:
+    """The tools a learning agent's request offers: Agno's skill readers, skill_manage, and one more tool."""
+    root = _skills_root(config, paths)
+
+    def shell(cmd: str) -> str:
+        """Run a shell command."""
+        shell_calls.append(cmd)
+        return "ran"
+
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    functions = [
+        *(catalog.skills.get_tools() if catalog.skills is not None else []),
+        *SkillManageTools("mind", config, paths, root).get_async_functions().values(),
+        Function.from_callable(shell),
+    ]
+    for function in functions:
+        function.process_entrypoint()
+    return functions
+
+
+async def _answer(
+    model: _ScriptedModel | Model,
+    capture: SkillReviewCapture,
+    tools: Sequence[Function | dict[str, Any]],
+    run_id: str = "r1",
+) -> None:
+    """Run one agent response loop whose final request the capture records, as a primary attempt does."""
+    messages = [
+        Message(role="system", content="You are Mind, a deployment assistant."),
+        Message(role="user", content="Deploy the web service"),
+    ]
+    with capture.observe(model, run_id=run_id):
+        await model.aresponse(messages=messages, tools=list(tools), run_response=RunOutput(run_id=run_id))
+
+
+def _learning_agent_with_a_skill(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    library.create_skill(
+        _skills_root(config, paths),
+        "older-lesson",
+        LEARNED.replace("deploy-checks", "older-lesson"),
+        reserved_names=frozenset(),
+        learner=True,
+    )
+    return config, paths
+
+
+@pytest.mark.asyncio
+async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_path: Path) -> None:
+    """Like Hermes' default review, the fork resends the request and tools unchanged and appends the review prompt."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    shell_calls: list[str] = []
+    model = _model()
+    capture = SkillReviewCapture("default")
+    await _answer(model, capture, _agent_tools(config, paths, shell_calls))
+    model.script = [
+        ("shell", {"cmd": "cat ~/.ssh/id_ed25519"}),
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
+    ]
+    await _review(config, paths, captured=capture.latest)
+    primary, fork, denied = model.requests[:3]
+    assert fork[: len(primary) + 1] == [*primary, "Done."]
+    assert fork[-1].startswith("This turn is an automatic skill review")
+    assert "- older-lesson (learner):" in fork[-1]
+    assert "<conversation>" not in fork[-1]
+    assert model.tool_requests[1] == model.tool_requests[0]
+    assert shell_calls == []
+    assert denied[-1] == "Error: The requested tool does not exist or is not available."
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.request_breakdown is not None
+    assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["other review model", "no final answer", "no skill_manage", "skill tool needs approval", "no capture"],
+)
+async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tmp_path: Path, reason: str) -> None:
+    """Another review model, a loop that ended on a tool call, or a request without a usable skill_manage replays."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    config.models["small"] = ModelConfig(provider="openai", id="gpt-6-astra-mini")
+    tools = _agent_tools(config, paths, [])
+    if reason == "other review model":
+        config.agents["mind"].skill_learning.model = "small"
+    elif reason == "no skill_manage":
+        tools = [tool for tool in tools if tool.name != "skill_manage"]
+    elif reason == "skill tool needs approval":
+        (skill_manage,) = [tool for tool in tools if tool.name == "skill_manage"]
+        skill_manage.requires_confirmation = True
+    primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
+    capture = SkillReviewCapture("default")
+    await _answer(primary, capture, tools)
+    if reason == "no final answer":
+        capture = replace(
+            capture,
+            latest=replace(capture.latest, messages=capture.latest.messages[:-1]) if capture.latest else None,
+        )
+    replay = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=replay):
+        await _review(config, paths, captured=None if reason == "no capture" else capture.latest)
+    assert len(replay.requests) == 1
+    assert "<conversation>" in replay.requests[0][-1]
+    assert "tests passed" in replay.requests[0][-1]
+
+
+@pytest.mark.asyncio
+async def test_the_capture_keeps_only_its_attempts_final_request_as_sent(tmp_path: Path) -> None:
+    """Loops of other runs on the model are ignored, and later edits of the messages never change the capture."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    tools = _agent_tools(config, paths, [])
+    model = _model()
+    capture = SkillReviewCapture("default")
+    with capture.observe(model, run_id="r1"):
+        await model.aresponse(
+            messages=[Message(role="user", content="helper request")],
+            tools=tools,
+            run_response=RunOutput(run_id="helper"),
+        )
+        assert capture.latest is None
+        messages = [Message(role="user", content="Deploy the web service")]
+        await model.aresponse(messages=messages, tools=tools, run_response=RunOutput(run_id="r1"))
+    messages[-1].content = "rewritten after the loop"
+    await model.aresponse(messages=list(messages), tools=tools, run_response=RunOutput(run_id="r1"))
+    assert capture.latest is not None
+    assert [message.get_content_string() for message in capture.latest.messages] == ["Deploy the web service", "Done."]
+    assert capture.latest.tools == tuple(tools)
+
+
+@pytest.mark.asyncio
+async def test_chat_skill_manage_creates_user_owned_skills_and_edits_any_workspace_skill(tmp_path: Path) -> None:
+    """Like Hermes' foreground skill_manage, chat edits need no prior read and the skills it creates are the user's."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skills = ["mindroom-docs"]
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    tools = SkillManageTools("mind", config, paths, root)
+    created = json.loads(await tools.skill_manage("create", "handwritten", content=HANDWRITTEN))
+    assert created["success"] is True
+    handwritten = library.read_skill_file(root, "handwritten")
+    assert handwritten is not None
+    assert not handwritten.learned
+    patched = await tools.skill_manage("patch", "handwritten", old_string="Body", new_string="Better body")
+    assert json.loads(patched)["success"] is True
+    await tools.skill_manage("patch", "deploy-checks", old_string="1. Run", new_string="1. Always run")
+    learned = library.read_skill_file(root, "deploy-checks")
+    assert learned is not None
+    assert learned.learned
+    assert "1. Always run the smoke test." in learned.content
+    refused = json.loads(await tools.skill_manage("patch", "mindroom-docs", old_string="a", new_string="b"))
+    assert "configured skill and read-only" in refused["error"]
+
+
+def test_learning_agents_offer_skill_manage(tmp_path: Path) -> None:
+    """The review can only call tools the agent's request offered, so learning agents offer skill_manage."""
+    config, _paths = _learner(tmp_path)
+
+    def offered() -> set[str]:
+        return {entry.name for entry in visible_tool_surface(agent_name="mind", config=config).runtime_tool_configs}
+
+    assert "skill_manage" in offered()
+    config.agents["mind"].skill_learning.enabled = False
+    assert "skill_manage" not in offered()
+
+
+def _without_cache_markers(value: object) -> object:
+    """Drop prompt-cache breakpoints, which mark where a cached prefix ends rather than what it contains."""
+    if isinstance(value, dict):
+        return {key: _without_cache_markers(item) for key, item in value.items() if key != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_markers(item) for item in value]
+    return value
+
+
+# The request field holding the conversation, and the fields a warm prompt cache needs unchanged.
+_WIRE_REQUEST_PARTS = {
+    "openai-chat": ("messages", ("tools", "tool_choice")),
+    "openai-responses": ("input", ("tools", "instructions", "tool_choice")),
+    "anthropic": ("messages", ("tools", "system", "tool_choice")),
+    "google": ("contents", ("tools", "systemInstruction", "toolConfig")),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_name", list(_PROVIDER_WIRES))
+async def test_the_review_fork_replays_the_final_request_through_each_adapter(tmp_path: Path, wire_name: str) -> None:
+    """Each real adapter sends the fork's tools and conversation prefix exactly as the response sent them."""
+    wire = _PROVIDER_WIRES[wire_name]
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    config.models["default"] = wire.model
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=wire.replies[1])
+
+    model = get_model_instance(config, paths, "default")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        if wire.model.provider == "openai":
+            model.async_client = AsyncOpenAI(api_key="test-key", max_retries=0, http_client=http_client)
+        elif wire.model.provider == "anthropic":
+            model.async_client = AsyncAnthropic(api_key="test-key", max_retries=0, http_client=http_client)
+        else:
+            model.client = genai.Client(
+                api_key="test-key",
+                http_options=HttpOptions(httpx_async_client=http_client, retry_options=HttpRetryOptions(attempts=1)),
+            )
+        capture = SkillReviewCapture("default")
+        await _answer(model, capture, _agent_tools(config, paths, []))
+        await _review(config, paths, captured=capture.latest)
+    primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
+    history, unchanged = _WIRE_REQUEST_PARTS[wire_name]
+    assert {key: fork.get(key) for key in unchanged} == {key: primary.get(key) for key in unchanged}
+    assert primary.get("tools"), "the response offered its tools"
+    if "previous_response_id" in fork:
+        # A stored Responses conversation continues from the response itself, so the server replays its prefix.
+        assert fork["previous_response_id"] == wire.replies[1]["id"]
+        assert [item["role"] for item in fork[history]] == ["user"]
+    else:
+        assert fork[history][: len(primary[history])] == primary[history]
+        assert len(fork[history]) == len(primary[history]) + 2, "the fork adds the final answer and the review prompt"
+    assert not wire.selection_disabled(fork)

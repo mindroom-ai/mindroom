@@ -45,15 +45,24 @@ def conversation_messages(session: AgentSession) -> list[Message]:
     ]
 
 
-def count_model_replies(runs: Iterable[RunOutput]) -> int:
-    """Count assistant messages, one per model request including tool-calling steps, in model-visible runs."""
-    return sum(
-        1
-        for run in runs
-        if is_model_history_visible_run(run)
-        for message in run.messages or []
-        if message.role == "assistant" and not message.from_history
-    )
+def count_model_replies(runs: Iterable[RunOutput]) -> tuple[int, bool]:
+    """Count assistant messages, one per model request including tool-calling steps, in model-visible runs.
+
+    Like Hermes resetting its counter when ``skill_manage`` runs, only replies after the last reply that called it
+    count; the second value says whether one did.
+    """
+    replies, restarted = 0, False
+    for run in runs:
+        if not is_model_history_visible_run(run):
+            continue
+        for message in run.messages or []:
+            if message.role != "assistant" or message.from_history:
+                continue
+            if any((call.get("function") or {}).get("name") == "skill_manage" for call in message.tool_calls or []):
+                replies, restarted = 0, True
+            else:
+                replies += 1
+    return replies, restarted
 
 
 def render_transcript(messages: Sequence[Message], *, summary: str | None = None, budget_chars: int) -> str:

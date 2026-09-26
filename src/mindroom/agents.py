@@ -764,6 +764,20 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    if tool_name == "skill_manage":
+        from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
+
+        return SkillManageTools(
+            agent_name,
+            config,
+            runtime_paths,
+            agent_workspace_skills_root(
+                runtime_paths,
+                agent_name,
+                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+            ),
+        )
+
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 

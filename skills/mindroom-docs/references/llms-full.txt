@@ -3239,8 +3239,8 @@ All fields are optional, and unknown fields are rejected.
 
 | Field | Type | Default | Bounds and behavior |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Count completed standalone responses and review conversations that reach the interval. |
-| `model` | string or null | `null` | Reviewer model alias from `models`; null uses the agent's model. |
+| `enabled` | boolean | `false` | Count completed standalone responses, review conversations that reach the interval, and offer the `skill_manage` tool. |
+| `model` | string or null | `null` | Review model alias from `models`; null reviews on the model the response used and reuses its prompt cache, while another model replays a digest of the conversation. |
 | `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
 | `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
 | `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
@@ -14590,41 +14590,55 @@ Like Hermes' `creation_nudge_interval`, each conversation keeps a count of model
 Each successful standalone-agent response to a person in Matrix adds the replies of its runs when it completes, including every run it continued in, for example after loading a tool.
 An approved continuation adds the paused run it completes, including its replies from before the pause, and the run it ends in.
 A few runs go uncounted, which only delays a review: runs a response finished before pausing for approval, runs between two tool reloads after an approval, and the earlier steps of a minimal-mode command approval resumed after a restart, which count as one reply.
-A review runs once the count reaches `review_interval`, and it subtracts the replies it covered, so replies that arrive while it runs count toward the next review.
-Replies are counted only as responses finish while learning is on, so replies from before learning was enabled or while it was off never count, and the queued conversations of an agent that stops learning are forgotten on the next config change.
+Like Hermes restarting its count when the agent saves a skill with `skill_manage`, a response that calls `skill_manage` restarts the count, which then holds only the replies after its last call.
+Minimal-mode agents call `skill_manage` through their command line, which does not restart the count.
+Once the count reaches `review_interval`, the review starts in the background right after that response, so it never delays a reply.
+A response that starts in the same conversation stops a running review, as a new Hermes turn cancels its review; the count stays, so the next completed reply starts the review again.
+A review subtracts the replies it covered, so replies that arrive while it runs count toward the next review.
+Replies are counted only as responses finish while learning is on, so replies from before learning was enabled or while it was off never count, and the counts and running reviews of an agent that stops learning are dropped on the next config change.
 Compaction and redaction never change a count, because replies are counted when their response completes.
-A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
-Automated responses from schedules, hooks, and external triggers, including ones the router or another agent hands on, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the evidence when people also use the thread.
+Automated responses from schedules, hooks, and external triggers, including ones the router or another agent hands on, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the conversation a review reads when people also use the thread.
 Team responses are excluded.
-Hermes restarts its count when the agent saves a skill with its own `skill_manage` tool; MindRoom agents write skills with their file tools, which do not restart the count, so the next review sees the saved skill and is told to patch rather than duplicate it.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
-Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds each conversation's count, retry state, and scope metadata, never message content, so counts survive restarts.
-A conversation still below the interval is forgotten after 30 days without a counted response.
+A review that a restart interrupts is not resumed on its own; like any due conversation, it starts again with the next completed reply.
+A conversation without a counted response for 30 days is forgotten.
 Reviews run one at a time across processes that share the storage root.
-A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, which gives up the replies it would have covered.
-A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
-Shutdown interrupts a running review, which runs again after the next start unless it had already changed skills; writes it started land first.
+A failed review, including a provider error, keeps its count for the next completed reply to retry and is abandoned after three consecutive failures, which gives up the replies it would have covered.
+A review that already changed skills before failing, timing out, or being stopped counts as done, like Hermes' best-effort review, so it never repeats its edits; writes it started land first.
 
-### What a review can do
+### What a review sees
 
-The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
-It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
+Like Hermes' default review, the review forks the final model request of the response that made the conversation due.
+It sends that request again on the same model, with the same tools, the model's final answer, and the review prompt appended, so the provider can serve the conversation from its prompt cache and the review sees it verbatim, including every tool call and result.
+On a stored OpenAI Responses conversation, the fork continues from the response with `previous_response_id`, so the provider rebuilds the same conversation.
+Only the skill tools run; a call to any other tool the request offered answers that the tool is not available.
+The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
+
+The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, and when the final request cannot be forked because the response ended on a tool call, offered no `skill_manage`, or needs approval for a skill tool.
+A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
 Older tool results are left out, and a very long message keeps its start and end.
-Private keys are removed from each whole message and other credential-like values are redacted on a best-effort basis, because the agent's model already processed this conversation; learned files are checked again when they are written.
-Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
+Private keys are removed from each whole message and other credential-like values are redacted on a best-effort basis.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
-When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
+When compaction has replaced older turns with a summary, the digest starts with that summary, as a Hermes review sees the compressed conversation.
+
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
-Like Hermes, each request counts the whole context it sends, the tool results of one reply go out together in the next request, and the review ends before a request once the total reached the budget.
-The budget is estimated at four characters per token.
-It makes at most 16 tool calls and stops after `timeout_seconds`.
+Like Hermes, each request adds the input tokens the provider reported, prompt-cache reads included, and the review ends before a request once the total reached the budget.
+A digest replay's transcript may use a quarter of that budget, estimated at four characters per token.
+A review makes at most 16 tool calls and stops after `timeout_seconds`.
 The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
+It also lists the agent's skills and who owns each.
 Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 
-`skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
-Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
-A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
+### Skill tools
+
+Agents with skill learning on have a `skill_manage` tool, as Hermes agents do, and the review writes with the same tool.
+It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
+In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
+Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
+The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
+Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
+A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters, and one the review creates also needs the `learned` marker shown below.
 Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, or a quoted value of at least 20 characters, including a passphrase, of an api-key, token, secret, or password setting such as `password: "..."`, `api_key="..."`, or `{"api_key": "..."}`.
 This is a heuristic for common formats, not a guarantee: like Hermes' guard, it lets an unusual secret format or an unquoted value of an unknown format, such as `API_KEY=...` in an environment file, pass.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, environment variable names like `api_key = "OPENAI_API_KEY"` or `postgres://app:DB_PASSWORD@localhost/app`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
@@ -14643,7 +14657,7 @@ metadata:
 
 Add the marker to a skill you wrote to hand it to the learner.
 Add `pinned: true` under `metadata.mindroom` to take any skill away from the learner and the curator, which then never edit or archive it.
-Bundled, plugin, and user skills and workspace skills that someone else wrote are never edited, and new learned skills cannot reuse their names.
+The review never edits bundled, plugin, and user skills or workspace skills that someone else wrote, and new skills cannot reuse their names.
 Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
 
 ### History, archive, and notices
@@ -14661,7 +14675,7 @@ Rewrites keep a file's existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``; a review stopped by shutdown after changing skills posts none.
 The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
-Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](https://docs.mindroom.chat/dashboard/), except for a review that times out or is interrupted before the model run returns.
+Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](https://docs.mindroom.chat/dashboard/), also for a review that times out or is interrupted.
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 
 # Plugins
@@ -19936,7 +19950,6 @@ MindRoom's architecture consists of several key components working together.
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
-| `orchestration/background_workers.py` | Config-gated start and stop of the memory auto-flush and skill-learning workers |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
@@ -19945,12 +19958,14 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
-| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, scope keys, retries, and retention |
-| `skill_learning/worker.py` | Background worker that reviews conversations whose count reached the interval and posts change notices |
-| `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
-| `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
-| `skill_learning/library.py` | Confined learner-owned skill writes, ownership provenance, history snapshots, and archival |
+| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, chat-time restarts, scope keys, retries, and retention |
+| `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
+| `skill_learning/runner.py` | Starts a review after the response that makes a conversation due, stops it when a new response starts, and posts change notices |
+| `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a digest replay on another model |
+| `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
+| `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
+| `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
+| `custom_tools/skill_manage.py` | Chat-time `skill_manage` of learning agents, like Hermes' foreground tool |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -19996,7 +20011,7 @@ MindRoom's architecture consists of several key components working together.
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
-| `config/skill_learning.py` | Opt-in agent settings for background skill reviews: interval, reviewer model, notices, and archival |
+| `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
@@ -21227,6 +21242,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Message projection and historical-media policy require private message interception. | Propose supported message-preparation hooks with explicit history-mutation ownership. | `agno_compat_model_hooks.py`, `history/agno_compat_message_builder.py`. |
 | Post-tool callbacks lack mutable messages/results at the required stage; approved continuations bypass them. | Extend the callback surface after result formatting, media insertion, and resumed batches at response entry. | `agno_compat_model_hooks.py`. |
 | Invocation, retry-cycle, scoped request, and final SDK payload hooks are missing. | Define each lifecycle stage separately, including wrapper order, cache behavior, and cancellation cleanup. | `agno_compat_model_hooks.py`. |
+| A response loop's final request is not observable: `RunOutput.messages` drops messages kept out of agent memory, and the tool definitions stay inside `aresponse`, so the skill review cannot fork the request to reuse its prompt cache. | Tracking gap: report each response loop's final messages, tools, tool choice, and response format to a scoped callback; no matching issue or PR identified. | `agno_compat_model_hooks.py`; `skill_learning/capture.py` owns the capture and `skill_learning/reviewer.py` the fork. |
 | Response loops call the model for as long as it requests tools: `tool_call_limit` only refuses counted calls, and calls to unknown tools or with unparseable arguments bypass it; callers also have no public hook to end a run before a request, which the skill review's input budget needs. | End every loop after a bounded number of model requests through the normal completion path and offer a public pre-request hook that can end the run; refused `tool_call_limit` batches are tracked in [issue #8304](https://github.com/agno-agi/agno/issues/8304) and [issue #10041](https://github.com/agno-agi/agno/issues/10041), whose open PRs [#10042](https://github.com/agno-agi/agno/pull/10042) and [#8324](https://github.com/agno-agi/agno/pull/8324) stop only after limit refusals, no upstream issue was identified for unknown-tool or unparseable-argument loops, and the pre-request hook is a tracking gap with no issue or PR identified. | `agno_compat_model_hooks.py`; real Agent and Team loops in `tests/test_tool_call_budget.py`, and the review budget in `tests/test_skill_learning.py`. |
 | Tool-hook chains cannot express the required deferred-result and synchronous execution ownership. | Propose an execution hook with regression coverage for cache hits, argument rewrites, and cancellation. | `tool_system/agno_compat_tool_hooks.py`. |
 | Function schema postprocessors are lost or misbound during copying/preparation. | Add a supported postprocessor that survives copies and runs after schema preparation. | `tool_system/agno_compat_function_schema.py`. |
@@ -21258,7 +21274,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media, asynchronous post-batch checkpoint chaining, and resumed-response callbacks, the per-loop model request gate, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices and mid-turn judgments, the model-call cap and its warning, the skill review's input budget, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media, asynchronous post-batch checkpoint chaining, and resumed-response callbacks, the per-loop model request gate, permanent and scoped invocation/retry bindings, the scoped response-loop observer, answer-cache bypass, and provider client factories. | Approval receipts, queued notices and mid-turn judgments, the model-call cap and its warning, the skill review's input budget and its fork of the final request, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_cli_checkpoint.py` | Task-scoped real provider batch snapshots, including resolved fallback instances, keyed by exact FunctionCall identity. The response lifetime resolves lazy prepared bindings per pull; completed sibling Bash media stays in native result messages. | `agent_cli/turn.py` owns admission and calls the existing propagating `agent_storage` boundary before binding or effects; `cli_approval_recovery.py` persists interrupted-replay sessions through the same `save_cli_session` boundary. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation, temporary instruction restoration, call-local result-stream/thread lifetime ownership, per-execution stop signaling, and reporting the Bash facade's actual per-run Function copy. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns voice policy; `tool_system/agent_tool_calls.py` owns qualified live-turn bindings and serialized execution. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |

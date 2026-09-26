@@ -364,6 +364,7 @@ shell = []
 shopify = [
   "httpx>=0.27",
 ]
+skill_manage = []
 slack = [
   "slack-sdk",
 ]
