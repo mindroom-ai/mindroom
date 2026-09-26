@@ -62,9 +62,10 @@ _CONVERSATION_BUDGET_SHARE = 4
 _SKILL_TOOL_LINES = {
     "get_skill_instructions": "get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its "
     "support files.",
-    "get_skill_reference": "get_skill_reference(skill_name, reference_path): load one support file under references/.",
-    "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/; scripts "
-    "never run in a review.",
+    "get_skill_reference": "get_skill_reference(skill_name, reference_path): load one support file under references/, "
+    "named as get_skill_instructions lists it or by its file name.",
+    "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/, named the "
+    "same way; scripts never run in a review.",
     "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
     '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
     '(file_path and file_content), or "remove_file" (file_path).',
@@ -85,6 +86,14 @@ class _ReviewRequest:
     compressed_tool_results: bool = False
 
 
+# AGNO_COMPAT: One compression manager both sends compressed tool results and compresses more of them.
+# Reason: Agno's response loop sends tool results' compressed text only when a compression manager is passed, and then
+# also compresses before every request; the fork must resend what its response compressed without compressing more.
+# Upstream issue: tracking gap; no Agno issue or PR separates sending compressed results from compressing new ones.
+# Upstream PR: none identified.
+# Remove when: Agno can send existing compressed tool results without compressing further; the fork's rule of never
+# compressing during a review remains MindRoom policy.
+# Coverage: tests/test_skill_learning.py::test_a_fork_keeps_compressed_results_and_compresses_nothing_more.
 @dataclass
 class _SendCompressedResults(CompressionManager):
     """Send the tool results a response compressed as it sent them, and compress nothing more in the review.
@@ -126,7 +135,8 @@ def _review_tools(
     runnable = [tool.name for tool in skill_tools if not (tool.requires_confirmation or tool.external_execution)]
 
     async def deny(**_arguments: object) -> str:
-        return f"This tool is not available during a skill review; only {_listing(runnable)} run here."
+        verb = "runs" if len(runnable) == 1 else "run"
+        return f"This tool is not available during a skill review; only {_listing(runnable)} {verb} here."
 
     review_tools: list[Function | dict[str, Any]] = []
     for tool in schemas:
