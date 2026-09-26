@@ -331,7 +331,6 @@ class SkillTools:
         self._reads[name, SKILL_FILENAME] = SkillFile(content, content_digest(content), learned=self.learner, name=name)
 
     async def _remove(self, name: str, directory: str, relative_path: str, read: SkillFile | None) -> None:
-        self._reads.pop((directory, relative_path), None)
         await self._file(
             partial(
                 remove_skill_file,
@@ -344,6 +343,7 @@ class SkillTools:
             name=name,
             action="updated",
         )
+        self._reads.pop((directory, relative_path), None)
 
     async def _write(
         self,
