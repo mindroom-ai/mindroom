@@ -472,6 +472,7 @@ def _save_expiring_mcp_oauth_credentials(
     token: str,
     refresh_token: str,
     expires_at: float,
+    token_uri: object = "https://auth.example.test/token",  # noqa: S107
 ) -> None:
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
@@ -479,7 +480,7 @@ def _save_expiring_mcp_oauth_credentials(
         mcp_oauth_provider("demo", _oauth_mcp_config()),
         {
             "token": token,
-            "token_uri": "https://auth.example.test/token",
+            "token_uri": token_uri,
             "refresh_token": refresh_token,
             "client_id": "public-client",
             "scopes": [],
@@ -493,9 +494,19 @@ def _save_expiring_mcp_oauth_credentials(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_token_url", "configured_token_url"),
+    [
+        ("https://auth.example.test/token", "https://auth.example.test/new-token"),
+        (None, "https://auth.example.test/token"),
+    ],
+    ids=["changed", "missing"],
+)
 async def test_mcp_oauth_refresh_rejects_token_endpoint_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    stored_token_url: object,
+    configured_token_url: str,
 ) -> None:
     """A refresh token must never be sent to an endpoint discovered after authorization."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -506,12 +517,13 @@ async def test_mcp_oauth_refresh_rejects_token_endpoint_drift(
         token="expired-access-token",  # noqa: S106
         refresh_token="stored-refresh-token",  # noqa: S106
         expires_at=time.time() - 60,
+        token_uri=stored_token_url,
     )
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     original_config = _oauth_mcp_config()
     assert original_config.auth is not None
     changed_config = original_config.model_copy(
-        update={"auth": original_config.auth.model_copy(update={"token_url": "https://auth.example.test/new-token"})},
+        update={"auth": original_config.auth.model_copy(update={"token_url": configured_token_url})},
     )
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": changed_config}))
