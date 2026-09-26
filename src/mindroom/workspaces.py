@@ -174,20 +174,26 @@ def _copy_workspace_template(
 
     with _WORKSPACE_MUTATION_LOCK, open_directory_within_root(workspace_path) as workspace_fd:
         for source_path, relative_path in _iter_workspace_template_entries(resolved_template_dir):
-            resolve_relative_path_within_root(
+            if source_path.is_dir():
+                resolve_relative_path_within_root(
+                    workspace_path,
+                    relative_path,
+                    field_name="workspace template destination",
+                    root_label="workspace root",
+                )
+                with open_directory_within_root(workspace_fd, relative_path, create=True):
+                    pass
+                continue
+            resolve_relative_path_within_root_preserving_leaf(
                 workspace_path,
                 relative_path,
                 field_name="workspace template destination",
                 root_label="workspace root",
             )
-            if source_path.is_dir():
-                with open_directory_within_root(workspace_fd, relative_path, create=True):
-                    pass
-                continue
             with open_directory_within_root(workspace_fd, relative_path.parent, create=True) as parent_fd:
                 if not force:
                     try:
-                        os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
+                        os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=True)
                     except FileNotFoundError:
                         pass
                     else:

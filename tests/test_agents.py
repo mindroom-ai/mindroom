@@ -3411,6 +3411,22 @@ def test_copy_workspace_template_does_not_follow_predictable_temporary_symlink(t
     assert not (workspace_root / "AGENTS.md").is_symlink()
 
 
+def test_copy_workspace_template_replaces_dangling_destination_symlink(tmp_path: Path) -> None:
+    """A dangling destination link remains a missing file and is replaced without being followed."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "AGENTS.md").symlink_to(tmp_path / "missing.txt")
+
+    _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+    assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
+    assert not (workspace_root / "AGENTS.md").is_symlink()
+
+
 @patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
