@@ -35,7 +35,7 @@ class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
     response_run_id: str | None = None
-    # Every run the response produced, oldest first: a dynamic tool change continues in a new run.
+    # The runs whose model replies this response counts, oldest first; a dynamic tool change continues in a new run.
     response_run_ids: tuple[str, ...] = ()
     session_id: str | None = None
     session_type: SessionType | None = None

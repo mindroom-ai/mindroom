@@ -873,8 +873,7 @@ def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
     """Whether a turn counts toward skill learning.
 
     Like Hermes skipping cron reviews, automated runs, including ones the router handed off, restart resumes, and
-    replies to other agents never start a review; they have no human to learn from. A resumed run of a person's
-    turn is still counted with the conversation's next response to a person.
+    replies to other agents never count toward a review; they have no human to learn from.
     """
     return (
         origin.requester_kind == SenderKind.USER
@@ -2104,12 +2103,9 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
         """Return the normal skill-review handoff for an agent continuation."""
-        if (
-            continuation.entity_kind != "agent"
-            or not _requested_by_a_person(restore_legacy_approval_origin(continuation), continuation.request_body)
-            # Checked before the stored identity is parsed below, so continuations of agents that do not learn
-            # never depend on that payload.
-            or not self._learns_skills(continuation.entity_name)
+        if continuation.entity_kind != "agent" or not _requested_by_a_person(
+            restore_legacy_approval_origin(continuation),
+            continuation.request_body,
         ):
             return None
         return self._skill_review(
@@ -2129,7 +2125,8 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
     ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
         """Build the handoff that adds a response's runs to its skill review count, or None without learning."""
-        if not self._learns_skills(agent_name):
+        agent = self.deps.runtime.config.agents.get(agent_name)
+        if agent is None or not agent.skill_learning.enabled:
             return None
 
         async def queue(run_ids: Sequence[str]) -> None:
@@ -2144,10 +2141,6 @@ class ResponseRunner:
             )
 
         return queue
-
-    def _learns_skills(self, agent_name: str) -> bool:
-        agent = self.deps.runtime.config.agents.get(agent_name)
-        return agent is not None and agent.skill_learning.enabled
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
         """Return the normal agent-memory handoff for a completed continuation."""
