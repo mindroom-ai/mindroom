@@ -124,13 +124,13 @@ def _chat_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, 
     catalog = load_skill_catalog(config, runtime_paths, agent_name, skills_root)
     entries = dict(catalog.entries)
     loaded = {entry.directory: entry for entry in catalog.entries.values() if entry.directory is not None}
-    for directory, markdown in skill_directories(skills_root).items():
+    for directory in skill_directories(skills_root):
+        # Chat only changes files, so it never shows or checks what an unloaded skill says or who owns it.
         entries[directory] = loaded.get(directory) or _CatalogEntry(
             name=directory,
-            # Chat only changes files, so it never shows what an unloaded skill says.
             description="",
             directory=directory,
-            learned=markdown.learned,
+            learned=False,
             instructions="",
         )
     return replace(catalog, entries=entries)

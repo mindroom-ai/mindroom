@@ -2124,36 +2124,78 @@ _UNMET = (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("directory", "content", "configured"),
+    ("directory", "content", "configured", "name"),
     [
-        ("needs-env", _UNMET.format(name="needs-env"), []),
-        ("mindroom-docs", _UNMET.format(name="mindroom-docs"), ["mindroom-docs"]),
-        ("broken", "---\nname broken\n---\nExport the variable first.\n", []),
-        ("unnamed", "---\nname: ''\ndescription: Use when checking the setup\n---\nExport the variable first.\n", []),
-        ("adopted", "---\nname: other-name\ndescription: Use when checking the setup\n---\nExport it first.\n", []),
+        ("needs-env", _UNMET.format(name="needs-env"), [], "needs-env"),
+        ("mindroom-docs", _UNMET.format(name="mindroom-docs"), ["mindroom-docs"], "mindroom-docs"),
+        ("broken", "---\nname broken\n---\nExport the variable first.\n", [], "broken"),
+        ("unnamed", "---\nname: ''\ndescription: Use when checking the setup\n---\nExport it first.\n", [], "unnamed"),
+        ("blank", "---\nname: '   '\ndescription: Use when checking the setup\n---\nExport it first.\n", [], "blank"),
+        (
+            "spaced",
+            "---\nname: ' padded '\ndescription: Use when checking the setup\n---\nExport it first.\n",
+            [],
+            "padded",
+        ),
+        (
+            "adopted",
+            "---\nname: other-name\ndescription: Use when checking the setup\n---\nExport it first.\n",
+            [],
+            "other-name",
+        ),
     ],
-    ids=["unmet requirements", "overrides a configured skill", "broken frontmatter", "empty name", "adopted directory"],
+    ids=[
+        "unmet requirements",
+        "overrides a configured skill",
+        "broken frontmatter",
+        "empty name",
+        "blank name",
+        "padded name",
+        "adopted directory",
+    ],
 )
 async def test_chat_skill_manage_finds_workspace_skills_by_their_directory(
     tmp_path: Path,
     directory: str,
     content: str,
     configured: list[str],
+    name: str,
 ) -> None:
-    """Like Hermes' _find_skill, chat finds a workspace skill by its directory, even one this host does not load."""
+    """Like Hermes' _find_skill, chat finds a workspace skill by its directory, even one this host does not load.
+
+    An edit keeps the name the skill loads under, stripped like skill loading does, or its directory's when it has none.
+    """
     config, paths = _learner(tmp_path)
     config.agents["mind"].skills = configured
     root = _skills_root(config, paths)
     _write_skill(root, directory, content)
-    current = library.read_skill_file(root, directory)
-    assert current is not None
-    # An edit keeps the skill's name, or its directory's when the frontmatter has none.
-    fixed = f"---\nname: {current.name}\ndescription: Use when checking the setup\n---\nRun the check.\n"
+    fixed = f"---\nname: {name}\ndescription: Use when checking the setup\n---\nRun the check.\n"
     result = json.loads(
         await SkillManageTools("mind", config, paths, root).skill_manage("edit", directory, content=fixed),
     )
     assert result["success"], result
     assert (root / directory / "SKILL.md").read_text() == fixed
+
+
+@pytest.mark.asyncio
+async def test_chat_skill_manage_refuses_a_skills_directory_replaced_by_a_link(tmp_path: Path) -> None:
+    """A skills directory that worker code swapped for a link is refused like any failed edit, and never followed."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    elsewhere = tmp_path / "elsewhere"
+    _write_skill(elsewhere, "deploy-checks", LEARNED)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    root.symlink_to(elsewhere, target_is_directory=True)
+    result = json.loads(
+        await SkillManageTools("mind", config, paths, root).skill_manage(
+            "patch",
+            "deploy-checks",
+            old_string="1. Run the smoke test.",
+            new_string="1. Run smoke.",
+        ),
+    )
+    assert not result["success"]
+    assert (elsewhere / "deploy-checks/SKILL.md").read_text() == LEARNED
 
 
 @pytest.mark.asyncio
