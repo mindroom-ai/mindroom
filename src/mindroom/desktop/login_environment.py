@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 LOGIN_ENVIRONMENT_TIMEOUT_SECONDS = 5.0
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-_SYSTEM_PATH_PREPENDS = ("/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin")
+_PACKAGE_MANAGER_PATHS = ("/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin")
 _HELPER_ALLOWLIST = ("TMPDIR", "LANG")
 # Per-process shell state describes the capture shell, not later commands in their own directories.
 _SHELL_STATE_NAMES = frozenset({"OLDPWD", "PWD", "SHLVL", "_"})
@@ -75,7 +75,7 @@ def _base_environment(account: pwd.struct_passwd) -> dict[str, str]:
     environment.update({name: os.environ[name] for name in _HELPER_ALLOWLIST if name in os.environ})
     path = subprocess_path_with_prepends(
         _SYSTEM_PATH,
-        prepend_entries=(*_SYSTEM_PATH_PREPENDS, str(Path(account.pw_dir) / ".local" / "bin")),
+        prepend_entries=(*_PACKAGE_MANAGER_PATHS, str(Path(account.pw_dir) / ".local" / "bin")),
     )
     assert path is not None
     environment["PATH"] = path
