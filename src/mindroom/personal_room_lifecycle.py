@@ -46,14 +46,15 @@ class _CandidateBackoff:
     failures: int
     delay_seconds: float
     retry_at: float
+    error_type: type[Exception]
 
 
-def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
+def _next_backoff(previous: _CandidateBackoff | None, error: Exception) -> _CandidateBackoff:
     if previous is None:
         failures, delay = 1, _RECONCILIATION_RETRY_SECONDS
     else:
         failures, delay = previous.failures + 1, min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
-    return _CandidateBackoff(failures, delay, monotonic() + delay)
+    return _CandidateBackoff(failures, delay, monotonic() + delay, type(error))
 
 
 @dataclass(frozen=True)
@@ -279,7 +280,7 @@ class PersonalRoomLifecycle:
         try:
             await self._onboard(user_id, room_id)
         except Exception as error:
-            backoff = _next_backoff(previous)
+            backoff = _next_backoff(previous, error)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
             retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
@@ -288,18 +289,19 @@ class PersonalRoomLifecycle:
                 logger.warning(
                     "Personal-room imported roster has unattested members",
                     user_id=user_id,
-                    room_id=error.room_id,
-                    source_room_id=room_id,
+                    room_id=room_id,
+                    personal_room_id=error.room_id,
                     unexpected_user_ids=error.unexpected_user_ids,
                     **retry,
                 )
-            elif backoff.failures == 1:
+            elif previous is None or previous.error_type is not type(error):
                 logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
             else:
                 logger.warning(
                     "Personal-room reconciliation failed",
                     user_id=user_id,
                     room_id=room_id,
+                    error_type=type(error).__name__,
                     error=str(error),
                     **retry,
                 )

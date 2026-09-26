@@ -685,11 +685,12 @@ async def test_an_imported_room_with_unattested_people_names_them_and_removes_no
     assert [(entry["log_level"], entry["event"], "exc_info" in entry) for entry in reported] == [
         ("warning", "Personal-room imported roster has unattested members", False),
     ]
-    assert (reported[0]["user_id"], reported[0]["room_id"], reported[0]["unexpected_user_ids"]) == (
-        "@alice:localhost",
-        room_id,
-        ("@bob:localhost", "@eve:localhost"),
-    )
+    assert {key: reported[0][key] for key in ("user_id", "room_id", "personal_room_id", "unexpected_user_ids")} == {
+        "user_id": "@alice:localhost",
+        "room_id": "!lobby:localhost",
+        "personal_room_id": room_id,
+        "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
+    }
     assert not server.kicks
     assert (server.membership(room_id, "@eve:localhost"), server.membership(room_id, "@bob:localhost")) == (
         "invite",

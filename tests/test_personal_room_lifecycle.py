@@ -375,8 +375,8 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
 
 
 @pytest.mark.asyncio
-async def test_repeated_failure_logs_traceback_once_per_streak(coordination: Coordination, clock: Clock) -> None:
-    """Only the first failure in a row carries a traceback; retries report their attempt and next delay."""
+async def test_repeated_error_logs_its_traceback_once(coordination: Coordination, clock: Clock) -> None:
+    """Only the first of the same error in a row carries a traceback; retries report their attempt and next delay."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
@@ -384,13 +384,65 @@ async def test_repeated_failure_logs_traceback_once_per_streak(coordination: Coo
         await lifecycle._reconcile()
         clock.now += 30
         await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
     failures = [entry for entry in logs if entry["event"] == "Personal-room reconciliation failed"]
     assert [
         (entry["log_level"], entry.get("exc_info", False), entry["attempt"], entry["retry_in_seconds"])
         for entry in failures
-    ] == [("error", True, 1, 30.0), ("warning", False, 2, 60.0)]
-    assert failures[1]["error"] == "temporarily unavailable"
+    ] == [("error", True, 1, 30.0), ("warning", False, 2, 60.0), ("warning", False, 3, 120.0)]
+    assert [(entry["error_type"], entry["error"]) for entry in failures[1:]] == [
+        ("RuntimeError", "temporarily unavailable"),
+    ] * 2
     assert {(entry["user_id"], entry["room_id"]) for entry in failures} == {("@alice:localhost", "!lobby:localhost")}
+
+
+@pytest.mark.asyncio
+async def test_a_different_error_logs_a_new_traceback(coordination: Coordination, clock: Clock) -> None:
+    """A new kind of failure behind a waiting roster mismatch is a new problem, so it gets its own traceback."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [
+        PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"}),
+        KeyError("content"),
+        KeyError("content"),
+    ]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
+    assert [
+        (entry["event"], entry["log_level"], entry.get("exc_info", False))
+        for entry in logs
+        if entry["log_level"] in {"warning", "error"}
+    ] == [
+        ("Personal-room imported roster has unattested members", "warning", False),
+        ("Personal-room reconciliation failed", "error", True),
+        ("Personal-room reconciliation failed", "warning", False),
+    ]
+    assert logs[-1]["error_type"] == "KeyError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_failure_during_reload_leaves_no_stale_delay(coordination: Coordination) -> None:
+    """An attempt that fails after a reload cannot delay the new configuration's first retry."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        lifecycle.config_changed()
+        msg = "membership mismatch"
+        raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    coordination.owner.ensure.side_effect = None
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    assert lifecycle._reconciled
 
 
 @pytest.mark.asyncio
@@ -414,8 +466,8 @@ async def test_imported_roster_mismatch_is_a_warning_without_traceback(
             "event": "Personal-room imported roster has unattested members",
             "log_level": "warning",
             "user_id": "@alice:localhost",
-            "room_id": "!personal:localhost",
-            "source_room_id": "!lobby:localhost",
+            "room_id": "!lobby:localhost",
+            "personal_room_id": "!personal:localhost",
             "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
             "attempt": attempt,
             "retry_in_seconds": delay,
