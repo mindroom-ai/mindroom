@@ -935,9 +935,9 @@ def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _FakeOwner:
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
     monkeypatch.setattr("mindroom.desktop.transport.DesktopTransport", _IdleTransport)
-    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", forbidden_gui_provider)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden_gui_provider)
     monkeypatch.setattr(
-        "mindroom.desktop.login_environment.capture_login_environment",
+        "mindroom.desktop.bridge_components.capture_login_environment",
         AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"}),
     )
     return owner
@@ -1002,7 +1002,7 @@ async def test_runtime_start_failure_releases_pinned_folders(
             super().__init__(roots)
             opened.append(self)
 
-    monkeypatch.setattr("mindroom.desktop.filesystem.DesktopFilesystem", RecordingFilesystem)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopFilesystem", RecordingFilesystem)
     (tmp_path / "desktop_bridge" / "commands.sqlite3").mkdir(parents=True)
     runtime = NativeBridgeRuntime(
         SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),

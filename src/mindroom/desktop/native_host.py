@@ -632,12 +632,8 @@ class NativeBridgeRuntime:
         """Open one observe-only bridge session."""
         from nio import AuthenticatedToDeviceEvent
 
-        from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+        from mindroom.desktop.bridge_components import build_desktop_bridge
         from mindroom.desktop.cloudflare_access import cloudflare_access_headers
-        from mindroom.desktop.filesystem import DesktopFilesystem
-        from mindroom.desktop.login_environment import capture_login_environment
-        from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
-        from mindroom.desktop.provider import PyAutoGuiDesktopProvider
         from mindroom.desktop.session import (
             desktop_session_path,
             load_desktop_http_headers,
@@ -645,7 +641,6 @@ class NativeBridgeRuntime:
             open_desktop_client,
             prepare_desktop_client,
         )
-        from mindroom.desktop.shell import DesktopShell
         from mindroom.desktop.transport import DesktopTransport
         from mindroom.matrix.olm_to_device import resolve_pinned_device
 
@@ -655,51 +650,19 @@ class NativeBridgeRuntime:
         if session.cloudflare_access:
             http_headers = cloudflare_access_headers(session.homeserver, http_headers)
         try:
-            if self._config.browser.enabled:
-                self._browser = PlaywrightMCPBrowserProvider(
-                    output_dir=self._runtime_paths.storage_root / "desktop-browser",
-                    executable_path=self._config.browser.executable_path,
-                    user_data_dir=self._config.browser.user_data_dir,
-                    call_timeout_seconds=self._config.browser.timeout_seconds,
-                    extension_token=self._runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN"),
-                )
             self._owner = await open_desktop_client(
                 session,
                 runtime_paths=self._runtime_paths,
                 http_headers=http_headers,
             )
-            provider = (
-                PyAutoGuiDesktopProvider(
-                    allowed_app_ids=frozenset(self._config.allowed_app_ids),
-                    max_screenshot_width=self._config.capture.max_screenshot_width,
-                    jpeg_quality=self._config.capture.jpeg_quality,
-                )
-                if self._config.allowed_app_ids
-                else None
-            )
-            self._filesystem = DesktopFilesystem(self._config.files.roots) if self._config.files.roots else None
-            if self._config.shell.enabled:
-                self._shell = DesktopShell(environment=await capture_login_environment())
-            self._bridge = DesktopBridge(
+            # The builder closes its own providers if it fails; afterwards this runtime owns them.
+            components = await build_desktop_bridge(
+                self._config,
                 client=self._owner.client,
-                provider=provider,
-                policy=DesktopBridgePolicy(
-                    controller=self._config.controller,
-                    allowed_requester_ids=frozenset(self._config.allowed_requester_ids),
-                    allowed_agent_names=frozenset(self._config.allowed_agent_names),
-                    allowed_app_ids=frozenset(self._config.allowed_app_ids),
-                    allow_control=False,
-                    control_lease_expires_at_ms=None,
-                    browser_enabled=self._config.browser.enabled,
-                    allowed_file_roots=self._config.files.roots,
-                    shell_enabled=self._config.shell.enabled,
-                ),
-                browser_provider=self._browser,
-                filesystem=self._filesystem,
-                shell=self._shell,
-                journal_path=self._runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-                legacy_journal_path=self._runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
+                runtime_paths=self._runtime_paths,
             )
+            self._bridge, self._browser = components.bridge, components.browser
+            self._filesystem, self._shell = components.filesystem, components.shell
             self._owner.client.add_to_device_callback(self._bridge.on_to_device_event, AuthenticatedToDeviceEvent)
             self._registration = self._owner.client.to_device_callbacks[-1]
             await resolve_pinned_device(self._owner.client, self._config.controller)
@@ -829,7 +792,6 @@ class NativeBridgeRuntime:
         if self._bridge is not None:
             self._bridge.close()
         self._bridge = None
-        # The bridge may not exist after a partial start; descriptors are released either way.
         if self._filesystem is not None:
             self._filesystem.close()
         self._filesystem = None

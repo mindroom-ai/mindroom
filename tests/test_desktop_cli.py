@@ -712,9 +712,9 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
-    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
     monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", make_bridge)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", make_bridge)
 
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
@@ -792,9 +792,9 @@ async def test_cli_drains_native_work_before_releasing_owner(
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
     monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", ActiveBridge)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", ActiveBridge)
     task = asyncio.create_task(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
@@ -866,14 +866,14 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", forbidden)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden)
     monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", forbidden)
     monkeypatch.setattr(
-        "mindroom.desktop.login_environment.capture_login_environment",
+        "mindroom.desktop.bridge_components.capture_login_environment",
         AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
     )
     monkeypatch.setattr(desktop_cli, "_terminal_input_fd", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", RecordingBridge)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", RecordingBridge)
     task = asyncio.create_task(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),

@@ -3345,6 +3345,18 @@ depends_on = []
 visibility = ["mindroom.cli.desktop"]
 
 [[modules]]
+path = "mindroom.desktop.bridge_components"
+depends_on = [
+    "mindroom.desktop.bridge",
+    "mindroom.desktop.filesystem",
+    "mindroom.desktop.login_environment",
+    "mindroom.desktop.playwright_mcp",
+    "mindroom.desktop.provider",
+    "mindroom.desktop.shell",
+]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
+
+[[modules]]
 path = "mindroom.desktop.configuration"
 depends_on = [
     "mindroom.desktop.protocol",
@@ -4047,20 +4059,16 @@ depends_on = [
     "mindroom.desktop.transport",
     "mindroom.cli.config",
     "mindroom.constants",
-    "mindroom.desktop.bridge",
+    "mindroom.desktop.bridge_components",
     "mindroom.desktop.cloudflare_access",
     "mindroom.desktop.command_journal",
-    "mindroom.desktop.filesystem",
     "mindroom.desktop.identity",
-    "mindroom.desktop.login_environment",
     "mindroom.desktop.login_method",
     "mindroom.desktop.native_config",
     "mindroom.desktop.pairing_client",
-    "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
     "mindroom.desktop.protocol",
     "mindroom.desktop.session",
-    "mindroom.desktop.shell",
     "mindroom.desktop.shell_prompt",
     "mindroom.desktop.sso",
     "mindroom.logging_config",
@@ -6873,7 +6881,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.native_host"
-depends_on = ["mindroom.constants", "mindroom.desktop.bridge", "mindroom.desktop.cloudflare_access", "mindroom.desktop.command_journal", "mindroom.desktop.filesystem", "mindroom.desktop.login_environment", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.playwright_mcp", "mindroom.desktop.protocol", "mindroom.desktop.provider", "mindroom.desktop.session", "mindroom.desktop.shell", "mindroom.desktop.sso", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
+depends_on = ["mindroom.constants", "mindroom.desktop.bridge_components", "mindroom.desktop.cloudflare_access", "mindroom.desktop.command_journal", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.protocol", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
 
 [[modules]]
 path = "mindroom.desktop.native_protocol"

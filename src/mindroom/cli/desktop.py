@@ -23,9 +23,12 @@ from mindroom.desktop.login_method import DesktopLoginMethod
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from nio.client.base_client import ClientCallback
+
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.bridge_components import DesktopBridgeComponents
     from mindroom.desktop.native_config import NativeDesktopConfig
-    from mindroom.desktop.session import DesktopMatrixSession
+    from mindroom.desktop.session import DesktopMatrixSession, DesktopOwnedSession
 
 _console = Console()
 _error_console = Console(stderr=True)
@@ -1000,7 +1003,7 @@ def _validate_browser_options(
         raise typer.Exit(2)
 
 
-async def _run_bridge(  # noqa: C901, PLR0912, PLR0915
+async def _run_bridge(
     *,
     runtime_paths: RuntimePaths,
     session: DesktopMatrixSession,
@@ -1025,16 +1028,18 @@ async def _run_bridge(  # noqa: C901, PLR0912, PLR0915
 ) -> None:
     from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
-    from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy  # noqa: PLC0415
-    from mindroom.desktop.filesystem import DesktopFilesystem  # noqa: PLC0415
-    from mindroom.desktop.login_environment import capture_login_environment  # noqa: PLC0415
-    from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider  # noqa: PLC0415
-    from mindroom.desktop.provider import PyAutoGuiDesktopProvider  # noqa: PLC0415
+    from mindroom.desktop.bridge_components import build_desktop_bridge  # noqa: PLC0415
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeDesktopConfig,
+        NativeFilesConfig,
+        NativeShellConfig,
+    )
     from mindroom.desktop.session import (  # noqa: PLC0415
         open_desktop_client,
         prepare_desktop_client,
     )
-    from mindroom.desktop.shell import DesktopShell  # noqa: PLC0415
     from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
     from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice, resolve_pinned_device  # noqa: PLC0415
@@ -1042,68 +1047,50 @@ async def _run_bridge(  # noqa: C901, PLR0912, PLR0915
     # Folder and shell access need no GUI permissions.
     if allow_app:
         _request_required_desktop_permissions()
-    controller = PinnedMatrixDevice(
-        user_id=controller_user_id,
-        device_id=controller_device_id,
-        ed25519=controller_ed25519,
+    # The shared builder reads only the capability fields; this run's configuration is never saved.
+    config = NativeDesktopConfig(
+        revision=0,
+        enabled=True,
+        controller=PinnedMatrixDevice(
+            user_id=controller_user_id,
+            device_id=controller_device_id,
+            ed25519=controller_ed25519,
+        ),
+        allowed_requester_ids=tuple(allow_requester),
+        allowed_agent_names=tuple(allow_agent),
+        allowed_app_ids=tuple(allow_app),
+        capture=NativeCaptureConfig(max_screenshot_width=max_screenshot_width, jpeg_quality=jpeg_quality),
+        browser=NativeBrowserConfig(
+            enabled=browser_extension,
+            executable_path=browser_executable,
+            user_data_dir=browser_user_data_dir,
+            timeout_seconds=browser_timeout_seconds,
+        ),
+        files=NativeFilesConfig(file_roots),
+        shell=NativeShellConfig(enabled=shell_enabled),
     )
-    browser_provider = None
-    filesystem = None
-    shell = None
     owner = None
-    bridge = None
+    components: DesktopBridgeComponents | None = None
     registration = None
     approvals: asyncio.Task[None] | None = None
     tasks: set[asyncio.Task[None]] = set()
     try:
-        if browser_extension:
-            browser_provider = PlaywrightMCPBrowserProvider(
-                output_dir=runtime_paths.storage_root / "desktop-browser",
-                executable_path=browser_executable,
-                user_data_dir=browser_user_data_dir,
-                call_timeout_seconds=browser_timeout_seconds,
-                extension_token=runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN"),
-            )
-        filesystem = DesktopFilesystem(file_roots) if file_roots else None
-        if shell_enabled:
-            shell = DesktopShell(environment=await capture_login_environment())
         owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
         client = owner.client
-        provider = (
-            PyAutoGuiDesktopProvider(
-                allowed_app_ids=allow_app,
-                max_screenshot_width=max_screenshot_width,
-                jpeg_quality=jpeg_quality,
-            )
-            if allow_app
-            else None
-        )
         lease_expiry = round((time.time() + lease_minutes * 60) * 1000) if allow_control else None
-        bridge = DesktopBridge(
+        # The builder closes its own providers if it fails; afterwards this function owns them.
+        components = await build_desktop_bridge(
+            config,
             client=client,
-            provider=provider,
-            policy=DesktopBridgePolicy(
-                controller=controller,
-                allowed_requester_ids=allow_requester,
-                allowed_agent_names=allow_agent,
-                allowed_app_ids=allow_app,
-                allow_control=allow_control,
-                control_lease_expires_at_ms=lease_expiry,
-                browser_enabled=browser_extension,
-                allowed_file_roots=file_roots,
-                shell_enabled=shell_enabled,
-            ),
-            browser_provider=browser_provider,
-            filesystem=filesystem,
-            shell=shell,
-            journal_path=runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-            legacy_journal_path=runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
+            runtime_paths=runtime_paths,
+            control_lease_expires_at_ms=lease_expiry,
         )
+        bridge = components.bridge
         if shell_auto_approve_minutes is not None:
             bridge.grant_local_shell(shell_auto_approve_minutes * 60)
         client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
         registration = client.to_device_callbacks[-1]
-        await resolve_pinned_device(client, controller)
+        await resolve_pinned_device(client, config.controller)
         await prepare_desktop_client(client)
 
         _announce_bridge(
@@ -1134,36 +1121,50 @@ async def _run_bridge(  # noqa: C901, PLR0912, PLR0915
         for task in done:
             await task
     finally:
-        # The terminal stops reading before stop settles pending approval.
-        if approvals is not None:
-            approvals.cancel()
-            await asyncio.gather(approvals, return_exceptions=True)
-        # Native input runs in threads; cancelling its worker cannot stop the input.
-        # Keep the journal and device lease until the active action has drained.
-        # Stopping also closes the shell: its grant ends, pending approval is rejected, and handles are killed.
-        if bridge is not None:
-            await bridge.stop()
-        elif shell is not None:
-            await shell.close()
-        if shell is not None:
+        await _close_bridge_run(
+            owner=owner,
+            components=components,
+            registration=registration,
+            tasks=tasks,
+            approvals=approvals,
+        )
+
+
+async def _close_bridge_run(
+    *,
+    owner: DesktopOwnedSession | None,
+    components: DesktopBridgeComponents | None,
+    registration: ClientCallback | None,
+    tasks: set[asyncio.Task[None]],
+    approvals: asyncio.Task[None] | None,
+) -> None:
+    """Stop the terminal approver, then drain the bridge before releasing workers, storage, and the session."""
+    # The terminal stops reading before stop settles pending approval.
+    if approvals is not None:
+        approvals.cancel()
+        await asyncio.gather(approvals, return_exceptions=True)
+    # Native input runs in threads; cancelling its worker cannot stop the input.
+    # Keep the journal and device lease until the active action has drained.
+    # Stopping also closes the shell: its grant ends, pending approval is rejected, and handles are killed.
+    if components is not None:
+        await components.bridge.stop()
+        if components.shell is not None:
             _console.print("Shell access revoked; pending and running shell commands were stopped.")
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if registration is not None and owner is not None:
-            owner.client.to_device_callbacks.remove(registration)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    if registration is not None and owner is not None:
+        owner.client.to_device_callbacks.remove(registration)
+    try:
+        if components is not None:
+            components.bridge.close()
+    finally:
         try:
-            if bridge is not None:
-                bridge.close()
-            elif filesystem is not None:
-                filesystem.close()
+            if components is not None and components.browser is not None:
+                await components.browser.close()
         finally:
-            try:
-                if browser_provider is not None:
-                    await browser_provider.close()
-            finally:
-                if owner is not None:
-                    await owner.close()
+            if owner is not None:
+                await owner.close()
 
 
 def _terminal_input_fd() -> int | None:
