@@ -1954,7 +1954,10 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.personal_room_lifecycle",
+]
 
 [[modules]]
 path = "mindroom.personal_room_lifecycle"
@@ -1962,6 +1965,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.personal_rooms",
     "mindroom.matrix.state",
 ]
 visibility = ["mindroom.bot"]

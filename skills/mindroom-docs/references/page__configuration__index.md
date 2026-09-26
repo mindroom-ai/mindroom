@@ -1165,6 +1165,7 @@ Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the 
 Room ownership and membership are verified before reusing an alias.
 The owner may invite other MindRoom agents into their personal room; an agent sees only messages sent after its invite.
 Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
+Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
