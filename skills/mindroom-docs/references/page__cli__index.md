@@ -311,7 +311,7 @@ Repeating setup for the same controller keeps saved folder and shell choices, an
 
 Save read-only folders and shell command requests in the setup shared with the macOS app.
 Omitted options keep the saved values, and changes apply the next time the bridge starts.
-Shell commands run with your full account access, and each one still waits for approval on this computer; see [Shell Commands](https://docs.mindroom.chat/tools/desktop/#shell-commands) before enabling them.
+Shell commands run with your full account access, and each one still waits for approval on this computer unless you have allowed commands without asking; see [Shell Commands](https://docs.mindroom.chat/tools/desktop/#shell-commands) before enabling them.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

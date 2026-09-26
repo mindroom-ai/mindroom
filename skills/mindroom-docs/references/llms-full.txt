@@ -9673,8 +9673,8 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 Select folders locally in the macOS app's **Access** step or with [`mindroom desktop access --allow-folder`](#read-only-folders-and-shell-commands-from-the-terminal); cloud configuration and model output cannot add one.
 The agent can list and read inside those folders, and there is no write, create, rename, or delete action.
 
-- `list_folders` returns an ID, name, and absolute path for each selected folder.
-- `list_directory` takes a `root_id` and an optional relative `path` and returns at most 200 entries, each with its name and type (`directory`, `file`, `symlink`, or `other`), plus a `truncated` flag.
+- `list_folders` returns an ID, name, and absolute path for each selected folder, plus a `truncated` flag if too many folders or paths are too long to fit one reply.
+- `list_directory` takes a `root_id` and an optional relative `path` and returns at most 200 entries, each with its name and type (`directory`, `file`, `symlink`, or `other`), plus a `truncated` flag if there are more entries than fit the folder limit or one reply.
 - `read_file` takes a `root_id`, a relative `path`, and an optional byte `offset` and returns at most 16 KiB of UTF-8 text with `next_offset`, `eof`, and `truncated`; the agent continues a longer file from `next_offset`.
 
 Paths are relative to the selected folder, and absolute paths or `..` components are rejected.
@@ -9701,7 +9701,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 
 ### Local Approval
 
-Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`.
+Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
 The approver sees the exact command, working directory, requester, agent, and expiry, with control and text-direction characters shown escaped.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
@@ -20056,6 +20056,11 @@ MindRoom's architecture consists of several key components working together.
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
 | `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
+| `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
+| `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
+| `desktop/shell_prompt.py` | Local terminal approval for shell commands requested through a terminal-owned Desktop bridge |
 | `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
 | `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
 | `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
@@ -24889,7 +24894,7 @@ Repeating setup for the same controller keeps saved folder and shell choices, an
 
 Save read-only folders and shell command requests in the setup shared with the macOS app.
 Omitted options keep the saved values, and changes apply the next time the bridge starts.
-Shell commands run with your full account access, and each one still waits for approval on this computer; see [Shell Commands](https://docs.mindroom.chat/tools/desktop/#shell-commands) before enabling them.
+Shell commands run with your full account access, and each one still waits for approval on this computer unless you have allowed commands without asking; see [Shell Commands](https://docs.mindroom.chat/tools/desktop/#shell-commands) before enabling them.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

@@ -124,7 +124,7 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
     An approved command can use the network and every file your account can read or change, including files outside the read-only folders.
     The working folder does not confine it.
 
-While access runs with shell requests allowed, each command request appears on an approval card above the steps.
+While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
 The card shows the command, working folder, agent, requester, and expiry, with control and text-direction characters shown escaped.
 Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
 Without a waiting request, **Allow Without Asking…** offers the same durations.
