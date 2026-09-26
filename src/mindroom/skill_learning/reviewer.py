@@ -1,4 +1,4 @@
-"""One skill review: Hermes' fork of the agent's final request, or its digest replay on a different model.
+"""One skill review: Hermes' fork of the agent's final request, or a digest replay when the request cannot be forked.
 
 Like Hermes' default review, the fork replays the finished response's final request on the same model with its tools
 unchanged and appends the review prompt, so the provider serves the conversation from its prompt cache and the review
@@ -20,6 +20,7 @@ from agno.metrics import BaseMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.tools.function import Function
+from pydantic import validate_call
 
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage, load_agent_session
@@ -125,11 +126,16 @@ def _review_tools(
     stays a plain definition, which Agno answers with "The requested tool does not exist or is not available." instead of
     pausing the review. Returns the tools, the skill tools that run, and whether a skill tool needs approval.
     """
+    # The copies skip Agno's entrypoint processing to keep their schemas, so the skill tools validate their own
+    # arguments as Agno would, such as an action outside the enum or a string "false" for replace_all.
     entrypoints: dict[str, Callable[..., Any]] = {
-        "get_skill_instructions": tools.get_skill_instructions,
-        "get_skill_reference": tools.get_skill_reference,
-        "get_skill_script": tools.get_skill_script,
-        "skill_manage": tools.skill_manage,
+        name: validate_call(entrypoint)
+        for name, entrypoint in (
+            ("get_skill_instructions", tools.get_skill_instructions),
+            ("get_skill_reference", tools.get_skill_reference),
+            ("get_skill_script", tools.get_skill_script),
+            ("skill_manage", tools.skill_manage),
+        )
     }
     skill_tools = [tool for tool in schemas if isinstance(tool, Function) and tool.name in entrypoints]
     runnable = [tool.name for tool in skill_tools if not (tool.requires_confirmation or tool.external_execution)]

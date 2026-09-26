@@ -2163,18 +2163,30 @@ async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_skill_actions_are_refused(tmp_path: Path) -> None:
-    """A review's entrypoint runs without Agno's argument validation, so Hermes' delete never removes a file."""
+async def test_the_review_validates_skill_tool_arguments_like_agno(tmp_path: Path) -> None:
+    """The review's copies skip Agno's entrypoint processing, so they validate arguments themselves."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    twice = LEARNED + "1. Run the smoke test.\n"
+    library.create_skill(root, "deploy-checks", twice, reserved_names=frozenset(), learner=True)
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
-    catalog = load_skill_catalog(config, paths, "mind", root)
-    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    await tools.get_skill_reference("deploy-checks", "notes.md")
-    refused = json.loads(await tools.skill_manage("delete", "deploy-checks", file_path="references/notes.md"))  # type: ignore[arg-type]
-    assert "Unknown action 'delete'" in refused["error"]
+    patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
+    model = _model(
+        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        # Hermes' delete is not an action here, and a string "false" is no licence to replace every match.
+        ("skill_manage", {"action": "delete", "name": "deploy-checks", "file_path": "references/notes.md"}),
+        ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
+    ):
+        await _review(config, paths)
+    assert "Input should be 'create', 'patch', 'edit', 'write_file' or 'remove_file'" in model.requests[2][-1]
+    assert "occurs 2 times" in json.loads(model.requests[3][-1])["error"]
     assert (root / "deploy-checks/references/notes.md").read_text() == "Notes."
+    assert (root / "deploy-checks/SKILL.md").read_text() == twice
 
 
 @pytest.mark.asyncio
