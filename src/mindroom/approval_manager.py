@@ -402,8 +402,12 @@ class ApprovalManager:
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
+        if full_arguments is not None and _contains_sanitizer_truncation(raw_arguments, full_arguments):
+            full_arguments = None
         review_arguments = full_arguments if full_arguments is not None else event_arguments
-        arguments_redacted = review_arguments != raw_arguments
+        arguments_sanitized = (
+            not arguments_truncated or full_arguments is not None
+        ) and review_arguments != raw_arguments
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -417,9 +421,8 @@ class ApprovalManager:
             requested_at=_utcnow(),
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
         )
-        if arguments_redacted:
-            content["arguments_redacted"] = True
-            content["body"] = f"🔒 Approval required: {tool_name} (sensitive arguments hidden)"
+        if arguments_sanitized:
+            content["body"] = f"🔒 Approval required: {tool_name} (argument preview sanitized)"
             grant_operation = None
         if (
             grant_operation is not None

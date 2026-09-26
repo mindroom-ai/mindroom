@@ -1780,12 +1780,47 @@ async def test_redacted_approval_card_allows_only_exact_one_time_approval(tmp_pa
 
     assert card is not None
     assert card.payload["arguments"]["api_key"] == "***redacted***"
-    assert card.payload["arguments_redacted"] is True
     assert card.payload.get("approvable", True) is True
-    assert "sensitive arguments hidden" in card.payload["body"]
+    assert "argument preview sanitized" in card.payload["body"]
     assert "auto_approve_options" not in card.payload
     assert "approval_scope" not in card.payload
     assert card.grant_operation is None
+    pending = PendingApproval.from_card_event(
+        {
+            "type": "io.mindroom.tool_approval",
+            "event_id": "$approval",
+            "sender": "@router:localhost",
+            "content": card.payload,
+        },
+        room_id="!room:localhost",
+    )
+    assert manager._normalized_resolution_request(pending, status="approved", reason=None) == ("approved", None, False)
+
+
+@pytest.mark.asyncio
+async def test_oversized_approval_card_is_unapprovable_without_redaction_label(tmp_path: Path) -> None:
+    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+        return content
+
+    manager = ApprovalManager(test_runtime_paths(tmp_path), prepare_event=prepare_event)
+
+    card = await manager._prepare_approval_card(
+        approval_id="approval-1",
+        tool_call_id="call-1",
+        tool_name="shell",
+        raw_arguments={"content": "x" * 3_000_000},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        expires_at_ns=9_000_000_000_000_000_000,
+        target_fields={},
+    )
+
+    assert card is not None
+    assert card.payload["approvable"] is False
+    assert card.payload["body"] == "🔒 Approval required: shell"
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:
