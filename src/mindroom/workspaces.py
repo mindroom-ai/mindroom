@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.constants import RuntimePaths, config_relative_path
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 
 if TYPE_CHECKING:
@@ -170,27 +172,43 @@ def _copy_workspace_template(
     workspace_path.mkdir(parents=True, exist_ok=True)
     resolved_template_dir = validate_workspace_template_dir(template_dir)
 
-    with _WORKSPACE_MUTATION_LOCK:
+    with _WORKSPACE_MUTATION_LOCK, open_directory_within_root(workspace_path) as workspace_fd:
         for source_path, relative_path in _iter_workspace_template_entries(resolved_template_dir):
-            destination_path = resolve_relative_path_within_root(
+            if source_path.is_dir():
+                resolve_relative_path_within_root(
+                    workspace_path,
+                    relative_path,
+                    field_name="workspace template destination",
+                    root_label="workspace root",
+                )
+                with open_directory_within_root(workspace_fd, relative_path, create=True):
+                    pass
+                continue
+            resolve_relative_path_within_root_preserving_leaf(
                 workspace_path,
                 relative_path,
                 field_name="workspace template destination",
                 root_label="workspace root",
             )
-            if source_path.is_dir():
-                destination_path.mkdir(parents=True, exist_ok=True)
-                continue
-            if destination_path.exists() and not force:
-                continue
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            # Publish atomically so concurrent readers never see partial files.
-            temp_path = destination_path.with_name(f".{destination_path.name}.tmp")
-            try:
-                shutil.copy2(source_path, temp_path)
-                temp_path.replace(destination_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
+            with open_directory_within_root(workspace_fd, relative_path.parent, create=True) as parent_fd:
+                if not force:
+                    try:
+                        os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=True)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        continue
+                source_mode = source_path.stat().st_mode & 0o777
+                with (
+                    source_path.open("rb") as source_file,
+                    atomic_write_file_at(
+                        parent_fd,
+                        relative_path.name,
+                        file_mode=source_mode,
+                        temp_prefix=f".{relative_path.name}.",
+                    ) as output_file,
+                ):
+                    shutil.copyfileobj(source_file, output_file)
 
 
 def ensure_workspace_template(
