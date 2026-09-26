@@ -29,7 +29,7 @@ from mindroom.shell_output_capture import (
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
-_MAX_BACKGROUNDED = 16
+MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
@@ -151,6 +151,10 @@ async def run_command(
     handle: str | None = None,
     handle_reservations: set[str] | None = None,
     output_destination: ShellOutputDestination | None = None,
+    output_capture: ShellOutputCapture | None = None,
+    stdin: int | None = None,
+    stderr: int = asyncio.subprocess.PIPE,
+    kill_group_after_exit: bool = False,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -160,6 +164,12 @@ async def run_command(
     running under *registry* and a
     handle string is returned for ``check_command``/``kill_command``.
     Cancellation terminates the process group and drops any registered handle.
+
+    Callers that manage output themselves pass ``output_capture`` instead of
+    ``output_destination``. ``stdin`` and ``stderr`` go to the subprocess as
+    given, so ``stderr=asyncio.subprocess.STDOUT`` merges both streams. With
+    ``kill_group_after_exit``, whatever remains of the process group is killed
+    once the foreground process exits or is cancelled.
     """
     _sweep_stale_records(registry)
     if handle is not None:
@@ -182,13 +192,17 @@ async def run_command(
             timeout=timeout,
             handle=handle,
             output_destination=output_destination,
+            output_capture=output_capture,
+            stdin=stdin,
+            stderr=stderr,
+            kill_group_after_exit=kill_group_after_exit,
         )
     finally:
         if handle is not None and handle_reservations is not None:
             handle_reservations.discard(handle)
 
 
-async def _run_command_after_reservation(  # noqa: C901
+async def _run_command_after_reservation(  # noqa: C901, PLR0912
     registry: dict[str, ProcessRecord],
     *,
     namespace: str,
@@ -199,15 +213,21 @@ async def _run_command_after_reservation(  # noqa: C901
     timeout: float,  # noqa: ASYNC109
     handle: str | None,
     output_destination: ShellOutputDestination | None,
+    output_capture: ShellOutputCapture | None,
+    stdin: int | None,
+    stderr: int,
+    kill_group_after_exit: bool,
 ) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
-    capture = None
+    capture = output_capture
     try:
-        capture = ShellOutputCapture(output_destination, cwd) if output_destination is not None else None
+        if capture is None and output_destination is not None:
+            capture = ShellOutputCapture(output_destination, cwd)
         process = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=stderr,
             cwd=cwd,
             env=env,
             start_new_session=True,
@@ -245,6 +265,8 @@ async def _run_command_after_reservation(  # noqa: C901
                 output_capture=capture,
             )
 
+        if kill_group_after_exit:
+            _kill_process_group(process.pid)
         await _await_reader_tasks_with_grace(
             stdout_reader,
             stderr_reader,
@@ -253,6 +275,8 @@ async def _run_command_after_reservation(  # noqa: C901
     except asyncio.CancelledError:
         if process.returncode is None:
             await _terminate_process_group(process)
+        if kill_group_after_exit:
+            _kill_process_group(process.pid)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
         if capture is not None:
             capture.close()
@@ -293,13 +317,13 @@ async def _background_process(
     output_capture: ShellOutputCapture | None,
 ) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
-    if active >= _MAX_BACKGROUNDED:
+    if active >= MAX_BACKGROUNDED:
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
         return ShellRunResult(
             message=(
-                f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
+                f"Error: Too many backgrounded processes ({active}/{MAX_BACKGROUNDED}). "
                 "Kill or wait for existing ones before running more."
             ),
         )
@@ -537,6 +561,12 @@ async def _await_reader_tasks_with_grace(
         for task in pending_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+
+def _kill_process_group(pid: int) -> None:
+    """Kill every process still in the group led by *pid*."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
 
 
 async def _terminate_process_group(

@@ -36,6 +36,8 @@ final class DesktopControlStore: ObservableObject {
     @Published var browserEnabled = false { didSet { configurationFieldChanged(\.browserEnabled) } }
     @Published var browserExecutable = "" { didSet { configurationFieldChanged(\.browserExecutable) } }
     @Published var browserProfile = "" { didSet { configurationFieldChanged(\.browserProfile) } }
+    @Published var fileRoots: [String] = [] { didSet { configurationFieldChanged(\.fileRoots) } }
+    @Published var shellEnabled = false { didSet { configurationFieldChanged(\.shellEnabled) } }
     @Published var controlMinutes = 15
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
@@ -80,16 +82,7 @@ final class DesktopControlStore: ObservableObject {
     }
 
     var desktopStatusLabel: String {
-        switch status.bridge.state {
-        case "control":
-            return "Control · \(leaseRemainingSeconds / 60)m \(leaseRemainingSeconds % 60)s"
-        case "observe_only":
-            return "Observe only"
-        case "faulted":
-            return "Attention required"
-        default:
-            return "Stopped"
-        }
+        status.accessModeLabel(controlRemainingSeconds: leaseRemainingSeconds)
     }
 
     var identityConfirmed: Bool {
@@ -115,7 +108,7 @@ final class DesktopControlStore: ObservableObject {
     var needsPairing: Bool { setupImported || !confirmationCommand.isEmpty }
 
     var connectionStatusLabel: String {
-        if status.bridge.state == "observe_only" || status.bridge.state == "control" {
+        if status.isBridgeOnline {
             return "Connected · \(desktopStatusLabel)"
         }
         if needsPairing && !status.canStopBridge {
@@ -257,22 +250,117 @@ final class DesktopControlStore: ObservableObject {
         ])
     }
 
-    var hasAppSelectionChanges: Bool {
-        selectedAppIDs != Set(status.config.allowedAppIDs ?? [])
+    /// Compares one access draft with the current status, or with a status a save just returned.
+    func hasChanges(for capability: DesktopAccessCapability, comparedTo saved: DesktopStatus? = nil) -> Bool {
+        let config = (saved ?? status).config
+        switch capability {
+        case .applications: return selectedAppIDs != Set(config.allowedAppIDs ?? [])
+        case .folders: return fileRoots != config.fileRoots
+        case .shell: return shellEnabled != config.shellEnabled
+        }
     }
 
-    func saveAllowedApplications(completion: @escaping () -> Void = {}) {
+    var hasAppSelectionChanges: Bool { hasChanges(for: .applications) }
+
+    var hasLocalAccessChanges: Bool { hasChanges(for: .folders) || hasChanges(for: .shell) }
+
+    var hasAccessChanges: Bool { hasAccessChanges(comparedTo: status) }
+
+    func hasAccessChanges(comparedTo saved: DesktopStatus) -> Bool {
+        DesktopAccessCapability.allCases.contains { hasChanges(for: $0, comparedTo: saved) }
+    }
+
+    func saveAllowedApplications(completion: @escaping (DesktopStatus) -> Void = { _ in }) {
         guard status.hasSavedConnection, !needsPairing else {
             errorMessage = "Complete connection setup before saving app access."
             recovery = nil
             return
         }
-        perform(
+        saveAccess(
             "set_allowed_apps",
             parameters: ["expected_revision": status.config.revision, "allowed_app_ids": selectedAppIDs.sorted()],
-            stopFirst: status.canStopBridge,
-            completion: { _ in completion() }
+            completion: completion
         )
+    }
+
+    /// Saves only folder and shell settings; approvals and auto-approval are never part of saved config.
+    func saveLocalAccess(completion: @escaping (DesktopStatus) -> Void = { _ in }) {
+        guard status.hasSavedConnection, !needsPairing else {
+            errorMessage = "Complete connection setup before saving folder and shell access."
+            recovery = nil
+            return
+        }
+        saveAccess(
+            "set_local_access",
+            parameters: [
+                "expected_revision": status.config.revision,
+                "files": ["roots": fileRoots],
+                "shell": ["enabled": shellEnabled],
+            ]
+        ) { [weak self] saved in
+            // The helper saves canonical folder paths; adopt them so the saved draft is clean.
+            self?.fileRoots = saved.config.fileRoots
+            self?.shellEnabled = saved.config.shellEnabled
+            completion(saved)
+        }
+    }
+
+    /// Stops a running bridge first, then continues only with a saved status that decodes; otherwise it reports an error.
+    private func saveAccess(
+        _ action: String, parameters: [String: Any], completion: @escaping (DesktopStatus) -> Void
+    ) {
+        var saved: DesktopStatus?
+        perform(
+            action, parameters: parameters, stopFirst: status.canStopBridge,
+            then: { result in
+                saved = try Self.responseStatus(result)
+                return result
+            },
+            completion: { _ in saved.map(completion) }
+        )
+    }
+
+    func discardLocalAccessChanges() {
+        fileRoots = status.config.fileRoots
+        shellEnabled = status.config.shellEnabled
+    }
+
+    func addFileRoot(at url: URL) {
+        guard let path = Self.canonicalDirectoryPath(url) else {
+            errorMessage = "Choose a folder that exists on this Mac."
+            recovery = nil
+            return
+        }
+        guard !fileRoots.contains(path) else {
+            errorMessage = "\(path) is already a read-only folder."
+            recovery = nil
+            return
+        }
+        fileRoots.append(path)
+    }
+
+    func removeFileRoot(_ path: String) {
+        fileRoots.removeAll { $0 == path }
+    }
+
+    /// Answers only the exact request the person reviewed; a newer request needs its own review.
+    func decideShell(_ request: DesktopShellRequest, _ decision: DesktopShellDecision) {
+        guard status.shell.pending == request else {
+            errorMessage = "That command is no longer waiting for approval. Nothing was approved."
+            recovery = "Review the current request, if any, before answering it."
+            return
+        }
+        perform("decide_shell", parameters: decision.parameters(commandID: request.requestID), urgent: true)
+    }
+
+    func grantShell(_ approval: DesktopShellAutoApproval) {
+        perform("grant_shell", parameters: approval.grantParameters, urgent: true)
+    }
+
+    func revokeShell() { perform("revoke_shell", urgent: true) }
+
+    func killShellHandle(_ handle: String) {
+        perform("kill_shell_handle", parameters: ["handle": handle], urgent: true)
     }
 
     func discardAppSelectionChanges() {
@@ -380,6 +468,8 @@ final class DesktopControlStore: ObservableObject {
             "config_state": status.config.state,
             "config_revision": status.config.revision,
             "allowed_app_count": status.config.allowedAppIDs?.count ?? status.apps.count,
+            "file_root_count": status.config.fileRoots.count,
+            "shell_enabled": status.config.shellEnabled,
             "accessibility": status.permissions.accessibility.state,
             "screen_recording": status.permissions.screenRecording.state,
             "browser_runtime": status.browser.runtime,
@@ -501,6 +591,12 @@ final class DesktopControlStore: ObservableObject {
         if !initialEdits.contains(\.browserProfile), browserProfile == (previous.browser.userDataDirectory ?? "") {
             browserProfile = value.browser.userDataDirectory ?? ""
         }
+        if !initialEdits.contains(\.fileRoots), fileRoots == previous.config.fileRoots {
+            fileRoots = value.config.fileRoots
+        }
+        if !initialEdits.contains(\.shellEnabled), shellEnabled == previous.config.shellEnabled {
+            shellEnabled = value.config.shellEnabled
+        }
     }
 
     private var currentIdentity: String {
@@ -519,6 +615,20 @@ final class DesktopControlStore: ObservableObject {
         value.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    private static func canonicalDirectoryPath(_ url: URL) -> String? {
+        // Match the helper's canonical form so a linked or repeated folder is caught before saving.
+        guard let resolved = url.withUnsafeFileSystemRepresentation({ $0.flatMap { realpath($0, nil) } }) else {
+            return nil
+        }
+        defer { free(resolved) }
+        let path = String(cString: resolved)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        return path
     }
 
     private static func responseStatus(_ result: [String: Any]) throws -> DesktopStatus {

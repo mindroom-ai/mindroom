@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
@@ -16,8 +17,9 @@ from mindroom.desktop.accessibility import (
     AccessibilityError,
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.input import normalize_key_chord
-from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
+from mindroom.desktop.media import DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -31,7 +33,11 @@ from mindroom.desktop.protocol import (
     DESKTOP_BROWSER_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_CONTROL_ACTIONS,
+    DESKTOP_FILE_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
+    DESKTOP_SHELL_ACTIONS,
+    MAX_INLINE_RESPONSE_BYTES,
+    SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
     DesktopObservationMode,
     DesktopProtocolError,
@@ -41,6 +47,7 @@ from mindroom.desktop.protocol import (
     event_content,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
+from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     OlmToDeviceError,
@@ -52,7 +59,6 @@ from mindroom.matrix.olm_to_device import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     import nio
     from nio import AuthenticatedToDeviceEvent
@@ -60,8 +66,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_FUTURE_SKEW_MS = 30_000
-_MAX_PARAMETER_TEXT_LENGTH = 2_000
+# Checking a handle is an observation; starting or killing a command has effects that must not repeat.
+_EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
+_MAX_WARNING_DETAIL = 500
+# Stop drains the action in flight, so every media upload it may wait on must be bounded.
+_MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
+_MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
 
 
 async def _run_macos_application_events() -> None:
@@ -102,17 +113,19 @@ class DesktopBridgePolicy:
     allow_control: bool = False
     control_lease_expires_at_ms: int | None = None
     browser_enabled: bool = False
+    allowed_file_roots: tuple[Path, ...] = ()
+    shell_enabled: bool = False
 
     def __post_init__(self) -> None:
-        """Require explicit caller, agent, and application allowlists."""
+        """Require explicit caller and agent allowlists plus at least one local capability."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
         if not self.allowed_agent_names:
             msg = "Desktop bridge requires at least one allowed agent name."
             raise ValueError(msg)
-        if not self.allowed_app_ids:
-            msg = "Desktop bridge requires at least one allowed application ID."
+        if not (self.allowed_app_ids or self.allowed_file_roots or self.shell_enabled or self.browser_enabled):
+            msg = "Desktop bridge requires at least one local capability."
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_requester_ids):
             msg = "Desktop bridge requester IDs must not be empty."
@@ -149,9 +162,11 @@ class DesktopBridge:
     """Validate, execute, and answer pinned encrypted desktop commands."""
 
     client: nio.AsyncClient
-    provider: DesktopProvider
+    provider: DesktopProvider | None
     policy: DesktopBridgePolicy
     browser_provider: BrowserProvider | None = None
+    filesystem: DesktopFilesystem | None = None
+    shell: DesktopShell | None = None
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
     journal_path: Path | None = None
@@ -160,8 +175,10 @@ class DesktopBridge:
     _observations: DesktopObservations = field(init=False)
     _in_flight: set[str] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _shell_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _work_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _shell_work_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _response_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _capacity_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _stopped: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -171,7 +188,19 @@ class DesktopBridge:
     _control_lease_deadline: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Convert the wall-clock lease label into a rollback-safe local deadline."""
+        """Pair each enabled capability with its provider and convert the lease label to a local deadline."""
+        if self.policy.browser_enabled != (self.browser_provider is not None):
+            msg = "Desktop browser policy and local browser provider must be enabled together."
+            raise ValueError(msg)
+        if bool(self.policy.allowed_app_ids) != (self.provider is not None):
+            msg = "Desktop app policy and local GUI provider must be enabled together."
+            raise ValueError(msg)
+        if bool(self.policy.allowed_file_roots) != (self.filesystem is not None):
+            msg = "Desktop file policy and local filesystem provider must be enabled together."
+            raise ValueError(msg)
+        if self.policy.shell_enabled != (self.shell is not None):
+            msg = "Desktop shell policy and local shell provider must be enabled together."
+            raise ValueError(msg)
         self._observations = DesktopObservations(clock=self.monotonic_clock)
         self._journal = DesktopCommandJournal.load(
             self.journal_path,
@@ -184,9 +213,6 @@ class DesktopBridge:
             ),
             legacy_path=self.legacy_journal_path,
         )
-        if self.policy.browser_enabled != (self.browser_provider is not None):
-            msg = "Desktop browser policy and local browser provider must be enabled together."
-            raise ValueError(msg)
         if self.policy.control_lease_expires_at_ms is None:
             return
         remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
@@ -217,7 +243,7 @@ class DesktopBridge:
             self._queue_response(self._request_status_response(command))
             return
         self._journal.admit(command, fingerprint)
-        self._work_available.set()
+        (self._shell_work_available if command.action == "run_shell" else self._work_available).set()
 
     def _replay_cached(self, command: DesktopCommand, fingerprint: str) -> bool:
         cached = self._journal.get(command.request_id)
@@ -280,18 +306,26 @@ class DesktopBridge:
                 )
                 self._response_available.set()
 
-    async def execute_pending(self) -> None:
-        """Execute admitted work serially while Matrix polling remains independent."""
-        if self._execution_lock.locked():
+    async def execute_pending(self, *, shell_starts: bool) -> None:
+        """Execute one lane's admitted work serially while Matrix polling remains independent.
+
+        Shell starts have their own lane: approval can take the whole command lifetime, and status,
+        handle checks, and every other action must keep answering meanwhile.
+        """
+        lock = self._shell_start_lock if shell_starts else self._execution_lock
+        if lock.locked():
             return
-        async with self._execution_lock:
+        async with lock:
             for entry in self._journal.queued():
                 if not self._accepting:
                     break
                 command = entry.command
                 assert command is not None
+                if (command.action == "run_shell") != shell_starts:
+                    continue
                 self._in_flight.add(command.request_id)
-                self._active_action = command.action
+                if not shell_starts:
+                    self._active_action = command.action
                 started_at = self.monotonic_clock()
                 try:
                     response = await self._process(command, entry.command_fingerprint)
@@ -316,7 +350,8 @@ class DesktopBridge:
                     )
                 finally:
                     self._in_flight.discard(command.request_id)
-                    self._active_action = None
+                    if not shell_starts:
+                        self._active_action = None
 
     async def deliver_pending(self) -> bool:
         """Retry exact recorded results without running desktop work again."""
@@ -339,21 +374,30 @@ class DesktopBridge:
         """Run independent action and response workers until locally stopped."""
         self.recover_interrupted()
         self._work_available.set()
+        self._shell_work_available.set()
         self._response_available.set()
         async with asyncio.TaskGroup() as group:
-            application_events = group.create_task(_run_macos_application_events(), name="desktop_application_events")
-            executor = group.create_task(self._execute_loop(), name="desktop_executor")
+            application_events = (
+                group.create_task(_run_macos_application_events(), name="desktop_application_events")
+                if self.provider is not None
+                else None
+            )
+            executor = group.create_task(self._execute_loop(shell_starts=False), name="desktop_executor")
+            shell_executor = group.create_task(self._execute_loop(shell_starts=True), name="desktop_shell_executor")
             sender = group.create_task(self._deliver_loop(), name="desktop_responses")
             await self._stopped.wait()
             executor.cancel()
+            shell_executor.cancel()
             sender.cancel()
-            application_events.cancel()
+            if application_events is not None:
+                application_events.cancel()
 
-    async def _execute_loop(self) -> None:
+    async def _execute_loop(self, *, shell_starts: bool) -> None:
+        work_available = self._shell_work_available if shell_starts else self._work_available
         while True:
-            await self._work_available.wait()
-            self._work_available.clear()
-            await self.execute_pending()
+            await work_available.wait()
+            work_available.clear()
+            await self.execute_pending(shell_starts=shell_starts)
 
     async def _deliver_loop(self) -> None:
         while True:
@@ -365,17 +409,94 @@ class DesktopBridge:
                 self._response_available.set()
 
     def local_status(self) -> dict[str, object]:
-        """Report local authority without exposing command arguments or secrets."""
+        """Report local authority, including pending shell details only for the local approver.
+
+        ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
+        has no to-device size limit, unlike the remote ``status`` action reply.
+        """
         remaining = 0.0
         if self._control_available() and self._control_lease_deadline is not None:
             remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
         return {
             **self._bridge_status(),
+            "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
             "mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
+            "shell": self._shell_status(),
         }
+
+    def _shell_status(self, caller: tuple[str, str] | None = None) -> dict[str, object]:
+        if self.shell is None:
+            return {
+                "enabled": False,
+                "pending": None,
+                "auto_approve_remaining_seconds": 0.0,
+                "auto_approve_until_revoked": False,
+                "active_request_id": None,
+                "handles": [],
+            }
+        return {"enabled": True, **self.shell.status(caller=caller)}
+
+    def _caller_shell_status(self, command: DesktopCommand) -> dict[str, object]:
+        """Show another allowed caller only whether approval is pending, its own active ID, and its own handles."""
+        status = self._shell_status((command.requester_id, command.agent_name))
+        return {
+            **status,
+            "pending": status["pending"] is not None,
+            "handles": self.shell.handles(command.requester_id, command.agent_name) if self.shell is not None else [],
+        }
+
+    def decide_local_shell(
+        self,
+        command_id: str,
+        *,
+        approved: bool,
+        auto_approve_seconds: int,
+        auto_approve_until_revoked: bool = False,
+    ) -> dict[str, object]:
+        """Settle the exact pending shell request; call on the event loop that runs the bridge."""
+        self._running_shell().decide(
+            command_id,
+            approved=approved,
+            auto_approve_seconds=auto_approve_seconds,
+            auto_approve_until_revoked=auto_approve_until_revoked,
+        )
+        return self.local_status()
+
+    def grant_local_shell(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+    ) -> dict[str, object]:
+        """Auto-approve shell requests from every locally allowed caller until the lease ends or is revoked."""
+        self._running_shell().grant(duration_seconds, until_revoked=until_revoked)
+        return self.local_status()
+
+    def revoke_local_shell(self) -> dict[str, object]:
+        """End auto-approval, reject pending approval, and kill handles now; an active command stops promptly."""
+        self._enabled_shell().revoke()
+        return self.local_status()
+
+    def kill_local_shell_handle(self, handle: str) -> dict[str, object]:
+        """Kill any caller's handle from the local management channel."""
+        self._enabled_shell().kill_handle(handle)
+        return self.local_status()
+
+    def _enabled_shell(self) -> DesktopShell:
+        if self.shell is None:
+            msg = "Local shell access is disabled."
+            raise ValueError(msg)
+        return self.shell
+
+    def _running_shell(self) -> DesktopShell:
+        shell = self._enabled_shell()
+        if not self._accepting:
+            msg = "The desktop bridge is stopping."
+            raise ValueError(msg)
+        return shell
 
     def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
         """Grant control only through the local helper's private management channel."""
@@ -384,6 +505,9 @@ class DesktopBridge:
             raise ValueError(msg)
         if not self._accepting or self._control_revoked:
             msg = "Restart or reset the stopped bridge before granting control."
+            raise ValueError(msg)
+        if self.provider is None:
+            msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
         self.provider.check_emergency_stop()
         self.policy = replace(
@@ -405,21 +529,29 @@ class DesktopBridge:
         if self._in_flight:
             msg = "Wait for the active desktop action before resetting emergency stop."
             raise ValueError(msg)
+        if self.provider is None:
+            msg = "Desktop GUI is unavailable."
+            raise ValueError(msg)
         self.provider.check_emergency_stop()
         self.revoke_local_control()
         self._control_revoked = False
         return self.local_status()
 
     async def stop(self) -> None:
-        """Fence admission and drain only the currently executing action."""
+        """Fence admission, settle local shell work, and drain only the currently executing actions."""
         self._accepting = False
         self.revoke_local_control()
-        async with self._execution_lock:
+        if self.shell is not None:
+            # Pending approval can otherwise hold the shell lane until the command expires.
+            await self.shell.close()
+        async with self._execution_lock, self._shell_start_lock:
             self._stopped.set()
 
     def close(self) -> None:
-        """Close durable command storage after workers have stopped."""
+        """Close durable command storage and pinned folders after workers have stopped."""
         self._journal.close()
+        if self.filesystem is not None:
+            self.filesystem.close()
 
     async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
         policy_error = self._policy_error(command)
@@ -432,6 +564,8 @@ class DesktopBridge:
         policy_error = self._policy_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
+        if command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS and "observation" in command.parameters:
+            return self._error_response(command, "Unexpected desktop parameters: observation.")
         try:
             mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
             resolved = self._observations.resolve(command) if "state_id" in command.parameters else command
@@ -483,11 +617,12 @@ class DesktopBridge:
             return self._success_response(command, result=execution.result)
         extension = "png" if image.mime_type == "image/png" else "jpg"
         try:
-            screenshot = await upload_encrypted_screenshot(
+            screenshot = await upload_encrypted_media(
                 self.client,
                 image.content,
                 mime_type=image.mime_type,
                 filename=f"browser-{command.request_id}.{extension}",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
             return self._capture_error_response(command, result=execution.result, error=str(exc))
@@ -506,7 +641,14 @@ class DesktopBridge:
             return self._unknown_control_response(command)
         except PlaywrightActionOutcomeUnknownError:
             return self._unknown_control_response(command)
-        except (AccessibilityError, DesktopProviderError, DesktopProtocolError, PlaywrightBrowserError) as exc:
+        except (
+            AccessibilityError,
+            DesktopProviderError,
+            DesktopProtocolError,
+            PlaywrightBrowserError,
+            DesktopFilesystemError,
+            DesktopShellError,
+        ) as exc:
             return self._error_response(command, str(exc))
         except Exception:
             logger.exception(
@@ -514,7 +656,7 @@ class DesktopBridge:
                 request_id=command.request_id,
                 action=command.action,
             )
-            if command.action in DESKTOP_CONTROL_ACTIONS:
+            if command.action in DESKTOP_CONTROL_ACTIONS | _EFFECTFUL_SHELL_ACTIONS:
                 return self._unknown_control_response(command)
             return self._error_response(command, "Local desktop operation failed.")
 
@@ -527,7 +669,7 @@ class DesktopBridge:
         if app_id is None:
             return execution
         try:
-            state = await asyncio.to_thread(self.provider.get_app_state, app_id)
+            state = await asyncio.to_thread(self._required_gui_provider().get_app_state, app_id)
             self._observations.remember(state, command)
         except Exception:
             logger.exception(
@@ -559,15 +701,16 @@ class DesktopBridge:
     ) -> DesktopResponse:
         try:
             capture = await asyncio.to_thread(
-                self.provider.screenshot,
+                self._required_gui_provider().screenshot,
                 app_id=app_id,
                 state_id=state_id,
             )
-            screenshot = await upload_encrypted_screenshot(
+            screenshot = await upload_encrypted_media(
                 self.client,
                 capture.content,
                 mime_type=capture.mime_type,
                 filename=f"desktop-{command.request_id}.jpg",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
             return self._capture_error_response(command, result=result, error=str(exc))
@@ -600,23 +743,35 @@ class DesktopBridge:
             error = "Desktop command expired before local execution."
         elif not self.policy.caller_allowed(command):
             error = "Desktop command requester or agent is not allowed by local policy."
+        elif command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS:
+            error = self._local_capability_error(command.action)
         elif command.action in DESKTOP_BROWSER_ACTIONS:
             error = self._browser_policy_error(command)
         elif command.action in DESKTOP_APP_ACTIONS and (
             not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
         ):
             error = "Desktop command must target an application in the local allowlist."
-        elif command.action not in DESKTOP_CONTROL_ACTIONS:
-            error = None
-        elif not self.policy.allow_control:
-            error = "Desktop control is disabled; this bridge is observe-only."
-        elif self._control_revoked:
-            error = "Desktop emergency stop is latched; restart the bridge locally before granting control again."
-        elif not self._control_available():
-            error = "Local desktop control lease has expired."
+        elif command.action in DESKTOP_CONTROL_ACTIONS:
+            error = self._control_policy_error()
         else:
             error = None
         return error
+
+    def _control_policy_error(self) -> str | None:
+        if not self.policy.allow_control:
+            return "Desktop control is disabled; this bridge is observe-only."
+        if self._control_revoked:
+            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
+        if not self._control_available():
+            return "Local desktop control lease has expired."
+        return None
+
+    def _local_capability_error(self, action: str) -> str | None:
+        if action in DESKTOP_FILE_ACTIONS and not self.policy.allowed_file_roots:
+            return "Local file access is disabled."
+        if action in DESKTOP_SHELL_ACTIONS and not self.policy.shell_enabled:
+            return "Local shell access is disabled."
+        return None
 
     def _browser_policy_error(self, command: DesktopCommand) -> str | None:  # noqa: PLR0911
         if not self.policy.browser_enabled or self.browser_provider is None:
@@ -640,6 +795,13 @@ class DesktopBridge:
         return None
 
     async def _execute(self, command: DesktopCommand) -> _Execution:
+        if command.action in DESKTOP_FILE_ACTIONS:
+            return await self._execute_file(command)
+        if command.action in DESKTOP_SHELL_ACTIONS:
+            return await self._execute_shell(command)
+        return await self._execute_desktop(command)
+
+    async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
         parameters = command.parameters
         if command.action in DESKTOP_BROWSER_ACTIONS:
             browser_action, browser_parameters = _browser_command_parameters(parameters)
@@ -647,28 +809,42 @@ class DesktopBridge:
                 msg = "Playwright browser extension support is disabled on this desktop bridge."
                 raise DesktopProtocolError(msg)
             if command.action == "browser_control":
+                if self.provider is None:
+                    msg = "Desktop GUI is unavailable for browser control."
+                    raise DesktopProtocolError(msg)
                 await asyncio.to_thread(self.provider.check_emergency_stop)
             browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            status = await asyncio.to_thread(self.provider.status)
-            return _Execution({**status, "bridge": self._bridge_status()})
+            status: dict[str, object] = (
+                await asyncio.to_thread(self.provider.status) if self.provider is not None else {"gui_available": False}
+            )
+            folders = self.filesystem.list_folders()["folders"] if self.filesystem is not None else []
+            return _Execution(
+                self._fit_status(
+                    command,
+                    status,
+                    self._caller_shell_status(command),
+                    cast("list[dict[str, str]]", folders),
+                ),
+            )
         if command.action == "list_apps":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            apps = await asyncio.to_thread(self.provider.list_apps)
+            apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
             return _Execution({"apps": [app.to_result() for app in apps]})
+        provider = self._required_gui_provider()
         if command.action == "launch_app":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             app_id = _required_str_parameter(parameters, "app")
-            await asyncio.to_thread(self.provider.launch_app, app_id)
+            await asyncio.to_thread(provider.launch_app, app_id)
             return _Execution(
                 {"action": command.action, "action_completed": True},
                 follow_up_app=app_id,
             )
         if command.action in {"get_app_state", "screenshot"}:
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
-            state = await asyncio.to_thread(self.provider.get_app_state, _required_str_parameter(parameters, "app"))
+            state = await asyncio.to_thread(provider.get_app_state, _required_str_parameter(parameters, "app"))
             self._observations.remember(state, command)
             return _Execution(
                 {"action": command.action, "state": state.to_result()},
@@ -679,16 +855,236 @@ class DesktopBridge:
         app_id = _required_str_parameter(parameters, "app")
         state_id = _required_str_parameter(parameters, "state_id")
         if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
-            await self._execute_semantic_control(command, app_id=app_id, state_id=state_id)
+            await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
         else:
-            await self._execute_fallback_control(command, app_id=app_id, state_id=state_id)
+            await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
         return _Execution(
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
         )
 
+    def _required_gui_provider(self) -> DesktopProvider:
+        provider = self.provider
+        if provider is None:
+            msg = "Desktop GUI is unavailable."
+            raise DesktopProtocolError(msg)
+        return provider
+
+    async def _execute_file(self, command: DesktopCommand) -> _Execution:
+        """Read through pinned folder descriptors on a worker thread."""
+        files = self.filesystem
+        if files is None:
+            msg = "Local file access is disabled."
+            raise DesktopProtocolError(msg)
+        parameters = command.parameters
+        if command.action == "list_folders":
+            _reject_unexpected_parameters(parameters, allowed=frozenset())
+            folders = (await asyncio.to_thread(files.list_folders))["folders"]
+            return _Execution(
+                self._fit_listing(
+                    command,
+                    cast("list[dict[str, str]]", folders),
+                    key="folders",
+                    already_truncated=False,
+                ),
+            )
+        if command.action == "list_directory":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path"}))
+            listing = await asyncio.to_thread(
+                files.list_directory,
+                _required_str_parameter(parameters, "root_id"),
+                _optional_str_parameter(parameters, "path", default="."),
+            )
+            return _Execution(
+                self._fit_listing(
+                    command,
+                    cast("list[dict[str, str]]", listing["entries"]),
+                    key="entries",
+                    already_truncated=bool(listing["truncated"]),
+                ),
+            )
+        _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path", "offset"}))
+        return _Execution(
+            await asyncio.to_thread(
+                files.read_file,
+                _required_str_parameter(parameters, "root_id"),
+                _required_str_parameter(parameters, "path"),
+                _optional_int_parameter(parameters, "offset") or 0,
+            ),
+        )
+
+    async def _execute_shell(self, command: DesktopCommand) -> _Execution:
+        """Start a command only after local approval, or read or stop one of the caller's own handles."""
+        shell = self.shell
+        if shell is None:
+            msg = "Local shell access is disabled."
+            raise DesktopProtocolError(msg)
+        parameters = command.parameters
+        if command.action == "check_shell":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle"}))
+            handle = _required_str_parameter(parameters, "handle")
+            return _Execution(
+                await self._shell_result(command, shell.check(command.requester_id, command.agent_name, handle)),
+            )
+        if command.action == "kill_shell":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
+            handle = _required_str_parameter(parameters, "handle")
+            force = _optional_bool_parameter(parameters, "force")
+            return _Execution(
+                {"state": shell.kill(command.requester_id, command.agent_name, handle, force=force), "handle": handle},
+            )
+        _reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
+        timeout_seconds = _optional_int_parameter(parameters, "timeout_seconds")
+        request = DesktopShellRequest(
+            request_id=command.request_id,
+            requester_id=command.requester_id,
+            agent_name=command.agent_name,
+            command=_required_str_parameter(parameters, "command"),
+            cwd=_optional_str_parameter(parameters, "cwd", default=str(Path.home())),
+            expires_at_ms=command.expires_at_ms,
+            timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
+        )
+        return _Execution(await self._shell_result(command, await shell.execute(request)))
+
+    async def _shell_result(self, command: DesktopCommand, result: DesktopShellResult) -> dict[str, object]:
+        """Reply inline when the encrypted response fits one to-device message, otherwise attach the full output."""
+        output = result.output
+        size = output.size
+        payload: dict[str, object] = {
+            "state": result.state,
+            "handle": result.handle,
+            "exit_code": result.exit_code,
+            "output": "",
+            "output_bytes": size,
+            "output_truncated": output.truncated,
+            "output_attachment": None,
+        }
+        if result.state == "running":
+            return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), size=size)
+        try:
+            content = output.read()
+            # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
+            if len(content) <= MAX_INLINE_RESPONSE_BYTES:
+                inline = {**payload, "output": content.decode()}
+                if self._success_response(command, result=inline).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+                    return inline
+            try:
+                media = await upload_encrypted_media(
+                    self.client,
+                    content,
+                    mime_type=SHELL_OUTPUT_MIME_TYPE,
+                    filename=f"shell-{command.request_id}.txt",
+                    timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
+                )
+            except DesktopMediaError as exc:
+                error = str(exc)
+            except Exception:
+                logger.exception("shell_output_upload_failed", request_id=command.request_id)
+                error = "Shell output upload failed."
+            else:
+                return {**payload, "output_attachment": media.to_content()}
+            warning = f"The full output could not be attached ({error[:_MAX_WARNING_DETAIL]}); only its end is shown."
+            return self._fit_output_tail(
+                command,
+                {**payload, "warning": warning},
+                content[-MAX_INLINE_RESPONSE_BYTES:],
+                size=size,
+            )
+        finally:
+            output.release()
+
+    def _leftmost_fitting(
+        self,
+        command: DesktopCommand,
+        low: int,
+        high: int,
+        build: Callable[[int], dict[str, object]],
+    ) -> int:
+        """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
+
+        Shared by every trimmed reply (shell output, listings, status), all measured the same way:
+        ``self._success_response(command, result=build(x)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES``.
+        Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
+        """
+        while low < high:
+            middle = (low + high) // 2
+            if self._success_response(command, result=build(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+                high = middle
+            else:
+                low = middle + 1
+        return low
+
+    def _fit_output_tail(
+        self,
+        command: DesktopCommand,
+        payload: dict[str, object],
+        tail: bytes,
+        *,
+        size: int,
+    ) -> dict[str, object]:
+        """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
+        text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
+
+        def reply(start: int) -> dict[str, object]:
+            shown = text[start:]
+            truncated = bool(payload["output_truncated"]) or len(shown.encode()) < size
+            return {**payload, "output": shown, "output_truncated": truncated}
+
+        # Dropping older characters never grows the reply, so search for the fewest to drop.
+        start = self._leftmost_fitting(command, 0, len(text), reply)
+        return reply(start)
+
+    def _fit_listing(
+        self,
+        command: DesktopCommand,
+        entries: list[dict[str, str]],
+        *,
+        key: str,
+        already_truncated: bool,
+    ) -> dict[str, object]:
+        """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline budget."""
+        total = len(entries)
+
+        def reply(dropped: int) -> dict[str, object]:
+            count = total - dropped
+            return {key: entries[:count], "truncated": already_truncated or count < total}
+
+        # Dropping later entries never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
+
+    def _fit_status(
+        self,
+        command: DesktopCommand,
+        provider_status: dict[str, object],
+        shell_status: dict[str, object],
+        folders: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Keep the fitting prefix of ``folders`` in the remote reply's ``bridge.file_roots``.
+
+        ``local_status()`` reports every folder unconditionally: only this remote, to-device reply
+        is bounded by the inline budget.
+        """
+        total = len(folders)
+
+        def reply(dropped: int) -> dict[str, object]:
+            count = total - dropped
+            return {
+                **provider_status,
+                "bridge": {
+                    **self._bridge_status(),
+                    "file_roots": folders[:count],
+                    "file_roots_truncated": count < total,
+                    "shell": shell_status,
+                },
+            }
+
+        dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
+
     async def _execute_semantic_control(
         self,
+        provider: DesktopProvider,
         command: DesktopCommand,
         *,
         app_id: str,
@@ -698,7 +1094,7 @@ class DesktopBridge:
         if command.action == "click_element":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "element_index"}))
             await asyncio.to_thread(
-                self.provider.click_element,
+                provider.click_element,
                 app_id=app_id,
                 state_id=state_id,
                 element_index=_required_int_parameter(parameters, "element_index"),
@@ -709,7 +1105,7 @@ class DesktopBridge:
                 allowed=frozenset({"app", "state_id", "element_index", "value"}),
             )
             await asyncio.to_thread(
-                self.provider.set_value,
+                provider.set_value,
                 app_id=app_id,
                 state_id=state_id,
                 element_index=_required_int_parameter(parameters, "element_index"),
@@ -721,7 +1117,7 @@ class DesktopBridge:
                 allowed=frozenset({"app", "state_id", "element_index", "direction", "pages"}),
             )
             await asyncio.to_thread(
-                self.provider.scroll_element,
+                provider.scroll_element,
                 app_id=app_id,
                 state_id=state_id,
                 element_index=_required_int_parameter(parameters, "element_index"),
@@ -734,7 +1130,7 @@ class DesktopBridge:
                 allowed=frozenset({"app", "state_id", "element_index", "action_name"}),
             )
             await asyncio.to_thread(
-                self.provider.perform_action,
+                provider.perform_action,
                 app_id=app_id,
                 state_id=state_id,
                 element_index=_required_int_parameter(parameters, "element_index"),
@@ -746,6 +1142,7 @@ class DesktopBridge:
 
     async def _execute_fallback_control(
         self,
+        provider: DesktopProvider,
         command: DesktopCommand,
         *,
         app_id: str,
@@ -758,7 +1155,7 @@ class DesktopBridge:
                 allowed=frozenset({"app", "state_id", "x", "y", "button"}),
             )
             await asyncio.to_thread(
-                self.provider.double_click if command.action == "double_click" else self.provider.click,
+                provider.double_click if command.action == "double_click" else provider.click,
                 app_id=app_id,
                 state_id=state_id,
                 x=_required_int_parameter(parameters, "x"),
@@ -768,7 +1165,7 @@ class DesktopBridge:
         elif command.action == "hover":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "x", "y"}))
             await asyncio.to_thread(
-                self.provider.hover,
+                provider.hover,
                 app_id=app_id,
                 state_id=state_id,
                 x=_required_int_parameter(parameters, "x"),
@@ -790,7 +1187,7 @@ class DesktopBridge:
                 ),
             )
             await asyncio.to_thread(
-                self.provider.drag,
+                provider.drag,
                 app_id=app_id,
                 state_id=state_id,
                 start_x=_required_int_parameter(parameters, "start_x"),
@@ -807,7 +1204,7 @@ class DesktopBridge:
                 else {}
             )
             await asyncio.to_thread(
-                self.provider.type_text,
+                provider.type_text,
                 app_id=app_id,
                 state_id=state_id,
                 text=_required_str_parameter(parameters, "text"),
@@ -819,7 +1216,7 @@ class DesktopBridge:
                 allowed=frozenset({"app", "state_id", "direction", "pages", "x", "y"}),
             )
             await asyncio.to_thread(
-                self.provider.scroll,
+                provider.scroll,
                 app_id=app_id,
                 state_id=state_id,
                 direction=_required_str_parameter(parameters, "direction"),
@@ -830,7 +1227,7 @@ class DesktopBridge:
         elif command.action == "keypress":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "keys"}))
             await asyncio.to_thread(
-                self.provider.keypress,
+                provider.keypress,
                 app_id=app_id,
                 state_id=state_id,
                 keys=_required_str_list_parameter(parameters, "keys"),
@@ -840,6 +1237,7 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
 
     def _bridge_status(self) -> dict[str, object]:
+        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not)."""
         control_available = self._control_available()
         status: dict[str, object] = {
             "mode": "control" if control_available else "observe_only",
@@ -847,6 +1245,7 @@ class DesktopBridge:
             "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
+            "gui_available": self.provider is not None,
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }
@@ -902,15 +1301,22 @@ class DesktopBridge:
         )
 
     def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
-        recovery_action = (
-            "browser(action='tabs' or 'snapshot', target='desktop')"
-            if command.action in DESKTOP_BROWSER_ACTIONS
-            else "get_app_state"
-        )
-        warning = (
-            "The desktop action outcome is unknown and it may have completed; do not repeat the action automatically. "
-            f"Request {recovery_action} before deciding the next step."
-        )
+        if command.action in DESKTOP_SHELL_ACTIONS:
+            warning = (
+                "The shell command outcome is unknown and it may have completed; do not repeat it automatically. "
+                "Inspect its effects before deciding the next step."
+            )
+        else:
+            recovery_action = (
+                "browser(action='tabs' or 'snapshot', target='desktop')"
+                if command.action in DESKTOP_BROWSER_ACTIONS
+                else "get_app_state"
+            )
+            warning = (
+                "The desktop action outcome is unknown and it may have completed; "
+                "do not repeat the action automatically. "
+                f"Request {recovery_action} before deciding the next step."
+            )
         logger.warning(
             "desktop_control_outcome_unknown",
             request_id=command.request_id,
@@ -924,7 +1330,7 @@ class DesktopBridge:
         )
 
     def _interrupted_response(self, command: DesktopCommand) -> DesktopResponse:
-        if command.action in DESKTOP_CONTROL_ACTIONS:
+        if command.action in DESKTOP_CONTROL_ACTIONS | _EFFECTFUL_SHELL_ACTIONS:
             return self._unknown_control_response(command)
         return self._error_response(
             command,
@@ -1001,13 +1407,21 @@ def _optional_int_parameter(parameters: dict[str, object], key: str) -> int | No
     return _required_int_parameter(parameters, key)
 
 
+def _optional_bool_parameter(parameters: dict[str, object], key: str) -> bool:
+    value = parameters.get(key, False)
+    if not isinstance(value, bool):
+        msg = f"Desktop parameter {key} must be a boolean."
+        raise DesktopProtocolError(msg)
+    return value
+
+
 def _required_str_parameter(parameters: dict[str, object], key: str, *, allow_empty: bool = False) -> str:
     value = parameters.get(key)
     if not isinstance(value, str) or (not value and not allow_empty):
         qualifier = "a string" if allow_empty else "a non-empty string"
         msg = f"Desktop parameter {key} must be {qualifier}."
         raise DesktopProtocolError(msg)
-    max_length = _MAX_PARAMETER_TEXT_LENGTH if key in {"text", "value"} else _MAX_PARAMETER_IDENTIFIER_LENGTH
+    max_length = _MAX_PARAMETER_LENGTHS.get(key, _MAX_PARAMETER_IDENTIFIER_LENGTH)
     if len(value) > max_length:
         msg = f"Desktop parameter {key} must not exceed {max_length} characters."
         raise DesktopProtocolError(msg)

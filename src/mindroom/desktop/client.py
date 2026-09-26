@@ -137,6 +137,18 @@ def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
         "Ensure the local `mindroom desktop run` process is running; do not guess another command name or flags."
         f" Query request_status with request_id={command.request_id!r} to recover the recorded outcome."
     )
+    if command.action == "run_shell":
+        return (
+            f"{message} The command may still be awaiting local approval, may have run, or may still be running; "
+            "do not run the command again automatically."
+        )
+    if command.action == "check_shell":
+        return (
+            f"{message} A finished handle's output is handed over only once, so do not call check_shell again "
+            "for this handle; call it again only if request_status reports not_found."
+        )
+    if command.action == "kill_shell":
+        return f"{message} The kill outcome is unknown; query request_status before deciding the next step."
     if command.action not in DESKTOP_CONTROL_ACTIONS:
         return message
     recovery_action = (

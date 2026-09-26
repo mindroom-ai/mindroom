@@ -1129,13 +1129,13 @@ async def test_handle_isolation_blocks_cross_runtime_access(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# _MAX_BACKGROUNDED limit
+# MAX_BACKGROUNDED limit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_max_backgrounded_limit(tmp_path: Path) -> None:
-    """Exceeding _MAX_BACKGROUNDED should return an error and kill the excess process."""
+    """Exceeding MAX_BACKGROUNDED should return an error and kill the excess process."""
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
@@ -1143,7 +1143,7 @@ async def test_max_backgrounded_limit(tmp_path: Path) -> None:
     handles: list[str] = []
 
     # Patch to a small limit
-    with patch("mindroom.shell_execution._MAX_BACKGROUNDED", 2):
+    with patch("mindroom.shell_execution.MAX_BACKGROUNDED", 2):
         # Fill up to the limit
         for _ in range(2):
             result = await run_fn(["sleep", "300"], timeout=0)

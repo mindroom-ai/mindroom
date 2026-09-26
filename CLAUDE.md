@@ -263,6 +263,11 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
 | `desktop/legacy_command_journal.py` | Validates historical JSON v1 receipts for the SQLite journal's one-time import |
 | `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
+| `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
+| `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
+| `desktop/shell_prompt.py` | Local terminal approval for shell commands requested through a terminal-owned Desktop bridge |
 | `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
 | `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
 | `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |

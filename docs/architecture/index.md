@@ -147,6 +147,11 @@ MindRoom's architecture consists of several key components working together.
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
 | `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
+| `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
+| `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
+| `desktop/shell_prompt.py` | Local terminal approval for shell commands requested through a terminal-owned Desktop bridge |
 | `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
 | `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
 | `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
