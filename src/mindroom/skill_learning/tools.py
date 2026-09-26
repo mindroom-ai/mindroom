@@ -15,7 +15,7 @@ import weakref
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal, assert_never
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.skill_learning.library import (
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
-_ACTIONS: tuple[str, ...] = get_args(SkillAction)
 # Agno runs the tool calls of one reply concurrently, and chat and a review may change one library at once, while each
 # change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they take turns.
 _LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -56,7 +55,7 @@ def _library_turn(skills_root: Path) -> asyncio.Lock:
 class SkillChange:
     """One ``skill_manage`` call."""
 
-    action: str
+    action: SkillAction
     name: str
     content: str | None = None
     old_string: str | None = None
@@ -236,9 +235,6 @@ class SkillTools:
             return await self._apply(change)
 
     async def _apply(self, change: SkillChange) -> str:
-        # A review's entrypoint runs without Agno's argument validation, so the action is checked here.
-        if change.action not in _ACTIONS:
-            return _refusal(f"Unknown action {change.action!r}; use one of {', '.join(_ACTIONS)}.")
         entry = self.catalog.get(change.name)
         if change.action != "create" and (refusal := self._edit_refusal(change.name, entry)) is not None:
             return refusal
@@ -275,8 +271,10 @@ class SkillTools:
         if change.action == "write_file":
             content = _required(change.file_content, "file_content")
             await self._write(name, directory, target, content, await self._current(directory, target))
-        else:
+        elif change.action == "remove_file":
             await self._remove(name, directory, target, await self._current(directory, target))
+        else:
+            assert_never(change.action)
         return target
 
     def _edit_refusal(self, name: str, entry: _CatalogEntry | None) -> str | None:

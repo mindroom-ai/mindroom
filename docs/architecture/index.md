@@ -67,7 +67,7 @@ MindRoom's architecture consists of several key components working together.
 | `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, chat-time restarts, scope keys, retries, and retention |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | Starts a review after the response that makes a conversation due, stops it when a new response starts, and posts change notices |
-| `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a digest replay on another model |
+| `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
