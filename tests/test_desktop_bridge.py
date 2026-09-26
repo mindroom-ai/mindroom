@@ -1054,14 +1054,13 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
 
     (tmp_path / "release").touch()
     completed, _ = await _check_until_completed(bridge, transport, handle, first_sequence=2)
-    assert _without_metrics(completed) | {"output_attachment": None} == {
+    assert {key: value for key, value in _without_metrics(completed).items() if key != "output_attachment"} == {
         "state": "completed",
         "handle": handle,
         "exit_code": 0,
         "output": "",
         "output_bytes": len(expected),
         "output_truncated": False,
-        "output_attachment": None,
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))

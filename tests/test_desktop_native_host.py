@@ -568,8 +568,7 @@ def _shell_event(
     *,
     request_id: str = "shell-1",
     sequence: int = 1,
-    action: str = "run_shell",
-    parameters: dict[str, object] | None = None,
+    timeout_seconds: int = 30,
 ) -> AuthenticatedToDeviceEvent:
     now_ms = round(time.time() * 1000)
     content = DesktopCommand(
@@ -578,10 +577,10 @@ def _shell_event(
         sequence,
         now_ms,
         now_ms + 60_000,
-        action,
+        "run_shell",
         "@person:example.org",
         "assistant",
-        {"command": command, "cwd": str(cwd)} if parameters is None else parameters,
+        {"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
     ).to_content()
     return AuthenticatedToDeviceEvent(
         source={"content": content},
@@ -724,7 +723,7 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
     await host.handle(_request("grant_shell", duration_seconds=60))
     pid_file = tmp_path / "leader.pid"
     command = f"echo $$ > {pid_file}; sleep 30"
-    event = _shell_event("", tmp_path, parameters={"command": command, "cwd": str(tmp_path), "timeout_seconds": 1})
+    event = _shell_event(command, tmp_path, timeout_seconds=1)
     try:
         await bridge.on_to_device_event(event)
         await bridge.execute_pending(shell_starts=True)
