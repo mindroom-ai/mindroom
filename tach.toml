@@ -4068,6 +4068,7 @@ depends_on = [
     "mindroom.desktop.command_journal",
     "mindroom.desktop.identity",
     "mindroom.desktop.login_method",
+    "mindroom.desktop.native_config",
     "mindroom.desktop.pairing_client",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
@@ -6877,7 +6878,7 @@ depends_on = ["mindroom.desktop.accessibility"]
 
 [[modules]]
 path = "mindroom.desktop.native_config"
-depends_on = ["mindroom.durable_write", "mindroom.matrix.device_identity"]
+depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.matrix.device_identity"]
 
 [[modules]]
 path = "mindroom.desktop.native_entry"

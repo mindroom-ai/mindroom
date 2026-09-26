@@ -80,9 +80,21 @@ class ThreadOffload:
 
         Registration is synchronous, so a ``close()`` that starts after this
         returns already knows the statement exists.
+
+        The pool holds each work item until its thread next gets to drop it,
+        which a starved thread can put off past the caller's next statement.
+        The worker therefore takes ``call`` out before running it, so what the
+        statement closes over is released before its completion is reported.
+        Its result, or its exception and traceback, still travel with the future.
         """
         context = contextvars.copy_context()
-        work = asyncio.get_running_loop().run_in_executor(self._executor, context.run, call)
+        pending = [call]
+
+        def run_once() -> T:
+            operation = pending.pop()
+            return operation()
+
+        work = asyncio.get_running_loop().run_in_executor(self._executor, context.run, run_once)
         self._running.add(work)
         work.add_done_callback(self._running.discard)
         return work

@@ -4294,15 +4294,13 @@ class TestMultiAgentOrchestrator:
                 msg = "boom"
                 raise RuntimeError(msg)
 
-        with (
-            patch("mindroom.orchestration.runtime.STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestration.runtime.STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
-        ):
-            await run_with_retry(
-                "background retry",
-                _operation,
-                update_runtime_state=False,
-            )
+        await run_with_retry(
+            "background retry",
+            _operation,
+            update_runtime_state=False,
+            initial_delay_seconds=0,
+            max_delay_seconds=0,
+        )
 
         state = get_runtime_state()
         assert attempts == 2

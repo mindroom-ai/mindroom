@@ -3,6 +3,7 @@
 The native app and its desktop helper require macOS 14 or newer.
 
 The app has Overview, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
+Sidebar buttons support Tab and Space navigation; when you activate a section, keyboard focus follows that section instead of remaining on a previous button.
 The menu shows local-agent and computer-access status as clickable shortcuts to their sections, with start, stop, and revoke actions when available.
 Hover over Quit MindRoom for its effect on background work: computer access stops, while local agents keep running.
 Its Python desktop helper is bundled at:
@@ -72,8 +73,11 @@ For an existing connection, saving apps preserves the controller, requester, bro
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
 Start Observe Only explicitly to resume with the saved app list.
 Saving an empty selection removes all app access; select and save at least one app before Start Observe Only becomes available again.
-During initial setup, choose apps first and select Continue Setup to open the connection form; Save Setup saves those app selections with the connection.
-The session card explains why Start or Stop is unavailable and links directly to incomplete setup or pending app selections.
+Setup presents one step at a time: Connect, Apps, Permissions, Start. The top connection summary names the next required step.
+Save and Connect saves a disabled configuration and claims pairing using the reviewed revision and saved session. I’ve Confirmed in Chat enables that exact saved setup after the user confirms the agent's response.
+A failed claim or app restart before confirmation leaves the configuration disabled; fresh setup data can be imported without replacing the saved login. Pairing codes and confirmation commands remain transient.
+The Start step explains remaining blockers and links to the corresponding step. App selection save controls appear above the list.
+Search matches reordered partial or fuzzy display-name words and literal bundle-ID tokens.
 Paste setup data into the labeled, bordered field before selecting Import Setup.
 Primary-screen access is a separate advanced option because it can expose content outside selected apps.
 Settings shows the installed app version and build number.
@@ -86,8 +90,9 @@ Use the signed release for stable permissions; when testing a local copy, approv
 Computer access shows the saved local Matrix device without signing in again, including sessions created by the CLI while the app is open.
 Saved identity is read from the private session file; its presence does not prove server authentication or completed controller pairing.
 Unreadable or invalid sessions remain recoverable without exposing their contents.
-Use the existing device to finish pairing, or select **Replace Session…** and confirm to sign in with a new device.
+Use the existing device to finish pairing, or select **Replace Saved Login…** and confirm to sign in with a new device.
 Replacement requires pairing the new device again and is unavailable while the bridge is running.
+Organization sign-in and pairing accept the imported Cloudflare Access requirement, prepare headers without blocking the native loop, and persist that requirement with the saved session.
 
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
 Stop has a separate single request lane; status, revoke, and emergency reset remain available while a login, pairing, browser, or stop request is pending.

@@ -21,8 +21,10 @@ def _enter_mount_namespace(nodeid: str) -> bool:
     command = ["unshare", "--user", "--map-root-user", "--mount"]
     if subprocess.run([*command, "true"], capture_output=True, check=False).returncode:
         pytest.skip("unprivileged mount namespace unavailable")
+    # Clearing addopts also drops its `-p no:tach`, and Tach's plugin spends seconds scanning the tree.
+    pytest_args = [nodeid, "-q", "-n", "0", "--no-cov", "-o", "addopts=", "-p", "no:tach"]
     result = subprocess.run(
-        [*command, sys.executable, "-m", "pytest", nodeid, "-q", "-n", "0", "--no-cov", "-o", "addopts="],
+        [*command, sys.executable, "-m", "pytest", *pytest_args],
         env={**os.environ, "MINDROOM_BUNDLE_MOUNT_TEST_CHILD": "1"},
         capture_output=True,
         text=True,

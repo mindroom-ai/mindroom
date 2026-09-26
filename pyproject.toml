@@ -472,6 +472,7 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
+  "pytest-shm>=0.1",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
@@ -624,6 +625,8 @@ markers = [
   "slow: marks tests as slow",
   "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
+# A full run peaks at about 3 GiB of temporary files on /dev/shm, mostly worker virtualenvs.
+shm_min_free_gib = 4
 
 [tool.coverage.report]
 exclude_lines = [

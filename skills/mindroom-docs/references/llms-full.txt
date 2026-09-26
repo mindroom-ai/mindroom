@@ -2262,6 +2262,8 @@ If room creation succeeds but its local room-ID receipt is lost, alias recovery 
 Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
 Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
 Room ownership and membership are verified before reusing an alias.
+The owner may invite other MindRoom agents into their personal room; an agent sees only messages sent after its invite.
+Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
@@ -9683,6 +9685,7 @@ uv tool install 'mindroom[desktop]'
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
+When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
@@ -9693,12 +9696,13 @@ Chrome and Brave are supported by the local command through an explicit browser 
 ## Native macOS setup
 
 Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
-In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
-Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
-Confirm the displayed controller fingerprint, requester, and agent locally, then choose **Save Setup**.
-Confirm the saved identities again before choosing **Claim Pairing**.
-Return the displayed `!desktop confirm ...` command to the same chat.
-For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
+In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into **Connect**.
+Review the displayed controller fingerprint, requester, and agent, then reuse the saved Matrix login or sign in.
+Confirm those identities and select **Save and Connect**. Return the displayed confirmation command to the same chat, wait for the agent's confirmation, and select **I’ve Confirmed in Chat**.
+Choose allowed applications in **Apps** and select **Save App Access**, then complete **Permissions** and **Start**.
+The top summary distinguishes a missing connection, saved setup with access off, and an active connection; it names the next action.
+Incomplete app setup remains disabled across restarts and can be retried with fresh setup data without replacing the login.
+Cloudflare Access authentication is supported in the app when `cloudflared` is installed.
 
 The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
 Start in observe-only mode, then grant a bounded local lease when control is needed.
@@ -9830,8 +9834,16 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
+The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
+After a successful claim it saves the controller, requester, and allowed agents in the same private configuration used by the macOS app.
+When setup uses `--cloudflare-access`, it also saves that authentication choice for subsequent app and terminal starts, including when reusing an older login.
+The pairing code is never saved there.
+An open app refreshes externally saved settings while stopped and preserves unsaved form edits.
+Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
+Repeating setup for the same controller preserves existing app, browser, and capture choices unless you supply new app IDs.
+If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
@@ -9879,7 +9891,20 @@ On Windows and Linux, `primary-screen` is currently the only usable state target
 
 ## 4. Run the Local Bridge
 
-Start with observation only and an exact app allowlist:
+After saving setup and app access through either interface, start observation with:
+
+```bash
+mindroom desktop run
+```
+
+The command reads the same saved controller, allowlists, browser settings, and capture settings as the macOS app.
+Control leases are temporary and are never restored from saved setup.
+Stop the bridge in the interface that started it before switching interfaces.
+Saved changes take effect on the next start; they do not change a running bridge's authority.
+
+Explicit flags override settings for one terminal run without changing the saved setup.
+Changing the controller requires its complete identity and explicit requester, agent, and app allowlists.
+For example, start with observation only and an exact app allowlist:
 
 ```bash
 mindroom desktop run \
@@ -18156,6 +18181,7 @@ Run these commands in a private Matrix room containing only the requester and on
 `!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
 The local pairing command presents that code through an authenticated encrypted Matrix device event.
 It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Successful terminal setup also saves the connection for the macOS app; choose and save allowed apps in **Computer access**, then start observation there or with `mindroom desktop run`.
 Only the same Matrix requester in the same agent scope can confirm the matching claim.
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
@@ -23206,6 +23232,10 @@ Untrusted code-execution tools may still share the runner container's process na
 For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
+The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
+The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
+Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
 ### Host machine + Docker sandbox container
@@ -23614,13 +23644,17 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
+- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` (a 1 GiB tmpfs on Docker, an `emptyDir` on Kubernetes).
+  The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
+  Worker tools install their extras into the worker's own virtualenv on the state mount instead.
+  Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
   Chromium's namespace sandbox is documented in [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
 - With `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
-  With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
+  With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
@@ -24647,9 +24681,8 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 │ app     Run the native app's private structured helper over inherited standard I/O.    │
 │ login   Log in once, create an Olm device, and save its access token privately.        │
 │ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
-│ setup   Log in when needed, then claim one requester-agent pairing.                    │
-│ run     Run the outbound-only Matrix sync loop and execute locally authorized          │
-│         commands.                                                                      │
+│ setup   Pair and save the connection shared with the macOS app.                        │
+│ run     Observe using saved app/terminal setup; flags override this run only.          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -24659,7 +24692,8 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
 ### desktop setup
 
-Log in when no saved local Desktop session exists, then claim the requester-agent pairing in one command.
+Log in when needed, claim pairing, and save the connection shared with the macOS app.
+Use `--allow-app` to save app choices here, or choose them later in **Computer access**.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -24676,7 +24710,7 @@ Log in when no saved local Desktop session exists, then claim the requester-agen
 
  Usage: root desktop setup [OPTIONS]
 
- Log in when needed, then claim one requester-agent pairing.
+ Pair and save the connection shared with the macOS app.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ *  --code                              TEXT  Short-lived code returned by !desktop     │
@@ -24687,6 +24721,10 @@ Log in when no saved local Desktop session exists, then claim the requester-agen
 │ *  --controller-device-id              TEXT  Pinned cloud controller device.           │
 │                                              [required]                                │
 │ *  --controller-ed25519                TEXT  Pinned controller fingerprint. [required] │
+│    --allow-agent                       TEXT  Agent name from the setup message;        │
+│                                              prompts if omitted. Repeat as needed.     │
+│    --allow-app                         TEXT  Save allowed app IDs, or choose apps      │
+│                                              later in the macOS app.                   │
 │    --user-id                           TEXT  Expected Matrix user ID; required for     │
 │                                              password login and optional for SSO.      │
 │    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
@@ -24795,7 +24833,8 @@ Create and privately save the dedicated local desktop Matrix device.
 
 ### desktop run
 
-Run the outbound-only local Matrix worker with exact controller, requester, and agent allowlists.
+Run the outbound-only local Matrix worker using setup saved by the terminal or macOS app.
+Flags override settings for this run without changing the saved setup.
 Control remains disabled unless the local command grants a short lease.
 
 <!-- CODE:START -->
@@ -24817,73 +24856,83 @@ Control remains disabled unless the local command grants a short lease.
 
  Usage: root desktop run [OPTIONS]
 
- Run the outbound-only Matrix sync loop and execute locally authorized commands.
+ Observe using saved app/terminal setup; flags override this run only.
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ *  --controller-user-id               TEXT                        Pinned cloud controller    │
-│                                                                   Matrix user.               │
-│                                                                   [required]                 │
-│ *  --controller-device-id             TEXT                        Pinned cloud controller    │
-│                                                                   device.                    │
-│                                                                   [required]                 │
-│ *  --controller-ed25519               TEXT                        Pinned controller          │
-│                                                                   fingerprint.               │
-│                                                                   [required]                 │
-│ *  --allow-requester                  TEXT                        Human Matrix requester     │
-│                                                                   allowed to operate this    │
-│                                                                   desktop; repeat as needed. │
-│                                                                   [required]                 │
-│ *  --allow-agent                      TEXT                        MindRoom agent name        │
-│                                                                   allowed to operate this    │
-│                                                                   desktop; repeat as needed. │
-│                                                                   [required]                 │
-│ *  --allow-app                        TEXT                        Exact local application ID │
-│                                                                   exposed to the agent;      │
-│                                                                   repeat as needed.          │
-│                                                                   [required]                 │
-│    --allow-control                                                Enable semantic and        │
-│                                                                   fallback input for a short │
-│                                                                   local lease. Default is    │
-│                                                                   observe-only.              │
-│    --lease-minutes                    INTEGER RANGE [1<=x<=60]    Local control lease        │
-│                                                                   duration.                  │
-│                                                                   [default: 15]              │
-│    --max-screenshot-width             INTEGER RANGE               [default: 1600]            │
-│                                       [320<=x<=3840]                                         │
-│    --jpeg-quality                     INTEGER RANGE [40<=x<=95]   [default: 80]              │
-│    --browser-extension                                            Expose Playwright MCP      │
-│                                                                   control of an existing     │
-│                                                                   browser profile when its   │
-│                                                                   extension is installed.    │
-│    --browser-executable               PATH                        Chrome-family executable   │
-│                                                                   to open the Playwright     │
-│                                                                   extension connection page, │
-│                                                                   including Brave.           │
-│    --browser-user-data-dir            PATH                        Existing browser user-data │
-│                                                                   root containing the        │
-│                                                                   profile where the          │
-│                                                                   extension is installed.    │
-│    --browser-timeout-seconds          INTEGER RANGE [1<=x<=120]   Local Playwright MCP call  │
-│                                                                   timeout.                   │
-│                                                                   [default: 90]              │
-│    --log-level                -l      TEXT                        [default: INFO]            │
-│    --cloudflare-access                                            Authenticate Matrix        │
-│                                                                   requests interactively     │
-│                                                                   with the local cloudflared │
-│                                                                   CLI.                       │
-│                                                                   [env var:                  │
-│                                                                   MINDROOM_DESKTOP_CLOUDFLA… │
-│    --matrix-http-headers-fi…          PATH                        Owner-only JSON file of    │
-│                                                                   HTTP headers added to      │
-│                                                                   every Matrix request.      │
-│                                                                   [env var:                  │
-│                                                                   MINDROOM_DESKTOP_MATRIX_H… │
-│    --config                   -c      PATH                        MindRoom config path used  │
-│                                                                   for runtime env.           │
-│    --storage-path             -s      PATH                        Desktop bridge state       │
-│                                                                   directory.                 │
-│    --help                     -h                                  Show this message and      │
-│                                                                   exit.                      │
+│ --controller-user-id                              TEXT                  Pinned cloud         │
+│                                                                         controller Matrix    │
+│                                                                         user.                │
+│ --controller-device-…                             TEXT                  Pinned cloud         │
+│                                                                         controller device.   │
+│ --controller-ed25519                              TEXT                  Pinned controller    │
+│                                                                         fingerprint.         │
+│ --allow-requester                                 TEXT                  Human Matrix         │
+│                                                                         requester allowed to │
+│                                                                         operate this         │
+│                                                                         desktop; repeat as   │
+│                                                                         needed.              │
+│ --allow-agent                                     TEXT                  MindRoom agent name  │
+│                                                                         allowed to operate   │
+│                                                                         this desktop; repeat │
+│                                                                         as needed.           │
+│ --allow-app                                       TEXT                  Exact local          │
+│                                                                         application ID       │
+│                                                                         exposed to the       │
+│                                                                         agent; repeat as     │
+│                                                                         needed.              │
+│ --allow-control                                                         Enable semantic and  │
+│                                                                         fallback input for a │
+│                                                                         short local lease.   │
+│                                                                         Default is           │
+│                                                                         observe-only.        │
+│ --lease-minutes                                   INTEGER RANGE         Local control lease  │
+│                                                   [1<=x<=60]            duration.            │
+│                                                                         [default: 15]        │
+│ --max-screenshot-wid…                             INTEGER RANGE                              │
+│                                                   [320<=x<=3840]                             │
+│ --jpeg-quality                                    INTEGER RANGE                              │
+│                                                   [40<=x<=95]                                │
+│ --browser-extension        --no-browser-exten…                          Expose Playwright    │
+│                                                                         MCP control of an    │
+│                                                                         existing browser     │
+│                                                                         profile when its     │
+│                                                                         extension is         │
+│                                                                         installed.           │
+│ --browser-executable                              PATH                  Chrome-family        │
+│                                                                         executable to open   │
+│                                                                         the Playwright       │
+│                                                                         extension connection │
+│                                                                         page, including      │
+│                                                                         Brave.               │
+│ --browser-user-data-…                             PATH                  Existing browser     │
+│                                                                         user-data root       │
+│                                                                         containing the       │
+│                                                                         profile where the    │
+│                                                                         extension is         │
+│                                                                         installed.           │
+│ --browser-timeout-se…                             INTEGER RANGE         Local Playwright MCP │
+│                                                   [1<=x<=120]           call timeout.        │
+│ --log-level            -l                         TEXT                  [default: INFO]      │
+│ --cloudflare-access                                                     Authenticate Matrix  │
+│                                                                         requests             │
+│                                                                         interactively with   │
+│                                                                         the local            │
+│                                                                         cloudflared CLI.     │
+│                                                                         [env var:            │
+│                                                                         MINDROOM_DESKTOP_CL… │
+│ --matrix-http-header…                             PATH                  Owner-only JSON file │
+│                                                                         of HTTP headers      │
+│                                                                         added to every       │
+│                                                                         Matrix request.      │
+│                                                                         [env var:            │
+│                                                                         MINDROOM_DESKTOP_MA… │
+│ --config               -c                         PATH                  MindRoom config path │
+│                                                                         used for runtime     │
+│                                                                         env.                 │
+│ --storage-path         -s                         PATH                  Desktop bridge state │
+│                                                                         directory.           │
+│ --help                 -h                                               Show this message    │
+│                                                                         and exit.            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 

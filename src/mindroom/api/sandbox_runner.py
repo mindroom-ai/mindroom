@@ -120,10 +120,13 @@ def _startup_manifest_from_env() -> dict[str, object]:
     return payload
 
 
-def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, object]:
-    """Read startup runtime payload from the manifest path or Docker runtime JSON."""
+def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, dict[str, ToolValidationInfo]]:
+    """Read the startup runtime and primary tool validation snapshot once, from the manifest or runtime JSON."""
     if os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
-        return constants.deserialize_startup_manifest(_startup_manifest_from_env())
+        startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
+            _startup_manifest_from_env(),
+        )
+        return startup_runtime_paths, deserialize_tool_validation_snapshot(tool_validation_snapshot)
 
     raw_runtime_paths = os.environ.get(_STARTUP_RUNTIME_PATHS_JSON_ENV, "").strip()
     if not raw_runtime_paths:
@@ -135,9 +138,8 @@ def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, object]:
     return constants.deserialize_runtime_paths(json.loads(raw_runtime_paths)), {}
 
 
-def _startup_runtime_paths_from_env() -> RuntimePaths:
-    """Read the committed sandbox-runner runtime payload from startup env."""
-    startup_runtime_paths, _tool_validation_snapshot = _startup_runtime_payload_from_env()
+def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Commit the startup runtime payload together with this runner's own startup env."""
     credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
     process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
@@ -225,35 +227,28 @@ def _wipe_process_environment_entry(address: int, size: int) -> None:
         ctypes.memset(address, 0, size)
 
 
-def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str, ToolValidationInfo]:
-    startup_manifest_path = constants.sandbox_startup_manifest_path(runtime_paths.storage_root)
-    if not startup_manifest_path.exists():
-        return {}
-    startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
-        json.loads(startup_manifest_path.read_text(encoding="utf-8")),
-    )
-    if startup_runtime_paths.storage_root != runtime_paths.storage_root:
-        msg = "Sandbox startup manifest storage_root does not match runtime storage_root."
-        raise RuntimeError(msg)
-    return deserialize_tool_validation_snapshot(tool_validation_snapshot)
-
-
-def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+def _runtime_config_or_empty(
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, ToolValidationInfo] | None = None,
+) -> Config:
     """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             return load_config(runtime_paths)
-        return _dedicated_worker_runtime_config_or_empty(runtime_paths)
+        return _dedicated_worker_runtime_config_or_empty(runtime_paths, tool_validation_snapshot)
     return Config.validate_with_runtime({}, runtime_paths)
 
 
-def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+def _dedicated_worker_runtime_config_or_empty(
+    runtime_paths: RuntimePaths,
+    tool_validation_snapshot: Mapping[str, ToolValidationInfo] | None,
+) -> Config:
     """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
     # The authored config may be split across !include files; a plain
     # yaml.safe_load crashes the worker on the include tags.
     data, _config_source_files = load_yaml_config_source(runtime_paths.config_path)
 
-    tool_validation_snapshot = _upstream_tool_validation_snapshot(runtime_paths)
     if not tool_validation_snapshot:
         return load_config(runtime_paths)
 
@@ -304,9 +299,15 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
 
 
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
-    """Read the sandbox runner runtime context from explicit startup payload."""
-    runtime_paths = _startup_runtime_paths_from_env()
-    return runtime_paths, _runtime_config_or_empty(runtime_paths)
+    """Read the sandbox runner runtime context from explicit startup payload.
+
+    This is the only read of the startup manifest. The runner keeps the result in
+    memory for its lifetime, so the primary rewriting the manifest for a replacement
+    pod changes nothing in a runner that is still serving.
+    """
+    startup_runtime_paths, tool_validation_snapshot = _startup_runtime_payload_from_env()
+    runtime_paths = _committed_startup_runtime_paths(startup_runtime_paths)
+    return runtime_paths, _runtime_config_or_empty(runtime_paths, tool_validation_snapshot=tool_validation_snapshot)
 
 
 def initialize_sandbox_runner_app(

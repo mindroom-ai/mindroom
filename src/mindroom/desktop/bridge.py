@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
@@ -60,6 +62,29 @@ logger = get_logger(__name__)
 _MAX_FUTURE_SKEW_MS = 30_000
 _MAX_PARAMETER_TEXT_LENGTH = 2_000
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
+
+
+async def _run_macos_application_events() -> None:
+    """Refresh AppKit's application cache while asyncio owns the main thread."""
+    if sys.platform != "darwin":
+        return
+    if threading.current_thread() is not threading.main_thread():
+        msg = "The macOS desktop bridge must run on the main thread."
+        raise RuntimeError(msg)
+
+    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        CFRunLoopRunInMode,
+        kCFRunLoopDefaultMode,
+    )
+    from objc import autorelease_pool  # noqa: PLC0415
+
+    while True:
+        # NSWorkspace and NSRunningApplication update only on the main Cocoa
+        # run loop. Keep pumping while native worker threads wait for launches
+        # and activation; a refresh only before dispatch cannot observe either.
+        with autorelease_pool():
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, False)
+        await asyncio.sleep(0.05)
 
 
 class _DesktopBridgeStoppedError(RuntimeError):
@@ -316,11 +341,13 @@ class DesktopBridge:
         self._work_available.set()
         self._response_available.set()
         async with asyncio.TaskGroup() as group:
+            application_events = group.create_task(_run_macos_application_events(), name="desktop_application_events")
             executor = group.create_task(self._execute_loop(), name="desktop_executor")
             sender = group.create_task(self._deliver_loop(), name="desktop_responses")
             await self._stopped.wait()
             executor.cancel()
             sender.cancel()
+            application_events.cancel()
 
     async def _execute_loop(self) -> None:
         while True:

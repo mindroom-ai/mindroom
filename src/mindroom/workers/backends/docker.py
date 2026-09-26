@@ -157,6 +157,14 @@ _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
 _DEDICATED_WORKER_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]
 _SHARED_STORAGE_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]
 
+# Worker containers get a read-only root filesystem. The image's /app tree stays
+# owned by the runtime user so trusted primaries can install tool extras into it,
+# but in a worker that would let tool code replace runner code the runner imports
+# later, and a stopped container keeps its writable layer across restarts. Only the
+# bind mounts and this private /tmp stay writable. The tmpfs is RAM-backed and
+# workers have no memory limit, so its size is capped.
+_WORKER_TMPFS = {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
+
 # Backend-owned control state lives beside the worker roots, never inside one.
 # Each worker root is bind-mounted read-write into its own container, so any
 # lifecycle state kept there would be rewritable by the untrusted tool code the
@@ -194,6 +202,13 @@ def _docker_seccomp_profile_matches(options: list[str]) -> bool:
         return json.loads(actual_profile_json) == json.loads(expected_profile_json)
     except (json.JSONDecodeError, TypeError):
         return False
+
+
+def _container_root_filesystem_read_only(container: _DockerContainer | None) -> bool:
+    if container is None:
+        return False
+    host_config = container.attrs.get("HostConfig")
+    return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
 
 
 def _docker_security_options_match(value: object) -> bool:
@@ -1143,8 +1158,8 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
-        if self.config.security_policy == "computer" and not self._container_runtime_security_matches(
-            container,
+        if not _container_root_filesystem_read_only(container) or (
+            self.config.security_policy == "computer" and not self._container_runtime_security_matches(container)
         ):
             return False
 
@@ -1248,6 +1263,8 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                read_only=True,
+                tmpfs=_WORKER_TMPFS,
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
@@ -1428,23 +1445,16 @@ class DockerWorkerBackend:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
         # ensure_worker's CLI profile validation guarantees CLI workers have no extra env.
         env.update(self.config.extra_env)
-        if self._tool_validation_snapshot is not None or cli_worker:
-            env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
-                Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
-            )
+        env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(sandbox_startup_manifest_path(dedicated_root))
         return env
 
     def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, worker_key: str) -> None:
-        """Persist primary validation state before starting one Docker worker."""
-        cli_worker = is_cli_worker_key(worker_key)
-        if self._tool_validation_snapshot is None and not cli_worker:
-            sandbox_startup_manifest_path(paths.state.root).unlink(missing_ok=True)
-            return
+        """Persist primary validation state before creating one Docker worker."""
         dedicated_root = Path(self.config.storage_mount_path)
         write_startup_manifest(
             paths.state.root,
             self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
-            tool_validation_snapshot={} if cli_worker else self._tool_validation_snapshot,
+            tool_validation_snapshot={} if is_cli_worker_key(worker_key) else self._tool_validation_snapshot,
             public_runtime=True,
         )
 
@@ -1510,18 +1520,25 @@ class DockerWorkerBackend:
         return str(Path(self.config.storage_mount_path) / "agents" / agent_name / "workspace")
 
     def _worker_root_mount_specs(self, paths: LocalWorkerStatePaths) -> list[tuple[Path, str, bool]]:
-        """Return the worker-root binds, keeping the shared-credential mirror read-only.
+        """Return the worker-root binds, keeping primary-written directories read-only.
 
         The worker root is writable so tools can persist state, but the primary keeps
-        mirroring credentials into ``.shared_credentials`` on every ensure. Mounting that
-        directory read-only stops worker code from deleting it or replacing it with a link
-        into the deployment-wide credential store.
+        mirroring credentials into ``.shared_credentials`` on every ensure and writes the
+        startup manifest the runner boots from into ``.runtime``. Mounting those
+        directories read-only stops worker code from rewriting them or replacing them
+        with links elsewhere.
         """
+        storage_mount_path = Path(self.config.storage_mount_path)
         return [
             (paths.root, self.config.storage_mount_path, False),
             (
                 paths.root / WORKER_SHARED_CREDENTIALS_DIRNAME,
                 f"{self.config.storage_mount_path}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+                True,
+            ),
+            (
+                sandbox_startup_manifest_path(paths.root).parent,
+                str(sandbox_startup_manifest_path(storage_mount_path).parent),
                 True,
             ),
         ]

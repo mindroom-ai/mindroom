@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import traceback
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
@@ -5995,7 +5996,8 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
-    path_overrides = ({}, {"PATH": str(runtime_bin)})[explicit_runtime_path]
+    runtime_overrides = {"PATH": str(runtime_bin), "TMPDIR": str(tmp_path / "runtime-tmp")}
+    path_overrides = ({}, runtime_overrides)[explicit_runtime_path]
     runtime_paths = replace(
         runtime_paths,
         process_env={**runtime_paths.process_env, **path_overrides},
@@ -6058,6 +6060,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["TMPDIR"] == tempfile.gettempdir()
     assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))

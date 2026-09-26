@@ -142,6 +142,7 @@ uv tool install 'mindroom[desktop]'
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
+When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
@@ -152,12 +153,13 @@ Chrome and Brave are supported by the local command through an explicit browser 
 ## Native macOS setup
 
 Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
-In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
-Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
-Confirm the displayed controller fingerprint, requester, and agent locally, then choose **Save Setup**.
-Confirm the saved identities again before choosing **Claim Pairing**.
-Return the displayed `!desktop confirm ...` command to the same chat.
-For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
+In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into **Connect**.
+Review the displayed controller fingerprint, requester, and agent, then reuse the saved Matrix login or sign in.
+Confirm those identities and select **Save and Connect**. Return the displayed confirmation command to the same chat, wait for the agent's confirmation, and select **I’ve Confirmed in Chat**.
+Choose allowed applications in **Apps** and select **Save App Access**, then complete **Permissions** and **Start**.
+The top summary distinguishes a missing connection, saved setup with access off, and an active connection; it names the next action.
+Incomplete app setup remains disabled across restarts and can be retried with fresh setup data without replacing the login.
+Cloudflare Access authentication is supported in the app when `cloudflared` is installed.
 
 The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
 Start in observe-only mode, then grant a bounded local lease when control is needed.
@@ -289,8 +291,16 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
+The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
+After a successful claim it saves the controller, requester, and allowed agents in the same private configuration used by the macOS app.
+When setup uses `--cloudflare-access`, it also saves that authentication choice for subsequent app and terminal starts, including when reusing an older login.
+The pairing code is never saved there.
+An open app refreshes externally saved settings while stopped and preserves unsaved form edits.
+Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
+Repeating setup for the same controller preserves existing app, browser, and capture choices unless you supply new app IDs.
+If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
@@ -338,7 +348,20 @@ On Windows and Linux, `primary-screen` is currently the only usable state target
 
 ## 4. Run the Local Bridge
 
-Start with observation only and an exact app allowlist:
+After saving setup and app access through either interface, start observation with:
+
+```bash
+mindroom desktop run
+```
+
+The command reads the same saved controller, allowlists, browser settings, and capture settings as the macOS app.
+Control leases are temporary and are never restored from saved setup.
+Stop the bridge in the interface that started it before switching interfaces.
+Saved changes take effect on the next start; they do not change a running bridge's authority.
+
+Explicit flags override settings for one terminal run without changing the saved setup.
+Changing the controller requires its complete identity and explicit requester, agent, and app allowlists.
+For example, start with observation only and an exact app allowlist:
 
 ```bash
 mindroom desktop run \

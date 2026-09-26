@@ -51,7 +51,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func refresh() {
-        statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.desktopStatusLabel)"
+        statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
         menuNeedsUpdate(menu)
     }
 
@@ -79,7 +79,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(actionItem("Refresh Local Agent Status", symbol: "arrow.clockwise", action: #selector(refreshStatus)))
         }
         menu.addItem(actionItem(
-            "Computer access: \(desktop.desktopStatusLabel)…",
+            "Computer access: \(desktop.connectionStatusLabel)…",
             symbol: "desktopcomputer", action: #selector(openComputerAccess)
         ))
         if desktop.status.authority.controlAvailable {

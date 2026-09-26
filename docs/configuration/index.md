@@ -1167,6 +1167,8 @@ If room creation succeeds but its local room-ID receipt is lost, alias recovery 
 Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
 Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
 Room ownership and membership are verified before reusing an alias.
+The owner may invite other MindRoom agents into their personal room; an agent sees only messages sent after its invite.
+Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
