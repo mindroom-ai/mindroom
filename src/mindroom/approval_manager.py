@@ -399,10 +399,11 @@ class ApprovalManager:
         if self.prepare_event is None:
             return None
         event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
-        arguments_redacted = redact_sensitive_data(raw_arguments) != raw_arguments
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
+        review_arguments = full_arguments if full_arguments is not None else event_arguments
+        arguments_redacted = review_arguments != raw_arguments
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
