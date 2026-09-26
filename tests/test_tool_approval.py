@@ -1755,6 +1755,32 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
     assert truncated is False
 
 
+@pytest.mark.asyncio
+async def test_approval_card_is_not_approvable_when_redaction_changes_arguments(tmp_path: Path) -> None:
+    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+        return content
+
+    manager = ApprovalManager(test_runtime_paths(tmp_path), prepare_event=prepare_event)
+
+    card = await manager._prepare_approval_card(
+        approval_id="approval-1",
+        tool_call_id="call-1",
+        tool_name="shell",
+        raw_arguments={"command": "deploy", "api_key": "sk-test-approval-value"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        expires_at_ns=9_000_000_000_000_000_000,
+        target_fields={},
+    )
+
+    assert card is not None
+    assert card.payload["arguments"]["api_key"] == "***redacted***"
+    assert card.payload["approvable"] is False
+
+
 def test_full_event_arguments_returns_complete_payload() -> None:
     arguments = {"content": "x" * 10_000, "path": "notes.txt"}
 

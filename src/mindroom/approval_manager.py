@@ -399,6 +399,7 @@ class ApprovalManager:
         if self.prepare_event is None:
             return None
         event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
+        arguments_redacted = redact_sensitive_data(raw_arguments) != raw_arguments
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
@@ -415,6 +416,8 @@ class ApprovalManager:
             requested_at=_utcnow(),
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
         )
+        if arguments_redacted:
+            content["approvable"] = False
         if (
             grant_operation is not None
             and thread_id
