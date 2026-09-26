@@ -830,3 +830,92 @@ async def test_cli_drains_native_work_before_releasing_owner(
     finally:
         release_native.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A terminal bridge serves folders and shell without GUI grants, and stopping it ends the local grant."""
+    from mindroom.desktop.bridge import DesktopBridge  # noqa: PLC0415
+    from mindroom.desktop.shell import DesktopShellError  # noqa: PLC0415
+
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    bridges: list[DesktopBridge] = []
+
+    class RecordingBridge(DesktopBridge):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            bridges.append(self)
+
+    class Source:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        async def wait_for_work(self) -> None:
+            await asyncio.Event().wait()
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("GUI setup ran for a bridge without applications")
+
+    owner = SimpleNamespace(client=client, source=Source(), close=client.close)
+    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
+    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
+    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", forbidden)
+    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", forbidden)
+    monkeypatch.setattr(
+        "mindroom.desktop.login_environment.capture_login_environment",
+        AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
+    )
+    monkeypatch.setattr(desktop_cli, "_terminal_input_fd", lambda: None)
+    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", RecordingBridge)
+    task = asyncio.create_task(
+        desktop_cli._run_bridge(
+            runtime_paths=SimpleNamespace(storage_root=tmp_path),
+            session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
+            controller_user_id="@cloud:example.org",
+            controller_device_id="CLOUD",
+            controller_ed25519="fingerprint",
+            allow_requester=frozenset({"@alice:example.org"}),
+            allow_agent=frozenset({"computer"}),
+            allow_app=frozenset(),
+            allow_control=False,
+            lease_minutes=15,
+            max_screenshot_width=1600,
+            jpeg_quality=80,
+            file_roots=(root,),
+            shell_enabled=True,
+            shell_auto_approve_minutes=5,
+        ),
+    )
+    try:
+        for _ in range(500):
+            if client.to_device_callbacks and bridges:
+                break
+            await asyncio.sleep(0.01)
+        bridge = bridges[0]
+        status = bridge.local_status()
+        assert bridge.provider is None
+        assert [folder["path"] for folder in status["file_roots"]] == [str(root)]
+        assert 290 < status["shell"]["auto_approve_remaining_seconds"] <= 300
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    shell = bridge.shell
+    assert shell is not None
+    assert shell.status()["auto_approve_remaining_seconds"] == 0.0
+    with pytest.raises(DesktopShellError, match="closed"):
+        shell.grant(60)
+    assert client.to_device_callbacks == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Applications: none" in output
+    assert f"Read-only folders: {root}" in output
+    assert "every locally allowed requester and agent" in output
+    assert "for 5 minutes" in output
+    assert "observe-only" not in output
+    assert "emergency stop" not in output

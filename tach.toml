@@ -3340,6 +3340,11 @@ path = "mindroom.desktop.login_environment"
 depends_on = ["mindroom.constants", "mindroom.desktop.shell"]
 
 [[modules]]
+path = "mindroom.desktop.shell_prompt"
+depends_on = []
+visibility = ["mindroom.cli.desktop"]
+
+[[modules]]
 path = "mindroom.desktop.configuration"
 depends_on = [
     "mindroom.desktop.protocol",
@@ -4045,7 +4050,9 @@ depends_on = [
     "mindroom.desktop.bridge",
     "mindroom.desktop.cloudflare_access",
     "mindroom.desktop.command_journal",
+    "mindroom.desktop.filesystem",
     "mindroom.desktop.identity",
+    "mindroom.desktop.login_environment",
     "mindroom.desktop.login_method",
     "mindroom.desktop.native_config",
     "mindroom.desktop.pairing_client",
@@ -4053,6 +4060,8 @@ depends_on = [
     "mindroom.desktop.provider",
     "mindroom.desktop.protocol",
     "mindroom.desktop.session",
+    "mindroom.desktop.shell",
+    "mindroom.desktop.shell_prompt",
     "mindroom.desktop.sso",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
