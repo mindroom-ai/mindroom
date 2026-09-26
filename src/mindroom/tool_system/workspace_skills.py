@@ -101,10 +101,15 @@ def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
 
 
 def list_support_files(skill_fd: int, directory: str) -> list[str]:
-    """Return visible regular files directly inside one support directory; a linked directory has none."""
+    """Return the readable regular files directly inside one support directory; a linked directory has none."""
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
-            return list_entries(support_fd, directories=False)
+            return [
+                filename
+                for filename in list_entries(support_fd, directories=False)
+                # A file too large to read is not offered.
+                if os.stat(filename, dir_fd=support_fd, follow_symlinks=False).st_size <= MAX_SKILL_FILE_BYTES
+            ]
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -122,6 +127,14 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
     return fields
 
 
+def _strict_frontmatter(text: str) -> Any:  # noqa: ANN401
+    try:
+        return yaml_io.safe_load(text) or {}
+    except ValueError as exc:
+        # PyYAML refuses impossible dates such as 2026-02-30 with ValueError instead of YAMLError.
+        raise YAMLError(str(exc)) from exc
+
+
 def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str, Any], str]:
     """Split SKILL.md into its frontmatter mapping and instruction body.
 
@@ -131,7 +144,7 @@ def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str
     if match is None:
         return {}, content
     try:
-        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+        frontmatter = _strict_frontmatter(match.group(1))
     except YAMLError:
         if not loose:
             raise
@@ -164,16 +177,6 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     return None
 
 
-# AGNO_COMPAT: LocalSkills reads skill files by pathname and follows links.
-# Reason: Agno's local loader opens SKILL.md, scripts/ and references/ with pathname reads, so a link planted in a
-# worker-shared workspace would make the primary read files outside it. The loader has no reader or descriptor
-# extension point, so workspace roots build the same Skill fields from descriptor-bound reads.
-# Upstream issue: tracking gap; no Agno issue or PR proposes caller-owned file access for LocalSkills.
-# Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
-# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery.
-# Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
-# tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
-# tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], Result | None]) -> list[Result]:
     """Read every visible workspace skill directory, skipping unreadable entries and an unavailable root.
 
@@ -203,6 +206,16 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
     return results
 
 
+# AGNO_COMPAT: LocalSkills reads skill files by pathname and follows links.
+# Reason: Agno's local loader opens SKILL.md, scripts/ and references/ with pathname reads, so a link planted in a
+# worker-shared workspace would make the primary read files outside it. The loader has no reader or descriptor
+# extension point, so workspace roots build the same Skill fields from descriptor-bound reads.
+# Upstream issue: tracking gap; no Agno issue or PR proposes caller-owned file access for LocalSkills.
+# Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
+# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery.
+# Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
+# tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
+# tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
     return _each_skill_directory(

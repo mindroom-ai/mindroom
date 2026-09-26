@@ -23,6 +23,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
+from mindroom.tool_system.workspace_skills import MAX_SKILL_FILE_BYTES
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -603,20 +604,49 @@ def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> Non
     assert skills is None
 
 
-def test_workspace_skill_with_loose_frontmatter_loads_like_agno(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("frontmatter", "description"),
+    [
+        ("description: Use when: deploying the app to staging\n", "Use when: deploying the app to staging"),
+        ("description: Use when deploying\nupdated: 2026-02-30\n", "Use when deploying"),
+    ],
+    ids=["colon in a value", "impossible date"],
+)
+def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
+    tmp_path: Path,
+    frontmatter: str,
+    description: str,
+) -> None:
     """Frontmatter that is not strict YAML falls back to key: value lines, as Agno's LocalSkills does."""
     storage = tmp_path / "storage"
     skill_dir = _workspace_skills(storage) / "deploy-checks"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: deploy-checks\ndescription: Use when: deploying the app to staging\n---\nRun the smoke test.\n",
+        f"---\nname: deploy-checks\n{frontmatter}---\nRun the smoke test.\n",
         encoding="utf-8",
     )
     skills = _load(tmp_path, storage)
     assert _skill_names(skills) == ["deploy-checks"]
     skill = skills.get_skill("deploy-checks")
     assert skill is not None
-    assert skill.description == "Use when: deploying the app to staging"
+    assert skill.description == description
+
+
+def test_workspace_skill_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
+    """A SKILL.md over the read limit does not load, and a support file over it is not offered."""
+    storage = tmp_path / "storage"
+    root = _workspace_skills(storage)
+    skill_path = _write_skill(root, "guide", "Guide")
+    (skill_path.parent / "references").mkdir()
+    (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
+    (skill_path.parent / "references" / "manual.md").write_text("x" * (MAX_SKILL_FILE_BYTES + 1), encoding="utf-8")
+    huge = _write_skill(root, "huge", "Huge")
+    huge.write_text(huge.read_text(encoding="utf-8") + "x" * MAX_SKILL_FILE_BYTES, encoding="utf-8")
+    skills = _load(tmp_path, storage)
+    assert _skill_names(skills) == ["guide"]
+    skill = skills.get_skill("guide")
+    assert skill is not None
+    assert skill.references == ["notes.md"]
 
 
 def test_workspace_support_reads_refuse_swapped_links(tmp_path: Path) -> None:
