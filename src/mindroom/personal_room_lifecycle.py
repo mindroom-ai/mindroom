@@ -114,6 +114,7 @@ class PersonalRoomLifecycle:
                 await asyncio.gather(task, return_exceptions=True)
                 self._reconciliation_task = None
         self._next_reconciliation_at = 0.0
+        await self.service.cancel_guest_removal_retries(timeout_seconds=timeout_seconds)
 
     async def _onboard(
         self,
@@ -169,6 +170,7 @@ class PersonalRoomLifecycle:
         """Finish local welcomes and route definite joins without bypassing baseline admission."""
         if event.membership in {"join", "leave", "ban"}:
             await self.service.owner_membership_event(room.room_id, event.state_key, event.membership)
+        await self.service.guest_membership_event(room, event.state_key, event.membership)
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
         if self.observes_onboarding_joins and event.prev_membership is not None:
