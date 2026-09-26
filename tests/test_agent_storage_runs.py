@@ -498,6 +498,18 @@ def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
     assert [run["run_id"] for run in json.loads(blob)] == ["team2"]
 
 
+def test_runs_without_removes_every_descendant() -> None:
+    """Grandchildren leave with their root even when stored before it."""
+    runs = [
+        RunOutput(run_id="unrelated"),
+        RunOutput(run_id="child", parent_run_id="root"),
+        RunOutput(run_id="grandchild", parent_run_id="child"),
+        RunOutput(run_id="root"),
+    ]
+
+    assert [run.run_id for run in runs_without(runs, ["root"])] == ["unrelated"]
+
+
 def test_runs_without_drops_a_child_that_has_no_run_id() -> None:
     """A descendant is identified by its parent_run_id even when it never got a run_id of its own."""
     root = TeamRunOutput(run_id="root", team_id="eng", session_id="t1")

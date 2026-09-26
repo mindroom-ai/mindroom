@@ -11,7 +11,7 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.agent_storage import get_agent_session, get_team_session, replace_runs
+from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.handled_turns import (
@@ -21,8 +21,8 @@ from mindroom.handled_turns import (
     same_turn_identity,
     with_user_stop,
 )
-from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
-from mindroom.legacy_revision_replay import summary_depends_on_source, summary_source_id
+from mindroom.history.storage import remove_redacted_event_from_compaction
+from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.session_ids import create_session_id
 from mindroom.turn_record import (
     EditPreparation,
@@ -1156,24 +1156,15 @@ class TurnStore:
                 if session_type is SessionType.TEAM
                 else get_agent_session(storage, target.session_id)
             )
-            seen_event_ids = read_scope_seen_event_ids(session, history_scope) if session is not None else set()
-            scope_contains_source = redacted_event_id in seen_event_ids or summary_depends_on_source(
-                legacy_summary_source_id,
-                has_summary=session is not None and session.summary is not None,
-                seen_event_ids=seen_event_ids,
+            removed_compacted = session is not None and remove_redacted_event_from_compaction(
+                storage,
+                session,
+                history_scope,
+                event_id=redacted_event_id,
+                removed_live_run=removed_run,
+                legacy_source_event_id=legacy_summary_source_id,
             )
-            removed_summary_dependents = bool(
-                session is not None and session.summary is not None and scope_contains_source and session.runs,
-            )
-            if removed_summary_dependents:
-                assert session is not None
-                replace_runs(storage, session, [])
-            invalidated_summary = False
-            if session is not None and (removed_run or scope_contains_source):
-                invalidated_summary = invalidate_compacted_replay(session, history_scope)
-                if invalidated_summary:
-                    storage.upsert_session(session)
-            return removed_run or removed_summary_dependents or invalidated_summary
+            return removed_run or removed_compacted
         finally:
             storage.close()
 

@@ -30,7 +30,7 @@ from mindroom.history.replay import (
 from mindroom.history.runtime import _compaction_fallback_is_distinct
 from mindroom.history.storage import (
     read_scope_state,
-    write_scope_state,
+    set_force_compaction_state,
 )
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
@@ -55,6 +55,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _runtime_paths,
     _session,
+    archived_run_ids,
 )
 
 
@@ -292,7 +293,7 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
     assert execution_plan.replay_window_tokens == 1
     assert execution_plan.summary_input_budget_tokens == 881_616
-    assert execution_plan.destructive_compaction_available is True
+    assert execution_plan.text_compaction_available is True
     assert execution_plan.unavailable_reason is None
 
 
@@ -472,7 +473,7 @@ def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> No
         CompactionOverrideConfig(timeout_seconds=-1)
 
 
-def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
+def test_authored_empty_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -508,7 +509,7 @@ def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_p
     assert execution_plan.authored_compaction_enabled is True
 
 
-def test_omitted_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
+def test_omitted_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -1013,7 +1014,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
     assert execution_plan.trigger_threshold_tokens == 16_000
     assert execution_plan.replay_budget_tokens == 8_000
     assert execution_plan.hard_replay_budget_tokens == 8_000
-    assert execution_plan.destructive_compaction_available is True
+    assert execution_plan.text_compaction_available is True
 
     decision = classify_compaction_decision(
         plan=execution_plan,
@@ -1107,7 +1108,7 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     )
 
     assert execution_plan.summary_input_budget_tokens == 0
-    assert execution_plan.destructive_compaction_available is False
+    assert execution_plan.text_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
 
 
@@ -1140,7 +1141,7 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
     )
 
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
-    assert execution_plan.destructive_compaction_available is expected_available
+    assert execution_plan.text_compaction_available is expected_available
     assert (execution_plan.unavailable_reason is None) is expected_available
 
 
@@ -1236,7 +1237,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
-        destructive_compaction_available=True,
+        text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
         compaction_context_window=32_000,
@@ -1263,7 +1264,7 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
 def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_within_hard_budget() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
-        destructive_compaction_available=True,
+        text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
         compaction_context_window=32_000,
@@ -1347,7 +1348,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
@@ -1494,7 +1495,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     agent = _agent(db=storage)
@@ -1530,7 +1531,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     assert persisted.summary.summary == "merged summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
-    assert state.last_compacted_run_count == 2
+    assert len(archived_run_ids(storage)) == 2
     assert state.force_compact_before_next_run is False
 
 

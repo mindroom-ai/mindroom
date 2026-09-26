@@ -15,7 +15,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import read_scope_state, write_scope_state
+from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import (
     CompactionOutcome,
     HistoryScope,
@@ -63,7 +63,7 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
 def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
     defaults: dict[str, object] = {
         "authored_compaction_enabled": True,
-        "destructive_compaction_available": True,
+        "text_compaction_available": True,
         "explicit_compaction_model": False,
         "compaction_model_name": "summary-model",
         "compaction_context_window": 64_000,
@@ -83,7 +83,7 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
 def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
     return ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
-        destructive_compaction_available=True,
+        text_compaction_available=True,
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
         compaction_context_window=64_000,
@@ -351,11 +351,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
             created_at=1,
             updated_at=1,
         )
-        write_scope_state(
-            session,
-            scope,
-            HistoryScopeState(force_compact_before_next_run=True, last_summary_model="summary-model"),
-        )
+        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
         seed_session(first_storage, session)
 
         persisted = second_storage.get_session("session-1", SessionType.TEAM)
@@ -365,7 +361,6 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         assert persisted.metadata["source"] == "alice"
         state = read_scope_state(persisted, scope)
         assert state.force_compact_before_next_run is True
-        assert state.last_summary_model == "summary-model"
     finally:
         first_storage.close()
         second_storage.close()

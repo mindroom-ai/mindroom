@@ -251,14 +251,14 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-scope overrides for destructive compaction.
+    """Optional per-scope overrides for text compaction.
 
     An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
     """
 
     enabled: bool | None = Field(
         default=None,
-        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
+        description="Whether to allow automatic pre-reply text compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
@@ -314,11 +314,11 @@ class CompactionOverrideConfig(BaseModel):
 
 
 class CompactionConfig(BaseModel):
-    """Concrete destructive compaction configuration."""
+    """Concrete text compaction configuration."""
 
     enabled: bool = Field(
         default=True,
-        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
+        description="Whether to allow automatic pre-reply text compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
@@ -411,7 +411,7 @@ class DefaultsConfig(BaseModel):
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
-        description="Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
+        description="Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
     )
     num_history_runs: int | None = Field(
         default=None,

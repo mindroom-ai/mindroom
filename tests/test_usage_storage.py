@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,11 +17,12 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 from sqlalchemy.exc import IntegrityError
 
 from mindroom.agent_storage import create_state_storage
-from mindroom.history.storage import record_compaction_chunk
+from mindroom.history.storage import archive_compaction_chunk
 from mindroom.history.types import HistoryScope
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.usage_stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
@@ -257,12 +257,14 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Sqlite
     assert before[0].runs[0].metrics["total_tokens"] == 10
     session = usage_db.get_session("session", session_type=SessionType.AGENT)
     assert isinstance(session, AgentSession)
-    record_compaction_chunk(
+    archive_compaction_chunk(
         storage=usage_db,
-        persisted_session=session,
-        working_session=deepcopy(session),
+        session=session,
         scope=HistoryScope(kind="agent", scope_id="code"),
-        compacted_run_ids=["run-1"],
+        summary=SessionSummary(summary="summary"),
+        summary_model="summary-model",
+        archived_runs=[run for run in session.runs or [] if run.run_id == "run-1"],
     )
+    assert session.runs == []
     usage_db.close()
     assert list(iter_usage_storage_rows(source)) == before

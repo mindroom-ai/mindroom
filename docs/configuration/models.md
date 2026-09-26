@@ -462,7 +462,7 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 ## Context Window
 
 Set `context_window` to the model provider's actual limit.
-MindRoom uses it to budget persisted replay and required destructive compaction unless compaction config sets a smaller `replay_window_tokens` cap.
+MindRoom uses it to budget persisted replay and required text compaction unless compaction config sets a smaller `replay_window_tokens` cap.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
@@ -485,8 +485,8 @@ You can tune compaction behavior with these settings:
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
@@ -534,7 +534,7 @@ Native compaction requires automatic compaction to be enabled, all-history repla
 Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
 Manual `compact_context` always requests portable text compaction.
 Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
-Native compaction itself never deletes canonical runs; storage therefore continues to grow until portable text compaction removes older runs.
+Native compaction itself never moves canonical runs; they stay stored in `session.runs` until portable text compaction moves older runs into the compaction archive.
 
 Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
 The system instructions keep their shared prompt-cache prefix.
