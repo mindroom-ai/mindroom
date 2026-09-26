@@ -2343,6 +2343,29 @@ async def test_the_review_reads_support_files_by_the_paths_it_lists(tmp_path: Pa
         assert loaded["content"] == "Notes."
 
 
+@pytest.mark.asyncio
+async def test_a_refused_removal_keeps_the_reviews_read(tmp_path: Path) -> None:
+    """A removal that changes nothing leaves the loaded file patchable without loading it again."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    await tools.get_skill_instructions("deploy-checks")
+    refused = json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="SKILL.md"))
+    assert not refused["success"]
+    patched = json.loads(
+        await tools.skill_manage(
+            "patch",
+            "deploy-checks",
+            old_string="1. Run the smoke test.",
+            new_string="1. Run smoke.",
+        ),
+    )
+    assert patched["success"], patched
+    assert "1. Run smoke." in (root / "deploy-checks/SKILL.md").read_text()
+
+
 def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_path: Path) -> None:
     """Like Hermes' record of a create, a chat skill_manage create of a reused name starts a fresh, user-owned record."""
     root = tmp_path / "skills"

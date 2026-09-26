@@ -1738,8 +1738,8 @@ class ResponseRunner:
 
         async def continue_response(_message_id: str | None) -> None:
             nonlocal post_effect_continuation
-            self._cancel_approval_skill_review(claimed)
             try:
+                self._cancel_approval_skill_review(claimed)
                 outcome, post_effect_continuation = await self._execute_claimed_approval(
                     claimed,
                     request=request,
@@ -2123,17 +2123,14 @@ class ResponseRunner:
         )
 
     def _cancel_approval_skill_review(self, continuation: ApprovalContinuation) -> None:
-        """Stop the running review of the conversation an agent continuation resumes; it never fails the continuation."""
+        """Stop the running review of the conversation an agent continuation resumes."""
         if continuation.entity_kind != "agent" or not self._learns_skills(continuation.entity_name):
             return
-        try:
-            execution_identity = parse_tool_execution_identity_payload(
-                continuation.execution_identity,
-                error_prefix="Approval continuation execution_identity",
-            )
-            self._cancel_skill_review(continuation.entity_name, continuation.session_id, execution_identity)
-        except (TypeError, ValueError):
-            self.deps.logger.exception("Could not stop the skill review of an approval continuation")
+        execution_identity = parse_tool_execution_identity_payload(
+            continuation.execution_identity,
+            error_prefix="Approval continuation execution_identity",
+        )
+        self._cancel_skill_review(continuation.entity_name, continuation.session_id, execution_identity)
 
     def _skill_review(
         self,
