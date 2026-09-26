@@ -114,7 +114,7 @@ def archive_runs(
 # Legacy format: A scope whose runs the destructive compactor deleted, leaving only a
 # ``session.summary``, tombstoned run ids, and preserved Matrix seen ids (see
 # ``history/legacy_compaction_state.py`` for provenance and the one-time migration).
-# Last legacy release: v2026.9.313; replacement: the next release archives compacted runs.
+# Last legacy release: v2026.9.314; replacement: the next release archives compacted runs.
 # Handling: The migration records a ``legacy`` generation holding that summary, the seen ids it
 # may contain, and ``run_data``-free tombstone rows. ``compacted_event_ids`` counts those seen ids
 # while the summary replays; ``has_legacy_summary``, ``legacy_event_ids``, ``clear_to_legacy``, and

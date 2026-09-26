@@ -416,7 +416,7 @@ def remove_redacted_event_from_compaction(
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
 # Legacy format: A legacy generation (see ``history/legacy_compaction_state.py``) whose summary
 # still replays and whose provenance is only the preserved seen ids the migration captured.
-# Last legacy release: v2026.9.313; replacement: the next release records exact per-run provenance.
+# Last legacy release: v2026.9.314; replacement: the next release records exact per-run provenance.
 # Handling: That summary cannot be split by run, and every later summary includes it. An event it
 # may contain (its captured seen ids or retained source ownership) clears it together with every
 # later generation and live run, which may repeat its content. A live run removed for any other
