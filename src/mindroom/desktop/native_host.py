@@ -43,7 +43,15 @@ if TYPE_CHECKING:
 _MAX_REGULAR_NATIVE_REQUESTS = 4
 _MAX_STOP_NATIVE_REQUESTS = 1
 _IMMEDIATE_NATIVE_ACTIONS = frozenset(
-    {"status", "revoke_control", "reset_emergency_stop", "decide_shell", "grant_shell", "revoke_shell"},
+    {
+        "status",
+        "revoke_control",
+        "reset_emergency_stop",
+        "decide_shell",
+        "grant_shell",
+        "revoke_shell",
+        "kill_shell_handle",
+    },
 )
 
 
@@ -56,9 +64,17 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
     def reset_emergency_stop(self) -> dict[str, object]: ...
-    def decide_shell(self, command_id: str, *, approved: bool, auto_approve_seconds: int) -> dict[str, object]: ...
-    def grant_shell(self, duration_seconds: int) -> dict[str, object]: ...
+    def decide_shell(
+        self,
+        command_id: str,
+        *,
+        approved: bool,
+        auto_approve_seconds: int,
+        auto_approve_until_revoked: bool = False,
+    ) -> dict[str, object]: ...
+    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]: ...
     def revoke_shell(self) -> dict[str, object]: ...
+    def kill_shell_handle(self, handle: str) -> dict[str, object]: ...
     async def connect_browser(self) -> None: ...
     async def disconnect_browser(self) -> None: ...
 
@@ -179,7 +195,9 @@ class NativeDesktopHost:
                     "enabled": bool(config and config.shell.enabled),
                     "pending": None,
                     "auto_approve_remaining_seconds": 0.0,
+                    "auto_approve_until_revoked": False,
                     "active_request_id": None,
+                    "handles": [],
                 },
             ),
             "browser": {
@@ -457,29 +475,50 @@ class NativeDesktopHost:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "decide_shell":
-            _expect_keys(parameters, {"command_id", "approved", "auto_approve_seconds"})
+            _expect_keys(
+                parameters,
+                {"command_id", "approved", "auto_approve_seconds"} | ({"auto_approve_until_revoked"} & set(parameters)),
+            )
             command_id = _required_text(parameters, "command_id")
             approved = parameters.get("approved")
             if not isinstance(approved, bool):
                 raise NativeProtocolError("invalid_request", "Native desktop approved must be a boolean.")
             auto_approve_seconds = _required_int(parameters, "auto_approve_seconds", minimum=0, maximum=3600)
-            if 0 < auto_approve_seconds < 60 or (auto_approve_seconds and not approved):
+            auto_approve_until_revoked = _optional_bool(parameters, "auto_approve_until_revoked")
+            if (
+                0 < auto_approve_seconds < 60
+                or ((auto_approve_seconds or auto_approve_until_revoked) and not approved)
+                or (auto_approve_seconds and auto_approve_until_revoked)
+            ):
                 raise NativeProtocolError(
                     "invalid_request",
-                    "Native desktop auto_approve_seconds must be 0, or 60 through 3600 with approval.",
+                    "Native desktop auto-approval must be 60 through 3600 seconds or until revoked, "
+                    "chosen only with approval.",
                 )
             runtime = self._require_runtime()
             try:
-                runtime.decide_shell(command_id, approved=approved, auto_approve_seconds=auto_approve_seconds)
+                runtime.decide_shell(
+                    command_id,
+                    approved=approved,
+                    auto_approve_seconds=auto_approve_seconds,
+                    auto_approve_until_revoked=auto_approve_until_revoked,
+                )
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "grant_shell":
-            _expect_keys(parameters, {"duration_seconds"})
-            duration_seconds = _required_int(parameters, "duration_seconds", minimum=60, maximum=3600)
+            if set(parameters) == {"until_revoked"} and parameters["until_revoked"] is True:
+                duration_seconds = None
+            elif set(parameters) == {"duration_seconds"}:
+                duration_seconds = _required_int(parameters, "duration_seconds", minimum=60, maximum=3600)
+            else:
+                raise NativeProtocolError(
+                    "invalid_request",
+                    "Native desktop grant_shell needs exactly duration_seconds or until_revoked: true.",
+                )
             runtime = self._require_runtime()
             try:
-                runtime.grant_shell(duration_seconds)
+                runtime.grant_shell(duration_seconds, until_revoked=duration_seconds is None)
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -488,6 +527,15 @@ class NativeDesktopHost:
             runtime = self._require_runtime()
             try:
                 runtime.revoke_shell()
+            except ValueError as exc:
+                raise NativeProtocolError("shell_denied", str(exc)) from exc
+            return {"status": self.status()}
+        if action == "kill_shell_handle":
+            _expect_keys(parameters, {"handle"})
+            handle = _required_text(parameters, "handle")
+            runtime = self._require_runtime()
+            try:
+                runtime.kill_shell_handle(handle)
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -587,6 +635,7 @@ class NativeBridgeRuntime:
         from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
         from mindroom.desktop.cloudflare_access import cloudflare_access_headers
         from mindroom.desktop.filesystem import DesktopFilesystem
+        from mindroom.desktop.login_environment import capture_login_environment
         from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
         from mindroom.desktop.provider import PyAutoGuiDesktopProvider
         from mindroom.desktop.session import (
@@ -629,7 +678,8 @@ class NativeBridgeRuntime:
                 else None
             )
             self._filesystem = DesktopFilesystem(self._config.files.roots) if self._config.files.roots else None
-            self._shell = DesktopShell() if self._config.shell.enabled else None
+            if self._config.shell.enabled:
+                self._shell = DesktopShell(environment=await capture_login_environment())
             self._bridge = DesktopBridge(
                 client=self._owner.client,
                 provider=provider,
@@ -711,21 +761,33 @@ class NativeBridgeRuntime:
         """Reset the local emergency latch while idle."""
         return self._required_bridge().reset_local_emergency_stop()
 
-    def decide_shell(self, command_id: str, *, approved: bool, auto_approve_seconds: int) -> dict[str, object]:
+    def decide_shell(
+        self,
+        command_id: str,
+        *,
+        approved: bool,
+        auto_approve_seconds: int,
+        auto_approve_until_revoked: bool = False,
+    ) -> dict[str, object]:
         """Approve or deny one exact pending command locally."""
         return self._required_bridge().decide_local_shell(
             command_id,
             approved=approved,
             auto_approve_seconds=auto_approve_seconds,
+            auto_approve_until_revoked=auto_approve_until_revoked,
         )
 
-    def grant_shell(self, duration_seconds: int) -> dict[str, object]:
-        """Enable bounded local auto-approval."""
-        return self._required_bridge().grant_local_shell(duration_seconds)
+    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]:
+        """Enable local auto-approval for a bounded duration or until revoked or stopped."""
+        return self._required_bridge().grant_local_shell(duration_seconds, until_revoked=until_revoked)
 
     def revoke_shell(self) -> dict[str, object]:
-        """Revoke local shell authority now and stop current work in the background."""
+        """Revoke local shell authority and kill every handle; an active command stops promptly."""
         return self._required_bridge().revoke_local_shell()
+
+    def kill_shell_handle(self, handle: str) -> dict[str, object]:
+        """Kill one handle from any caller."""
+        return self._required_bridge().kill_local_shell_handle(handle)
 
     async def connect_browser(self) -> None:
         """Connect the configured installed-profile extension."""

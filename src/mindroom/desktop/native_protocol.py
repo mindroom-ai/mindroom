@@ -35,6 +35,7 @@ NATIVE_ACTIONS = frozenset(
         "decide_shell",
         "grant_shell",
         "revoke_shell",
+        "kill_shell_handle",
         "request_permission",
         "browser_connect",
         "browser_disconnect",

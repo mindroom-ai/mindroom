@@ -1,22 +1,41 @@
-"""Locally approved, bounded shell execution for a paired desktop device."""
+"""Locally approved desktop shell commands run through MindRoom's shell engine."""
 
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import os
-import signal
+import shutil
+import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+
+from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
+from mindroom.shell_execution import (
+    ProcessRecord,
+    discard_background_record,
+    kill_all_records,
+    kill_command,
+    run_command,
+)
+from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
+_INLINE_WAIT_SAFETY_SECONDS = 10.0
+_MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
-_MAX_OUTPUT = 16_384
-_TERM_GRACE_SECONDS = 1.0
+_COMMAND_PREVIEW_CHARS = 200
+# Equal to the engine's background limit, so a start is refused before approval rather than killed later.
+_MAX_HANDLES = 16
+_UNKNOWN_HANDLE = "Unknown shell handle."
+_NOT_STARTED = "The local shell request was cancelled before approval; the command did not run."
+_STOPPED = "The local shell command was stopped before it finished; it may have partially run."
 
 
 class DesktopShellError(ValueError):
@@ -36,29 +55,101 @@ class DesktopShellRequest:
     timeout_seconds: int = 30
 
 
+class DesktopShellOutput(ShellOutputCapture):
+    """Spool one command's combined output privately until the bridge transfers it."""
+
+    def __init__(self, directory: str) -> None:
+        super().__init__(
+            ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES),
+            None,
+        )
+        self.exit_code: int | None = None
+        self.completed = False
+
+    @property
+    def size(self) -> int:
+        """Return the retained UTF-8 bytes, at most the capture cap."""
+        self.stdout.file.flush()
+        return os.fstat(self.stdout.file.fileno()).st_size
+
+    @property
+    def truncated(self) -> bool:
+        """Report output dropped past the cap or lost to a capture error."""
+        return self.stdout.error is not None
+
+    def read(self) -> bytes:
+        """Return all retained output."""
+        return self.tail(self.size)
+
+    def tail(self, max_bytes: int) -> bytes:
+        """Return at most the newest *max_bytes* bytes; the first character may be partial."""
+        size = self.size
+        self.stdout.file.seek(max(0, size - max_bytes))
+        # Reading to the end leaves the engine's next write appending after existing output.
+        return self.stdout.file.read()
+
+    def publish(self, return_code: int | None) -> str:
+        """Record completion; the bridge transfers the spool instead of writing a workspace file."""
+        self.exit_code = return_code
+        self.completed = True
+        return ""
+
+    def close(self) -> None:
+        """Release on cancellation or eviction; after completion the spool waits for transfer."""
+        if not self.completed:
+            self.release()
+
+    def release(self) -> None:
+        """Remove the spool after transfer or handle cleanup."""
+        super().close()
+
+
+@dataclass(frozen=True)
+class DesktopShellResult:
+    """One command's state; a completed result hands its output to the caller to transfer and release."""
+
+    state: Literal["completed", "running"]
+    handle: str | None
+    exit_code: int | None
+    output: DesktopShellOutput
+
+
+@dataclass(frozen=True)
+class _ShellHandle:
+    requester_id: str
+    agent_name: str
+    command: str
+    started_at: float
+    output: DesktopShellOutput
+
+
 class DesktopShell:
-    """Require a local decision or live local lease before each process starts."""
+    """Require a local decision or live local lease before each command starts, then track its handle."""
 
     def __init__(
         self,
         *,
+        environment: Mapping[str, str],
         clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not hasattr(os, "killpg"):
             message = "This platform cannot stop local process groups safely."
             raise DesktopShellError(message)
+        self._environment = dict(environment)
         self._clock = clock
         self._monotonic_clock = monotonic_clock
         self._lease_until = 0.0
         self._pending: DesktopShellRequest | None = None
         self._decision: asyncio.Future[str] | None = None
         self._active_request_id: str | None = None
-        self._process: asyncio.subprocess.Process | None = None
         self._cancel_event = asyncio.Event()
         self._finished = asyncio.Event()
         self._finished.set()
         self._used_ids: set[str] = set()
+        self._records: dict[str, ProcessRecord] = {}
+        self._handles: dict[str, _ShellHandle] = {}
+        self._directory: str | None = None
         self._busy = False
         self._closed = False
 
@@ -96,8 +187,9 @@ class DesktopShell:
         return self._monotonic_clock() + remaining
 
     def status(self) -> dict[str, object]:
-        """Describe pending approval, active process, and remaining lease."""
+        """Describe pending approval, active command, auto-approval, and every retained handle."""
         pending = self._pending
+        until_revoked = self._lease_until == math.inf
         return {
             "pending": (
                 {
@@ -111,45 +203,84 @@ class DesktopShell:
                 if pending
                 else None
             ),
-            "auto_approve_remaining_seconds": max(0.0, self._lease_until - self._monotonic_clock()),
+            "auto_approve_remaining_seconds": (
+                0.0 if until_revoked else max(0.0, self._lease_until - self._monotonic_clock())
+            ),
+            "auto_approve_until_revoked": until_revoked,
             "active_request_id": self._active_request_id,
+            "handles": self.handles(),
         }
 
-    def decide(self, command_id: str, *, approved: bool, auto_approve_seconds: int = 0) -> None:
+    def handles(self, requester_id: str | None = None, agent_name: str | None = None) -> list[dict[str, object]]:
+        """List retained handles, optionally only those owned by one exact requester and agent."""
+        self._prune()
+        entries: list[dict[str, object]] = []
+        for handle, entry in self._handles.items():
+            if requester_id is not None and (entry.requester_id, entry.agent_name) != (requester_id, agent_name):
+                continue
+            record = self._records[handle]
+            ended_at = record.finished_at if record.finished_at is not None else time.monotonic()
+            entries.append(
+                {
+                    "handle": handle,
+                    "requester_id": entry.requester_id,
+                    "agent_name": entry.agent_name,
+                    "command_preview": entry.command[:_COMMAND_PREVIEW_CHARS],
+                    "elapsed_seconds": round(max(0.0, ended_at - entry.started_at), 1),
+                    "state": "completed" if record.finished else "running",
+                },
+            )
+        return entries
+
+    def decide(
+        self,
+        command_id: str,
+        *,
+        approved: bool,
+        auto_approve_seconds: int = 0,
+        auto_approve_until_revoked: bool = False,
+    ) -> None:
         """Settle only the exact pending request ID from the local UI."""
         pending = self._pending
         decision = self._decision
         if self._closed or pending is None or decision is None or decision.done() or pending.request_id != command_id:
             message = "No matching pending shell command."
             raise DesktopShellError(message)
-        if not isinstance(approved, bool):
+        if not isinstance(approved, bool) or not isinstance(auto_approve_until_revoked, bool):
             message = "Shell decision must be boolean."
             raise DesktopShellError(message)
         if (
             not isinstance(auto_approve_seconds, int)
             or isinstance(auto_approve_seconds, bool)
             or (auto_approve_seconds != 0 and not 60 <= auto_approve_seconds <= 3600)
+            or (auto_approve_seconds and auto_approve_until_revoked)
         ):
-            message = "Auto-approval duration must be 0 or 60 to 3600 seconds."
+            message = "Auto-approval must be 0 or 60 to 3600 seconds, or until revoked."
             raise DesktopShellError(message)
         if self._monotonic_clock() >= self._pending_deadline:
             message = "Shell approval expired."
             raise DesktopShellError(message)
-        if approved and auto_approve_seconds:
+        if approved and auto_approve_until_revoked:
+            self._lease_until = math.inf
+        elif approved and auto_approve_seconds:
             self._lease_until = self._monotonic_clock() + auto_approve_seconds
         decision.set_result("approved" if approved else "denied")
 
-    def grant(self, duration_seconds: int) -> None:
-        """Grant a time-limited local auto-approval lease."""
+    def grant(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> None:
+        """Auto-approve every locally allowed caller for a bounded duration or until revoked or stopped."""
         if self._closed:
             message = "Local shell is closed."
             raise DesktopShellError(message)
+        if until_revoked is True and duration_seconds is None:
+            self._lease_until = math.inf
+            return
         if (
-            not isinstance(duration_seconds, int)
+            until_revoked is not False
+            or not isinstance(duration_seconds, int)
             or isinstance(duration_seconds, bool)
             or not 60 <= duration_seconds <= 3600
         ):
-            message = "Grant duration must be 60 to 3600 seconds."
+            message = "Grant 60 to 3600 seconds or until revoked."
             raise DesktopShellError(message)
         self._lease_until = self._monotonic_clock() + duration_seconds
 
@@ -171,20 +302,31 @@ class DesktopShell:
             message = "Local shell is closed."
             raise DesktopShellError(message)
         if self._busy:
-            message = "A local shell command is already pending or running."
+            message = "Another local shell command is still awaiting approval or its first result."
             raise DesktopShellError(message)
         deadline = self._validate_request(request)
         if request.request_id in self._used_ids:
             message = "Shell request ID has already been used."
             raise DesktopShellError(message)
+        self._reserve_handle_capacity()
         self._used_ids.add(request.request_id)
         self._busy = True
         self._finished.clear()
         self._cancel_event.clear()
         return deadline
 
-    async def execute(self, request: DesktopShellRequest) -> dict[str, object]:
-        """Admit one request, await local approval if needed, then run it."""
+    def _reserve_handle_capacity(self) -> None:
+        self._prune()
+        if len(self._handles) < _MAX_HANDLES:
+            return
+        finished = [(record.finished_at or 0.0, handle) for handle, record in self._records.items() if record.finished]
+        if not finished:
+            message = "Too many local shell commands are running; kill one before starting another."
+            raise DesktopShellError(message)
+        self._discard(min(finished)[1])
+
+    async def execute(self, request: DesktopShellRequest) -> DesktopShellResult:
+        """Admit one request, await local approval if needed, then run it until it completes or becomes a handle."""
         deadline = self._admit(request)
         try:
             if self._monotonic_clock() >= self._lease_until:
@@ -193,7 +335,7 @@ class DesktopShell:
                     message = "Shell command denied locally."
                     raise DesktopShellError(message)
                 if outcome == "cancelled":
-                    return self._cancelled_result()
+                    raise DesktopShellError(_NOT_STARTED)
                 if self._monotonic_clock() >= deadline:
                     message = "Shell approval expired."
                     raise DesktopShellError(message)
@@ -201,142 +343,136 @@ class DesktopShell:
                 message = "Shell request expired."
                 raise DesktopShellError(message)
             if self._cancel_event.is_set():
-                return self._cancelled_result()
+                raise DesktopShellError(_NOT_STARTED)
             self._active_request_id = request.request_id
-            self._process = await asyncio.create_subprocess_exec(
-                "/bin/sh",
-                "-c",
-                request.command,
-                cwd=request.cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-            )
-            return await self._run_process(request.timeout_seconds)
-        except asyncio.CancelledError:
-            await self._terminate_process()
-            raise
+            # Reply before the remote caller stops waiting; a longer command continues as a handle.
+            remaining = deadline - self._monotonic_clock() - _INLINE_WAIT_SAFETY_SECONDS
+            return await self._run(request, max(_MIN_INLINE_WAIT_SECONDS, min(request.timeout_seconds, remaining)))
         finally:
             self._pending = None
             self._decision = None
             self._active_request_id = None
-            self._process = None
             self._busy = False
             self._finished.set()
 
-    @staticmethod
-    def _cancelled_result() -> dict[str, object]:
-        return {
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "truncated": False,
-            "timed_out": False,
-            "cancelled": True,
-        }
-
-    @staticmethod
-    async def _drain(reader: asyncio.StreamReader) -> tuple[bytes, bool]:
-        output = bytearray()
-        truncated = False
-        while chunk := await reader.read(4096):
-            remaining = _MAX_OUTPUT - len(output)
-            output.extend(chunk[:remaining])
-            truncated |= len(chunk) > remaining
-        return bytes(output), truncated
-
-    async def _run_process(self, timeout_seconds: int) -> dict[str, object]:
-        process = self._process
-        assert process is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
-        stdout_task = asyncio.create_task(self._drain(process.stdout))
-        stderr_task = asyncio.create_task(self._drain(process.stderr))
-        wait_task = asyncio.create_task(process.wait())
-        complete = asyncio.gather(wait_task, stdout_task, stderr_task)
-        cancel_task = asyncio.create_task(self._cancel_event.wait())
-        timed_out = False
-        cancelled = False
+    async def _run(self, request: DesktopShellRequest, inline_wait: float) -> DesktopShellResult:
+        output = DesktopShellOutput(self._spool_directory())
+        started_at = time.monotonic()
+        run = asyncio.create_task(
+            run_command(
+                self._records,
+                namespace=json.dumps([request.requester_id, request.agent_name]),
+                argv=["/bin/sh", "-c", request.command],
+                env=self._environment,
+                cwd=request.cwd,
+                # The spool carries output; the engine's line tail is unused.
+                tail=0,
+                timeout=inline_wait,
+                output_capture=output,
+                stdin=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.STDOUT,
+                kill_group_after_exit=True,
+            ),
+        )
+        cancelled = asyncio.create_task(self._cancel_event.wait())
         try:
-            done, _ = await asyncio.wait(
-                {complete, cancel_task},
-                timeout=timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            timed_out = not done
-            cancelled = cancel_task in done and self._cancel_event.is_set()
-            if timed_out or cancelled:
-                await self._terminate_process()
-                try:
-                    await asyncio.wait_for(asyncio.shield(complete), _TERM_GRACE_SECONDS)
-                except TimeoutError:
-                    self._signal_group(signal.SIGKILL)
-            _, (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.shield(complete)
-            # Background children with redirected output can outlive a successful shell.
-            # Stop the rest of its process group before settling the result.
-            if not (timed_out or cancelled) and self._group_exists():
-                await self._terminate_process()
-            return {
-                "exit_code": process.returncode,
-                "stdout": stdout.decode("utf-8", errors="replace"),
-                "stderr": stderr.decode("utf-8", errors="replace"),
-                "truncated": stdout_truncated or stderr_truncated,
-                "timed_out": timed_out,
-                "cancelled": cancelled,
-            }
+            await asyncio.wait({run, cancelled}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            cancel_task.cancel()
-            if not complete.done():
-                await self._terminate_process()
-                try:
-                    await asyncio.wait_for(asyncio.shield(complete), _TERM_GRACE_SECONDS)
-                except TimeoutError:
-                    self._signal_group(signal.SIGKILL)
-            await asyncio.gather(complete, cancel_task, return_exceptions=True)
+            cancelled.cancel()
+            if not run.done():
+                run.cancel()
+                # The engine stops the process group within its bounded grace before this settles.
+                with suppress(asyncio.CancelledError):
+                    await run
+        if run.cancelled():
+            raise DesktopShellError(_STOPPED)
+        result = run.result()
+        self._prune()
+        if result.handle is not None:
+            if self._cancel_event.is_set():
+                # Revocation raced the new handle's registration and has already killed it.
+                output.release()
+                raise DesktopShellError(_STOPPED)
+            self._handles[result.handle] = _ShellHandle(
+                request.requester_id,
+                request.agent_name,
+                request.command,
+                started_at,
+                output,
+            )
+            return DesktopShellResult("running", result.handle, None, output)
+        if not output.completed:
+            output.release()
+            raise DesktopShellError(result.message.removeprefix("Error: "))
+        return DesktopShellResult("completed", None, output.exit_code, output)
 
-    def _signal_group(self, sig: signal.Signals) -> None:
-        process = self._process
-        if process is None:
-            return
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, sig)
+    def check(self, requester_id: str, agent_name: str, handle: str) -> DesktopShellResult:
+        """Report the caller's own handle; a completed handle is handed over once and forgotten."""
+        record = self._caller_record(requester_id, agent_name, handle)
+        if not record.finished:
+            return DesktopShellResult("running", handle, None, self._handles[handle].output)
+        self._records.pop(handle)
+        return DesktopShellResult("completed", handle, record.return_code, self._handles.pop(handle).output)
 
-    def _group_exists(self) -> bool:
-        process = self._process
-        if process is None:
-            return False
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+    def kill(
+        self,
+        requester_id: str,
+        agent_name: str,
+        handle: str,
+        *,
+        force: bool = False,
+    ) -> Literal["killed", "completed"]:
+        """Signal the caller's own running handle, keeping its output for a later check."""
+        record = self._caller_record(requester_id, agent_name, handle)
+        if record.process.returncode is not None:
+            return "completed"
+        kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
+        return "killed"
 
-    async def _terminate_process(self) -> None:
-        process = self._process
-        if process is None:
-            return
-        self._signal_group(signal.SIGTERM)
-        deadline = asyncio.get_running_loop().time() + _TERM_GRACE_SECONDS
-        # Descendants may outlive the shell and close its pipes; group liveness has no event to await.
-        while self._group_exists() and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
-            await asyncio.sleep(0.05)
-        if self._group_exists():
-            self._signal_group(signal.SIGKILL)
-        await process.wait()
+    def kill_handle(self, handle: str) -> None:
+        """Kill and forget any handle from the local management channel."""
+        self._prune()
+        if handle not in self._handles:
+            raise DesktopShellError(_UNKNOWN_HANDLE)
+        self._discard(handle)
 
-    async def revoke(self) -> None:
-        """Clear lease and settle any pending or active command."""
+    def _caller_record(self, requester_id: str, agent_name: str, handle: str) -> ProcessRecord:
+        self._prune()
+        entry = self._handles.get(handle)
+        if entry is None or (entry.requester_id, entry.agent_name) != (requester_id, agent_name):
+            raise DesktopShellError(_UNKNOWN_HANDLE)
+        return self._records[handle]
+
+    def _discard(self, handle: str) -> None:
+        discard_background_record(self._records, handle)
+        self._handles.pop(handle).output.release()
+
+    def _prune(self) -> None:
+        # The engine drops finished records after ten minutes; release the output they left behind.
+        for handle in self._handles.keys() - self._records.keys():
+            self._handles.pop(handle).output.release()
+
+    def _spool_directory(self) -> str:
+        if self._directory is None:
+            self._directory = tempfile.mkdtemp(prefix="mindroom-desktop-shell-")
+        return self._directory
+
+    def revoke(self) -> None:
+        """Clear auto-approval, reject pending approval, stop the active command, and kill every handle."""
         self._lease_until = 0.0
         self._cancel_event.set()
         if self._decision is not None and not self._decision.done():
             self._decision.set_result("cancelled")
-        await self._finished.wait()
+        kill_all_records(self._records)
+        for entry in self._handles.values():
+            entry.output.release()
+        self._handles.clear()
 
     async def close(self) -> None:
-        """Revoke current access and refuse future commands."""
+        """Revoke current access, wait for the active command to stop, and refuse future commands."""
         self._closed = True
-        await self.revoke()
+        self.revoke()
+        await self._finished.wait()
+        if self._directory is not None:
+            shutil.rmtree(self._directory, ignore_errors=True)
+            self._directory = None

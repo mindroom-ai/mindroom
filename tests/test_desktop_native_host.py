@@ -42,7 +42,7 @@ from mindroom.desktop.native_host import (
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE, DesktopCommand
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
-from mindroom.desktop.shell import DesktopShell
+from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 
 if TYPE_CHECKING:
@@ -107,17 +107,33 @@ class FakeRuntime:
         self.reset += 1
         return self.status()
 
-    def decide_shell(self, command_id: str, *, approved: bool, auto_approve_seconds: int) -> dict[str, object]:
-        parameters = {"command_id": command_id, "approved": approved, "auto_approve_seconds": auto_approve_seconds}
+    def decide_shell(
+        self,
+        command_id: str,
+        *,
+        approved: bool,
+        auto_approve_seconds: int,
+        auto_approve_until_revoked: bool = False,
+    ) -> dict[str, object]:
+        parameters = {
+            "command_id": command_id,
+            "approved": approved,
+            "auto_approve_seconds": auto_approve_seconds,
+            "auto_approve_until_revoked": auto_approve_until_revoked,
+        }
         self.shell_calls.append(("decide_shell", parameters))
         return self.status()
 
-    def grant_shell(self, duration_seconds: int) -> dict[str, object]:
-        self.shell_calls.append(("grant_shell", {"duration_seconds": duration_seconds}))
+    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]:
+        self.shell_calls.append(("grant_shell", {"duration_seconds": duration_seconds, "until_revoked": until_revoked}))
         return self.status()
 
     def revoke_shell(self) -> dict[str, object]:
         self.shell_calls.append(("revoke_shell", {}))
+        return self.status()
+
+    def kill_shell_handle(self, handle: str) -> dict[str, object]:
+        self.shell_calls.append(("kill_shell_handle", {"handle": handle}))
         return self.status()
 
     async def connect_browser(self) -> None:
@@ -402,7 +418,9 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
         "enabled": True,
         "pending": None,
         "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_until_revoked": False,
         "active_request_id": None,
+        "handles": [],
     }
     assert load_native_config(native_config_path(tmp_path)).to_payload() == before | {
         "revision": 2,
@@ -526,7 +544,7 @@ def _attach_shell_runtime(host: NativeDesktopHost, tmp_path: Path) -> NativeBrid
     """Attach a real shell-only bridge to the native channel without opening Matrix."""
     config = load_native_config(native_config_path(tmp_path))
     runtime = NativeBridgeRuntime(SimpleNamespace(storage_root=tmp_path), config)
-    runtime._shell = DesktopShell()
+    runtime._shell = DesktopShell(environment={"PATH": os.defpath})
     runtime._bridge = DesktopBridge(
         client=object(),
         provider=None,
@@ -550,6 +568,8 @@ def _shell_event(
     *,
     request_id: str = "shell-1",
     sequence: int = 1,
+    action: str = "run_shell",
+    parameters: dict[str, object] | None = None,
 ) -> AuthenticatedToDeviceEvent:
     now_ms = round(time.time() * 1000)
     content = DesktopCommand(
@@ -558,10 +578,10 @@ def _shell_event(
         sequence,
         now_ms,
         now_ms + 60_000,
-        "run_shell",
+        action,
         "@person:example.org",
         "assistant",
-        {"command": command, "cwd": str(cwd)},
+        {"command": command, "cwd": str(cwd)} if parameters is None else parameters,
     ).to_content()
     return AuthenticatedToDeviceEvent(
         source={"content": content},
@@ -589,7 +609,7 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
     bridge = _attach_shell_runtime(host, tmp_path)._bridge
     event = _shell_event("printf ran >> marker", tmp_path)
     await bridge.on_to_device_event(event)
-    execution = asyncio.create_task(bridge.execute_pending())
+    execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     pending = await _wait_for_native_pending(host)
     assert {key: pending[key] for key in ("request_id", "requester_id", "agent_name", "command", "cwd")} == {
         "request_id": "shell-1",
@@ -605,6 +625,19 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
         ({"command_id": "shell-1", "approved": True, "auto_approve_seconds": True}, "invalid_request"),
         ({"command_id": "shell-1", "approved": False, "auto_approve_seconds": 60}, "invalid_request"),
         ({"command_id": "shell-1", "approved": True}, "invalid_request"),
+        (
+            {"command_id": "shell-1", "approved": True, "auto_approve_seconds": 60, "auto_approve_until_revoked": True},
+            "invalid_request",
+        ),
+        (
+            {"command_id": "shell-1", "approved": False, "auto_approve_seconds": 0, "auto_approve_until_revoked": True},
+            "invalid_request",
+        ),
+        (
+            {"command_id": "shell-1", "approved": True, "auto_approve_seconds": 0, "auto_approve_until_revoked": 1},
+            "invalid_request",
+        ),
+        ({"command_id": "shell-1", "approved": True, "auto_approve_seconds": 0, "extra": True}, "invalid_request"),
     ):
         with pytest.raises(NativeProtocolError) as caught:
             await host.handle(_request("decide_shell", **parameters))
@@ -631,7 +664,7 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
 
     restarted = _attach_shell_runtime(host, tmp_path)._bridge
     await restarted.on_to_device_event(event)
-    await restarted.execute_pending()
+    await restarted.execute_pending(shell_starts=True)
     await restarted.deliver_pending()
     assert bridge_transport.await_args.kwargs["content"] == completed
     assert (tmp_path / "marker").read_text() == "ran"
@@ -642,27 +675,93 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
 async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transport: AsyncMock, tmp_path: Path) -> None:
     host = await _shell_host(tmp_path)
     bridge = _attach_shell_runtime(host, tmp_path)._bridge
-    for duration in (59, 3601, True, "900"):
+    for parameters in (
+        {"duration_seconds": 59},
+        {"duration_seconds": 3601},
+        {"duration_seconds": True},
+        {"duration_seconds": "900"},
+        {"until_revoked": False},
+        {"until_revoked": 1},
+        {"duration_seconds": 900, "until_revoked": True},
+        {},
+    ):
         with pytest.raises(NativeProtocolError) as caught:
-            await host.handle(_request("grant_shell", duration_seconds=duration))
+            await host.handle(_request("grant_shell", **parameters))
         assert caught.value.code == "invalid_request"
     granted = await host.handle(_request("grant_shell", duration_seconds=900))
     assert 899 < granted["status"]["shell"]["auto_approve_remaining_seconds"] <= 900
     await bridge.on_to_device_event(_shell_event("printf granted > granted", tmp_path))
-    await bridge.execute_pending()
+    await bridge.execute_pending(shell_starts=True)
     assert (tmp_path / "granted").read_text() == "granted"
 
     revoked = await host.handle(_request("revoke_shell"))
     assert revoked["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
     await bridge.on_to_device_event(_shell_event("touch after-revoke", tmp_path, request_id="shell-2", sequence=2))
-    execution = asyncio.create_task(bridge.execute_pending())
+    execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     await _wait_for_native_pending(host)
     assert not (tmp_path / "after-revoke").exists()
     await host.handle(_request("revoke_shell"))
     await execution
     await bridge.deliver_pending()
-    assert bridge_transport.await_args.kwargs["content"]["result"]["cancelled"] is True
+    assert "did not run" in bridge_transport.await_args.kwargs["content"]["error"]
     assert not (tmp_path / "after-revoke").exists()
+
+    forever = await host.handle(_request("grant_shell", until_revoked=True))
+    assert forever["status"]["shell"]["auto_approve_until_revoked"] is True
+    assert forever["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
+    await bridge.on_to_device_event(_shell_event("printf kept > kept", tmp_path, request_id="shell-3", sequence=3))
+    await bridge.execute_pending(shell_starts=True)
+    assert (tmp_path / "kept").read_text() == "kept"
+    revoked = await host.handle(_request("revoke_shell"))
+    assert revoked["status"]["shell"]["auto_approve_until_revoked"] is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: AsyncMock, tmp_path: Path) -> None:
+    host = await _shell_host(tmp_path)
+    bridge = _attach_shell_runtime(host, tmp_path)._bridge
+    await host.handle(_request("grant_shell", duration_seconds=60))
+    pid_file = tmp_path / "leader.pid"
+    command = f"echo $$ > {pid_file}; sleep 30"
+    event = _shell_event("", tmp_path, parameters={"command": command, "cwd": str(tmp_path), "timeout_seconds": 1})
+    try:
+        await bridge.on_to_device_event(event)
+        await bridge.execute_pending(shell_starts=True)
+        await bridge.deliver_pending()
+        handle = bridge_transport.await_args.kwargs["content"]["result"]["handle"]
+        [entry] = host.status()["shell"]["handles"]
+        assert {key: entry[key] for key in ("handle", "requester_id", "agent_name", "command_preview", "state")} == {
+            "handle": handle,
+            "requester_id": "@person:example.org",
+            "agent_name": "assistant",
+            "command_preview": command,
+            "state": "running",
+        }
+        assert entry["elapsed_seconds"] >= 1
+        for parameters, code in (({}, "invalid_request"), ({"handle": ""}, "invalid_request")):
+            with pytest.raises(NativeProtocolError) as caught:
+                await host.handle(_request("kill_shell_handle", **parameters))
+            assert caught.value.code == code
+        with pytest.raises(NativeProtocolError) as caught:
+            await host.handle(_request("kill_shell_handle", handle="shell:missing"))
+        assert caught.value.code == "shell_denied"
+
+        killed = await host.handle(_request("kill_shell_handle", handle=handle))
+        assert killed["status"]["shell"]["handles"] == []
+        leader = int(pid_file.read_text())
+        for _ in range(400):
+            try:
+                os.kill(leader, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("locally killed handle kept running")
+    finally:
+        if pid_file.exists() and pid_file.read_text().strip():
+            with suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
     await host.shutdown()
 
 
@@ -700,7 +799,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} >/dev/null 2>&1 & wait"
     event = _shell_event(command, tmp_path)
     await bridge.on_to_device_event(event)
-    execution = asyncio.create_task(bridge.execute_pending())
+    execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     pid_file = tmp_path / "child.pid"
     try:
         for _ in range(400):
@@ -728,7 +827,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         restarted = _attach_shell_runtime(host, tmp_path)._bridge
         await restarted.on_to_device_event(event)
         await restarted.deliver_pending()
-        assert bridge_transport.await_args.kwargs["content"]["result"]["cancelled"] is True
+        assert "was stopped" in bridge_transport.await_args.kwargs["content"]["error"]
         await host.shutdown()
         for _ in range(400):
             try:
@@ -745,17 +844,34 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
 
 
 @pytest.mark.parametrize(
-    ("action", "parameters"),
+    ("action", "parameters", "call"),
     [
-        ("decide_shell", {"command_id": "shell-1", "approved": False, "auto_approve_seconds": 0}),
-        ("grant_shell", {"duration_seconds": 60}),
-        ("revoke_shell", {}),
+        (
+            "decide_shell",
+            {"command_id": "shell-1", "approved": False, "auto_approve_seconds": 0},
+            {
+                "command_id": "shell-1",
+                "approved": False,
+                "auto_approve_seconds": 0,
+                "auto_approve_until_revoked": False,
+            },
+        ),
+        (
+            "decide_shell",
+            {"command_id": "shell-1", "approved": True, "auto_approve_seconds": 0, "auto_approve_until_revoked": True},
+            {"command_id": "shell-1", "approved": True, "auto_approve_seconds": 0, "auto_approve_until_revoked": True},
+        ),
+        ("grant_shell", {"duration_seconds": 60}, {"duration_seconds": 60, "until_revoked": False}),
+        ("grant_shell", {"until_revoked": True}, {"duration_seconds": None, "until_revoked": True}),
+        ("revoke_shell", {}, {}),
+        ("kill_shell_handle", {"handle": "shell:0123abcd"}, {"handle": "shell:0123abcd"}),
     ],
 )
 def test_shell_controls_bypass_lifecycle_lock_and_require_running_bridge(
     tmp_path: Path,
     action: str,
     parameters: dict[str, object],
+    call: dict[str, object],
 ) -> None:
     async def scenario() -> list[tuple[str, dict[str, object]]]:
         runtime = FakeRuntime()
@@ -777,7 +893,7 @@ def test_shell_controls_bypass_lifecycle_lock_and_require_running_bridge(
         await host.shutdown()
         return runtime.shell_calls
 
-    assert asyncio.run(scenario()) == [(action, parameters)]
+    assert asyncio.run(scenario()) == [(action, call)]
 
 
 class _FakeOwner:
@@ -821,6 +937,10 @@ def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _FakeOwner:
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
     monkeypatch.setattr("mindroom.desktop.transport.DesktopTransport", _IdleTransport)
     monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", forbidden_gui_provider)
+    monkeypatch.setattr(
+        "mindroom.desktop.login_environment.capture_login_environment",
+        AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"}),
+    )
     return owner
 
 
@@ -847,6 +967,19 @@ async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
     assert status["gui_available"] is False
     assert [folder["path"] for folder in status["file_roots"]] == [str(root)]
     assert status["shell"]["enabled"] is True
+    # The shell runtime runs commands with the environment captured from the login shell at start.
+    runtime.grant_shell(60)
+    request = DesktopShellRequest(
+        "captured",
+        "@person:example.org",
+        "assistant",
+        'printf "$MINDROOM_CAPTURED"',
+        str(tmp_path),
+        round(time.time() * 1000) + 60_000,
+    )
+    result = await runtime._shell.execute(request)
+    assert result.output.read() == b"from-login-shell"
+    result.output.release()
     await runtime.stop()
     assert offline_runtime_session.closed is True
     assert offline_runtime_session.client.to_device_callbacks == []

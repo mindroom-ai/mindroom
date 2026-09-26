@@ -17,6 +17,17 @@ DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE = "io.mindroom.desktop.pairing_accepted.v1"
 DESKTOP_PROTOCOL_VERSION = 2
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
+SHELL_OUTPUT_MIME_TYPE = "text/plain"
+# The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
+# request bodies at 200 * 65,536 bytes and Tuwunel at 24 MiB, and one federation transaction carries up to
+# 50 PDUs and 100 EDUs within that cap. Each encrypted to-device request therefore stays within the
+# 65,536-byte event limit, so a full transaction of them still fits.
+MAX_TO_DEVICE_BYTES = 65_536
+# Measured as ASCII-escaped JSON, the form nio encrypts. Olm framing and base64 then add a third, and
+# maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the bridge's metrics and the
+# request_status receipt that wraps a stored response.
+MAX_INLINE_RESPONSE_BYTES = 40_960
 _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
 _PAIRING_VERIFICATION_HEX_CHARS = 16
 
@@ -44,6 +55,8 @@ type DesktopAction = Literal[
     "list_directory",
     "read_file",
     "run_shell",
+    "check_shell",
+    "kill_shell",
 ]
 
 DESKTOP_CONTROL_ACTIONS = frozenset(
@@ -65,7 +78,7 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
 )
 DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
 DESKTOP_FILE_ACTIONS = frozenset({"list_folders", "list_directory", "read_file"})
-DESKTOP_SHELL_ACTIONS = frozenset({"run_shell"})
+DESKTOP_SHELL_ACTIONS = frozenset({"run_shell", "check_shell", "kill_shell"})
 DESKTOP_APP_ACTIONS = frozenset(
     {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
 )
@@ -83,6 +96,16 @@ _DESKTOP_ACTIONS = frozenset(
 
 
 type DesktopObservationMode = Literal["tree", "screenshot", "both"]
+type DesktopMediaKind = Literal["screenshot", "output_attachment"]
+
+_MEDIA_MIME_TYPES: dict[DesktopMediaKind, frozenset[str]] = {
+    "screenshot": frozenset({"image/jpeg", "image/png"}),
+    "output_attachment": frozenset({SHELL_OUTPUT_MIME_TYPE}),
+}
+_MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
+    "screenshot": MAX_SCREENSHOT_BYTES,
+    "output_attachment": MAX_SHELL_OUTPUT_BYTES,
+}
 
 
 def desktop_observation_mode(action: str, value: object = "both") -> DesktopObservationMode:
@@ -229,35 +252,35 @@ class EncryptedDesktopMedia:
         )
 
     @classmethod
-    def from_content(cls, raw: object) -> EncryptedDesktopMedia:
-        """Parse one strict encrypted-file payload."""
-        content = _object_mapping(raw, "screenshot")
-        key = _object_mapping(content.get("key"), "screenshot.key")
-        hashes = _object_mapping(content.get("hashes"), "screenshot.hashes")
+    def from_content(cls, raw: object, *, kind: DesktopMediaKind = "screenshot") -> EncryptedDesktopMedia:
+        """Parse one strict encrypted-file payload of the media kind expected in its response field."""
+        content = _object_mapping(raw, kind)
+        key = _object_mapping(content.get("key"), f"{kind}.key")
+        hashes = _object_mapping(content.get("hashes"), f"{kind}.hashes")
         if key.get("alg") != "A256CTR" or key.get("kty") != "oct" or key.get("ext") is not True:
-            msg = "screenshot.key must describe an extractable A256CTR octet key."
+            msg = f"{kind}.key must describe an extractable A256CTR octet key."
             raise DesktopProtocolError(msg)
-        url = _required_str(content, "url", "screenshot")
+        url = _required_str(content, "url", kind)
         if not url.startswith("mxc://"):
-            msg = "screenshot.url must be an mxc:// URI."
+            msg = f"{kind}.url must be an mxc:// URI."
             raise DesktopProtocolError(msg)
-        version = _required_str(content, "v", "screenshot")
+        version = _required_str(content, "v", kind)
         if version != "v2":
-            msg = "screenshot.v must be v2."
+            msg = f"{kind}.v must be v2."
             raise DesktopProtocolError(msg)
-        size = _required_int(content, "size", "screenshot")
-        if size <= 0 or size > MAX_SCREENSHOT_BYTES:
-            msg = f"screenshot.size must be between 1 and {MAX_SCREENSHOT_BYTES}."
+        size = _required_int(content, "size", kind)
+        if size <= 0 or size > _MEDIA_MAX_BYTES[kind]:
+            msg = f"{kind}.size must be between 1 and {_MEDIA_MAX_BYTES[kind]}."
             raise DesktopProtocolError(msg)
-        mime_type = _required_str(content, "mimetype", "screenshot")
-        if mime_type not in {"image/jpeg", "image/png"}:
-            msg = "screenshot.mimetype must be image/jpeg or image/png."
+        mime_type = _required_str(content, "mimetype", kind)
+        if mime_type not in _MEDIA_MIME_TYPES[kind]:
+            msg = f"{kind}.mimetype must be {' or '.join(sorted(_MEDIA_MIME_TYPES[kind]))}."
             raise DesktopProtocolError(msg)
         return cls(
             url=url,
-            key=_required_str(key, "k", "screenshot.key"),
-            iv=_required_str(content, "iv", "screenshot"),
-            sha256=_required_str(hashes, "sha256", "screenshot.hashes"),
+            key=_required_str(key, "k", f"{kind}.key"),
+            iv=_required_str(content, "iv", kind),
+            sha256=_required_str(hashes, "sha256", f"{kind}.hashes"),
             mime_type=mime_type,
             size=size,
         )
@@ -363,6 +386,10 @@ class DesktopResponse:
             content["screenshot"] = self.screenshot.to_content()
         return content
 
+    def content_bytes(self) -> int:
+        """Return this response's size inside the Olm plaintext, serialized as nio's ``Api.to_json`` does."""
+        return len(json.dumps(self.to_content(), separators=(",", ":")).encode())
+
     @classmethod
     def from_content(cls, raw: object) -> DesktopResponse:
         """Parse one strict response payload."""
@@ -457,9 +484,14 @@ __all__ = [
     "DESKTOP_SAFE_KEYS",
     "DESKTOP_SHELL_ACTIONS",
     "MAX_COMMAND_TTL_MS",
+    "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
+    "MAX_SHELL_OUTPUT_BYTES",
+    "MAX_TO_DEVICE_BYTES",
+    "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopMediaKind",
     "DesktopObservationMode",
     "DesktopPairingAccepted",
     "DesktopPairingClaim",
