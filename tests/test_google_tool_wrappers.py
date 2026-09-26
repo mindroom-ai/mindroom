@@ -1330,9 +1330,11 @@ def test_google_drive_refreshes_expired_readonly_grant(
     assert tool.creds.token == "refreshed-readonly-token"  # noqa: S105
 
 
-def test_google_refresh_rejects_missing_endpoint_pin_before_provider_call(
+@pytest.mark.parametrize("token_uri", [None, "https://changed.example.test/token"], ids=["missing", "changed"])
+def test_google_refresh_rejects_invalid_endpoint_pin_before_provider_call(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
+    token_uri: str | None,
 ) -> None:
     """The Google adapter must not send an unbound refresh token to its configured endpoint."""
     refresh = MagicMock()
@@ -1343,15 +1345,19 @@ def test_google_refresh_rejects_missing_endpoint_pin_before_provider_call(
         worker_target=None,
     )
 
+    token_data = {
+        "token": "expired-token",
+        "refresh_token": "stored-refresh-token",
+        "client_id": "client-id",
+        "expires_at": 1.0,
+        "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+    }
+    if token_uri is not None:
+        token_data["token_uri"] = token_uri
+
     with pytest.raises(OAuthRefreshRejectedError, match="endpoint changed"):
         tool._refresh_google_token_data(
-            {
-                "token": "expired-token",
-                "refresh_token": "stored-refresh-token",
-                "client_id": "client-id",
-                "expires_at": 1.0,
-                "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
-            },
+            token_data,
             object(),
             force=True,
         )

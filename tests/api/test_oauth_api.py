@@ -1900,6 +1900,7 @@ def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> N
     assert safe_result.token_data["_oauth_provider"] == provider.id
     assert safe_result.token_data["client_id"] == "client-id"
     assert safe_result.token_data["scopes"] == ["scope.read"]
+    assert safe_result.token_data["token_uri"] == provider.token_url
 
 
 def test_safe_token_result_drops_raw_id_token() -> None:
