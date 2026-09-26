@@ -54,7 +54,7 @@ def _skills_root(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry)
 
 
 async def _cancel(tasks: list[asyncio.Task[None]]) -> None:
-    """Stop reviews and wait until each has settled its count."""
+    """Stop tasks and wait until each has ended."""
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -62,11 +62,13 @@ async def _cancel(tasks: list[asyncio.Task[None]]) -> None:
 
 @dataclass
 class SkillReviewRunner:
-    """Own the process's running skill reviews, at most one per conversation."""
+    """Own the process's running skill reviews, at most one per conversation, and their notices."""
 
     runtime_paths: RuntimePaths
     client_provider: Callable[[str], nio.AsyncClient | None]
     _reviews: dict[str, tuple[str, asyncio.Task[None]]] = field(default_factory=dict, init=False)
+    # A notice is sent apart from its review, because a Matrix send can retry for as long as the homeserver is down.
+    _notices: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _stopped: bool = field(default=False, init=False)
 
     def start(
@@ -110,9 +112,9 @@ class SkillReviewRunner:
         )
 
     async def stop(self) -> None:
-        """Stop every review; the queue is durable, so a review that changed nothing runs after the next reply."""
+        """Stop every review and notice; the queue is durable, so a review that changed nothing runs again."""
         self._stopped = True
-        await _cancel([task for _agent_name, task in self._reviews.values()])
+        await _cancel([*(task for _agent_name, task in self._reviews.values()), *self._notices])
 
     def _forget(self, key: str, task: asyncio.Task[None]) -> None:
         if (running := self._reviews.get(key)) is not None and running[1] is task:
@@ -172,9 +174,9 @@ class SkillReviewRunner:
             # A bookkeeping error must not replace the cancellation.
             if (error := finish.exception()) is not None:
                 logger.error("Could not record an interrupted skill review", agent=entry.agent, exc_info=error)
-            elif settings.notify and progress.changes and identity is not None and not self._stopped:
+            elif settings.notify and progress.changes and identity is not None:
                 # A new response or a config change stopped the review after its writes landed.
-                await self._notify(entry.agent, identity, progress.changes)
+                self._post_notice(entry.agent, identity, progress.changes)
             raise stopped
         outcome = finish.result()
         changes = progress.changes
@@ -186,7 +188,7 @@ class SkillReviewRunner:
             changed=sorted(changes),
         )
         if settings.notify and changes and identity is not None:
-            await self._notify(entry.agent, identity, changes)
+            self._post_notice(entry.agent, identity, changes)
 
     async def _finish(self, key: str, claimed: QueueEntry, progress: ReviewProgress, outcome: _Outcome) -> _Outcome:
         if progress.changes:
@@ -195,6 +197,17 @@ class SkillReviewRunner:
             outcome = "reviewed"
         await asyncio.to_thread(settle_review, self.runtime_paths, key, claimed=claimed, outcome=outcome)
         return outcome
+
+    def _post_notice(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
+        """Send a settled review's notice, unless shutdown began."""
+        if self._stopped:
+            return
+        task = create_background_task(
+            self._notify(agent_name, identity, changes),
+            name=f"skill_review_notice:{agent_name}",
+        )
+        self._notices.add(task)
+        task.add_done_callback(self._notices.discard)
 
     async def _notify(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
