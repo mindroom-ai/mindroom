@@ -602,6 +602,37 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertFalse(store.hasLocalAccessChanges)
     }
 
+    func testUndecodableSaveReplyReportsAnErrorWithoutContinuingOrAdoptingDrafts() async throws {
+        let helper = DesktopBridgeProcess()
+        let saved = configuredStatus(revision: 4, apps: [], homeserver: "https://example.org", userID: "@person:example.org")
+        var actions: [String] = []
+        let store = DesktopControlStore(helper: helper, request: { action, _, _ in
+            actions.append(action)
+            return ["status": ["config": "not a configuration"]]
+        })
+        try await publish(saved, through: helper, to: store)
+        store.fileRoots = ["/Users/test/Draft"]
+        store.shellEnabled = true
+        store.selectedAppIDs = ["com.example.Draft"]
+        var continued = false
+
+        store.saveLocalAccess { _ in continued = true }
+        await waitUntilIdle(store)
+
+        XCTAssertEqual(actions, ["set_local_access"])
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertFalse(continued)
+        XCTAssertEqual(store.fileRoots, ["/Users/test/Draft"], "An unreadable reply is never adopted as the saved draft")
+        XCTAssertTrue(store.shellEnabled)
+
+        store.saveAllowedApplications { _ in continued = true }
+        await waitUntilIdle(store)
+
+        XCTAssertEqual(actions, ["set_local_access", "set_allowed_apps"])
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertFalse(continued)
+    }
+
     func testPendingSetupCannotSaveLocalAccess() async throws {
         let helper = DesktopBridgeProcess()
         var actions: [String] = []

@@ -7,7 +7,6 @@ struct DesktopApplicationsView: View {
     var onSaved: (DesktopStatus) -> Void = { _ in }
     @State private var search = ""
     @State private var showingAppPicker = false
-    @State private var confirmingStop = false
 
     var body: some View {
         AppSectionCard {
@@ -21,36 +20,14 @@ struct DesktopApplicationsView: View {
                 }
                 Text("Check the apps your paired agents may use, then save app access. This does not grant control or change macOS permissions.")
                     .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    Button(selectionAction.title(saving: "Save App Access")) {
-                        switch selectionAction {
-                        case .setup: showSetup()
-                        case .stopAndSave: confirmingStop = true
-                        case .save: store.saveAllowedApplications(completion: onSaved)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(selectionAction != .setup && !store.hasAppSelectionChanges)
-                    Button("Discard Changes") { store.discardAppSelectionChanges() }
-                        .disabled(!store.hasAppSelectionChanges)
-                    Spacer()
-                    if store.hasAppSelectionChanges {
-                        Text(selectionAction != .setup ? "Unsaved changes" : "Not saved yet")
-                            .foregroundStyle(.orange)
-                    } else if store.status.config.state == "ready" {
-                        Text("Saved").foregroundStyle(.secondary)
-                    }
-                }
-                if selectionAction == .setup {
-                    Text("Connect your agent first. These app choices will be kept while you finish setup.")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else if store.status.canStopBridge {
-                    Text("Saving stops computer access. Start it again when you are ready.")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else if store.selectedAppIDs.isEmpty {
-                    Text("No apps are selected. Agents will not have access to any apps.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
+                DesktopAccessSaveBar(
+                    store: store, saveTitle: "Save App Access", confirmTitle: "Stop computer access and save apps?",
+                    hasChanges: store.hasAppSelectionChanges,
+                    idleNote: store.selectedAppIDs.isEmpty ? "No apps are selected. Agents will not have access to any apps." : nil,
+                    showSetup: showSetup,
+                    save: { store.saveAllowedApplications(completion: onSaved) },
+                    discard: store.discardAppSelectionChanges
+                )
                 Divider()
                 HStack {
                     TextField("Search apps by name or bundle ID", text: $search)
@@ -100,16 +77,6 @@ struct DesktopApplicationsView: View {
                 if let id = store.addApplication(at: url) { search = id }
             }
         }
-        .confirmationDialog("Stop computer access and save apps?", isPresented: $confirmingStop) {
-            Button("Stop and Save App Access") { store.saveAllowedApplications(completion: onSaved) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This stops computer access, including observation, control, and shell commands, before saving. It stays stopped until you start it again.")
-        }
-    }
-
-    private var selectionAction: DesktopAccessSaveAction {
-        store.needsPairing ? .setup : store.status.accessSaveAction
     }
 
     private var applications: [InstalledDesktopApplication] {

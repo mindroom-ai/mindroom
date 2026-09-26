@@ -276,13 +276,10 @@ final class DesktopControlStore: ObservableObject {
             recovery = nil
             return
         }
-        perform(
+        saveAccess(
             "set_allowed_apps",
             parameters: ["expected_revision": status.config.revision, "allowed_app_ids": selectedAppIDs.sorted()],
-            stopFirst: status.canStopBridge,
-            completion: { result in
-                if let saved = try? Self.responseStatus(result) { completion(saved) }
-            }
+            completion: completion
         )
     }
 
@@ -293,21 +290,33 @@ final class DesktopControlStore: ObservableObject {
             recovery = nil
             return
         }
-        perform(
+        saveAccess(
             "set_local_access",
             parameters: [
                 "expected_revision": status.config.revision,
                 "files": ["roots": fileRoots],
                 "shell": ["enabled": shellEnabled],
-            ],
-            stopFirst: status.canStopBridge,
-            completion: { [weak self] result in
-                guard let saved = try? Self.responseStatus(result) else { return }
-                // The helper saves canonical folder paths; adopt them so the saved draft is clean.
-                self?.fileRoots = saved.config.fileRoots
-                self?.shellEnabled = saved.config.shellEnabled
-                completion(saved)
-            }
+            ]
+        ) { [weak self] saved in
+            // The helper saves canonical folder paths; adopt them so the saved draft is clean.
+            self?.fileRoots = saved.config.fileRoots
+            self?.shellEnabled = saved.config.shellEnabled
+            completion(saved)
+        }
+    }
+
+    /// Stops a running bridge first, then continues only with a saved status that decodes; otherwise it reports an error.
+    private func saveAccess(
+        _ action: String, parameters: [String: Any], completion: @escaping (DesktopStatus) -> Void
+    ) {
+        var saved: DesktopStatus?
+        perform(
+            action, parameters: parameters, stopFirst: status.canStopBridge,
+            then: { result in
+                saved = try Self.responseStatus(result)
+                return result
+            },
+            completion: { _ in saved.map(completion) }
         )
     }
 

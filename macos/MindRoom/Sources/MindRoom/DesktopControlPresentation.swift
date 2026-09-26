@@ -324,8 +324,8 @@ extension DesktopStatus {
         return nil
     }
 
-    var accessSaveAction: DesktopAccessSaveAction {
-        if !hasSavedConnection { return .setup }
+    func accessSaveAction(needsPairing: Bool = false) -> DesktopAccessSaveAction {
+        if !hasSavedConnection || needsPairing { return .setup }
         return canStopBridge ? .stopAndSave : .save
     }
 }

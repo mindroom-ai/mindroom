@@ -26,7 +26,7 @@ final class DesktopControlPresentationTests: XCTestCase {
         let value = status(bridge: "stopped", helper: "ready")
 
         XCTAssertEqual(value.startBlocker(isBusy: false, hasAccessChanges: true), .setup)
-        XCTAssertEqual(value.accessSaveAction, .setup)
+        XCTAssertEqual(value.accessSaveAction(), .setup)
         XCTAssertFalse(value.canStopBridge)
     }
 
@@ -34,14 +34,14 @@ final class DesktopControlPresentationTests: XCTestCase {
         let value = status(bridge: "stopped", helper: "ready", config: "invalid")
 
         XCTAssertEqual(value.startBlocker(isBusy: false, hasAccessChanges: false), .setup)
-        XCTAssertEqual(value.accessSaveAction, .setup)
+        XCTAssertEqual(value.accessSaveAction(), .setup)
     }
 
     func testUnsavedSelectionExplainsStartEvenWhenSavedAppsAreEmpty() {
         let value = status(bridge: "stopped", helper: "ready", config: "ready")
 
         XCTAssertEqual(value.startBlocker(isBusy: false, hasAccessChanges: true), .unsavedAccess)
-        XCTAssertEqual(value.accessSaveAction, .save)
+        XCTAssertEqual(value.accessSaveAction(), .save)
     }
 
     func testSavedEmptySelectionMustChooseAppsBeforeStarting() {
@@ -62,7 +62,7 @@ final class DesktopControlPresentationTests: XCTestCase {
 
         XCTAssertEqual(value.startBlocker(isBusy: true, hasAccessChanges: false), .starting)
         XCTAssertTrue(value.canStopBridge)
-        XCTAssertEqual(value.accessSaveAction, .stopAndSave)
+        XCTAssertEqual(value.accessSaveAction(), .stopAndSave)
     }
 
     func testRunningBridgeExplainsStartAndRequiresStopToSaveApps() {
@@ -71,7 +71,7 @@ final class DesktopControlPresentationTests: XCTestCase {
 
             XCTAssertEqual(value.startBlocker(isBusy: false, hasAccessChanges: true), .running)
             XCTAssertTrue(value.canStopBridge)
-            XCTAssertEqual(value.accessSaveAction, .stopAndSave)
+            XCTAssertEqual(value.accessSaveAction(), .stopAndSave)
         }
         let faulted = status(bridge: "faulted", helper: "ready", config: "ready")
         XCTAssertEqual(faulted.startBlocker(isBusy: false, hasAccessChanges: false), .faulted)
@@ -112,9 +112,17 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(status(bridge: "observe_only", helper: "running").connectionTitle, "Connected")
     }
 
+    func testPendingPairingSendsAccessSaveBackToSetup() {
+        for bridge in ["stopped", "observe_only"] {
+            let saved = status(bridge: bridge, helper: "ready", config: "ready", apps: ["com.apple.TextEdit"])
+            XCTAssertNotEqual(saved.accessSaveAction(), .setup)
+            XCTAssertEqual(saved.accessSaveAction(needsPairing: true), .setup)
+        }
+    }
+
     func testAppSelectionCannotPublishOverIncompletePairing() {
         let incomplete = status(bridge: "stopped", helper: "ready", config: "ready", enabled: false)
-        XCTAssertEqual(incomplete.accessSaveAction, .setup)
+        XCTAssertEqual(incomplete.accessSaveAction(), .setup)
         XCTAssertFalse(incomplete.hasSavedConnection)
         XCTAssertEqual(incomplete.nextSetupSection(hasAccessChanges: true), .setup)
     }
