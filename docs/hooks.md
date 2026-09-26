@@ -656,8 +656,8 @@ TurnOrigin(
 )
 
 # TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
-# A router handoff reaches its agent with source_kind "trusted_internal_relay"; relayed_source_kind keeps the automation that started it, such as "scheduled".
-# origin.automation_source_kind returns the automation source kind of a direct or router-handed-off automated turn, or None.
+# A router handoff or an agent's matrix_message relay reaches its agent with source_kind "trusted_internal_relay"; relayed_source_kind keeps the automation that started it, such as "scheduled".
+# origin.automation_source_kind returns the automation source kind of a direct or relayed automated turn, or None.
 # sender_kind and requester_kind are "user" or "managed_entity".
 # intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
 # trust is "external", "trusted_internal", or "trusted_user_relay".

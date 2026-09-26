@@ -164,7 +164,7 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
 
 
 def relayed_source_kind_from_content(content: Mapping[str, Any]) -> str | None:
-    """Return the automation source kind a router handoff carries, or None."""
+    """Return the automation source kind a router handoff or agent relay carries, or None."""
     return _source_kind_from_value(content.get(RELAYED_SOURCE_KIND_KEY))
 
 

@@ -59,12 +59,13 @@ class TurnOrigin:
     intent: TurnIntent
     source_kind: str
     trust: TurnTrust
-    # A router handoff replaces an automated turn's source kind; this keeps which automation started it.
+    # A router handoff or an agent's matrix_message relay replaces an automated turn's source kind; this keeps which
+    # automation started it.
     relayed_source_kind: str | None = None
 
     @property
     def automation_source_kind(self) -> str | None:
-        """Return the automation that started this turn, directly or through a router handoff, or None."""
+        """Return the automation that started this turn, directly or through a relay, or None."""
         for source_kind in (self.source_kind, self.relayed_source_kind):
             if source_kind is not None and is_automation_source_kind(source_kind):
                 return source_kind

@@ -196,10 +196,10 @@ def _event(content: dict[str, Any], *, event_id: str = _EVENT_ID) -> nio.RoomMes
     return nio.RoomMessageText.from_dict(source)
 
 
-@pytest.mark.parametrize("sender_is_router", [True, False])
-def test_router_handoffs_keep_the_automation_that_started_them(config: Config, *, sender_is_router: bool) -> None:
-    """A routed scheduled fire stays marked as automation, and only a managed sender can mark one."""
-    router_id = entity_identity_registry(config, runtime_paths_for(config)).current_id(ROUTER_AGENT_NAME).full_id
+@pytest.mark.parametrize("sender", [ROUTER_AGENT_NAME, "general", None])
+def test_managed_relays_keep_the_automation_that_started_them(config: Config, sender: str | None) -> None:
+    """A router handoff or agent relay of a scheduled fire stays marked as automation; others cannot mark one."""
+    registry = entity_identity_registry(config, runtime_paths_for(config))
     event = _event(
         {
             "body": "@general help me",
@@ -208,7 +208,7 @@ def test_router_handoffs_keep_the_automation_that_started_them(config: Config, *
             RELAYED_SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
         },
     )
-    event.sender = router_id if sender_is_router else "@stranger:localhost"
+    event.sender = registry.current_id(sender).full_id if sender is not None else "@stranger:localhost"
     origin = _resolver(config)._turn_origin_for_event(
         event=event,
         requester_user_id=_SENDER,
@@ -216,7 +216,7 @@ def test_router_handoffs_keep_the_automation_that_started_them(config: Config, *
         original_sender=_SENDER,
         trusted_user_relay=True,
     )
-    assert origin.automation_source_kind == (SCHEDULED_SOURCE_KIND if sender_is_router else None)
+    assert origin.automation_source_kind == (SCHEDULED_SOURCE_KIND if sender is not None else None)
 
 
 def _threaded_event(body: str = "in thread") -> nio.RoomMessageText:
