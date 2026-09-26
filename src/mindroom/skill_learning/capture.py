@@ -42,11 +42,13 @@ class CapturedRequest:
 class SkillReviewCapture:
     """Keep the final request of a response's latest attempt; a review forks it only for the response's final run."""
 
-    model_name: str
     latest: CapturedRequest | None = None
 
-    def observe(self, model: Model | None, *, run_id: str) -> AbstractContextManager[None]:
-        """Record the attempt's response loops on ``model`` while the attempt runs."""
+    def observe(self, model: Model | None, *, run_id: str, model_name: str) -> AbstractContextManager[None]:
+        """Record the attempt's response loops on ``model``, the configured ``model_name``, while the attempt runs.
+
+        Each attempt names its own model, because a dynamic continuation can switch models within one response.
+        """
         if model is None:
             return nullcontext()
 
@@ -61,7 +63,7 @@ class SkillReviewCapture:
                 return
             self.latest = CapturedRequest(
                 model=model,
-                model_name=self.model_name,
+                model_name=model_name,
                 run_id=run_id,
                 # The run keeps using these messages after the loop, so copies keep the request exactly as sent.
                 messages=tuple(copy.copy(message) for message in cast("list[Message]", messages)),
@@ -78,6 +80,7 @@ def observe_final_request(
     model: Model | None,
     *,
     run_id: str,
+    model_name: str,
 ) -> AbstractContextManager[None]:
     """Record one primary attempt's final request when its response counts toward skill learning."""
-    return capture.observe(model, run_id=run_id) if capture is not None else nullcontext()
+    return capture.observe(model, run_id=run_id, model_name=model_name) if capture is not None else nullcontext()

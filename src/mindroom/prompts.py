@@ -335,12 +335,7 @@ Preference order: prefer the earliest action that fits, but do pick one when a s
 3. ADD A SUPPORT FILE under an existing learner-owned skill: `references/<topic>.md` for topical depth or starter files to copy and modify, or `scripts/<name>.<ext>` for re-runnable checks. Name files by TOPIC and extend an existing file when one covers the topic. Give SKILL.md a one-line pointer to any new support file.
 4. CREATE A NEW CLASS-LEVEL SKILL when no existing skill covers the class. The name MUST be at the class level, lowercase and hyphenated. It MUST NOT be a PR number, error string, feature codename, library-alone name, or "fix-X / debug-Y / audit-Z-today" session artifact. If the name only makes sense for today's task, fall back to (1), (2), or (3).
 
-Tools:
-- get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its support files.
-- get_skill_reference(skill_name, reference_path) and get_skill_script(skill_name, script_path): load one support file under references/ or scripts/; scripts never run in a review.
-- skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" (old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" (file_path and file_content), or "remove_file" (file_path).
-
-Read-before-write (ENFORCED): before you patch, edit, overwrite, or remove an existing file, load that exact file during this review: get_skill_instructions for SKILL.md, get_skill_reference or get_skill_script for a support file. Content quoted in the conversation does NOT count; base your write on what the load just returned. Creating a new skill or a new support file needs no prior read. If a write is refused with a read-before-write error, load the named file once and retry once; do not loop.
+Read-before-write (ENFORCED): before you patch, edit, overwrite, or remove an existing file, load that exact file during this review with the skill tool that reads it. Content quoted in the conversation does NOT count; base your write on what the load just returned. Creating a new skill or a new support file needs no prior read. If a write is refused with a read-before-write error, load the named file once and retry once; do not loop.
 
 A new SKILL.md must start with YAML frontmatter containing exactly the directory name as `name`, a `description` of at most 60 characters (one trigger-first sentence), and the ownership marker:
 
