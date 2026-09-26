@@ -1756,6 +1756,19 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
     assert truncated is False
 
 
+def test_approval_arguments_preview_detects_truncation_below_literal_marker_key() -> None:
+    arguments: dict[str, Any] = {"__truncated__": {}}
+    nested = arguments["__truncated__"]
+    for _ in range(40):
+        child: dict[str, Any] = {}
+        nested["child"] = child
+        nested = child
+
+    _preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert truncated is True
+
+
 @pytest.mark.asyncio
 async def test_redacted_approval_card_allows_only_exact_one_time_approval(tmp_path: Path) -> None:
     async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
@@ -1821,6 +1834,29 @@ async def test_oversized_approval_card_is_unapprovable_without_redaction_label(t
     assert card is not None
     assert card.payload["approvable"] is False
     assert card.payload["body"] == "🔒 Approval required: shell"
+
+    nested_arguments: dict[str, Any] = {"__truncated__": {}}
+    nested = nested_arguments["__truncated__"]
+    for _ in range(40):
+        child: dict[str, Any] = {}
+        nested["child"] = child
+        nested = child
+    nested_card = await manager._prepare_approval_card(
+        approval_id="approval-2",
+        tool_call_id="call-2",
+        tool_name="shell",
+        raw_arguments=nested_arguments,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        expires_at_ns=9_000_000_000_000_000_000,
+        target_fields={},
+    )
+
+    assert nested_card is not None
+    assert nested_card.payload["approvable"] is False
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:

@@ -126,7 +126,7 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
             or any(
                 _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
                 for key, item in sanitized.items()
-                if key != "__truncated__"
+                if key != "__truncated__" or key in original
             )
         )
     if isinstance(sanitized, list):
