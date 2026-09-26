@@ -719,8 +719,8 @@ async def _raise_normalized_refresh_error(
 
 
 def _normalized_refresh_error(exc: OAuthProviderError) -> OAuthProviderError:
-    """Classify refresh failure only from its structured OAuth error code."""
-    if is_terminal_oauth_refresh_error_code(exc.oauth_error):
+    """Preserve explicit rejections or classify them from a structured OAuth error code."""
+    if isinstance(exc, OAuthRefreshRejectedError) or is_terminal_oauth_refresh_error_code(exc.oauth_error):
         return OAuthRefreshRejectedError(
             _OAUTH_REFRESH_FAILED_MESSAGE,
             oauth_error=exc.oauth_error,

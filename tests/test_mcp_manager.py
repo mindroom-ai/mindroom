@@ -479,6 +479,7 @@ def _save_expiring_mcp_oauth_credentials(
         mcp_oauth_provider("demo", _oauth_mcp_config()),
         {
             "token": token,
+            "token_uri": "https://auth.example.test/token",
             "refresh_token": refresh_token,
             "client_id": "public-client",
             "scopes": [],
@@ -489,6 +490,53 @@ def _save_expiring_mcp_oauth_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_refresh_rejects_token_endpoint_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refresh token must never be sent to an endpoint discovered after authorization."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_expiring_mcp_oauth_credentials(
+        runtime_paths,
+        worker_target,
+        token="expired-access-token",  # noqa: S106
+        refresh_token="stored-refresh-token",  # noqa: S106
+        expires_at=time.time() - 60,
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    original_config = _oauth_mcp_config()
+    assert original_config.auth is not None
+    changed_config = original_config.model_copy(
+        update={"auth": original_config.auth.model_copy(update={"token_url": "https://auth.example.test/new-token"})},
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": changed_config}))
+
+    class UnexpectedOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pytest.fail("endpoint drift must be rejected before constructing an OAuth client")
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", UnexpectedOAuth2Client)
+
+    try:
+        with pytest.raises(OAuthConnectionRequired):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        context = manager._oauth_credential_context(
+            manager._states["demo"],
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+        )
+        assert (await load_oauth_credentials_snapshot(context)).credentials is None
+    finally:
+        await manager.shutdown()
 
 
 class _FakeMcpOAuthProvider:

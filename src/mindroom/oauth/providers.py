@@ -859,6 +859,10 @@ class OAuthProvider:
         refresh_token = cast("str", token_data["refresh_token"])
 
         endpoints = await self.runtime_endpoints(runtime_paths)
+        stored_token_url = token_data.get("token_uri")
+        if isinstance(stored_token_url, str) and stored_token_url != endpoints.token_url:
+            msg = "OAuth token endpoint changed since authorization"
+            raise OAuthRefreshRejectedError(msg)
         client_config = await self.require_client_config_async(runtime_paths)
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
