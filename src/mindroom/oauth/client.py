@@ -585,15 +585,15 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
     ) -> dict[str, Any] | None:
         """Adapt one Google refresh call to the lifecycle provider contract."""
         current = dict(token_data)
-        stored_token_uri = current.get("token_uri")
-        if not isinstance(stored_token_uri, str) or stored_token_uri != self._oauth_provider.token_url:
-            msg = "OAuth token endpoint changed since authorization"
-            raise OAuthRefreshRejectedError(msg)
         credentials = self._raw_credentials_from_token_data(current)
         if not force and not credentials.expired:
             return None
         if not credentials.refresh_token:
             return None
+        stored_token_uri = current.get("token_uri")
+        if not isinstance(stored_token_uri, str) or stored_token_uri != self._oauth_provider.token_url:
+            msg = "OAuth token endpoint changed since authorization"
+            raise OAuthRefreshRejectedError(msg)
         try:
             credentials.refresh(request)
         except GoogleAuthError as exc:

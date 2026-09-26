@@ -1359,6 +1359,34 @@ def test_google_refresh_rejects_missing_endpoint_pin_before_provider_call(
     refresh.assert_not_called()
 
 
+def test_google_refresh_allows_valid_access_token_without_endpoint_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A still-valid access token does not expose its refresh grant and may finish normally."""
+    refresh = MagicMock()
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=None,
+    )
+
+    result = tool._refresh_google_token_data(
+        {
+            "token": "valid-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+        },
+        object(),
+    )
+
+    assert result is None
+    refresh.assert_not_called()
+
+
 def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
