@@ -234,6 +234,7 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
             {
                 "token": "old-access-token",
                 "refresh_token": "refresh-token",
+                "token_uri": GOOGLE_TOKEN_URL,
                 "client_id": "client-id",
                 "expires_at": 1.0,
                 scope_field: granted_scopes if scope_field == "scopes" else " ".join(granted_scopes),

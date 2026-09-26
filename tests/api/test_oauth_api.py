@@ -1283,6 +1283,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
             {
                 "token": "expired-access-token",
                 "refresh_token": "refresh-token",
+                "token_uri": provider.token_url,
                 "client_id": "client-id",
                 "scopes": ["scope.read"],
                 "expires_at": 900.0,
@@ -1402,6 +1403,7 @@ def test_provider_refresh_token_data_sanitizes_terminal_error_body(
                 {
                     "token": "stored-access-token-secret",
                     "refresh_token": "stored-refresh-token-secret",
+                    "token_uri": provider.token_url,
                     "client_id": "client-id",
                     "scopes": ["scope.read"],
                     "expires_at": 900.0,
@@ -1459,6 +1461,7 @@ def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
                 {
                     "token": "stored-access-token-secret",
                     "refresh_token": "stored-refresh-token-secret",
+                    "token_uri": provider.token_url,
                     "client_id": "client-id",
                     "scopes": ["scope.read"],
                     "expires_at": 900.0,
@@ -1508,6 +1511,7 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
             {
                 "token": "expired-access-token",
                 "refresh_token": "stored-refresh-token",
+                "token_uri": provider.token_url,
                 "client_id": "client-id",
                 "scopes": ["scope.read"],
                 "expires_at": 900.0,
@@ -1634,6 +1638,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
             {
                 "token": "expired-access-token",
                 "refresh_token": "stored-refresh-token",
+                "token_uri": provider.token_url,
                 "client_id": "client-id",
                 **stored_scope_fields,
                 "expires_at": 900.0,
@@ -1649,6 +1654,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
     assert refreshed["scopes"] == expected_scopes
     assert refreshed["_source"] == "oauth"
     assert refreshed["_oauth_provider"] == provider.id
+    assert refreshed["token_uri"] == provider.token_url
 
 
 def test_provider_refresh_token_data_preserves_verified_claims_for_default_parser(
@@ -1685,6 +1691,7 @@ def test_provider_refresh_token_data_preserves_verified_claims_for_default_parse
             {
                 "token": "expired-access-token",
                 "refresh_token": "stored-refresh-token",
+                "token_uri": provider.token_url,
                 "client_id": "client-id",
                 "scopes": ["scope.read"],
                 "expires_at": 900.0,
@@ -1741,6 +1748,7 @@ def test_google_provider_refresh_preserves_verified_claim_summary(
             {
                 "token": "expired-google-access-token",
                 "refresh_token": "google-refresh-token",
+                "token_uri": provider.token_url,
                 "client_id": "client-id",
                 "scopes": list(provider.scopes),
                 "expires_at": 900.0,
@@ -5749,6 +5757,7 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
         {
             "token": "expired-access-token",
             "refresh_token": "stored-refresh-token",
+            "token_uri": provider.token_url,
             "client_id": "client-id",
             "expires_at": 900.0,
             "scopes": list(provider.scopes),
@@ -5820,6 +5829,7 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
         {
             "token": "still-valid-access-token",
             "refresh_token": "stored-refresh-token",
+            "token_uri": provider.token_url,
             "client_id": "client-id",
             "expires_at": 1030.0,
             "scopes": list(provider.scopes),

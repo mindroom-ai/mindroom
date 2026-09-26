@@ -132,6 +132,7 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
+            "token_uri": _provider().token_url,
             "client_id": "github-client-id",
             "scopes": [],
             "expires_at": 1.0,
@@ -185,6 +186,7 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
+            "token_uri": context.provider.token_url,
             "client_id": "github-client-id",
             "scopes": [],
             "expires_at": 1.0,

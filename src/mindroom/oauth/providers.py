@@ -383,12 +383,15 @@ def _token_result_with_core_metadata(
     *,
     client_id: str | None = None,
     fallback_scopes: Sequence[str] | None = None,
+    token_url: str | None = None,
 ) -> OAuthTokenResult:
     token_data = dict(result.token_data)
     if client_id is not None:
         token_data["client_id"] = client_id
     token_data["_source"] = "oauth"
     token_data["_oauth_provider"] = provider.id
+    if token_url is not None:
+        token_data["token_uri"] = token_url
     if not isinstance(token_data.get("scopes"), list):
         token_data["scopes"] = list(provider.scopes if fallback_scopes is None else fallback_scopes)
     return OAuthTokenResult(
@@ -805,11 +808,17 @@ class OAuthProvider:
                 code_verifier,
             )
             if isinstance(result, OAuthTokenResult):
-                return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+                return _token_result_with_core_metadata(
+                    self,
+                    result,
+                    client_id=client_config.client_id,
+                    token_url=endpoints.token_url,
+                )
             return _token_result_with_core_metadata(
                 self,
                 await cast("Awaitable[OAuthTokenResult]", result),
                 client_id=client_config.client_id,
+                token_url=endpoints.token_url,
             )
 
         async with AsyncOAuth2Client(
@@ -846,6 +855,7 @@ class OAuthProvider:
             self,
             result,
             client_id=client_config.client_id,
+            token_url=endpoints.token_url,
         )
 
     async def refresh_token_data(
@@ -923,6 +933,7 @@ class OAuthProvider:
             self,
             result,
             client_id=client_config.client_id,
+            token_url=endpoints.token_url,
             fallback_scopes=_refresh_fallback_scopes(
                 token_data,
                 refresh_response,
