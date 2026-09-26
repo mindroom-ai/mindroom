@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
+from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
@@ -30,6 +31,7 @@ from mindroom.desktop.native_config import (
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+from mindroom.desktop.shell import DesktopShellError
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 runner = CliRunner()
@@ -859,9 +861,6 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A terminal bridge serves folders and shell without GUI grants, and stopping it ends the local grant."""
-    from mindroom.desktop.bridge import DesktopBridge  # noqa: PLC0415
-    from mindroom.desktop.shell import DesktopShellError  # noqa: PLC0415
-
     root = (tmp_path / "selected").resolve()
     root.mkdir()
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
