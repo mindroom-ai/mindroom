@@ -174,16 +174,20 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
 # Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
 # tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
-def load_workspace_skills(skills_root: Path) -> list[Skill]:
-    """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
+def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], Result | None]) -> list[Result]:
+    """Read every visible workspace skill directory, skipping unreadable entries and an unavailable root.
+
+    Worker code can plant entries in a shared workspace, so one never hides the others or fails the caller.
+    """
     if not skills_root.is_dir():
         return []
-    skills: list[Skill] = []
+    results: list[Result] = []
     try:
         with open_skills_root(skills_root) as root_fd:
             for directory in list_entries(root_fd, directories=True):
                 try:
-                    skill = _load_workspace_skill(root_fd, skills_root, directory)
+                    with open_directory_within_root(root_fd, directory) as skill_fd:
+                        result = read(skill_fd, directory)
                 except (OSError, ValueError, TypeError) as exc:
                     logger.warning(
                         "Skipping unreadable workspace skill",
@@ -191,32 +195,63 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
                         error=str(exc),
                     )
                     continue
-                if skill is not None:
-                    skills.append(skill)
+                if result is not None:
+                    results.append(result)
     except OSError as exc:
         logger.warning("Workspace skill root is unavailable", path=str(skills_root), error=str(exc))
         return []
-    return skills
+    return results
 
 
-def _load_workspace_skill(root_fd: int, skills_root: Path, directory: str) -> Skill | None:
-    with open_directory_within_root(root_fd, directory) as skill_fd:
-        content = read_text_at(skill_fd, SKILL_FILENAME)
-        if content is None:
-            return None
-        frontmatter, instructions = parse_skill_markdown(content, loose=True)
-        return Skill(
-            name=frontmatter.get("name", directory),
-            description=frontmatter.get("description", ""),
-            instructions=instructions,
-            source_path=str(skills_root / directory),
-            scripts=list_support_files(skill_fd, "scripts"),
-            references=list_support_files(skill_fd, "references"),
-            metadata=frontmatter.get("metadata"),
-            license=frontmatter.get("license"),
-            compatibility=frontmatter.get("compatibility"),
-            allowed_tools=frontmatter.get("allowed-tools"),
-        )
+def load_workspace_skills(skills_root: Path) -> list[Skill]:
+    """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
+    return _each_skill_directory(
+        skills_root,
+        lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
+    )
+
+
+def workspace_skill_directories(skills_root: Path) -> list[str]:
+    """Return the visible workspace directories that hold a SKILL.md, without reading it."""
+    return _each_skill_directory(
+        skills_root,
+        lambda skill_fd, directory: directory if SKILL_FILENAME in list_entries(skill_fd, directories=False) else None,
+    )
+
+
+def _frontmatter_name(frontmatter: dict[str, Any], directory: str) -> str | None:
+    """Return the stripped name a skill loads under, its directory's when it names none, or None when it is unusable."""
+    name = frontmatter.get("name", directory)
+    return name.strip() if isinstance(name, str) and name.strip() else None
+
+
+def workspace_skill_name(content: str, directory: str) -> str | None:
+    """Return the name a workspace SKILL.md loads under, read loosely like skill loading, or None when it has none."""
+    try:
+        frontmatter, _instructions = parse_skill_markdown(content, loose=True)
+    except TypeError:
+        return None
+    return _frontmatter_name(frontmatter, directory)
+
+
+def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> Skill | None:
+    content = read_text_at(skill_fd, SKILL_FILENAME)
+    if content is None:
+        return None
+    frontmatter, instructions = parse_skill_markdown(content, loose=True)
+    return Skill(
+        # Skill normalization drops a skill without a usable name.
+        name=_frontmatter_name(frontmatter, directory) or "",
+        description=frontmatter.get("description", ""),
+        instructions=instructions,
+        source_path=str(skills_root / directory),
+        scripts=list_support_files(skill_fd, "scripts"),
+        references=list_support_files(skill_fd, "references"),
+        metadata=frontmatter.get("metadata"),
+        license=frontmatter.get("license"),
+        compatibility=frontmatter.get("compatibility"),
+        allowed_tools=frontmatter.get("allowed-tools"),
+    )
 
 
 def read_support_file(skill_path: Path, directory: str, filename: str) -> str:

@@ -36,6 +36,7 @@ from mindroom.tool_system.workspace_skills import (
     parse_skill_metadata,
     read_text_at,
     update_skill_usage,
+    workspace_skill_name,
 )
 
 if TYPE_CHECKING:
@@ -178,48 +179,19 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
     content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
     if content is None:
         return None
+    # An edit keeps the name the skill loads under, or its directory's when it has none, so an edit can repair it.
+    skill_name = (workspace_skill_name(markdown, name) if markdown is not None else None) or name
     try:
         frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
     except (TypeError, YAMLError):
         # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's.
-        return SkillFile(content=content, digest=content_digest(content), learned=False, name=name)
-    skill_name = frontmatter.get("name")
+        return SkillFile(content=content, digest=content_digest(content), learned=False, name=skill_name)
     return SkillFile(
         content=content,
         digest=content_digest(content),
         learned=_learner_owns(frontmatter, usage, path=name),
-        # Like skill loading, a name is stripped, and a skill without one keeps its directory's, so an edit can repair it.
-        name=skill_name.strip() if isinstance(skill_name, str) and skill_name.strip() else name,
+        name=skill_name,
     )
-
-
-def skill_directories(skills_root: Path) -> list[str]:
-    """Return the visible workspace directories that hold a SKILL.md, the names chat finds skills by first.
-
-    Like Hermes' ``_find_skill``, nothing is parsed, so a skill whose frontmatter is broken is still found. Like
-    workspace skill loading, an unavailable root or entry is skipped, so one that worker code planted never hides the
-    others or fails the call.
-    """
-    directories: list[str] = []
-    try:
-        with open_skills_root(skills_root) as root_fd:
-            for directory in list_entries(root_fd, directories=True):
-                try:
-                    with _open_skill(root_fd, directory) as skill_fd:
-                        if SKILL_FILENAME in list_entries(skill_fd, directories=False):
-                            directories.append(directory)
-                except OSError as exc:
-                    logger.warning(
-                        "Skipping unreadable workspace skill",
-                        path=str(skills_root / directory),
-                        error=str(exc),
-                    )
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        logger.warning("Workspace skill root is unavailable", path=str(skills_root), error=str(exc))
-        return []
-    return directories
 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:

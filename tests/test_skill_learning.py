@@ -2143,6 +2143,7 @@ _UNMET = (
             [],
             "other-name",
         ),
+        ("deploy", "---\nname: deploy-checks\ndescription: Use when: deploying\n---\nRun it.\n", [], "deploy-checks"),
     ],
     ids=[
         "unmet requirements",
@@ -2152,6 +2153,7 @@ _UNMET = (
         "blank name",
         "padded name",
         "adopted directory",
+        "loose frontmatter in an adopted directory",
     ],
 )
 async def test_chat_skill_manage_finds_workspace_skills_by_their_directory(

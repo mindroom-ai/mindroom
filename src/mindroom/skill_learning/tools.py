@@ -25,12 +25,11 @@ from mindroom.skill_learning.library import (
     create_skill,
     read_skill_file,
     remove_skill_file,
-    skill_directories,
     support_file_paths,
     write_skill_file,
 )
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
+from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown, workspace_skill_directories
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -124,7 +123,7 @@ def _chat_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, 
     catalog = load_skill_catalog(config, runtime_paths, agent_name, skills_root)
     entries = dict(catalog.entries)
     loaded = {entry.directory: entry for entry in catalog.entries.values() if entry.directory is not None}
-    for directory in skill_directories(skills_root):
+    for directory in workspace_skill_directories(skills_root):
         # Chat only changes files, so it never shows or checks what an unloaded skill says or who owns it.
         entries[directory] = loaded.get(directory) or _CatalogEntry(
             name=directory,
