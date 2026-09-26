@@ -9,12 +9,13 @@ from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
-from mindroom.matrix.personal_rooms import PersonalRoomService
+from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -71,6 +72,37 @@ def coordination(tmp_path: Path) -> Coordination:
     requester = Mock(side_effect=lambda event: event.sender)
     lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, requester)
     return Coordination(lifecycle, owner, local, lookup, requester)
+
+
+@dataclass
+class Clock:
+    """Monotonic time as the coordinator reads it, advanced only by the test."""
+
+    now: float = 1000.0
+
+    def __call__(self) -> float:
+        """Return the current time."""
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    """Control when failed reconciliation candidates become due again."""
+    clock = Clock()
+    monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", clock)
+    return clock
+
+
+def record_intent(lifecycle: PersonalRoomLifecycle, user: str) -> None:
+    """Retain one requester's onboarding intent from the lobby."""
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "helper", f"@{user}:localhost"),
+        PersonalRoomRecord(
+            user_id=f"@{user}:localhost",
+            alias=f"#personal_{user}:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
 
 
 def command(body: str = "!personal") -> nio.RoomMessageText:
@@ -178,12 +210,13 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_retries_failure_and_resets_on_reload(coordination: Coordination) -> None:
+async def test_reconciliation_retries_failure_and_resets_on_reload(coordination: Coordination, clock: Clock) -> None:
     """A failed pass retries; a successful pass repeats only after configuration changes."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("temporarily unavailable"), None, None]
     await lifecycle._reconcile()
+    clock.now += 30
     await lifecycle._reconcile()
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 2
@@ -203,18 +236,11 @@ async def test_reconciliation_preserves_cancellation(coordination: Coordination)
 
 
 @pytest.mark.asyncio
-async def test_failed_room_retry_does_not_repeat_successful_rooms(coordination: Coordination) -> None:
+async def test_failed_room_retry_does_not_repeat_successful_rooms(coordination: Coordination, clock: Clock) -> None:
     """One rejected room must not repeat successful provisioning for every requester."""
     lifecycle = coordination.lifecycle
     for user in ("alice", "bob"):
-        write_personal_room(
-            personal_room_record_path(lifecycle.runtime_paths, "helper", f"@{user}:localhost"),
-            PersonalRoomRecord(
-                user_id=f"@{user}:localhost",
-                alias=f"#personal_{user}:localhost",
-                source_room_id="!lobby:localhost",
-            ),
-        )
+        record_intent(lifecycle, user)
     attempted = []
     repaired = False
 
@@ -226,14 +252,228 @@ async def test_failed_room_retry_does_not_repeat_successful_rooms(coordination: 
 
     coordination.owner.ensure.side_effect = ensure
     await lifecycle._reconcile()
+    clock.now += 3600
     await lifecycle._reconcile()
     repaired = True
+    clock.now += 3600
     await lifecycle._reconcile()
+    clock.now += 3600
     await lifecycle._reconcile()
     assert attempted == ["@alice:localhost", "@bob:localhost", "@alice:localhost", "@alice:localhost"]
     lifecycle.config_changed()
     await lifecycle._reconcile()
     assert attempted[-2:] == ["@alice:localhost", "@bob:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_failing_candidate_backs_off_up_to_an_hour(coordination: Coordination, clock: Clock) -> None:
+    """A room that keeps failing is retried after 30 seconds, then twice as long each time, at most hourly."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = RuntimeError("membership mismatch")
+    await lifecycle._reconcile()
+    for delay in (30, 60, 120, 240, 480, 960, 1920, 3600, 3600):
+        attempts = coordination.owner.ensure.await_count
+        clock.now += delay - 1
+        await lifecycle._reconcile()
+        assert coordination.owner.ensure.await_count == attempts
+        clock.now += 1
+        await lifecycle._reconcile()
+        assert coordination.owner.ensure.await_count == attempts + 1
+    assert not lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_backing_off_candidate_does_not_delay_other_requesters(coordination: Coordination, clock: Clock) -> None:
+    """New intent is onboarded on the next pass while another requester's room waits out its delay."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    attempted = []
+
+    async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
+        attempted.append(user_id)
+        if user_id == "@alice:localhost":
+            msg = "Personal-room ownership or membership does not match"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    record_intent(lifecycle, "bob")
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert attempted == ["@alice:localhost", "@bob:localhost"]
+    assert not lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_success_after_failures_clears_backoff(coordination: Coordination, clock: Clock) -> None:
+    """A room that recovers completes reconciliation and keeps no retry delay."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [RuntimeError("unavailable"), RuntimeError("unavailable"), None]
+    await lifecycle._reconcile()
+    clock.now += 30
+    await lifecycle._reconcile()
+    clock.now += 59
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 3
+    assert lifecycle._reconciled
+    assert not lifecycle._candidate_backoff
+
+
+@pytest.mark.asyncio
+async def test_reload_retries_backing_off_candidate_immediately(coordination: Coordination, clock: Clock) -> None:
+    """A configuration reload may be the fix, so it retries at once and restarts the delays."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = RuntimeError("membership mismatch")
+    await lifecycle._reconcile()
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 1
+    lifecycle.config_changed()
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    clock.now += 29
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordination, clock: Clock) -> None:
+    """A requester acting in the lobby is served at once, even while their recorded intent waits."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [RuntimeError("membership mismatch"), None, None, None]
+    await lifecycle._reconcile()
+    room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
+    assert await lifecycle.handle_command(room, command())
+    rejoin = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$rejoin",
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    await lifecycle.member_event(room, rejoin)
+    join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    await lifecycle.baseline_join(join)
+    assert coordination.owner.ensure.await_count == 4
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_repeated_error_logs_its_traceback_once(coordination: Coordination, clock: Clock) -> None:
+    """Only the first of the same error in a row carries a traceback; retries report their attempt and next delay."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
+    failures = [entry for entry in logs if entry["event"] == "Personal-room reconciliation failed"]
+    assert [
+        (entry["log_level"], entry.get("exc_info", False), entry["attempt"], entry["retry_in_seconds"])
+        for entry in failures
+    ] == [("error", True, 1, 30.0), ("warning", False, 2, 60.0), ("warning", False, 3, 120.0)]
+    assert [(entry["error_type"], entry["error"]) for entry in failures[1:]] == [
+        ("RuntimeError", "temporarily unavailable"),
+    ] * 2
+    assert {(entry["user_id"], entry["room_id"]) for entry in failures} == {("@alice:localhost", "!lobby:localhost")}
+
+
+@pytest.mark.asyncio
+async def test_a_different_error_logs_a_new_traceback(coordination: Coordination, clock: Clock) -> None:
+    """A new kind of failure behind a waiting roster mismatch is a new problem, so it gets its own traceback."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [
+        PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"}),
+        KeyError("content"),
+        KeyError("content"),
+    ]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
+    assert [
+        (entry["event"], entry["log_level"], entry.get("exc_info", False))
+        for entry in logs
+        if entry["log_level"] in {"warning", "error"}
+    ] == [
+        ("Personal-room imported roster has unattested members", "warning", False),
+        ("Personal-room reconciliation failed", "error", True),
+        ("Personal-room reconciliation failed", "warning", False),
+    ]
+    assert logs[-1]["error_type"] == "KeyError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_failure_during_reload_leaves_no_stale_delay(coordination: Coordination) -> None:
+    """An attempt that fails after a reload cannot delay the new configuration's first retry."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        lifecycle.config_changed()
+        msg = "membership mismatch"
+        raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    coordination.owner.ensure.side_effect = None
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_imported_roster_mismatch_is_a_warning_without_traceback(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """A room waiting for someone to remove unattested members is reported on each retry, never as a crash."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError(
+        "!personal:localhost",
+        {"@eve:localhost", "@bob:localhost"},
+    )
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+    assert [entry for entry in logs if entry["log_level"] in {"warning", "error"}] == [
+        {
+            "event": "Personal-room imported roster has unattested members",
+            "log_level": "warning",
+            "user_id": "@alice:localhost",
+            "room_id": "!lobby:localhost",
+            "personal_room_id": "!personal:localhost",
+            "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
+            "attempt": attempt,
+            "retry_in_seconds": delay,
+        }
+        for attempt, delay in ((1, 30.0), (2, 60.0))
+    ]
 
 
 @pytest.mark.asyncio

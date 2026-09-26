@@ -43,7 +43,7 @@ from mindroom.matrix_identifiers import managed_room_alias_localpart
 from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
 
     from mindroom.config.personal_rooms import PersonalRoomsConfig
@@ -65,6 +65,15 @@ _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 
 class _PolicyChangedError(Exception):
     """Current policy no longer authorizes this provisioning attempt."""
+
+
+class PersonalRoomRosterMismatchError(RuntimeError):
+    """An imported room holds people outside its attested roster until someone removes them."""
+
+    def __init__(self, room_id: str, unexpected_user_ids: Iterable[str]) -> None:
+        super().__init__("Personal-room ownership or membership does not match")
+        self.room_id = room_id
+        self.unexpected_user_ids = tuple(sorted(unexpected_user_ids))
 
 
 @dataclass
@@ -404,8 +413,7 @@ class PersonalRoomService:
             # Only a room this agent created is removed from; an imported room
             # keeps its exact attested roster and fails closed instead.
             if record.adoption is not None:
-                msg = "Personal-room ownership or membership does not match"
-                raise RuntimeError(msg)
+                raise PersonalRoomRosterMismatchError(record.room_id, guests)
             await self._remove_guests(record, guests, state)
             roster.update(dict.fromkeys(guests, "leave"))
         return roster
