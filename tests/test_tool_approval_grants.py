@@ -704,6 +704,34 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
 
 
 @pytest.mark.asyncio
+async def test_sanitized_call_does_not_reuse_active_timed_grant(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A hidden argument value must force a fresh one-time card despite an active grant."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        first = await _card(journal, manager, "first")
+        assert (await _approve(manager, first)).consumed
+
+        await _card(journal, manager, "sanitized", command="api_key=sk-test-approval-value")
+
+        continuation = await journal.principal("agent@code").approval_continuation("sanitized")
+        assert continuation is not None
+        assert continuation.calls[0].decision is None
+        stored = await journal.principal("router@shared").pending_approval_card(
+            room_id="!room:test",
+            card_event_id="$card-sanitized",
+        )
+        assert stored is not None
+        assert stored.card["content"].get("approvable", True) is True
+        assert "auto_approve_options" not in stored.card["content"]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_departure_and_changed_binding_invalidate_grants(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,

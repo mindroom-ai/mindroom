@@ -1857,6 +1857,18 @@ async def test_oversized_approval_card_is_unapprovable_without_redaction_label(t
 
     assert nested_card is not None
     assert nested_card.payload["approvable"] is False
+    assert "full_arguments" not in nested_card.payload
+    assert nested_card.payload["body"] == "🔒 Approval required: shell"
+    nested_pending = PendingApproval.from_card_event(
+        {
+            "type": "io.mindroom.tool_approval",
+            "event_id": "$nested-approval",
+            "sender": "@router:localhost",
+            "content": nested_card.payload,
+        },
+        room_id="!room:localhost",
+    )
+    assert manager._normalized_resolution_request(nested_pending, status="approved", reason=None)[0] == "denied"
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:
