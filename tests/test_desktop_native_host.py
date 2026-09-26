@@ -15,17 +15,22 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import replace
+from functools import partial
+from itertools import count
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import nio
 import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
 from mindroom.desktop.command_journal import DesktopCommandJournal, DesktopCommandJournalError
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
+from mindroom.desktop.media import download_encrypted_media
 from mindroom.desktop.native_config import (
     NativeDesktopConfig,
     load_native_config,
@@ -40,14 +45,19 @@ from mindroom.desktop.native_host import (
     supervise_native_tasks,
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
-from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE, DesktopCommand
-from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+from mindroom.desktop.protocol import (
+    DESKTOP_COMMAND_EVENT_TYPE,
+    DesktopCommand,
+    DesktopResponse,
+    EncryptedDesktopMedia,
+)
+from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
 from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
+from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
     from collections.abc import Buffer
-    from pathlib import Path
 
 
 def _config_payload() -> dict[str, object]:
@@ -562,13 +572,12 @@ def _attach_shell_runtime(host: NativeDesktopHost, tmp_path: Path) -> NativeBrid
     return runtime
 
 
-def _shell_event(
-    command: str,
-    cwd: Path,
+def _bridge_event(
+    action: str,
+    parameters: dict[str, object],
     *,
-    request_id: str = "shell-1",
-    sequence: int = 1,
-    timeout_seconds: int = 30,
+    request_id: str,
+    sequence: int,
 ) -> AuthenticatedToDeviceEvent:
     now_ms = round(time.time() * 1000)
     content = DesktopCommand(
@@ -577,16 +586,32 @@ def _shell_event(
         sequence,
         now_ms,
         now_ms + 60_000,
-        "run_shell",
+        action,
         "@person:example.org",
         "assistant",
-        {"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
+        parameters,
     ).to_content()
     return AuthenticatedToDeviceEvent(
         source={"content": content},
         sender="@controller:example.org",
         type=DESKTOP_COMMAND_EVENT_TYPE,
         authenticated_sender=AuthenticatedDevice("@controller:example.org", "DEVICE", "curve-key", "key"),
+    )
+
+
+def _shell_event(
+    command: str,
+    cwd: Path,
+    *,
+    request_id: str = "shell-1",
+    sequence: int = 1,
+    timeout_seconds: int = 30,
+) -> AuthenticatedToDeviceEvent:
+    return _bridge_event(
+        "run_shell",
+        {"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
+        request_id=request_id,
+        sequence=sequence,
     )
 
 
@@ -1015,6 +1040,198 @@ async def test_runtime_start_failure_releases_pinned_folders(
         opened[0].list_folders()
     assert offline_runtime_session.closed is True
     assert runtime.status()["mode"] == "stopped"
+
+
+async def _native(
+    host: NativeDesktopHost,
+    action: str,
+    parameters: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Send one request through the helper's wire parser, as the app does over its private channel."""
+    record = {"v": 1, "request_id": str(uuid4()), "action": action, "parameters": parameters or {}}
+    return await host.handle(parse_native_request(json.dumps(record).encode()))
+
+
+def _replied(send: AsyncMock, request_id: str) -> bool:
+    return any(call.kwargs["content"]["request_id"] == request_id for call in send.await_args_list)
+
+
+async def _reply(send: AsyncMock, request_id: str) -> DesktopResponse:
+    """Wait for the bridge's encrypted reply to one request."""
+    for _ in range(1000):
+        for call in send.await_args_list:
+            if call.kwargs["content"]["request_id"] == request_id:
+                return DesktopResponse.from_content(call.kwargs["content"])
+        await asyncio.sleep(0.01)
+    pytest.fail(f"the bridge never answered {request_id}")
+
+
+@pytest.mark.asyncio
+async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_runtime(  # noqa: PLR0915
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _FakeOwner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved access drives the real helper runtime, providers, journal, and shell engine; only Matrix is faked."""
+    # A real private session file and loader; only opening Matrix and the transport stay fake.
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://example.org", "@desktop:example.org", "LOCAL", "secret-token"),
+    )
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", load_desktop_session)
+    monotonic = [1_000.0]
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge_components.DesktopShell",
+        partial(DesktopShell, monotonic_clock=lambda: monotonic[0]),
+    )
+    uploaded: list[bytes] = []
+
+    async def upload(_client: object, content: bytes, *, content_type: str, filename: str) -> nio.UploadResponse:
+        del content_type, filename
+        uploaded.append(content)
+        return nio.UploadResponse("mxc://example.org/shell-output")
+
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
+    root = tmp_path / "selected"
+    root.mkdir()
+    (root / "note.txt").write_text("known text\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("outside secret", encoding="utf-8")
+    (root / "link").symlink_to(tmp_path / "outside.txt")
+    work = tmp_path / "work"
+    work.mkdir()
+    marker, pids = work / "marker", work / "pids"
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    sequences = count(1)
+
+    async def send(action: str, **parameters: object) -> str:
+        sequence = next(sequences)
+        request_id = f"{action}-{sequence}"
+        [(deliver, _)] = offline_runtime_session.client.to_device_callbacks
+        await deliver(_bridge_event(action, parameters, request_id=request_id, sequence=sequence))
+        return request_id
+
+    async def call(action: str, **parameters: object) -> DesktopResponse:
+        return await _reply(bridge_transport, await send(action, **parameters))
+
+    try:
+        await _native(
+            host,
+            "configure",
+            {"expected_revision": 0, "config": _config_payload() | {"allowed_app_ids": []}},
+        )
+        access = {"expected_revision": 1, "files": {"roots": [str(root)]}, "shell": {"enabled": True}}
+        saved = await _native(host, "set_local_access", access)
+        assert saved["status"]["config"]["file_roots"] == [str(root.resolve())]
+        assert (await _native(host, "start"))["status"]["bridge"]["state"] == "observe_only"
+
+        [folder] = (await call("list_folders")).result["folders"]
+        assert folder["path"] == str(root.resolve())
+        read = await call("read_file", root_id=folder["id"], path="note.txt")
+        assert (read.result["text"], read.result["eof"]) == ("known text\n", True)
+        for outside in ("../outside.txt", str(tmp_path / "outside.txt"), "link"):
+            denied = await call("read_file", root_id=folder["id"], path=outside)
+            assert not denied.ok
+            assert "outside secret" not in json.dumps(denied.to_content())
+
+        # Nothing runs until the person at the computer approves this exact request.
+        once = await send(
+            "run_shell",
+            command='echo $$ >> pids; printf once >> marker; printf "$MINDROOM_CAPTURED"',
+            cwd=str(work),
+        )
+        pending = await _wait_for_native_pending(host)
+        assert (pending["request_id"], pending["cwd"]) == (once, str(work))
+        assert not marker.exists()
+        assert not _replied(bridge_transport, once)
+        await _native(host, "decide_shell", {"command_id": once, "approved": True, "auto_approve_seconds": 0})
+        ran = await _reply(bridge_transport, once)
+        assert (ran.result["state"], ran.result["exit_code"], ran.result["output"]) == (
+            "completed",
+            0,
+            "from-login-shell",
+        )
+        assert marker.read_text() == "once"
+        receipt = await call("request_status", request_id=once)
+        assert (receipt.result["state"], receipt.result["response"]) == ("completed", ran.to_content())
+
+        # Approving once is single use: the next request waits again, and its decision grants a timed lease.
+        leased = await send("run_shell", command="echo $$ >> pids; printf leased >> marker", cwd=str(work))
+        assert (await _wait_for_native_pending(host))["request_id"] == leased
+        assert marker.read_text() == "once"
+        assert not _replied(bridge_transport, leased)
+        await _native(host, "decide_shell", {"command_id": leased, "approved": True, "auto_approve_seconds": 300})
+        assert (await _reply(bridge_transport, leased)).result["exit_code"] == 0
+        assert marker.read_text() == "onceleased"
+        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 300.0
+
+        # Under the lease, a command that outlives its inline wait becomes a handle whose large output arrives encrypted.
+        expected = b"attachment\n" * 8_000
+        running = await call(
+            "run_shell",
+            command="echo $$ >> pids; while [ ! -f release ]; do sleep 0.05; done; yes attachment | head -n 8000",
+            cwd=str(work),
+            timeout_seconds=1,
+        )
+        assert (running.result["state"], running.result["exit_code"]) == ("running", None)
+        handle = running.result["handle"]
+        (work / "release").touch()
+        for _ in range(500):
+            checked = await call("check_shell", handle=handle)
+            if checked.result["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("shell handle never completed")
+        assert (checked.result["exit_code"], checked.result["output"], checked.result["output_bytes"]) == (
+            0,
+            "",
+            len(expected),
+        )
+        media = EncryptedDesktopMedia.from_content(checked.result["output_attachment"], kind="output_attachment")
+        [ciphertext] = uploaded
+        assert expected not in ciphertext
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.download.return_value = nio.DownloadResponse(ciphertext, "application/octet-stream", None)
+        assert await download_encrypted_media(client, media, timeout_seconds=1) == expected
+        assert (await call("check_shell", handle=handle)).error == "Unknown shell handle."
+
+        # The lease ends on the monotonic clock, and revoking rejects the request waiting after it.
+        monotonic[0] += 301
+        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0.0
+        expired = await send("run_shell", command="echo $$ >> pids; printf expired >> marker", cwd=str(work))
+        assert (await _wait_for_native_pending(host))["request_id"] == expired
+        await _native(host, "revoke_shell")
+        assert "did not run" in str((await _reply(bridge_transport, expired)).error)
+        assert marker.read_text() == "onceleased"
+
+        # Stopping the bridge kills a background handle and its children and removes the private output spool.
+        granted = await _native(host, "grant_shell", {"duration_seconds": 60})
+        assert granted["status"]["shell"]["auto_approve_remaining_seconds"] == 60.0
+        background = await call(
+            "run_shell",
+            command="sleep 30 & echo $! >> pids; echo $$ >> pids; wait",
+            cwd=str(work),
+            timeout_seconds=1,
+        )
+        assert background.result["state"] == "running"
+        assert [entry["handle"] for entry in host.status()["shell"]["handles"]] == [background.result["handle"]]
+        spool = Path(cast("NativeBridgeRuntime", host._runtime)._shell._directory)
+        assert spool.is_dir()
+        stopped = await _native(host, "stop")
+        assert stopped["status"]["bridge"]["state"] == "stopped"
+        assert stopped["status"]["shell"]["handles"] == []
+        recorded = [int(pid) for pid in pids.read_text().split()]
+        assert len(recorded) == 5
+        for pid in recorded:
+            await _wait_until_gone(pid)
+        assert not spool.exists()
+    finally:
+        await host.shutdown()
+        if pids.exists():
+            for pid in pids.read_text().split():
+                with suppress(ProcessLookupError):
+                    os.kill(int(pid), signal.SIGKILL)
 
 
 def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_path: Path) -> None:
