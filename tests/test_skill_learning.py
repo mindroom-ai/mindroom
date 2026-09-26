@@ -2391,6 +2391,32 @@ async def test_a_config_change_never_waits_for_a_retired_reviews_notice(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_review_shutdown_stops_after_its_writes_posts_no_notice(tmp_path: Path) -> None:
+    """Shutdown settles a stopped review's count but sends nothing, since the runtime is going away."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    model.release = asyncio.Event()
+    model.released_requests = 1
+    send = AsyncMock(return_value=object())
+    runner = _runner(paths, object())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
+    ):
+        due = _queue(config, paths, identity=ALICE)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
+        await asyncio.wait_for(model.blocked.get(), timeout=10)
+        await asyncio.wait_for(runner.stop(), timeout=10)
+    assert task.cancelled()
+    assert _entries(paths)["mind:session"]["replies"] == 0
+    send.assert_not_awaited()
+    assert not runner._notices
+
+
+@pytest.mark.asyncio
 async def test_a_chat_skill_edit_waits_for_archival_to_move_the_library(tmp_path: Path) -> None:
     """A chat skill_manage call made while archival runs waits its turn, so it never writes into a moving skill."""
     config, paths = _learner(tmp_path)

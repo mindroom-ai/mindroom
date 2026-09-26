@@ -390,7 +390,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 `inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
 Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`).
+Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`).
 Every participant tool must also be listed in `permissions.tools`.
 Dynamic Workflow participants cannot suspend and resume a model run for human approval.
 A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
@@ -474,7 +474,7 @@ A first matching `auto_approve` rule can authorize a function outside `allowed_t
 Unmatched functions default to requiring approval and are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
 `claude_agent`, `config_manager`, and `scheduler` receive no generated grant from `allowed_tools`, including `"*"`, but an explicit operator rule can authorize otherwise eligible functions from those toolkits.
 Native-confirming functions remain unavailable even under an operator auto-approval rule.
-Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, and `self_config`) are always excluded.
+Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, `self_config`, and `skill_manage`) are always excluded.
 Participant tools must still be granted in the workflow's `permissions.tools`, resolve through the caller's tool routing, and satisfy their runtime authority checks.
 A function name shared by several granted toolkits receives a generated grant only when every owner is eligible.
 

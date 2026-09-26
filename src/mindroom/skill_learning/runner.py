@@ -200,6 +200,7 @@ class SkillReviewRunner:
 
     def _post_notice(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
         """Send a settled review's notice, unless shutdown began."""
+        # A review that shutdown stops settles after stop() chose the notices it cancels.
         if self._stopped:
             return
         task = create_background_task(
@@ -227,11 +228,5 @@ class SkillReviewRunner:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        try:
-            delivered = await send_message_result(client, identity.room_id, content)
-        except Exception:
-            # The review is already settled; a lost notice must not make it look failed.
-            logger.exception("Could not post skill review notice", agent=agent_name, room_id=identity.room_id)
-            return
-        if delivered is None:
+        if await send_message_result(client, identity.room_id, content) is None:
             logger.warning("Could not post skill review notice", agent=agent_name, room_id=identity.room_id)
