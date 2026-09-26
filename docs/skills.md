@@ -212,7 +212,7 @@ Provider-hosted tools the request offered, such as a provider's web search, stay
 Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
 The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
 
-The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, and when the final request cannot be forked because the response ended on a tool call, offered no `skill_manage`, or needs approval for a skill tool.
+The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, when the response's final attempt left no request to fork, and when the final request cannot be forked because the response ended on a tool call or without a text answer, offered no `skill_manage`, needs approval for a skill tool, or offered no skill reader although the library now holds skills.
 Unlike Hermes' fork, which compacts the conversation between its requests, the fork resends the whole conversation with each request, so a response whose final request already used more than a quarter of the review's input budget is replayed as a digest too.
 A replay without its own `skill_learning.model` runs on the model the response used, or for an approved continuation on the agent's model for that room and thread.
 A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
@@ -263,9 +263,9 @@ Private agents learn only from and into the requester's private workspace, and s
 
 ### History, archive, and notices
 
-Before the learner replaces or removes a file, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
+Before `skill_manage` replaces or removes a file, in chat or in a review, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
 Copy a saved version back to restore it.
-Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
+Before each review, learned skills with no use, creation, or `skill_manage` edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it; one recreated under the same name before that review stays learner-owned unless it carries `pinned: true`.

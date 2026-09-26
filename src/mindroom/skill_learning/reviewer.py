@@ -15,6 +15,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from agno.compression.manager import CompressionManager
 from agno.metrics import BaseMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from pathlib import Path
 
-    from agno.compression.manager import CompressionManager
     from agno.models.base import Model
     from pydantic import BaseModel
 
@@ -82,7 +82,19 @@ class _ReviewRequest:
     forked: bool
     tool_choice: str | dict[str, Any] | None = None
     response_format: dict[str, Any] | type[BaseModel] | None = None
-    compression_manager: CompressionManager | None = None
+    compressed_tool_results: bool = False
+
+
+@dataclass
+class _SendCompressedResults(CompressionManager):
+    """Send the tool results a response compressed as it sent them, and compress nothing more in the review.
+
+    Like Hermes deferring fork compaction, compressing during the review would rewrite the cached conversation and
+    shorten the skill files the review just loaded before it patches them.
+    """
+
+    async def ashould_compress(self, *_args: object, **_kwargs: object) -> bool:
+        return False
 
 
 def _review_input_budget_tokens(config: Config, model_name: str) -> int:
@@ -164,8 +176,11 @@ def _fork(
     if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
     review_tools, runnable, needs_approval = _review_tools(captured.tools, tools)
-    # A review cannot give approval, and a patch without its read tool is always refused, so all skill tools must run.
+    # A review cannot give approval, and a patch without its read tool is always refused, so all skill tools must run;
+    # a request made before the agent had any skill offered no reader for the skills the library holds now.
     if needs_approval or "skill_manage" not in runnable:
+        return None
+    if catalog.entries and "get_skill_instructions" not in runnable:
         return None
     return _ReviewRequest(
         model=captured.model,
@@ -175,7 +190,7 @@ def _fork(
         forked=True,
         tool_choice=captured.tool_choice,
         response_format=captured.response_format,
-        compression_manager=captured.compression_manager,
+        compressed_tool_results=captured.compressed_tool_results,
     )
 
 
@@ -342,7 +357,7 @@ async def review_conversation(
                 tool_call_limit=_REVIEW_TOOL_CALL_LIMIT,
                 response_format=review.response_format,
                 run_response=run,
-                compression_manager=review.compression_manager,
+                compression_manager=_SendCompressedResults() if review.compressed_tool_results else None,
             )
     finally:
         await run_coroutine_until_complete(aclose_anthropic_async_client(review.model))

@@ -1,4 +1,4 @@
-"""Chat-time ``skill_manage`` of agents that learn skills, like Hermes' foreground ``skill_manage``.
+"""Chat-time ``skill_manage``, like Hermes' foreground ``skill_manage``, for agents that list it or learn skills.
 
 The skill review forks the agent's final request with its tools unchanged, so the review can only call tools the
 agent's request offered; this is the one tool it writes skills with.

@@ -60,7 +60,7 @@ class SkillUsage(BaseModel):
     last_patched_at: _UtcDatetime | None = None
 
     def last_activity_at(self) -> datetime | None:
-        """Return the newest creation, use, or learner edit."""
+        """Return the newest creation, use, or ``skill_manage`` edit."""
         moments = [moment for moment in (self.created_at, self.last_used_at, self.last_patched_at) if moment]
         return max(moments, default=None)
 
