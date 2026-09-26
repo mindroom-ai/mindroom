@@ -1355,7 +1355,7 @@ def test_google_refresh_rejects_invalid_endpoint_pin_before_provider_call(
     if token_uri is not None:
         token_data["token_uri"] = token_uri
 
-    with pytest.raises(OAuthRefreshRejectedError, match="endpoint changed"):
+    with pytest.raises(OAuthRefreshRejectedError, match="missing or changed"):
         tool._refresh_google_token_data(
             token_data,
             object(),
