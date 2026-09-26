@@ -1830,6 +1830,57 @@ def test_pkce_provider_exchange_sends_code_verifier(
     assert result.token_data["token"] == "access-token"
 
 
+def test_custom_token_parser_exchange_receives_provider_payload_and_core_stamps_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    seen_response: dict[str, Any] = {}
+
+    def _parse_minimal_token(
+        _provider: OAuthProvider,
+        token_response: dict[str, Any],
+        _client_config: OAuthClientConfig,
+        _runtime_paths: constants.RuntimePaths,
+    ) -> OAuthTokenResult:
+        seen_response.update(token_response)
+        return OAuthTokenResult(token_data={"token": token_response["access_token"]})
+
+    provider = OAuthProvider(
+        id="custom_parser",
+        display_name="Custom Parser",
+        authorization_url="https://auth.example.test/custom_parser/authorize",
+        token_url="https://auth.example.test/custom_parser/token",
+        scopes=("scope.read",),
+        credential_service="custom_parser_oauth",
+        client_config_services=("test_drive_oauth_client",),
+        token_parser=_parse_minimal_token,
+    )
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
+            return {"access_token": "access-token"}
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
+
+    assert seen_response == {"access_token": "access-token"}
+    assert result.token_data["token_uri"] == provider.token_url
+
+
 def test_pkce_custom_token_exchanger_receives_code_verifier(tmp_path: Path) -> None:
     seen: dict[str, str | None] = {}
 

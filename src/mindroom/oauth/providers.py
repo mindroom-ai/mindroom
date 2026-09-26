@@ -196,6 +196,14 @@ def is_terminal_oauth_refresh_error_code(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
 
 
+def require_token_endpoint_pin(token_data: Mapping[str, Any], token_url: str) -> None:
+    """Require the authorization-time token endpoint before refreshing."""
+    stored_token_url = token_data.get("token_uri")
+    if not isinstance(stored_token_url, str) or stored_token_url != token_url:
+        msg = "OAuth token endpoint binding is missing or changed since authorization"
+        raise OAuthRefreshRejectedError(msg)
+
+
 class OAuthClaimValidationError(OAuthProviderError):
     """Raised when verified provider claims do not satisfy configured policy."""
 
@@ -348,9 +356,6 @@ def _default_token_parser(
 
     token_data: dict[str, Any] = {
         "token": access_token,
-        "token_uri": token_response.get("_mindroom_token_url")
-        if isinstance(token_response.get("_mindroom_token_url"), str)
-        else provider.token_url,
         "client_id": client_config.client_id,
         "_source": "oauth",
         "_oauth_provider": provider.id,
@@ -849,7 +854,6 @@ class OAuthProvider:
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
         token_response = dict(token_response)
-        token_response["_mindroom_token_url"] = endpoints.token_url
         result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
         return _token_result_with_core_metadata(
             self,
@@ -869,10 +873,7 @@ class OAuthProvider:
         refresh_token = cast("str", token_data["refresh_token"])
 
         endpoints = await self.runtime_endpoints(runtime_paths)
-        stored_token_url = token_data.get("token_uri")
-        if not isinstance(stored_token_url, str) or stored_token_url != endpoints.token_url:
-            msg = "OAuth token endpoint changed since authorization"
-            raise OAuthRefreshRejectedError(msg)
+        require_token_endpoint_pin(token_data, endpoints.token_url)
         client_config = await self.require_client_config_async(runtime_paths)
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
@@ -893,7 +894,6 @@ class OAuthProvider:
             raise OAuthProviderError(msg)
 
         refresh_response = dict(token_response)
-        refresh_response["_mindroom_token_url"] = endpoints.token_url
         response_refresh_token = refresh_response.get("refresh_token")
         existing_refresh_token = token_data.get("refresh_token")
         if (
