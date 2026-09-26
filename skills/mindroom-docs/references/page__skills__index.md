@@ -203,7 +203,7 @@ A review that already changed skills before failing, timing out, or being stoppe
 Like Hermes' default review, the review forks the final model request of the response that made the conversation due.
 It sends that request again on the same model, with the same tools, the model's final answer, and the review prompt appended, so the provider can serve the conversation from its prompt cache and the review sees it verbatim, including every tool call and result.
 On a stored OpenAI Responses conversation, the fork continues from the response with `previous_response_id`, so the provider rebuilds the same conversation.
-Only the skill tools run in MindRoom; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use.
+Only the skill tools run in MindRoom; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use, while a tool that needs approval answers only that it is not available.
 Provider-hosted tools the request offered, such as a provider's web search, stay available to the fork, because the provider runs them.
 Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
 The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
@@ -228,6 +228,7 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 ### Skill tools
 
 Agents with skill learning on have a `skill_manage` tool, as Hermes agents do, and the review writes with the same tool.
+Other agents can list `skill_manage` in `tools` to save skills in chat; like `self_config`, it is not available to scripts and workflow participants.
 It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
 Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
 In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.

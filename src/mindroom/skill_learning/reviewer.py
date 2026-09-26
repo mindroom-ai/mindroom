@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from pathlib import Path
 
+    from agno.compression.manager import CompressionManager
     from agno.models.base import Model
     from pydantic import BaseModel
 
@@ -54,8 +55,9 @@ _INPUT_CONTEXT_FRACTION = 0.75
 _MAX_INPUT_TOKENS = 600_000
 _FALLBACK_INPUT_TOKENS = 120_000
 _CHARS_PER_TOKEN = 4
-# A digest replay resends its transcript on every request of the review, so it may use a quarter of the budget.
-_TRANSCRIPT_BUDGET_SHARE = 4
+# Each request of a review resends the conversation, whether a fork's full request or a digest replay's transcript,
+# and fork compaction is absent, so the conversation may use a quarter of the budget to leave room for more requests.
+_CONVERSATION_BUDGET_SHARE = 4
 # The skill tools a review runs, as the review prompt describes them.
 _SKILL_TOOL_LINES = {
     "get_skill_instructions": "get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its "
@@ -67,9 +69,6 @@ _SKILL_TOOL_LINES = {
     '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
     '(file_path and file_content), or "remove_file" (file_path).',
 }
-# Without compaction between its requests, a fork resends the whole conversation each time, so a conversation that
-# already used more than this share of the review budget is replayed as a digest to leave room for several requests.
-_FORK_BUDGET_SHARE = 4
 
 
 @dataclass(frozen=True)
@@ -83,6 +82,7 @@ class _ReviewRequest:
     forked: bool
     tool_choice: str | dict[str, Any] | None = None
     response_format: dict[str, Any] | type[BaseModel] | None = None
+    compression_manager: CompressionManager | None = None
 
 
 def _review_input_budget_tokens(config: Config, model_name: str) -> int:
@@ -161,7 +161,7 @@ def _fork(
     if final is None or final.role != "assistant" or final.tool_calls or not final.content:
         return None
     sent = _context_tokens(config, captured.model, captured.model_name, final.metrics) if final.metrics else 0
-    if sent * _FORK_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
+    if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
     review_tools, runnable, needs_approval = _review_tools(captured.tools, tools)
     # A review cannot give approval, and a patch without its read tool is always refused, so all skill tools must run.
@@ -175,6 +175,7 @@ def _fork(
         forked=True,
         tool_choice=captured.tool_choice,
         response_format=captured.response_format,
+        compression_manager=captured.compression_manager,
     )
 
 
@@ -248,7 +249,7 @@ async def _replay(
         render_transcript,
         conversation_messages(session),
         summary=session.summary.summary if session.summary is not None else None,
-        budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _TRANSCRIPT_BUDGET_SHARE,
+        budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _CONVERSATION_BUDGET_SHARE,
     )
     schemas = await asyncio.to_thread(_agent_skill_schemas, config, runtime_paths, agent_name, skills_root, catalog)
     review_tools, runnable, _needs_approval = _review_tools(schemas, tools)
@@ -341,6 +342,7 @@ async def review_conversation(
                 tool_call_limit=_REVIEW_TOOL_CALL_LIMIT,
                 response_format=review.response_format,
                 run_response=run,
+                compression_manager=review.compression_manager,
             )
     finally:
         await run_coroutine_until_complete(aclose_anthropic_async_client(review.model))
