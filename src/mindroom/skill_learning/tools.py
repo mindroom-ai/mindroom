@@ -41,12 +41,13 @@ if TYPE_CHECKING:
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
-# Agno runs the tool calls of one reply concurrently, and chat and a review may change one library at once, while each
-# change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they take turns.
+# Agno runs the tool calls of one reply concurrently, and chat, a review, and archival may change one library at once,
+# while each change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they
+# take turns.
 _LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
-def _library_turn(skills_root: Path) -> asyncio.Lock:
+def library_turn(skills_root: Path) -> asyncio.Lock:
     """Return the lock every skill tool of one skills directory in this process takes turns with."""
     return _LIBRARY_TURNS.setdefault(skills_root, asyncio.Lock())
 
@@ -127,7 +128,7 @@ async def manage_skill_in_chat(
     change: SkillChange,
 ) -> str:
     """Apply one chat-time change to the library as it is once this call's turn comes."""
-    async with _library_turn(skills_root):
+    async with library_turn(skills_root):
         catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
         return await SkillTools(skills_root, catalog.entries, catalog.reserved_names)._apply(change)
 
@@ -145,7 +146,7 @@ class SkillTools:
 
     def __post_init__(self) -> None:
         """Share one turn lock with every other user of the same skills directory in this process."""
-        self._turn = _library_turn(self.skills_root)
+        self._turn = library_turn(self.skills_root)
 
     @property
     def learner(self) -> bool:

@@ -3399,7 +3399,7 @@
         },
         "archive_after_days": {
           "default": 30,
-          "description": "Archive learned skills unused for this many days; 0 keeps them indefinitely",
+          "description": "Archive learned skills with no use, creation, or skill_manage edit for this many days; 0 keeps them indefinitely",
           "maximum": 3650,
           "minimum": 0,
           "title": "Archive After Days",

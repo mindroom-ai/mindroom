@@ -1212,25 +1212,33 @@ async def test_an_interrupted_review_keeps_its_count_for_the_next_reply(tmp_path
 
 @pytest.mark.asyncio
 async def test_retiring_stops_the_reviews_of_agents_that_stopped_learning(tmp_path: Path) -> None:
-    """A config change that turns learning off stops that agent's running review."""
+    """A config change that turns learning off stops that agent's review and waits for it to settle its count.
+
+    The config change drops the agent's count right after retiring, so a settle landing later would keep the count
+    for learning turned on again.
+    """
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    model = _model()
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     model.release = asyncio.Event()
+    model.released_requests = 1
     runner = _runner(paths)
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         due = _queue(config, paths)
         assert due is not None
         task = runner.start(config, *due, None)
         assert task is not None
-        await asyncio.wait_for(model.started.wait(), timeout=10)
-        runner.retire(config)
+        await asyncio.wait_for(model.blocked.get(), timeout=10)
+        await runner.retire(config)
         assert not task.done()
         retired = config.model_copy(deep=True)
         retired.agents["mind"].skill_learning.enabled = False
-        runner.retire(retired)
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
-    assert task.cancelled()
+        await asyncio.wait_for(runner.retire(retired), timeout=10)
+        assert task.cancelled()
+        assert _entries(paths)["mind:session"]["replies"] == 0
+        queue.drop_retired_reviews(retired, paths)
+    assert _entries(paths) == {}
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
 
 
 def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
@@ -2337,3 +2345,103 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
     recreated = library.read_skill_file(root, "deploy-checks")
     assert recreated is not None
     assert not recreated.learned
+
+
+@pytest.mark.asyncio
+async def test_a_chat_skill_edit_waits_for_archival_to_move_the_library(tmp_path: Path) -> None:
+    """A chat skill_manage call made while archival runs waits its turn, so it never writes into a moving skill."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    library.create_skill(
+        root,
+        "old-habit",
+        LEARNED.replace("deploy-checks", "old-habit"),
+        reserved_names=frozenset(),
+        learner=True,
+    )
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(
+            root_fd,
+            "old-habit",
+            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+        )
+    reached, release = threading.Event(), threading.Event()
+    real_archive = runner_module.archive_unused_skills
+
+    def slow_archive(*args: object, **kwargs: Any) -> list[str]:  # noqa: ANN401
+        reached.set()
+        assert release.wait(timeout=10)
+        return real_archive(*args, **kwargs)
+
+    runner = _runner(paths)
+    tools = SkillManageTools("mind", config, paths, root)
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=_model()),
+        patch.object(runner_module, "archive_unused_skills", slow_archive),
+    ):
+        due = _queue(config, paths)
+        assert due is not None
+        review = runner.start(config, *due, None)
+        assert review is not None
+        assert await asyncio.to_thread(reached.wait, 10)
+        edit = asyncio.create_task(
+            tools.skill_manage("patch", "old-habit", old_string="1. Run the smoke test.", new_string="1. Run smoke."),
+        )
+        done, _pending = await asyncio.wait({edit}, timeout=0.2)
+        assert not done, "the chat edit must wait while archival moves skills"
+        release.set()
+        await asyncio.wait_for(review, timeout=10)
+        result = json.loads(await asyncio.wait_for(edit, timeout=10))
+    assert not result["success"]
+    assert not (root / "old-habit").exists()
+    (archived,) = (root / ".archive").iterdir()
+    assert "1. Run the smoke test." in (archived / "SKILL.md").read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["finished", "stopped while opening"])
+async def test_the_review_closes_the_claude_client_it_opens(tmp_path: Path, ending: str) -> None:
+    """The response closed its Claude client, so the review opens its own and closes it, even when stopped mid-open."""
+    config, paths = _learner(tmp_path)
+    config.models["default"] = ModelConfig(provider="anthropic", id="claude-sonnet-5", api_key="test-key")
+    _seed(config, paths, _tool_turn("r1"))
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"))
+
+    model = get_model_instance(config, paths, "default")
+    model.api_key = "test-key"
+    model.http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    opened, release = threading.Event(), threading.Event()
+    if ending == "finished":
+        release.set()
+    clients: list[AsyncAnthropic] = []
+    real_open = model.get_async_client
+
+    def opening() -> AsyncAnthropic:
+        # Opening a client does blocking credential and TLS work.
+        opened.set()
+        assert release.wait(timeout=10)
+        clients.append(real_open())
+        return clients[-1]
+
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch.object(model, "get_async_client", opening),
+    ):
+        review = asyncio.create_task(_review(config, paths))
+        assert await asyncio.to_thread(opened.wait, 10)
+        if ending == "stopped while opening":
+            review.cancel()
+            release.set()
+        await asyncio.wait_for(asyncio.gather(review, return_exceptions=True), timeout=10)
+    assert review.cancelled() == (ending == "stopped while opening")
+    if not review.cancelled():
+        review.result()
+    assert len(requests) == (1 if ending == "finished" else 0)
+    assert clients
+    assert all(client.is_closed() for client in clients)
+    assert model.async_client is None
