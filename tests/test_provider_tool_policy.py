@@ -18,10 +18,12 @@ from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, 
 from mindroom.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.provider_tool_policy import without_provider_tools
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.gemini_helpers import gemini_client
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import httpx
     from agno.models.groq import Groq
 
 
@@ -172,9 +174,108 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
         assert config.tools[0].function_declarations[0].name == "read_status"
         assert config.system_instruction == "Stable agent instructions"
         assert config.tool_config.function_calling_config.mode == "NONE"
+    assert config.response_mime_type == "application/json"
     assert options == before
     regular = GenerateContentConfig.model_validate(model.get_request_params()["config"])
     assert any(tool.google_search is not None for tool in regular.tools)
+    assert regular.response_mime_type is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
+@pytest.mark.parametrize(
+    ("authored_field", "authored_schema"),
+    [("response_schema", {"type": "STRING"}), ("response_json_schema", {"type": "string"})],
+)
+@pytest.mark.parametrize("typed", [False, True], ids=["dict", "typed"])
+async def test_gemini_decisions_drop_the_authored_output_schema(
+    vertexai: bool,
+    authored_field: str,
+    authored_schema: dict[str, str],
+    typed: bool,
+) -> None:
+    """Only the caller's decision schema may shape a decision; the reply's authored output schema never does."""
+
+    def unreachable(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
+    decision_schema = {"type": "object", "properties": {"decision": {"type": "boolean"}}, "required": ["decision"]}
+    options = {"response_mime_type": "application/json", authored_field: authored_schema}
+    authored = GenerateContentConfig(**options) if typed else options
+    before = deepcopy(authored)
+    async with gemini_client(unreachable, vertexai=vertexai) as client:
+        model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client, generation_config=authored)
+        with without_provider_tools(response_schema=decision_schema):
+            decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+        with without_provider_tools():
+            schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+        regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")["config"]
+    assert authored == before
+
+    for config in (decision, schemaless):
+        assert config.tools[0].function_declarations[0].name == "read_status"
+        assert config.tool_config.function_calling_config.mode == "NONE"
+        assert config.response_schema is None
+        # Vertex AI never pairs JSON output with declarations, not even an authored JSON format.
+        assert config.response_mime_type == (None if vertexai else "application/json")
+    assert decision.response_json_schema == (None if vertexai else decision_schema)
+    assert schemaless.response_json_schema is None
+    assert regular.model_dump(exclude_none=True)[authored_field]
+    assert regular.tool_config.function_calling_config.mode == "AUTO"
+
+
+def test_gemini_models_sharing_one_generation_config_stay_independent(tmp_path: Path) -> None:
+    """Instances loaded from one models entry share its dict; a reply must not leak its tools into a judgment."""
+    authored = {"max_output_tokens": 256}
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "gemini": ModelConfig(
+                    provider="gemini",
+                    id="test",
+                    extra_kwargs={"api_key": "test-key", "generation_config": authored},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    reply = get_model_instance(config, runtime_paths_for(config), "gemini")
+    judge = get_model_instance(config, runtime_paths_for(config), "gemini")
+    shared = config.models["gemini"].extra_kwargs["generation_config"]
+    assert reply.generation_config is judge.generation_config is shared
+
+    reply.get_request_params(system_message="Reply.", tools=[_function_tool()], tool_choice="auto")
+    with without_provider_tools():
+        judgment = judge.get_request_params(system_message="Judge.", tools=[], tool_choice="none")["config"]
+
+    assert shared == {"max_output_tokens": 256}
+    assert judgment.tools is None
+    assert judgment.tool_config is None
+    assert judgment.system_instruction == "Judge."
+    assert judgment.response_mime_type == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_vertex_gemini_requests_json_only_without_declarations() -> None:
+    """Vertex AI acceptance of JSON beside disabled declarations is unverified, so declarations keep NONE only."""
+
+    def unreachable(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
+    async with gemini_client(unreachable, vertexai=True) as client:
+        model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client)
+        with without_provider_tools(response_schema={"type": "object"}):
+            declared = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+            undeclared = model.get_request_params(system_message="Judge.", tool_choice="none")["config"]
+
+    assert declared.tools[0].function_declarations[0].name == "read_status"
+    assert declared.tool_config.function_calling_config.mode == "NONE"
+    assert declared.response_mime_type is None
+    assert declared.response_json_schema is None
+    assert undeclared.tools is None
+    assert undeclared.tool_config is None
+    assert undeclared.response_mime_type == "application/json"
+    assert undeclared.response_json_schema == {"type": "object"}
 
 
 def test_gemini_keeps_only_declarations_in_mixed_tool() -> None:

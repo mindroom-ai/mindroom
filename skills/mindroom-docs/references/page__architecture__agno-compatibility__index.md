@@ -17,26 +17,26 @@ rg -n -F 'AGNO_COMPAT:' src/mindroom
 
 ### Existing tracking
 
-Issue and PR states below were checked on September 15, 2026. Recheck upstream before starting a contribution or removing a workaround.
+Issue and PR states below were checked on September 24, 2026.
+Recheck upstream before starting a contribution or removing a workaround.
 The source modules listed here contain the exact regression-test references and removal conditions.
 Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
-| Session totals repeat cumulative run usage on checkpoints/resumes, or omit totals for bare sessions. | [PR #10353](https://github.com/agno-agi/agno/pull/10353), open. | `agno_compat_session_metrics.py`; remove after the pinned release includes the fix and approval, checkpoint, reload, and retained-history tests pass without the repair. |
 | Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `agno_compat_provider_errors.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
 | Team input flattens roleful messages. | [Issue #9942](https://github.com/agno-agi/agno/issues/9942), [PR #9943](https://github.com/agno-agi/agno/pull/9943), both open. | `history/agno_compat_message_builder.py`; historical-media filtering needs a separate extension point. |
 | Responses streams accept incomplete EOFs and publish continuation IDs too early. | [PR #10135](https://github.com/agno-agi/agno/pull/10135), open. | `agno_compat_openai_responses.py`; retry safety after retained output remains a separate gap. |
-| Responses continuation depends on a hard-coded model-name predicate. | [PR #10075](https://github.com/agno-agi/agno/pull/10075), open. | `agno_compat_openai_responses.py`; preserve explicit storage and replay choices. |
-| Responses reasoning is lost during explicit tool-call replay. | [Issue #9960](https://github.com/agno-agi/agno/issues/9960), [PR #9968](https://github.com/agno-agi/agno/pull/9968), both open. | `agno_compat_openai_responses_items.py`; hosted tool-search output needs separate coverage and tracking. |
+| Responses reasoning is lost during explicit tool-call replay. | [Issue #9960](https://github.com/agno-agi/agno/issues/9960), open; [PR #9968](https://github.com/agno-agi/agno/pull/9968), closed in favour of [PR #10075](https://github.com/agno-agi/agno/pull/10075), released in Agno 3.0.11, and [PR #10395](https://github.com/agno-agi/agno/pull/10395), merged but unreleased; both are partial, because Agno still keeps only the last reasoning item. | `agno_compat_openai_responses_items.py`; hosted tool-search output needs separate coverage and tracking. |
 | Unreliable streamed tool-call indexes create malformed or merged calls. | [Issue #8879](https://github.com/agno-agi/agno/issues/8879), [PR #8880](https://github.com/agno-agi/agno/pull/8880), both open. | `agno_compat_openai_chat.py`; local filtering only removes empty slots. |
 | Claude requests include sampling controls rejected in supported modes. | [Issue #9931](https://github.com/agno-agi/agno/issues/9931), [PR #9933](https://github.com/agno-agi/agno/pull/9933), both open. | `agno_compat_claude.py`; check top-level parameters and `extra_body` for the same model generations. |
 | Vertex Claude tool definitions contain rejected provider-level `strict` fields. | [Issue #6599](https://github.com/agno-agi/agno/issues/6599), open; [PR #6923](https://github.com/agno-agi/agno/pull/6923), closed without merge. | `agno_compat_vertex_claude_tools.py`; preserve schema properties named `strict`. |
 | Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
 | Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC and live-turn catalog paths. |
 | Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
+| Gemini request building mutates an authored `generation_config` dictionary in place. | [Issue #10161](https://github.com/agno-agi/agno/issues/10161), [PR #10162](https://github.com/agno-agi/agno/pull/10162), both open. | `google_gemini.py`; every request uses a model copy with a deep-copied `generation_config`, because instances loaded from one `models:` entry share the authored dictionary and would otherwise pass one request's tools, tool configuration, and system instruction to the next. |
 
 [PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
 The remaining embedder work concerns request/validation hooks and owner-controlled batch failure handling.
@@ -50,6 +50,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| Responses continuation depends on a hard-coded model-name predicate. | Replace the `o3`/`o4-mini`/`gpt-5` prefix check with a capability that aliases and compatible endpoints can set; [PR #10075](https://github.com/agno-agi/agno/pull/10075), released in Agno 3.0.11, added `use_previous_response_id` but left the predicate. | `agno_compat_openai_responses.py`; preserve explicit storage and replay choices. |
+| Session totals repeat cumulative run usage on checkpoints/resumes, or omit totals for bare sessions. | Open an issue or refile a PR; [PR #10353](https://github.com/agno-agi/agno/pull/10353) was closed by its author without merge or replacement. | `agno_compat_session_metrics.py`; approval, checkpoint, reload, and retained-history tests must pass without the repair before removal. |
 | Provider history is not available before an outer Bash call completes. | Expose a public pre-dispatch callback with actual provider history and propagating session/run persistence. Verified against Agno 3.0.9; no issue or PR identified. | `agno_compat_cli_checkpoint.py`; exact instance-bound batch capture includes resolved fallback models and excludes inner dispatch. |
 | Hidden nested control calls cannot stop their owning provider call through a public per-execution signal. | Expose a public per-call stop signal. Verified against installed Agno; no issue or PR identified. | `agno_compat_prepared_tools.py`; retain a shallow Function copy on the owning FunctionCall until Agno builds its result. |
 | Async model tool execution leaves generator consumers and synchronous threads alive after cancellation. | Own cancellation and cleanup for both execution paths. Reproduced against installed Agno 3.0.9; no issue or PR identified. | `agno_compat_prepared_tools.py`; public FunctionCall overrides fence late starts and settle consumers without replacing normal execution/hooks. |
@@ -147,6 +149,7 @@ Small owner-adjacent boundaries use the same source records:
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
+| `google_gemini.py` | Every request builds from a model copy with a deep-copied `generation_config`. | Native-tool removal, disabled function calling, and decision JSON output apply only to the decision request. |
 
 ## Installation and ownership
 

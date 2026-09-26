@@ -81,6 +81,10 @@ The following provider restrictions apply to this same-model check; a valid deci
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
+Gemini can emit function calls even when function calling is disabled, so MindRoom also requests JSON output with a reason followed by an action from Gemini API models.
+On Vertex AI, MindRoom requests this JSON output only when the agent sends no function declarations, because Vertex acceptance of JSON beside disabled declarations is unverified.
+With declarations, a leaked function call still fails the check, and the agent stays quiet.
+The Vertex AI request without declarations, with JSON output and its ordered response schema, is not live-verified.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
@@ -114,6 +118,8 @@ It receives no executable tools, agent system prompt, or agent memory.
 It must return a structured boolean decision; an explicit abstention or invalid response triggers the existing in-model fallback.
 No self-reported confidence score is requested or treated as a probability.
 Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
+MindRoom requests JSON output from Gemini judgment models on both the Gemini API and Vertex AI, because Gemini can emit function calls even when a request declares none.
+These judgment requests send no function declarations or function-calling settings; the Vertex AI request shape is not live-verified.
 
 To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
 
@@ -208,6 +214,7 @@ Acknowledgements, praise, thanks, "continue," and "do not interrupt" allow conti
 Unrelated requests wait for a later turn unless the user requests an immediate switch.
 For TypeSafe, continuation requires `1 - P(interrupt) >= threshold`; the default `0.8` permits interruption probabilities up to `0.2`.
 For the LLM backend, an explicit `false` answer permits continuation.
+Gemini LLM judges receive the same JSON output request as participation judgments.
 Abstentions, timeouts, missing credentials, exhausted capacity, and backend errors retain the normal wrap-up behavior.
 Judgments reuse the shared participation concurrency limits and backend deadlines.
 

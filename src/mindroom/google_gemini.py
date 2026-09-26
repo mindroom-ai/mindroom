@@ -18,7 +18,7 @@ from google.genai.types import (
 )
 
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.provider_tool_policy import decision_response_schema, provider_tools_disabled
 
 if TYPE_CHECKING:
     from typing import Any
@@ -34,8 +34,11 @@ def _provider_tool_call_id(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _without_tool_selection(config: object) -> GenerateContentConfig:
-    """Preserve function schemas and remove native tools from a decision request."""
+def _decision_config(config: object, *, vertexai: bool) -> GenerateContentConfig:
+    """Build a decision request that keeps function schemas for the shared prefix and drops native tools.
+
+    JSON output matching the caller's schema is requested wherever the endpoint is known to accept it.
+    """
     generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.
@@ -50,12 +53,23 @@ def _without_tool_selection(config: object) -> GenerateContentConfig:
         for tool in generation_config.tools or []
         if isinstance(tool, Tool) and tool.function_declarations
     ]
-    generation_config.tools = declaration_tools or None
-    if declaration_tools:
-        generation_config.tool_config = ToolConfig(
-            function_calling_config=FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE),
-        )
-    return generation_config
+    # Without declarations, function-calling settings govern nothing and are dropped.
+    function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
+    tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
+    # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
+    # The Gemini API accepts Gemini 2.5 JSON output beside declarations only under NONE. Vertex AI
+    # acceptance is unverified, and a rejection would fail every decision, so it gets no JSON there.
+    json_output = not (vertexai and declaration_tools)
+    # The reply's authored output format never shapes a decision.
+    return generation_config.model_copy(
+        update={
+            "tools": declaration_tools or None,
+            "tool_config": tool_config,
+            "response_mime_type": "application/json" if json_output else None,
+            "response_schema": None,
+            "response_json_schema": decision_response_schema() if json_output else None,
+        },
+    )
 
 
 @dataclass
@@ -70,15 +84,24 @@ class MindRoomGoogleGemini(Gemini):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request parameters accepted by the selected Gemini generation."""
-        request_model = self
         if provider_tools_disabled():
             client_http_options = (self.client_params or {}).get("http_options")
             if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
                 msg = "Participation decisions cannot safely apply Gemini body overrides"
                 raise ValueError(msg)
-            # Agno updates authored generation dictionaries in place while merging.
-            request_model = copy(self)
-            request_model.generation_config = deepcopy(self.generation_config)
+        # AGNO_COMPAT: Gemini request building mutates an authored generation_config dict.
+        # Reason: Agno's Gemini.get_request_params merges each request's settings into the
+        # authored dict in place. Instances loaded from one models entry share that dict, so
+        # one request's tools, tool_config and system instruction leak into later requests,
+        # including decisions and judgments on other instances.
+        # Upstream issue: https://github.com/agno-agi/agno/issues/10161, open.
+        # Upstream PR: https://github.com/agno-agi/agno/pull/10162, open; copies the config.
+        # Remove when: the pinned Agno builds every request from a copy of generation_config;
+        # keep applying _decision_config to the returned decision request only.
+        # Coverage: tests/test_provider_tool_policy.py::test_gemini_removes_native_tools_without_mutating_authored_config;
+        # tests/test_provider_tool_policy.py::test_gemini_models_sharing_one_generation_config_stay_independent.
+        request_model = copy(self)
+        request_model.generation_config = deepcopy(self.generation_config)
         request_params = super(MindRoomGoogleGemini, request_model).get_request_params(
             system_message=system_message,
             response_format=response_format,
@@ -86,7 +109,7 @@ class MindRoomGoogleGemini(Gemini):
             tool_choice=tool_choice,
         )
         if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
-            request_params["config"] = _without_tool_selection(generation_config)
+            request_params["config"] = _decision_config(generation_config, vertexai=self.get_client().vertexai)
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 
