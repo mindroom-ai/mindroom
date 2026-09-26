@@ -236,6 +236,7 @@ Other agents can list `skill_manage` in `tools` to save skills in chat; like `se
 It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
 Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
 In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
+A workspace skill that this host does not load, for example because its requirements are unmet, can still be changed in chat by its directory name.
 Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
 The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
 Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
