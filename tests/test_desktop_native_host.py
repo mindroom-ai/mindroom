@@ -1228,11 +1228,14 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
             await _wait_until_gone(pid)
         assert not spool.exists()
     finally:
-        await host.shutdown()
-        if pids.exists():
-            for pid in pids.read_text().split():
-                with suppress(ProcessLookupError):
-                    os.kill(int(pid), signal.SIGKILL)
+        try:
+            await host.shutdown()
+        finally:
+            # A failed shutdown must not leak a recorded child such as the background sleep.
+            if pids.exists():
+                for pid in pids.read_text().split():
+                    with suppress(ProcessLookupError):
+                        os.kill(int(pid), signal.SIGKILL)
 
 
 def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_path: Path) -> None:
