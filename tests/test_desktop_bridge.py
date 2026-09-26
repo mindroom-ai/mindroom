@@ -701,10 +701,14 @@ async def test_stop_settles_shell_work_promptly_without_replay(
     if phase == "pending":
         await _wait_for_pending_shell(bridge)
     else:
+        # Wait for the marker's content, not just its creation: `>>` opens (and so creates) the
+        # file before the write lands, so `exists()` alone can observe it empty.
         for _ in range(200):
-            if started.exists():
+            if started.exists() and started.read_text() == expected_runs:
                 break
             await asyncio.sleep(0.005)
+        else:
+            pytest.fail("shell command never finished writing its started marker")
     assert (started.read_text() if started.exists() else None) == expected_runs
     await asyncio.wait_for(bridge.stop(), timeout=3)
     await execution
