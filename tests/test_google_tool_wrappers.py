@@ -14,6 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Never
+from unittest.mock import MagicMock
 
 import pytest
 from agno.tools.function import Function
@@ -50,7 +51,12 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    OAuthProviderError,
+    OAuthRefreshRejectedError,
+    OAuthTokenResult,
+)
 from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -1322,6 +1328,35 @@ def test_google_drive_refreshes_expired_readonly_grant(
 
     assert tool._ensure_structured_auth() is None
     assert tool.creds.token == "refreshed-readonly-token"  # noqa: S105
+
+
+def test_google_refresh_rejects_missing_endpoint_pin_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """The Google adapter must not send an unbound refresh token to its configured endpoint."""
+    refresh = MagicMock()
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=None,
+    )
+
+    with pytest.raises(OAuthRefreshRejectedError, match="endpoint changed"):
+        tool._refresh_google_token_data(
+            {
+                "token": "expired-token",
+                "refresh_token": "stored-refresh-token",
+                "client_id": "client-id",
+                "expires_at": 1.0,
+                "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+            },
+            object(),
+            force=True,
+        )
+
+    refresh.assert_not_called()
 
 
 def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
