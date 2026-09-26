@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.background_tasks import wait_for_background_tasks
@@ -35,7 +36,7 @@ from mindroom.matrix.personal_room_store import (
     retained_personal_rooms,
     write_personal_room,
 )
-from mindroom.matrix.personal_rooms import PersonalRoomService
+from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -655,6 +656,45 @@ async def test_an_imported_room_still_refuses_an_unattested_agent(
     with pytest.raises(RuntimeError, match="ownership"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     assert not server.kicks
+
+
+@pytest.mark.asyncio
+async def test_an_imported_room_with_unattested_people_names_them_and_removes_no_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation reports who is outside an imported roster as a warning and leaves them for a person to fix."""
+    server = MatrixServer()
+    router, target = bots(tmp_path, server, monkeypatch, welcome="")
+    room_id = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    path = personal_room_record_path(target.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    write_personal_room(path, record)
+    server.set_member(room_id, "@eve:localhost", "invite")
+    server.set_member(room_id, "@bob:localhost", "join")
+
+    with pytest.raises(PersonalRoomRosterMismatchError, match="ownership") as raised:
+        await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    assert raised.value.room_id == room_id
+    assert raised.value.unexpected_user_ids == ("@bob:localhost", "@eve:localhost")
+
+    with capture_logs() as logs:
+        await router._personal_room_lifecycle._reconcile()
+    reported = [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+    assert [(entry["log_level"], entry["event"], "exc_info" in entry) for entry in reported] == [
+        ("warning", "Personal-room imported roster has unattested members", False),
+    ]
+    assert (reported[0]["user_id"], reported[0]["room_id"], reported[0]["unexpected_user_ids"]) == (
+        "@alice:localhost",
+        room_id,
+        ("@bob:localhost", "@eve:localhost"),
+    )
+    assert not server.kicks
+    assert (server.membership(room_id, "@eve:localhost"), server.membership(room_id, "@bob:localhost")) == (
+        "invite",
+        "join",
+    )
 
 
 @pytest.mark.asyncio
