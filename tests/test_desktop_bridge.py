@@ -45,7 +45,6 @@ from mindroom.desktop.protocol import (
     DESKTOP_APP_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
     MAX_INLINE_RESPONSE_BYTES,
-    MAX_TO_DEVICE_BYTES,
     DesktopCommand,
     DesktopResponse,
     EncryptedDesktopMedia,
@@ -54,6 +53,13 @@ from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
 from tests.test_olm_to_device import olm_transport
+
+# The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
+# request bodies at 200 * 65,536 bytes and Tuwunel at 24 MiB, and one federation transaction carries up to
+# 50 PDUs and 100 EDUs within that cap. Each encrypted to-device request therefore stays within the
+# 65,536-byte event limit, so a full transaction of them still fits. Only this test checks it: production
+# never reads this value, so it lives here rather than in mindroom.desktop.protocol.
+_MAX_TO_DEVICE_BYTES = 65_536
 
 NOW_SECONDS = 10.0
 APP_ID = "com.example.Editor"
@@ -1316,12 +1322,12 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
             await bridge.deliver_pending()
             body = requests[-1]["body"]
             assert "/sendToDevice/m.room.encrypted/" in requests[-1]["path"]
-            assert len(json.dumps(body, separators=(",", ":")).encode()) <= MAX_TO_DEVICE_BYTES
+            assert len(json.dumps(body, separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
             results.append(bridge._journal.get(request_id).response.result)
         receipt = _command("request_status", request_id="receipt", sequence=3, parameters={"request_id": "inline"})
         await bridge.on_to_device_event(_event(receipt))
         await bridge.deliver_pending()
-        assert len(json.dumps(requests[-1]["body"], separators=(",", ":")).encode()) <= MAX_TO_DEVICE_BYTES
+        assert len(json.dumps(requests[-1]["body"], separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
         await bridge.stop()
         bridge.close()
 

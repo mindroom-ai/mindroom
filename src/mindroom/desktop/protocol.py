@@ -19,11 +19,6 @@ MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
 SHELL_OUTPUT_MIME_TYPE = "text/plain"
-# The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
-# request bodies at 200 * 65,536 bytes and Tuwunel at 24 MiB, and one federation transaction carries up to
-# 50 PDUs and 100 EDUs within that cap. Each encrypted to-device request therefore stays within the
-# 65,536-byte event limit, so a full transaction of them still fits.
-MAX_TO_DEVICE_BYTES = 65_536
 # Measured as ASCII-escaped JSON, the form nio encrypts. Olm framing and base64 then add a third, and
 # maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the bridge's metrics and the
 # request_status receipt that wraps a stored response.
@@ -487,7 +482,6 @@ __all__ = [
     "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
     "MAX_SHELL_OUTPUT_BYTES",
-    "MAX_TO_DEVICE_BYTES",
     "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",
