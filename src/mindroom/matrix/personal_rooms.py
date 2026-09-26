@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import (
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -39,7 +40,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias_localpart
-from mindroom.requester_identity import is_human_requester_id, runtime_matrix_domain
+from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -56,6 +57,9 @@ _GUEST_REMOVAL_REASON = "Personal rooms are private to their owner"
 _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
 )
+# Retries for a removal a member event could not finish; restart reconciliation
+# covers anything still left after the last one.
+_GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 
 
 class _PolicyChangedError(Exception):
@@ -70,6 +74,7 @@ class PersonalRoomService:
     runtime: SupportsClientConfigMemberships
     runtime_paths: RuntimePaths
     change_membership: Callable[[str, str], Awaitable[bool]]
+    _guest_removal_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _settings(self) -> PersonalRoomsConfig | None:
         settings = self.runtime.config.personal_rooms
@@ -357,10 +362,13 @@ class PersonalRoomService:
         agent_id = self._client().user_id
         expected_creator = agent_id
         expected_history = "invited"
-        # The owner may bring in any MindRoom agent: history visibility keeps
-        # what came before its invite hidden, and agent access rules still apply.
-        permitted_members = {record.user_id, agent_id, *filter(self._is_agent, joined_or_invited)}
-        if record.adoption is not None:
+        permitted_members = {record.user_id, agent_id}
+        if record.adoption is None:
+            # The owner may bring in any MindRoom agent: history visibility keeps
+            # what came before its invite hidden, and agent access rules still
+            # apply. An imported room keeps its exact attested roster instead.
+            permitted_members.update(filter(self._is_agent, joined_or_invited))
+        else:
             expected_creator = record.adoption.creator_user_id
             expected_history = record.adoption.expected_history_visibility
             permitted_members.update(record.adoption.additional_user_ids)
@@ -402,9 +410,12 @@ class PersonalRoomService:
         return roster
 
     def _is_agent(self, user_id: str) -> bool:
-        """Return whether one member is a MindRoom account rather than a person or bridge."""
-        config = self.runtime.config
-        return user_id not in config.bot_accounts and not is_human_requester_id(user_id, config, self.runtime_paths)
+        """Return whether one member is a configured router, agent, or team account.
+
+        Not the internal service account, which a person may sign in to, and
+        not a bridge account, which relays people.
+        """
+        return is_managed_entity_id(user_id, self.runtime.config, self.runtime_paths)
 
     async def _remove_guests(
         self,
@@ -428,34 +439,74 @@ class PersonalRoomService:
         membership_event_ids = "|".join(
             str(state.get(("m.room.member", user_id), {}).get("event_id", user_id)) for user_id in sorted(guests)
         )
-        await send_message_result(
+        delivered = await send_message_result(
             client,
             record.room_id,
             content,
             transaction_id=f"personal-guests-{personal_room_digest(f'{record.room_id}|{membership_event_ids}')}",
         )
+        if delivered is None:
+            logger.warning("Personal-room guest removal notice failed", room_id=record.room_id)
 
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
-        """Remove a person the owner brought into a personal room as soon as it is seen."""
+        """Remove a person the owner brought into a personal room as soon as it is seen.
+
+        Never raises: a raising member callback would hold this room's event
+        lane, so a failed removal is retried in the background instead.
+        """
         if membership not in {"invite", "join", "knock"} or self._settings() is None or self._is_agent(user_id):
             return
+        path = await self._owner_record_path(room, excluding=user_id)
+        if path is None or await self._remove_guests_now(path, room.room_id):
+            return
+        if room.room_id not in self._guest_removal_retries:
+            self._guest_removal_retries[room.room_id] = create_background_task(
+                self._retry_guest_removal(path, room.room_id),
+                name=f"personal_room_guest_removal_{room.room_id}",
+                owner=self.runtime,
+            )
+
+    async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str) -> Path | None:
+        """Return the record of the member whose personal room this is, if any.
+
+        Read without the owner's lock, which is only taken once a record
+        matches, so a shared room never waits behind an unrelated provisioning.
+        """
         for member_id in room.users:
-            if member_id == user_id:
+            if member_id == excluding:
                 continue
             path = personal_room_record_path(self.runtime_paths, self.agent_name, member_id)
             if not path.is_file():
                 continue
             try:
-                async with async_exclusive_file_lock(path.with_suffix(".lock")):
-                    record = await run_blocking_until_complete(read_personal_room, path)
-                    if record is None or record.room_id != room.room_id or record.adoption is not None:
-                        continue
-                    await self._validate_room(record)
+                record = await run_blocking_until_complete(read_personal_room, path)
             except Exception:
-                # Raising here would hold this room's event lane until the room
-                # changed; the next reconciliation retries the removal instead.
-                logger.exception("Personal-room guest removal failed", room_id=room.room_id)
-            return
+                logger.exception("Personal-room record invalid", record=path.name)
+                continue
+            if record is not None and record.room_id == room.room_id and record.adoption is None:
+                return path
+        return None
+
+    async def _remove_guests_now(self, path: Path, room_id: str) -> bool:
+        """Validate one owner's room under its lock, removing guests; False on failure."""
+        try:
+            async with async_exclusive_file_lock(path.with_suffix(".lock")):
+                record = await run_blocking_until_complete(read_personal_room, path)
+                if record is not None and record.room_id == room_id and record.adoption is None:
+                    await self._validate_room(record)
+        except Exception:
+            logger.exception("Personal-room guest removal failed", room_id=room_id)
+            return False
+        return True
+
+    async def _retry_guest_removal(self, path: Path, room_id: str) -> None:
+        try:
+            for delay in _GUEST_REMOVAL_RETRY_SECONDS:
+                await asyncio.sleep(delay)
+                if await self._remove_guests_now(path, room_id):
+                    return
+        finally:
+            self._guest_removal_retries.pop(room_id, None)
 
     def _template_values(self, record: PersonalRoomRecord) -> dict[str, str]:
         return {
