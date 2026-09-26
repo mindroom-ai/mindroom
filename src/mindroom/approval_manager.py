@@ -120,9 +120,17 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
                 _contains_sanitizer_truncation(None, item) for item in sanitized.values()
             )
         original_by_text_key = {str(key): item for key, item in original.items()}
+        truncation_summary = sanitized.get("__truncated__")
+        collided_truncation_marker = (
+            isinstance(truncation_summary, str)
+            and truncation_summary.endswith(" more items")
+            and truncation_summary.removesuffix(" more items").isdigit()
+            and original_by_text_key.get("__truncated__") != truncation_summary
+        )
         return (
             len(sanitized) < len(original)
             or ("__truncated__" in sanitized and "__truncated__" not in original)
+            or collided_truncation_marker
             or any(
                 _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
                 for key, item in sanitized.items()

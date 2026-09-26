@@ -1769,6 +1769,17 @@ def test_approval_arguments_preview_detects_truncation_below_literal_marker_key(
     assert truncated is True
 
 
+def test_approval_arguments_preview_detects_collection_marker_collision() -> None:
+    arguments: dict[str, Any] = {f"k{index}": index for index in range(25)}
+    arguments["__truncated__"] = "original value"
+
+    preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert preview["__truncated__"] == "1 more items"
+    assert len(preview) == len(arguments)
+    assert truncated is True
+
+
 @pytest.mark.asyncio
 async def test_redacted_approval_card_allows_only_exact_one_time_approval(tmp_path: Path) -> None:
     async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
