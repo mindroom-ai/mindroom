@@ -28,16 +28,23 @@ async def upload_encrypted_media(
     *,
     mime_type: str,
     filename: str,
+    timeout_seconds: float,
 ) -> EncryptedDesktopMedia:
     """Encrypt a screenshot or shell output locally and upload only ciphertext to Matrix media."""
     _validate_payload(payload, mime_type=mime_type)
     encrypted_bytes, encryption = crypto.attachments.encrypt_attachment(payload)
-    response = await upload_media_bytes(
-        client,
-        encrypted_bytes,
-        content_type="application/octet-stream",
-        filename=f"{filename}.enc",
-    )
+    try:
+        # nio uploads ignore the client request timeout, so a stalled homeserver would wait forever.
+        async with asyncio.timeout(timeout_seconds):
+            response = await upload_media_bytes(
+                client,
+                encrypted_bytes,
+                content_type="application/octet-stream",
+                filename=f"{filename}.enc",
+            )
+    except TimeoutError as exc:
+        msg = f"Matrix media upload did not finish within {timeout_seconds:g} seconds."
+        raise DesktopMediaError(msg) from exc
     mxc_uri = upload_content_uri(response)
     if mxc_uri is None:
         msg = f"Matrix media upload failed: {response}"

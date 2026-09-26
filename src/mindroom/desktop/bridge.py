@@ -69,6 +69,8 @@ _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _MAX_WARNING_DETAIL = 500
+# Stop drains the action in flight, so every media upload it may wait on must be bounded.
+_MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 _MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
 
@@ -615,6 +617,7 @@ class DesktopBridge:
                 image.content,
                 mime_type=image.mime_type,
                 filename=f"browser-{command.request_id}.{extension}",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
             return self._capture_error_response(command, result=execution.result, error=str(exc))
@@ -702,6 +705,7 @@ class DesktopBridge:
                 capture.content,
                 mime_type=capture.mime_type,
                 filename=f"desktop-{command.request_id}.jpg",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
             return self._capture_error_response(command, result=result, error=str(exc))
@@ -945,6 +949,7 @@ class DesktopBridge:
                     content,
                     mime_type=SHELL_OUTPUT_MIME_TYPE,
                     filename=f"shell-{command.request_id}.txt",
+                    timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
                 )
             except DesktopMediaError as exc:
                 error = str(exc)

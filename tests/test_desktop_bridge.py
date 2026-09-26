@@ -51,7 +51,7 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
-from mindroom.desktop.shell import DesktopShell, DesktopShellError
+from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
 from tests.test_olm_to_device import olm_transport
 
@@ -1124,6 +1124,89 @@ async def test_output_past_the_capture_cap_is_reported_as_truncated(
     bridge.close()
 
 
+def _stall_output_uploads(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, list[DesktopShellOutput]]:
+    """Use the real encrypted upload against a homeserver that never answers, with a short bound."""
+    started = asyncio.Event()
+    released: list[DesktopShellOutput] = []
+    release = DesktopShellOutput.release
+
+    async def stalled(*_args: object, **_kwargs: object) -> nio.UploadResponse:
+        started.set()
+        await asyncio.Event().wait()
+        pytest.fail("stalled upload returned")
+
+    def record_release(output: DesktopShellOutput) -> None:
+        released.append(output)
+        release(output)
+
+    monkeypatch.setattr("mindroom.desktop.bridge._MEDIA_UPLOAD_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload_encrypted_media)
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", stalled)
+    monkeypatch.setattr(DesktopShellOutput, "release", record_release)
+    return started, released
+
+
+_LARGE_OUTPUT = "import sys; sys.stdout.write('x' * 100_000 + 'tail')"
+
+
+def _assert_upload_fallback(result: dict[str, object]) -> None:
+    assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 0, None)
+    assert str(result["output"]).endswith("tail")
+    assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
+    assert "upload did not finish within 0.2 seconds" in str(result["warning"])
+
+
+@pytest.mark.parametrize("action", ["run_shell", "check_shell"])
+@pytest.mark.asyncio
+async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_bound(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """A stalled attachment upload cannot hold a shell reply or its executor lane past the upload bound."""
+    _started, released = _stall_output_uploads(monkeypatch)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_LARGE_OUTPUT)}"
+    if action == "run_shell":
+        await asyncio.wait_for(_handle(bridge, _event(_run_shell(command, tmp_path))), timeout=3)
+        result = _response(transport).result
+    else:
+        await _handle(bridge, _event(_run_shell(f"{command}; while [ ! -f release ]; do sleep 0.05; done", tmp_path)))
+        handle = _response(transport).result["handle"]
+        assert isinstance(handle, str)
+        (tmp_path / "release").touch()
+        result, _ = await asyncio.wait_for(_check_until_completed(bridge, transport, handle, first_sequence=2), 5)
+    _assert_upload_fallback(result)
+    assert [output.closed for output in released] == [True]
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("transport")
+async def test_bridge_stop_during_a_stalled_output_upload_returns_within_the_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop drains the in-flight reply, and a stalled upload bounds that drain instead of hanging it."""
+    started, released = _stall_output_uploads(monkeypatch)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    worker = asyncio.create_task(bridge.run())
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_LARGE_OUTPUT)}"
+    await bridge.on_to_device_event(_event(_run_shell(command, tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=3)
+    await asyncio.wait_for(bridge.stop(), timeout=2)
+    await asyncio.wait_for(worker, timeout=2)
+    _assert_upload_fallback(bridge._journal.get("run").response.result)
+    assert [output.closed for output in released] == [True]
+    bridge.close()
+
+
 def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
     """Size the exact completed reply shape the bridge measures before metrics are added."""
     return DesktopResponse(
@@ -1873,6 +1956,7 @@ async def test_browser_screenshot_is_uploaded_as_encrypted_matrix_media(transpor
         b"\x89PNGbrowser",
         mime_type="image/png",
         filename="browser-request-1.png",
+        timeout_seconds=30.0,
     )
 
 

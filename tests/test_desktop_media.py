@@ -67,6 +67,7 @@ async def test_screenshot_is_encrypted_before_upload_and_authenticated_after_dow
         JPEG,
         mime_type="image/jpeg",
         filename="desktop.jpg",
+        timeout_seconds=1,
     )
 
     assert uploaded
@@ -100,6 +101,7 @@ async def test_screenshot_ciphertext_tampering_fails_closed(monkeypatch: pytest.
         JPEG,
         mime_type="image/jpeg",
         filename="desktop.jpg",
+        timeout_seconds=1,
     )
     tampered = bytes([uploaded[0][0] ^ 1, *uploaded[0][1:]])
     client.download.return_value = nio.DownloadResponse(tampered, "application/octet-stream", None)
@@ -135,7 +137,13 @@ async def test_shell_output_round_trips_byte_exact_with_size_and_hash_checks(mon
     """Text output uses the screenshot encryption path and is authenticated the same way after download."""
     uploaded = _capture_uploads(monkeypatch)
     client = AsyncMock(spec=nio.AsyncClient)
-    media = await upload_encrypted_media(client, OUTPUT, mime_type=SHELL_OUTPUT_MIME_TYPE, filename="shell.txt")
+    media = await upload_encrypted_media(
+        client,
+        OUTPUT,
+        mime_type=SHELL_OUTPUT_MIME_TYPE,
+        filename="shell.txt",
+        timeout_seconds=1,
+    )
     assert (media.mime_type, media.size) == ("text/plain", len(OUTPUT))
     assert OUTPUT not in uploaded[0]
     assert EncryptedDesktopMedia.from_content(media.to_content(), kind="output_attachment") == media
@@ -173,5 +181,30 @@ async def test_upload_rejects_payloads_that_do_not_match_their_type(
     """Only bounded UTF-8 text or matching image bytes are encrypted and uploaded."""
     uploaded = _capture_uploads(monkeypatch)
     with pytest.raises(DesktopMediaError):
-        await upload_encrypted_media(AsyncMock(spec=nio.AsyncClient), payload, mime_type=mime_type, filename="x")
+        await upload_encrypted_media(
+            AsyncMock(spec=nio.AsyncClient),
+            payload,
+            mime_type=mime_type,
+            filename="x",
+            timeout_seconds=1,
+        )
     assert uploaded == []
+
+
+@pytest.mark.asyncio
+async def test_upload_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A homeserver that never finishes an upload cannot hold the desktop bridge open indefinitely."""
+
+    async def stuck_upload(*_args: object, **_kwargs: object) -> nio.UploadResponse:
+        await asyncio.Event().wait()
+        pytest.fail("stalled upload returned")
+
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", stuck_upload)
+    with pytest.raises(DesktopMediaError, match=r"upload did not finish within 0\.01 seconds"):
+        await upload_encrypted_media(
+            AsyncMock(spec=nio.AsyncClient),
+            OUTPUT,
+            mime_type=SHELL_OUTPUT_MIME_TYPE,
+            filename="shell.txt",
+            timeout_seconds=0.01,
+        )
