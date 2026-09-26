@@ -57,7 +57,7 @@ class SkillLearningWorker:
     _task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def stop(self) -> None:
-        """Stop at once: the queue is durable, so an interrupted review runs again after restart."""
+        """Stop at once: the queue is durable, so an interrupted review that changed nothing runs again after restart."""
         self._stop_event.set()
         self._wake_event.set()
         if self._task is not None:

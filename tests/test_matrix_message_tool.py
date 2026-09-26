@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -19,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
+    RELAYED_SOURCE_KIND_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_VISIBLE_BODY_KEY,
@@ -197,10 +199,11 @@ async def test_matrix_message_send_defaults_to_current_conversation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
-    """Intentional mention dispatch should preserve a trusted human requester."""
+@pytest.mark.parametrize("automation_source_kind", [None, "scheduled"])
+async def test_matrix_message_active_mentions_mark_trusted_human_relay(automation_source_kind: str | None) -> None:
+    """Intentional mention dispatch preserves a trusted human requester and the automation that began the turn."""
     tool = MatrixMessageTools()
-    ctx = _make_context(thread_id=None)
+    ctx = replace(_make_context(thread_id=None), automation_source_kind=automation_source_kind)
 
     with (
         patch(
@@ -223,6 +226,7 @@ async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None
     assert SKIP_MENTIONS_KEY not in sent_content
     assert sent_content[ORIGINAL_SENDER_KEY] == ctx.requester_id
     assert sent_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert sent_content.get(RELAYED_SOURCE_KIND_KEY) == automation_source_kind
 
 
 @pytest.mark.asyncio

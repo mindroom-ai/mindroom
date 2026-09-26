@@ -9925,6 +9925,20 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
     assert not (coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json").exists()
 
 
+def test_tool_context_carries_the_automation_that_started_the_turn(tmp_path: Path) -> None:
+    """Messages a tool sends while answering a routed schedule keep saying a schedule started the turn."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    envelope = _plain_request(_target()).response_envelope
+    envelope = replace(envelope, origin=replace(envelope.origin, relayed_source_kind=SCHEDULED_SOURCE_KIND))
+    context = coordinator.deps.tool_runtime.build_context(
+        envelope.target,
+        user_id="@user:localhost",
+        source_envelope=envelope,
+    )
+    assert context is not None
+    assert context.automation_source_kind == SCHEDULED_SOURCE_KIND
+
+
 @pytest.mark.asyncio
 async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
     """Skill learning is background bookkeeping, so a broken queue file must not cost the user their answer."""

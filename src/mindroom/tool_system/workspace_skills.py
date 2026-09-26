@@ -292,7 +292,7 @@ def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsag
 
 
 def forget_missing_skill_usage(root_fd: int) -> None:
-    """Drop records of skill directories that are gone, so a restored or reused name starts as a new skill."""
+    """Drop records of skill directories that are gone, so a name restored or reused afterwards starts as a new skill."""
     with _USAGE_LOCK:
         records = _usage_records(root_fd)
         if records is None:
