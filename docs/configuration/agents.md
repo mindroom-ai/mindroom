@@ -867,7 +867,7 @@ All fields are optional, and unknown fields are rejected.
 | `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
 | `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
 | `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
-| `archive_after_days` | integer | `30` | 0–3650 days without use before a learned skill is archived; `0` keeps learned skills indefinitely. |
+| `archive_after_days` | integer | `30` | 0–3650 days with no use, creation, or `skill_manage` edit before a learned skill is archived; `0` keeps learned skills indefinitely. |
 
 Reviews incur additional model usage.
 See [Automatic skill learning](../skills.md#automatic-skill-learning) for triggering, ownership, history, archival, and notices.

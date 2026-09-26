@@ -26,7 +26,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning.library import archive_unused_skills
 from mindroom.skill_learning.queue import settle_review
 from mindroom.skill_learning.reviewer import review_conversation
-from mindroom.skill_learning.tools import ReviewProgress
+from mindroom.skill_learning.tools import ReviewProgress, library_turn
 from mindroom.tool_system.skills import agent_workspace_skills_root
 
 if TYPE_CHECKING:
@@ -51,6 +51,13 @@ def _skills_root(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry)
     runtime = resolve_agent_runtime(entry.agent, config, runtime_paths, execution_identity=entry.execution_identity())
     workspace_root = runtime.workspace.root if runtime.workspace is not None else None
     return agent_workspace_skills_root(runtime_paths, entry.agent, workspace_root=workspace_root)
+
+
+async def _cancel(tasks: list[asyncio.Task[None]]) -> None:
+    """Stop reviews and wait until each has settled its count."""
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dataclass
@@ -92,20 +99,20 @@ class SkillReviewRunner:
         if (running := self._reviews.get(key)) is not None:
             running[1].cancel()
 
-    def retire(self, config: Config) -> None:
-        """Stop the reviews of agents that no longer learn skills."""
-        for agent_name, task in self._reviews.values():
-            agent = config.agents.get(agent_name)
-            if agent is None or not agent.skill_learning.enabled:
-                task.cancel()
+    async def retire(self, config: Config) -> None:
+        """Stop the reviews of agents that no longer learn skills, once each has settled its count."""
+        await _cancel(
+            [
+                task
+                for agent_name, task in self._reviews.values()
+                if (agent := config.agents.get(agent_name)) is None or not agent.skill_learning.enabled
+            ],
+        )
 
     async def stop(self) -> None:
         """Stop every review; the queue is durable, so a review that changed nothing runs after the next reply."""
         self._stopped = True
-        tasks = [task for _agent_name, task in self._reviews.values()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _cancel([task for _agent_name, task in self._reviews.values()])
 
     def _forget(self, key: str, task: asyncio.Task[None]) -> None:
         if (running := self._reviews.get(key)) is not None and running[1] is task:
@@ -122,14 +129,16 @@ class SkillReviewRunner:
             # The lock lives in the storage root, because the primary takes no lock inside a workspace worker code shares.
             lock_name = f"{hashlib.sha256(str(skills_root).encode()).hexdigest()[:32]}.lock"
             async with async_exclusive_file_lock(self.runtime_paths.storage_root / "skill_learning_locks" / lock_name):
-                archived = await run_blocking_until_complete(
-                    partial(
-                        archive_unused_skills,
-                        skills_root,
-                        archive_after_days=settings.archive_after_days,
-                        now=datetime.now(UTC),
-                    ),
-                )
+                # Archival moves whole skill directories, so a chat skill_manage call waits instead of writing into one.
+                async with library_turn(skills_root):
+                    archived = await run_blocking_until_complete(
+                        partial(
+                            archive_unused_skills,
+                            skills_root,
+                            archive_after_days=settings.archive_after_days,
+                            now=datetime.now(UTC),
+                        ),
+                    )
                 if archived:
                     logger.info("Archived unused learned skills", agent=entry.agent, archived=archived)
                 await asyncio.wait_for(

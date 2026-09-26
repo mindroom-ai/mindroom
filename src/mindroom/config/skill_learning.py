@@ -25,5 +25,8 @@ class SkillLearningConfig(BaseModel):
         default=30,
         ge=0,
         le=3650,
-        description="Archive learned skills unused for this many days; 0 keeps them indefinitely",
+        description=(
+            "Archive learned skills with no use, creation, or skill_manage edit for this many days; "
+            "0 keeps them indefinitely"
+        ),
     )

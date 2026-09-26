@@ -5262,11 +5262,11 @@ async def test_config_changes_forget_conversations_of_agents_that_stopped_learni
         with (
             patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
-            patch.object(orchestrator.skill_reviews, "retire") as retire,
+            patch.object(orchestrator.skill_reviews, "retire", new=AsyncMock()) as retire,
         ):
             await orchestrator._sync_runtime_support_services(config, start_watcher=False)
         entries = json.loads((paths.storage_root / "skill_learning_state.json").read_text())["entries"]
         assert [entry["agent"] for entry in entries.values()] == ["general"]
-        retire.assert_called_once_with(config)
+        retire.assert_awaited_once_with(config)
     finally:
         await shutdown_approval_runtime()

@@ -1042,7 +1042,7 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         # Reviews and counts of agents that stopped learning are dropped, so learning turned on again starts from zero.
-        self._skill_reviews.retire(config)
+        await self._skill_reviews.retire(config)
         await asyncio.to_thread(drop_retired_reviews, config, self.runtime_paths)
         await self._todo_poke_runtime.sync()
         self._thread_export_runner.start()
