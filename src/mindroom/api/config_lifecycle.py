@@ -751,7 +751,7 @@ def _build_and_commit_mutation[T](
     except HTTPException:
         raise
     except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
@@ -789,7 +789,7 @@ def _build_and_commit_replacement(
     except HTTPException:
         raise
     except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:

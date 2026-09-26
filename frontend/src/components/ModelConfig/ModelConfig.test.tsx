@@ -425,6 +425,378 @@ describe("ModelConfig", () => {
     });
   });
 
+  it.each([
+    ["api_key", { api_key: "sk-config-real" }],
+    ["extra_kwargs.api_key", { extra_kwargs: { api_key: "sk-config-real" } }],
+  ])(
+    "shows and copies a model key from config.yaml (%s) instead of the provider key",
+    async (_field, keyFields) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            proxied: {
+              provider: "openrouter",
+              id: "z-ai/glm-5.3",
+              ...keyFields,
+            },
+          },
+        },
+      } as never);
+      keyStatusByService["openrouter"] = {
+        has_key: true,
+        source: "env",
+        masked_key: "sk-en...5678",
+        api_key: "sk-openrouter-env-real",
+      };
+
+      render(<ModelConfig />);
+
+      const row = screen.getByText("proxied").closest("tr");
+      if (!row) throw new Error("row not found");
+      await waitFor(() => {
+        expect(within(row).getByText("Config key")).toBeTruthy();
+      });
+      expect(within(row).getByText("Source: config.yaml")).toBeTruthy();
+      expect(within(row).getByText("sk-c...real")).toBeTruthy();
+      expect(within(row).queryByText("Provider key")).toBeNull();
+
+      fireEvent.click(within(row).getByTitle("Copy API key"));
+
+      await waitFor(() => {
+        expect(writeTextMock).toHaveBeenCalledWith("sk-config-real");
+      });
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        "/api/credentials/openrouter/api-key?key_name=api_key&include_value=true",
+      );
+
+      fireEvent.click(screen.getByText("proxied"));
+
+      expect(
+        screen.getByText(
+          "No custom key provided. This model will use its key from config.yaml.",
+        ),
+      ).toBeTruthy();
+    },
+  );
+
+  it("prefers a saved model key over a key from config.yaml", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          proxied: {
+            provider: "openrouter",
+            id: "z-ai/glm-5.3",
+            api_key: "sk-config-real",
+          },
+        },
+      },
+    } as never);
+    keyStatusByService["model:proxied"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    const row = screen.getByText("proxied").closest("tr");
+    if (!row) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(row).getByText("Custom key")).toBeTruthy();
+    });
+    expect(within(row).queryByText("Config key")).toBeNull();
+
+    fireEvent.click(screen.getByText("proxied"));
+
+    expect(
+      screen.getByText(
+        "No new key provided. This model will keep its saved key.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "No custom key provided. This model will use its key from config.yaml.",
+      ),
+    ).toBeNull();
+  });
+
+  it("gives equal config.yaml keys one badge colour", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          first: {
+            provider: "openrouter",
+            id: "z-ai/glm-5.3",
+            api_key: "sk-shared-config",
+          },
+          second: {
+            provider: "openrouter",
+            id: "openai/gpt-5.6-terra",
+            extra_kwargs: { api_key: "sk-shared-config" },
+          },
+        },
+      },
+    } as never);
+
+    render(<ModelConfig />);
+
+    const badgeFor = (modelName: string) => {
+      const row = screen.getByText(modelName).closest("tr");
+      if (!row) throw new Error("row not found");
+      return within(row).getByText("Config key");
+    };
+    await waitFor(() => {
+      expect(badgeFor("first")).toBeTruthy();
+    });
+    expect(badgeFor("first").className).toBe(badgeFor("second").className);
+  });
+
+  it.each([
+    ["openrouter", "Vertex AI Claude", false],
+    ["codex", "OpenAI", true],
+  ])(
+    "follows the draft provider when a %s model with a config.yaml key switches to %s",
+    async (savedProvider, draftProviderName, expectsConfigKey) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            switching: {
+              provider: savedProvider,
+              id: "some-model",
+              api_key: "sk-config-real",
+            },
+          },
+        },
+      } as never);
+
+      render(<ModelConfig />);
+
+      fireEvent.click(screen.getByText("switching"));
+      const row = screen.getByDisplayValue("switching").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getAllByRole("combobox")[0]);
+      fireEvent.click(
+        screen.getByRole("option", { name: new RegExp(draftProviderName) }),
+      );
+
+      const configHint =
+        "No custom key provided. This model will use its key from config.yaml.";
+      await waitFor(() => {
+        if (expectsConfigKey) {
+          expect(within(row).getByText("Config key")).toBeTruthy();
+        } else {
+          expect(within(row).queryByText("Config key")).toBeNull();
+        }
+      });
+      if (expectsConfigKey) {
+        expect(within(row).getByText(configHint)).toBeTruthy();
+      } else {
+        expect(within(row).queryByText(configHint)).toBeNull();
+      }
+    },
+  );
+
+  it.each([
+    ["an existing codex model", "codex", null],
+    ["a model switched to Vertex AI Claude", "openrouter", "Vertex AI Claude"],
+  ])(
+    "clears the saved key of %s on save, because the runtime drops it",
+    async (_label, savedProvider, draftProviderName) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            keyless: { provider: savedProvider, id: "some-model" },
+          },
+        },
+      } as never);
+      keyStatusByService["model:keyless"] = {
+        has_key: true,
+        source: "ui",
+        masked_key: "sk-ui...4321",
+        api_key: "sk-dashboard-real",
+      };
+
+      render(<ModelConfig />);
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/credentials/model:keyless/api-key?key_name=api_key",
+        );
+      });
+      fireEvent.click(screen.getByText("keyless"));
+      const row = screen.getByDisplayValue("keyless").closest("tr");
+      if (!row) throw new Error("row not found");
+      if (draftProviderName) {
+        fireEvent.click(within(row).getAllByRole("combobox")[0]);
+        fireEvent.click(
+          screen.getByRole("option", { name: new RegExp(draftProviderName) }),
+        );
+      }
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/credentials/model:keyless",
+          { method: "DELETE" },
+        );
+      });
+    },
+  );
+
+  it("deletes a saved key exactly once when a row switches to a keyless provider and is renamed", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          switching: { provider: "openrouter", id: "some-model" },
+        },
+      },
+    } as never);
+    keyStatusByService["model:switching"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    const initialRow = screen.getByText("switching").closest("tr");
+    if (!initialRow) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(initialRow).getByText("Custom key")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("switching"));
+    const row = screen.getByDisplayValue("switching").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /Vertex AI Claude/ }));
+    fireEvent.change(within(row).getByDisplayValue("switching"), {
+      target: { value: "renamed" },
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "renamed"],
+        expect.objectContaining({ provider: "vertexai_claude" }),
+      );
+    });
+    const deletes = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes).toEqual([
+      ["/api/credentials/model:switching", { method: "DELETE" }],
+    ]);
+  });
+
+  it("deletes an old saved key exactly once when a keyless model is renamed", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          keyless: { provider: "codex", id: "gpt-6-astra" },
+        },
+      },
+    } as never);
+    keyStatusByService["model:keyless"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/credentials/model:keyless/api-key?key_name=api_key",
+      );
+    });
+    fireEvent.click(screen.getByText("keyless"));
+    const row = screen.getByDisplayValue("keyless").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.change(within(row).getByDisplayValue("keyless"), {
+      target: { value: "renamed" },
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "renamed"],
+        expect.objectContaining({ provider: "codex" }),
+      );
+    });
+    const deletes = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes).toEqual([
+      ["/api/credentials/model:keyless", { method: "DELETE" }],
+    ]);
+  });
+
+  it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
+    "shows no key status for %s, which drops config and saved API keys",
+    async (provider) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            keyless: { provider, id: "some-model", api_key: "sk-config-real" },
+          },
+        },
+      } as never);
+      keyStatusByService["model:keyless"] = {
+        has_key: true,
+        source: "ui",
+        masked_key: "sk-ui...4321",
+        api_key: "sk-dashboard-real",
+      };
+
+      render(<ModelConfig />);
+
+      const row = screen.getByText("keyless").closest("tr");
+      if (!row) throw new Error("row not found");
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalled();
+      });
+      expect(within(row).getByText("N/A")).toBeTruthy();
+      expect(within(row).queryByText("Custom key")).toBeNull();
+      expect(within(row).queryByText("Config key")).toBeNull();
+
+      fireEvent.click(screen.getByText("keyless"));
+
+      expect(
+        screen.getByText(
+          "No API key used; this provider authenticates another way",
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByPlaceholderText("Paste new API key")).toBeNull();
+    },
+  );
+
   it("adds a model using the top add row", async () => {
     render(<ModelConfig />);
 

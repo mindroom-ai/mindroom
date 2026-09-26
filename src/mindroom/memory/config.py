@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_memory_llm_api_key, get_ollama_host
 from mindroom.embedding_factory import resolve_embedder_settings
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -200,10 +200,13 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
-        if app_config.memory.llm.provider in {"openai", "anthropic"}:
-            api_key = get_api_key_for_provider(app_config.memory.llm.provider, runtime_paths=runtime_paths)
-            if api_key:
-                llm_config["config"]["api_key"] = api_key
+        api_key = get_memory_llm_api_key(
+            app_config.memory.llm.provider,
+            app_config.memory.llm.config,
+            runtime_paths,
+        )
+        if api_key is not None:
+            llm_config["config"]["api_key"] = api_key.value
 
         logger.info(
             "Configured memory LLM",

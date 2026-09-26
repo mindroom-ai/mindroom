@@ -2981,6 +2981,29 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
     assert detail[0]["type"] == "value_error"
 
 
+def test_save_config_validation_error_omits_submitted_api_keys(test_client: TestClient) -> None:
+    """Validation errors must describe the problem without echoing secrets from the payload."""
+    response = test_client.put(
+        "/api/config/save",
+        json={
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-6-astra",
+                    "api_key": "sk-secretAAAA",
+                    "extra_kwargs": {"api_key": "sk-secretBBBB"},
+                },
+            },
+            "router": {"model": "default"},
+            "agents": {},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "either api_key or extra_kwargs.api_key" in response.text
+    assert "sk-secret" not in response.text
+
+
 def test_save_config_can_recover_from_invalid_reload(
     test_client: TestClient,
     temp_config_file: Path,

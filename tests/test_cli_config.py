@@ -30,6 +30,7 @@ from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
@@ -1779,6 +1780,74 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "Missing environment variables" not in result.output
 
+    def test_validate_skips_shared_key_warning_for_models_with_their_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A provider env key is only reported missing when some model would fall back to it."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-own\n"
+            "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        for name in ("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE"):
+            monkeypatch.delenv(name, raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "anthropic: Set ANTHROPIC_API_KEY" in result.output
+        assert "OPENAI_API_KEY" not in result.output
+
+    def test_validate_creates_nothing_in_a_read_only_config_dir(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Checking which models carry their own key must not open or create the credential store."""
+        config_dir = tmp_path / "readonly"
+        config_dir.mkdir()
+        cfg = config_dir / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-own\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        config_dir.chmod(0o555)
+        try:
+            result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+            created = sorted(path.name for path in config_dir.iterdir())
+        finally:
+            config_dir.chmod(0o755)
+
+        assert result.exit_code == 0, result.output
+        assert created == ["config.yaml"]
+
+    def test_validate_still_requires_ollama_host_for_ollama_models_with_a_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OLLAMA_HOST is a host, not a key, so a model's own key does not replace it."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: qwen3.8:27b\n    api_key: sk-ollama-cloud\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        monkeypatch.delenv("OLLAMA_HOST_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "ollama: Set OLLAMA_HOST" in result.output
+
     def test_validate_warns_for_missing_vertexai_claude_env(
         self,
         tmp_path: Path,
@@ -2855,6 +2924,415 @@ class TestDoctor:
         assert result.exit_code == 1
         assert "API key invalid" in result.output
 
+    @staticmethod
+    def _record_provider_probes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+        """Answer every doctor HTTP probe with 200 and record provider key probes as (url, Authorization)."""
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        probes: list[tuple[str, str]] = []
+
+        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
+            if "/_matrix/" in str(url):
+                return httpx.Response(200, json={"versions": ["v1.1"]})
+            if str(url).endswith("/models"):
+                probes.append((str(url), (headers or {}).get("Authorization", "")))
+            return httpx.Response(200, json={"data": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+        return probes
+
+    def test_doctor_validates_only_the_shared_key_models_use(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Model-specific keys are reported, never sent; the stored shared key is probed at a shared-key model's endpoint."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
+            "  saved:\n    provider: openai\n    id: gpt-6-astra\n"
+            "  proxy:\n    provider: openai\n    id: gpt-6-astra\n"
+            "    extra_kwargs:\n      api_key: sk-proxy\n      base_url: https://proxy.example/v1\n"
+            "  plain:\n    provider: openai\n    id: gpt-6-astra\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        credentials = get_runtime_shared_credentials_manager(
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        )
+        credentials.save_credentials("model:saved", {"api_key": "sk-dashboard"})
+        credentials.save_credentials("openai", {"api_key": "sk-store"})
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert probes == [("https://api.openai.com/v1/models", "Bearer sk-store")]
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert "openai API key valid" in result.output
+        assert "model default uses its own API key from config (not validated)" in result.output
+        assert "model saved uses its own API key from dashboard (not validated)" in result.output
+        assert "model proxy uses its own API key from config (not validated)" in result.output
+
+    @pytest.mark.parametrize(
+        ("memory_api_key", "expected_source"),
+        [("sk-memory", "its own API key"), ("'   '", "the shared openai key")],
+        ids=["explicit", "whitespace"],
+    )
+    def test_memory_llm_check_reports_key_source_without_sending_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        memory_api_key: str,
+        expected_source: str,
+    ) -> None:
+        """Mem0 resolves its own endpoint, so doctor names the memory LLM key's source and never sends it."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  llm:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: gpt-5.6-luna\n"
+            "      host: https://other.example/v1\n"
+            f"      api_key: {memory_api_key}\n",
+        )
+        (tmp_path / ".env").write_text("OPENAI_BASE_URL=http://localhost:9292/v1\n", encoding="utf-8")
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        get_runtime_shared_credentials_manager(
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        ).save_credentials("openai", {"api_key": "sk-store"})
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert f"Memory LLM: openai/gpt-5.6-luna uses {expected_source} (not validated)" in result.output
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert probes == [("https://api.anthropic.com/v1/models", "")]
+
+    @pytest.mark.parametrize(
+        ("provider", "extra_kwargs_yaml", "env"),
+        [
+            ("anthropic", "      base_url: https://gateway.example/v1\n", {}),
+            ("anthropic", "      client_params:\n        base_url: https://gateway.example/anthropic\n", {}),
+            ("anthropic", "", {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}),
+            (
+                "google",
+                "      client_params:\n        http_options:\n          base_url: https://gateway.example\n",
+                {},
+            ),
+            ("google", "      vertexai: true\n", {}),
+            ("google", "", {"GOOGLE_GEMINI_BASE_URL": "https://gateway.example"}),
+            ("google", "", {"GOOGLE_GENAI_USE_VERTEXAI": "true"}),
+            ("google", "", {"GOOGLE_GENAI_USE_ENTERPRISE": "true"}),
+            ("openai", "      base_url: https://gateway.example/v1\n", {}),
+            ("openai", "", {"OPENAI_BASE_URL": "https://gateway.example/v1"}),
+            ("groq", "", {"GROQ_BASE_URL": "https://gateway.example"}),
+            ("cerebras", "", {"CEREBRAS_BASE_URL": "https://gateway.example"}),
+        ],
+        ids=[
+            "anthropic-base-url",
+            "anthropic-client-params",
+            "anthropic-env",
+            "gemini-http-options",
+            "gemini-vertexai",
+            "gemini-env",
+            "gemini-vertexai-env",
+            "gemini-enterprise-env",
+            "openai-base-url",
+            "openai-env",
+            "groq-env",
+            "cerebras-env",
+        ],
+    )
+    def test_doctor_never_probes_a_shared_key_behind_a_custom_endpoint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        extra_kwargs_yaml: str,
+        env: dict[str, str],
+    ) -> None:
+        """A shared key is probed only at the default endpoint, and only when no endpoint override applies."""
+        cfg = tmp_path / "config.yaml"
+        extra_kwargs_block = f"    extra_kwargs:\n{extra_kwargs_yaml}" if extra_kwargs_yaml else ""
+        cfg.write_text(
+            "models:\n"
+            f"  default:\n    provider: {provider}\n    id: some-model\n{extra_kwargs_block}"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  backend: none\n",
+        )
+        for name in (
+            "OPENAI_BASE_URL",
+            "ANTHROPIC_BASE_URL",
+            "GOOGLE_GEMINI_BASE_URL",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_ENTERPRISE",
+            "GROQ_BASE_URL",
+            "CEREBRAS_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"):
+            monkeypatch.setenv(name, "sk-gateway-key")
+        requested: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+
+        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
+            requested.append((str(url), repr(headers)))
+            return httpx.Response(200, json={"versions": ["v1.1"], "data": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert f"{provider}: shared API key not validated (custom endpoint)" in result.output
+        assert not any("sk-gateway-key" in url or "sk-gateway-key" in headers for url, headers in requested)
+
+    def test_doctor_skips_the_probe_for_an_env_file_only_endpoint_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Model loading honours OPENAI_BASE_URL from .env, so doctor must not send the key to api.openai.com."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  backend: none\n",
+        )
+        (tmp_path / ".env").write_text("OPENAI_BASE_URL=http://localhost:9292/v1\n", encoding="utf-8")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-local-proxy")
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert "openai: shared API key not validated (custom endpoint)" in result.output
+        assert probes == []
+
+    def test_doctor_probes_the_default_endpoint_when_one_shared_key_model_uses_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A default-endpoint model is enough to probe, even next to a model behind a gateway."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "  gateway:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "    extra_kwargs:\n      client_params:\n        base_url: https://gateway.example/anthropic\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  backend: none\n",
+        )
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert probes == [("https://api.anthropic.com/v1/models", "")]
+        assert "anthropic API key valid" in result.output
+
+    def test_doctor_decides_once_for_gemini_and_google_models(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gemini and google share GOOGLE_API_KEY, so a custom gemini model must not hide a default google model."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: google\n    id: gemini-3.8-flash\n"
+            "  gateway:\n    provider: gemini\n    id: gemini-3.8-flash\n"
+            "    extra_kwargs:\n      client_params:\n        http_options:\n          base_url: https://gateway.example\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  backend: none\n",
+        )
+        for name in ("GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google")
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        requested_urls: list[str] = []
+
+        def _mock_get(url: str, **_kw: object) -> httpx.Response:
+            requested_urls.append(str(url))
+            return httpx.Response(200, json={"versions": ["v1.1"], "models": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert requested_urls.count("https://generativelanguage.googleapis.com/v1beta/models?key=sk-google") == 1
+        assert not any("gateway.example" in url for url in requested_urls)
+
+    @pytest.mark.parametrize("key_in_env_file", [False, True], ids=["process-env", "env-file"])
+    def test_doctor_finishes_when_the_credential_store_cannot_be_opened(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        key_in_env_file: bool,
+    ) -> None:
+        """Key lookups fall back to config and env, so a read-only storage dir does not stop later checks."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n"
+            "  own:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-own\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-5.6-luna\n",
+        )
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        if key_in_env_file:
+            monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+            (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-env\n", encoding="utf-8")
+        else:
+            monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        probes = self._record_provider_probes(monkeypatch)
+        storage.chmod(0o555)
+        try:
+            result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        finally:
+            storage.chmod(0o755)
+
+        assert not isinstance(result.exception, PermissionError), result.output
+        assert "Could not sync env credentials into the store" in result.output
+        assert "model own uses its own API key from config (not validated)" in result.output
+        assert probes == [("https://api.openai.com/v1/models", "Bearer sk-env")]
+        assert "Memory LLM: openai/gpt-5.6-luna uses the shared openai key (not validated)" in result.output
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert "Storage not writable" in result.output
+
+    @pytest.mark.parametrize(
+        ("provider", "env", "expected"),
+        [
+            ("groq", {"GROQ_API_KEY": "sk-groq"}, "- Memory LLM: groq/some-model uses GROQ_API_KEY (not validated)"),
+            ("groq", {}, "! Memory LLM (groq): GROQ_API_KEY not set"),
+            (
+                "groq",
+                {".env": "GROQ_API_KEY=sk-groq"},
+                "! Memory LLM (groq): GROQ_API_KEY not set in the process environment (Mem0 reads only that "
+                "variable there, not .env or a _FILE secret)",
+            ),
+            (
+                "groq",
+                {"GROQ_API_KEY_FILE": "secret-file"},
+                "! Memory LLM (groq): GROQ_API_KEY not set in the process environment (Mem0 reads only that "
+                "variable there, not .env or a _FILE secret)",
+            ),
+            ("litellm", {}, "- Memory LLM: litellm/some-model not validated"),
+            (
+                "openai",
+                {"OPENAI_API_KEY": "sk-openai", "OPENROUTER_API_KEY": "sk-openrouter"},
+                "- Memory LLM: openai/some-model uses OPENROUTER_API_KEY through OpenRouter (not validated)",
+            ),
+        ],
+        ids=["env-key-set", "env-key-missing", "env-file-only", "file-secret-only", "no-env-key", "openrouter-switch"],
+    )
+    def test_memory_llm_check_reports_mem0_env_keys(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        env: dict[str, str],
+        expected: str,
+    ) -> None:
+        """Doctor reports the process-env key a Mem0 client reads itself, including OpenRouter replacing openai."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            f"memory:\n  llm:\n    provider: {provider}\n    config:\n      model: some-model\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        for name in ("GROQ_API_KEY", "GROQ_API_KEY_FILE", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            if name == ".env":
+                (tmp_path / ".env").write_text(f"{value}\n", encoding="utf-8")
+            elif name.endswith("_FILE"):
+                (tmp_path / value).write_text("sk-from-file\n", encoding="utf-8")
+                monkeypatch.setenv(name, str(tmp_path / value))
+            else:
+                monkeypatch.setenv(name, value)
+        self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert expected in " ".join(result.output.split())
+
+    def test_doctor_never_sends_generic_embedder_keys_to_the_configured_host(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mem0 drops host for these embedders, so doctor must not send the provider key there."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  embedder:\n"
+            "    provider: gemini\n"
+            "    config:\n"
+            "      model: gemini-embedding-2\n"
+            "      host: https://other.example/v1\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google")
+        requested_urls: list[str] = []
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+
+        def _mock_get(url: str, **_kw: object) -> httpx.Response:
+            requested_urls.append(str(url))
+            return httpx.Response(200, json={"versions": ["v1.1"], "data": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert "Memory embedder: gemini/gemini-embedding-2 not validated" in result.output
+        assert not any("other.example" in url or "sk-google" in url for url in requested_urls)
+
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""
         cfg = tmp_path / "config.yaml"
@@ -2929,6 +3407,43 @@ class TestDoctor:
             "timeout": 10,
         }
 
+    def test_vertexai_claude_probe_uses_the_runtime_endpoint_from_env_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor builds the Vertex client like model loading, so a .env-only ANTHROPIC_VERTEX_BASE_URL applies."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        (tmp_path / ".env").write_text(
+            "ANTHROPIC_VERTEX_BASE_URL=https://vertex-gateway.example/v1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("ANTHROPIC_VERTEX_BASE_URL", raising=False)
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+        client_kwargs: dict[str, object] = {}
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                client_kwargs.update(kwargs)
+
+            def get_request_params(self) -> dict[str, object]:
+                return {}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=SimpleNamespace(create=lambda **_kwargs: None))
+
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert client_kwargs["base_url"] == "https://vertex-gateway.example/v1"
+
     def test_vertexai_claude_connection_uses_runtime_adc_credentials(
         self,
         tmp_path: Path,
@@ -2968,7 +3483,7 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_FakeMessages())
 
-        monkeypatch.setattr(google_adc_module, "load_google_application_credentials", _load_adc)
+        monkeypatch.setattr(google_adc_module, "_load_google_application_credentials", _load_adc)
         monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
@@ -3169,8 +3684,8 @@ class TestDoctor:
         assert "vertexai_claude connection failed for claude-sonnet-5" in result.output
         assert "HTTP 403" in result.output
 
-    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor validates against custom base_url when configured."""
+    def test_custom_base_url_is_not_validated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor never sends the shared key to a custom base_url or to a default host the model does not call."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -3201,9 +3716,8 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "API key valid" in result.output
-        # Should validate against the custom base_url, not api.openai.com
-        assert any("localhost:9292" in u for u in called_urls)
+        assert "openai: shared API key not validated (custom endpoint)" in result.output
+        assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
         self,
@@ -3231,12 +3745,12 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "Memory embedder: ollama reachable" in result.output
 
-    def test_memory_configured_llm_validates_key(
+    def test_memory_configured_llm_reports_shared_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor validates configured memory LLM API key."""
+        """Doctor reports that the configured memory LLM uses the provider's shared key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
@@ -3255,7 +3769,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM: openai/gpt-5.6-luna API key valid" in result.output
+        assert "Memory LLM: openai/gpt-5.6-luna uses the shared openai key (not validated)" in result.output
         assert "Memory embedder:" in result.output
 
     def test_memory_llm_missing_key_is_warning(
@@ -3283,47 +3797,6 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
-
-    def test_memory_llm_openai_base_url_used_when_host_absent(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-oss-low\n"
-            "      openai_base_url: http://localllm:9292/v1\n",
-        )
-        storage = tmp_path / "storage"
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        _patch_homeserver_ok(monkeypatch)
-
-        called_urls: list[str] = []
-
-        def _mock_check(url: str, _headers: dict[str, str] | None = None) -> tuple[bool, str]:
-            called_urls.append(url)
-            return True, ""
-
-        monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
-        monkeypatch.setattr(
-            "mindroom.cli.doctor._validate_provider_key",
-            lambda _prov, _key, base_url=None: called_urls.append(base_url or "NO_BASE_URL") or (True, ""),
-        )
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "http://localllm:9292/v1" in called_urls, (
-            f"Expected openai_base_url to be passed as base_url, got: {called_urls}"
-        )
 
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,

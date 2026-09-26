@@ -15,6 +15,9 @@ from pydantic import ValidationError
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.model_loading import get_model_instance
 from mindroom.openai_models import (
@@ -127,6 +130,135 @@ def test_model_api_rejects_invalid_values_and_unsupported_providers(provider: st
     """A transport selection must not be silently ignored or misspelled."""
     with pytest.raises(ValidationError):
         ModelConfig.model_validate({"provider": provider, "id": "test-model", "api": api})
+
+
+def _runtime_paths_with_synced_env(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
+    """Mirror startup, where provider env keys are synced into shared credentials."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env=env,
+    )
+    sync_env_to_credentials(runtime_paths)
+    return runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("model_fields", "stored_model_key", "expected_key"),
+    [
+        ({}, None, "sk-env"),
+        ({"api_key": "sk-configured"}, None, "sk-configured"),
+        ({"api_key": " sk-configured "}, None, "sk-configured"),
+        ({"extra_kwargs": {"api_key": "sk-configured"}}, None, "sk-configured"),
+        ({"extra_kwargs": {"api_key": " sk-configured "}}, None, "sk-configured"),
+        ({"api_key": "sk-configured"}, "sk-stored-model", "sk-stored-model"),
+        ({"api_key": "  "}, None, "sk-env"),
+        ({"extra_kwargs": {"api_key": ""}}, None, "sk-env"),
+        ({"api_key": " ", "extra_kwargs": {"api_key": "sk-configured"}}, None, "sk-configured"),
+    ],
+    ids=[
+        "env-fallback",
+        "api-key",
+        "api-key-trimmed",
+        "extra-kwargs-api-key",
+        "extra-kwargs-api-key-trimmed",
+        "stored-model-credential",
+        "blank-api-key",
+        "blank-extra-kwargs-api-key",
+        "blank-api-key-beside-extra-kwargs",
+    ],
+)
+def test_model_api_key_precedence(
+    tmp_path: Path,
+    model_fields: dict[str, object],
+    stored_model_key: str | None,
+    expected_key: str,
+) -> None:
+    """A stored model credential beats a configured key, which beats the provider env key."""
+    runtime_paths = _runtime_paths_with_synced_env(tmp_path, {"OPENAI_API_KEY": "sk-env"})
+    if stored_model_key is not None:
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "model:target",
+            {"api_key": stored_model_key},
+        )
+    config = Config(models={"target": ModelConfig(provider="openai", id="gpt-6-astra", **model_fields)})
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert isinstance(model, MindRoomOpenAIResponses)
+    assert model.api_key == expected_key
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("openrouter", "anthropic/claude-sonnet-5"),
+        ("zai", "glm-5.3"),
+        ("ollama", "qwen3.8:27b"),
+        ("llama_cpp", "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"),
+    ],
+)
+def test_configured_api_key_reaches_provider_with_its_own_key_handling(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Provider branches with custom key handling, and those excluded from env lookup, keep the configured key."""
+    runtime_paths = _runtime_paths_with_synced_env(
+        tmp_path,
+        {"OPENAI_API_KEY": "sk-env", "OPENROUTER_API_KEY": "sk-env", "ZAI_API_KEY": "sk-env"},
+    )
+    config = Config(models={"target": ModelConfig(provider=provider, id=model_id, api_key="sk-configured")})
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert model.api_key == "sk-configured"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "extra_kwargs"),
+    [
+        ("codex", "gpt-6-astra", {}),
+        ("kimi", "k3", {}),
+        (
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5",
+            {"aws_region": "us-east-1", "aws_access_key": "dummy-access", "aws_secret_key": "dummy-secret"},
+        ),
+        ("vertexai_claude", "claude-sonnet-5", {"project_id": "dummy-project", "region": "us-east1"}),
+        ("synthetic", "lorem-ipsum", {}),
+    ],
+)
+def test_keyless_providers_never_carry_a_configured_api_key(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    extra_kwargs: dict[str, object],
+) -> None:
+    """Providers that authenticate without API keys drop a configured key instead of holding it."""
+    runtime_paths = _runtime_paths_with_synced_env(tmp_path, {})
+    config = Config(
+        models={
+            "target": ModelConfig(provider=provider, id=model_id, api_key="sk-configured", extra_kwargs=extra_kwargs),
+        },
+    )
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert "sk-configured" not in repr(vars(model))
+
+
+@pytest.mark.parametrize("api_key", [12345, ["sk-a"], {"key": "sk-a"}])
+def test_model_config_rejects_non_string_extra_kwargs_api_key(api_key: object) -> None:
+    """A non-string extra_kwargs.api_key would bypass key resolution, so config validation rejects it."""
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.api_key must be a string"):
+        ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"api_key": api_key})
+
+
+def test_model_config_rejects_api_key_in_both_fields() -> None:
+    """Two configured keys for one model would leave one silently unused."""
+    with pytest.raises(ValidationError, match=r"either api_key or extra_kwargs\.api_key"):
+        ModelConfig(provider="openai", id="gpt-6-astra", api_key="sk-a", extra_kwargs={"api_key": "sk-b"})
 
 
 def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:

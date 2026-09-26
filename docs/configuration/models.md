@@ -39,11 +39,23 @@ Each model configuration supports the following fields:
 | `icon` | No | `null` | Image path relative to the config file's directory, or a Matrix `mxc://` URI |
 | `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
+| `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; you can set `extra_kwargs.api_key` instead, but not both |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
-Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
+Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
+MindRoom resolves a model's API key in this order: the key saved for that model in the dashboard's **Models** editor, then `api_key` or `extra_kwargs.api_key` from the model config, then the provider's shared key from the environment or credential store.
+Setting both `api_key` and `extra_kwargs.api_key` on one model is a validation error.
+MindRoom trims both fields, and a blank value counts as unset, so the provider's shared key still applies.
+`extra_kwargs.api_key` must be a string or `null`, which counts as unset; any other value is a validation error.
+`ollama` and `llama_cpp` models skip the shared provider key step.
+`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
+The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models and the providers above that drop keys.
+`mindroom doctor` never sends a model's own key; it lists those models and where each key comes from.
+Doctor sends a provider's shared key only to that provider's default endpoint, and only when at least one model that relies on the shared key has no `extra_kwargs.base_url`, `extra_kwargs.client_params`, or `extra_kwargs.vertexai`.
+Doctor also skips the probe when the provider SDK's base-URL environment variable is set: `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or, for Gemini, `GOOGLE_GEMINI_BASE_URL`, `GOOGLE_GENAI_USE_VERTEXAI`, or `GOOGLE_GENAI_USE_ENTERPRISE`.
+In those cases it prints that the shared key was not validated because of a custom endpoint.
 
 Presentation metadata is optional:
 

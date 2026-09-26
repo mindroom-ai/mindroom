@@ -2785,7 +2785,7 @@
             }
           ],
           "default": null,
-          "description": "Optional API key (usually from env vars)",
+          "description": "Optional model-specific API key used instead of the provider's shared key; a key saved for this model in the dashboard takes precedence",
           "title": "Api Key",
           "x-mindroom": {
             "secret": true
@@ -2802,7 +2802,7 @@
             }
           ],
           "default": null,
-          "description": "Additional provider-specific parameters passed directly to the model; may include api_key",
+          "description": "Additional provider-specific parameters passed directly to the model; may include api_key as an alternative to the api_key field",
           "title": "Extra Kwargs",
           "x-mindroom": {
             "secret": true

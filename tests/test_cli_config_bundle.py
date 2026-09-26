@@ -259,3 +259,26 @@ def test_install_bundle_cli_revision_is_stored(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_invalid_bundle_error_never_prints_model_api_keys(tmp_path: Path, *, json_output: bool) -> None:
+    """Config validation failures must not echo submitted secrets back into terminals or logs."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text(
+        "agents: {}\n"
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-6-astra\n"
+        "    api_key: sk-secretAAAA\n"
+        "    extra_kwargs:\n"
+        "      api_key: sk-secretBBBB\n",
+    )
+    args = ["config", "install-bundle", str(source), "--target", str(tmp_path / "active")]
+    result = runner.invoke(app, [*args, "--json"] if json_output else args)
+
+    assert result.exit_code == 2
+    assert "either api_key or extra_kwargs.api_key" in result.output
+    assert "sk-secret" not in result.output

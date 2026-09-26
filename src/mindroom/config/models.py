@@ -618,6 +618,23 @@ class EmbedderConfig(BaseModel):
         return None if value is None else validate_service_name(value)
 
 
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings whose api_key is a trimmed string or absent; reject a non-string key.
+
+    Blank or null keys are dropped, so the provider's shared key still applies.
+    """
+    if "api_key" not in settings:
+        return settings
+    api_key = settings["api_key"]
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    normalized = {key: item for key, item in settings.items() if key != "api_key"}
+    if api_key is not None and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -634,12 +651,18 @@ class ModelConfig(BaseModel):
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(
         default=None,
-        description="Optional API key (usually from env vars)",
+        description=(
+            "Optional model-specific API key used instead of the provider's shared key; "
+            "a key saved for this model in the dashboard takes precedence"
+        ),
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        description=(
+            "Additional provider-specific parameters passed directly to the model; "
+            "may include api_key as an alternative to the api_key field"
+        ),
         json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
@@ -662,6 +685,20 @@ class ModelConfig(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset, so the provider's shared key still applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _normalize_extra_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Normalize extra_kwargs.api_key exactly like the api_key field."""
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
 
     @field_validator("icon")
     @classmethod
@@ -711,6 +748,18 @@ class ModelConfig(BaseModel):
     def _validate_api_provider(self) -> Self:
         if self.api is not None and self.provider.strip().lower() != "openai":
             msg = "Model api is only supported for provider: openai"
+            raise ValueError(msg)
+        return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set in config through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        # Validation normalizes both fields to a trimmed string or absence.
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
+
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key is not None and self.extra_kwargs is not None and "api_key" in self.extra_kwargs:
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
             raise ValueError(msg)
         return self
 

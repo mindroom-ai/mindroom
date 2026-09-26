@@ -13,11 +13,19 @@ import httpx
 import typer
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.constants import RuntimePaths, env_key_for_provider
+from mindroom.credentials_sync import (
+    ResolvedApiKey,
+    get_api_key_for_provider,
+    get_memory_llm_api_key,
+    get_model_api_key,
+    get_secret_from_env,
+    sync_env_to_credentials,
+)
 from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
+from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -214,15 +222,16 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
 
-
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in config.models.values():
-        if model.provider == provider and model.extra_kwargs:
-            base_url = model.extra_kwargs.get("base_url")
-            if base_url:
-                return base_url
-    return None
+# Env variables that move a probed provider off its default endpoint, as read by the installed
+# provider SDKs (and by model loading for OPENAI_BASE_URL). OpenRouter and DeepSeek clients
+# always receive an explicit base_url, so no env variable moves them.
+_PROVIDER_ENDPOINT_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_BASE_URL",),
+    "openai": ("OPENAI_BASE_URL",),
+    "google": ("GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"),
+    "cerebras": ("CEREBRAS_BASE_URL",),
+    "groq": ("GROQ_BASE_URL",),
+}
 
 
 def _http_check(
@@ -280,12 +289,14 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
     )
 
 
-def _validate_provider_key(
-    provider: str,
-    api_key: str,
-    base_url: str | None = None,
-) -> tuple[bool | None, str]:
-    """Validate an API key with a lightweight models-list request.
+def _sets_custom_endpoint(model_config: ModelConfig) -> bool:
+    """Return whether a model's extra_kwargs may move it off the provider's default endpoint."""
+    extra_kwargs = model_config.extra_kwargs or {}
+    return any(extra_kwargs.get(name) for name in ("base_url", "client_params", "vertexai"))
+
+
+def _validate_provider_key(provider: str, api_key: str) -> tuple[bool | None, str]:
+    """Validate an API key with a lightweight models-list request to the provider's default endpoint.
 
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error).
@@ -293,12 +304,9 @@ def _validate_provider_key(
     # Normalize aliases so we look up a single URL and auth style
     canonical = "google" if provider == "gemini" else provider
 
-    if base_url:
-        url = base_url.rstrip("/") + "/models"
-    elif canonical in _PROVIDER_VALIDATE_URLS:
-        url = _PROVIDER_VALIDATE_URLS[canonical]
-    else:
+    if canonical not in _PROVIDER_VALIDATE_URLS:
         return None, "unknown provider"
+    url = _PROVIDER_VALIDATE_URLS[canonical]
 
     headers: dict[str, str] = {}
     if canonical == "anthropic":
@@ -361,32 +369,14 @@ def _validate_vertexai_claude_connection(
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
-    region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
-    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value(project_env)
-    region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
-    missing = []
-    if not project_id:
-        missing.append(project_env)
-    if not region:
-        missing.append(region_env)
+    # Build the client settings exactly as model loading does, so the probe reaches the same endpoint.
+    try:
+        populate_vertexai_claude_runtime_kwargs(extra_kwargs, runtime_paths)
+    except PermanentStartupError as exc:
+        return False, str(exc)
+    missing = [VERTEXAI_CLAUDE_ENV_BY_KEY[key] for key in ("project_id", "region") if not extra_kwargs.get(key)]
     if missing:
         return None, f"missing {', '.join(missing)}"
-
-    client_params = dict(extra_kwargs.get("client_params") or {})
-    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.google_adc import load_google_application_credentials  # noqa: PLC0415
-
-        try:
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-        except PermanentStartupError as exc:
-            return False, str(exc)
-    if client_params:
-        extra_kwargs["client_params"] = client_params
-
-    extra_kwargs.setdefault("project_id", project_id)
-    extra_kwargs.setdefault("region", region)
     extra_kwargs.setdefault("timeout", 10)
 
     from agno.models.vertexai.claude import Claude as VertexAIClaude  # noqa: PLC0415
@@ -424,6 +414,17 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
         if model.provider == "ollama" and model.host:
             return model.host
     return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
+
+
+def _read_credential_store[T](read: Callable[[], T], fallback: T) -> T:
+    """Read the credential store, or return the fallback when it cannot be opened.
+
+    The env sync step already reported the store failure, and the remaining checks must still run.
+    """
+    try:
+        return read()
+    except (OSError, ValueError):
+        return fallback
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -516,19 +517,60 @@ def _check_single_provider(
     env_key = env_key_for_provider(provider)
     if not env_key:
         return 0, 0, 0
+    return _check_api_key_provider(provider, env_key, config, validated_keys, runtime_paths)
 
-    # google and gemini share GOOGLE_API_KEY — validate once
+
+def _check_api_key_provider(
+    provider: str,
+    env_key: str,
+    config: Config,
+    validated_keys: set[str],
+    runtime_paths: RuntimePaths,
+) -> tuple[int, int, int]:
+    """Validate the shared key for the models that use it. Returns (passed, failed, warnings).
+
+    A model with its own key never uses the shared key. Doctor reports where that key
+    comes from but never sends it, so it cannot reach an endpoint the model would not call.
+    """
+    # google and gemini share GOOGLE_API_KEY, so decide once for every model behind this env key.
     if env_key in validated_keys:
         return 0, 0, 0
     validated_keys.add(env_key)
 
-    api_key = runtime_paths.env_value(env_key)
+    shared_key_models: list[ModelConfig] = []
+    for model_name, model_config in sorted(config.models.items()):
+        if env_key_for_provider(model_config.provider) != env_key:
+            continue
+        configured_api_key = model_config.configured_api_key()
+        model_api_key = _read_credential_store(
+            lambda name=model_name, model=model_config: get_model_api_key(name, model, runtime_paths),
+            None if configured_api_key is None else ResolvedApiKey(configured_api_key, "config"),
+        )
+        if model_api_key is None:
+            shared_key_models.append(model_config)
+        else:
+            console.print(
+                f"[dim]-[/dim] {model_config.provider}: model {model_name} uses its own API key"
+                f" from {model_api_key.source} (not validated)",
+            )
+    if not shared_key_models:
+        return 0, 0, 0
+
+    api_key = _read_credential_store(
+        lambda: get_api_key_for_provider(provider, runtime_paths=runtime_paths),
+        get_secret_from_env(env_key, runtime_paths=runtime_paths),
+    )
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
 
-    base_url = _get_custom_base_url(config, provider)
-    valid, detail = _validate_provider_key(provider, api_key, base_url)
+    # Probe only the provider's default endpoint, and only when some shared-key model calls it.
+    canonical = "google" if provider == "gemini" else provider
+    env_override = any(runtime_paths.env_value(name) for name in _PROVIDER_ENDPOINT_ENV_VARS.get(canonical, ()))
+    if env_override or all(_sets_custom_endpoint(model) for model in shared_key_models):
+        console.print(f"[dim]-[/dim] {provider}: shared API key not validated (custom endpoint)")
+        return 0, 0, 0
+    valid, detail = _validate_provider_key(provider, api_key)
     return _print_validation(
         valid,
         detail,
@@ -588,13 +630,13 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_host = (
-        config.memory.llm.config.get("host")
-        or config.memory.llm.config.get("openai_base_url")
-        or config.memory.llm.config.get("base_url")
-    )
     if llm_provider == "ollama":
-        host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        host = (
+            config.memory.llm.config.get("host")
+            or config.memory.llm.config.get("openai_base_url")
+            or config.memory.llm.config.get("base_url")
+            or _get_ollama_host(config, runtime_paths=runtime_paths)
+        )
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -606,21 +648,36 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
-    if env_key and not api_key:
-        console.print(
-            f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
-        )
-        return 0, 0, 1
-    base_url = llm_host
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
-    return _print_validation(
-        valid,
-        detail,
-        f"Memory LLM: {llm_provider}/{llm_model} API key valid",
-        f"Memory LLM: {llm_provider}/{llm_model} API key invalid",
-        f"Memory LLM: {llm_provider}/{llm_model} could not validate",
+    llm_settings = config.memory.llm.config
+    # Only the shared openai/anthropic lookup opens the store; without it, fall back to that env key.
+    env_api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    api_key = _read_credential_store(
+        lambda: get_memory_llm_api_key(llm_provider, llm_settings, runtime_paths),
+        ResolvedApiKey(env_api_key, "shared") if env_api_key else None,
     )
+    # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
+    # share, so doctor reports the key source instead of guessing where Mem0 would send it.
+    if llm_provider == "openai" and runtime_paths.process_env.get("OPENROUTER_API_KEY"):
+        # Mem0's OpenAI client switches to OpenRouter's key and endpoint whenever this variable is set.
+        source = "OPENROUTER_API_KEY through OpenRouter"
+    elif api_key is not None:
+        source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
+    elif env_key and runtime_paths.process_env.get(env_key):
+        # Mem0's other clients (groq, gemini, deepseek, ...) read this key from the process env themselves.
+        source = env_key
+    elif env_key:
+        where = (
+            " in the process environment (Mem0 reads only that variable there, not .env or a _FILE secret)"
+            if env_api_key
+            else ""
+        )
+        console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set{where}")
+        return 0, 0, 1
+    else:
+        console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} not validated")
+        return 0, 0, 0
+    console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} uses {source} (not validated)")
+    return 0, 0, 0
 
 
 def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -673,15 +730,10 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
         return 0, 0, 1
 
-    base_url = emb.config.host
-    valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
-    return _print_validation(
-        valid,
-        detail,
-        f"Memory embedder: {emb.provider}/{emb.config.model} API key valid",
-        f"Memory embedder: {emb.provider}/{emb.config.model} API key invalid",
-        f"Memory embedder: {emb.provider}/{emb.config.model} could not validate",
-    )
+    # Mem0 builds this embedder from its own config and env, so doctor cannot know which
+    # endpoint it would call and does not send the key anywhere.
+    console.print(f"[dim]-[/dim] Memory embedder: {emb.provider}/{emb.config.model} not validated")
+    return 0, 0, 0
 
 
 def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model: str) -> tuple[bool, str]:

@@ -400,7 +400,8 @@ def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
-    model_config = ConfigDict(extra="forbid")
+    # Authored config carries API keys, so rendered validation errors must never echo input values.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
     _uses_includes: bool = PrivateAttr(default=False)
