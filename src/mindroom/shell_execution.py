@@ -29,7 +29,7 @@ from mindroom.shell_output_capture import (
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
-_MAX_BACKGROUNDED = 16
+MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
@@ -317,13 +317,13 @@ async def _background_process(
     output_capture: ShellOutputCapture | None,
 ) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
-    if active >= _MAX_BACKGROUNDED:
+    if active >= MAX_BACKGROUNDED:
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
         return ShellRunResult(
             message=(
-                f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
+                f"Error: Too many backgrounded processes ({active}/{MAX_BACKGROUNDED}). "
                 "Kill or wait for existing ones before running more."
             ),
         )

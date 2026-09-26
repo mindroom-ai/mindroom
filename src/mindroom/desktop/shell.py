@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
 from mindroom.shell_execution import (
+    MAX_BACKGROUNDED,
     ProcessRecord,
     discard_background_record,
     kill_all_records,
@@ -32,7 +33,7 @@ _MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
 _COMMAND_PREVIEW_CHARS = 200
 # Equal to the engine's background limit, so a start is refused before approval rather than killed later.
-_MAX_HANDLES = 16
+_MAX_HANDLES = MAX_BACKGROUNDED
 _UNKNOWN_HANDLE = "Unknown shell handle."
 _NOT_STARTED = "The local shell request was cancelled before approval; the command did not run."
 _STOPPED = "The local shell command was stopped before it finished; it may have partially run."
