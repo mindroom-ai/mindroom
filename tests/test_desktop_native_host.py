@@ -616,7 +616,8 @@ def _shell_event(
 
 
 async def _wait_for_native_pending(host: NativeDesktopHost) -> dict[str, object]:
-    for _ in range(200):
+    # Allow the journal and shell lane a few seconds to reach approval on a loaded test machine.
+    for _ in range(1000):
         pending = host.status()["shell"]["pending"]
         if pending is not None:
             return pending
