@@ -1,14 +1,16 @@
-"""Per-run model-call cap derived from the per-turn tool-call budget, and caller-owned request gates."""
+"""Per-run model-call cap derived from the per-turn tool-call budget, and scoped caller-owned request gates."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from mindroom.agno_compat_model_hooks import install_response_request_gate
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from agno.models.base import Model
 
@@ -16,6 +18,7 @@ logger = get_logger(__name__)
 
 _GATE_ATTR = "_mindroom_model_call_cap_installed"
 _REQUEST_GATE_ATTR = "_mindroom_request_gate_installed"
+_scoped_gate: ContextVar[Callable[[], bool] | None] = ContextVar("scoped_request_gate", default=None)
 # Every tool-calling request spends at least one budgeted call, so a run within its budget needs at
 # most budget + 1 requests; one more lets the model answer after Agno refuses its first batch.
 _EXTRA_MODEL_REQUESTS = 2
@@ -57,6 +60,16 @@ def install_model_call_cap(model: Model, *, entity_name: str) -> None:
     install_response_request_gate(model, marker=_GATE_ATTR, open_gate=open_run)
 
 
-def install_request_gate(model: Model, allow_request: Callable[[], bool]) -> None:
-    """Ask ``allow_request`` before every model request of this model's runs; a refused request ends the run."""
-    install_response_request_gate(model, marker=_REQUEST_GATE_ATTR, open_gate=lambda _tool_call_limit: allow_request)
+@contextmanager
+def request_gate(model: Model, allow_request: Callable[[], bool]) -> Iterator[None]:
+    """Ask ``allow_request`` before each model request of the response loops started inside the block.
+
+    A refused request ends the run. The model keeps the gate installed, but loops started outside the block, such as
+    later runs of the model, are never asked.
+    """
+    install_response_request_gate(model, marker=_REQUEST_GATE_ATTR, open_gate=lambda _limit: _scoped_gate.get())
+    token = _scoped_gate.set(allow_request)
+    try:
+        yield
+    finally:
+        _scoped_gate.reset(token)
