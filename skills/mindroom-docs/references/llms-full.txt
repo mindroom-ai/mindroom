@@ -14617,7 +14617,7 @@ Provider-hosted tools the request offered, such as a provider's web search, stay
 Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
 The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
 
-The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, and when the final request cannot be forked because the response ended on a tool call, offered no `skill_manage`, or needs approval for a skill tool.
+The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, when the response's final attempt left no request to fork, and when the final request cannot be forked because the response ended on a tool call or without a text answer, offered no `skill_manage`, needs approval for a skill tool, or offered no skill reader although the library now holds skills.
 Unlike Hermes' fork, which compacts the conversation between its requests, the fork resends the whole conversation with each request, so a response whose final request already used more than a quarter of the review's input budget is replayed as a digest too.
 A replay without its own `skill_learning.model` runs on the model the response used, or for an approved continuation on the agent's model for that room and thread.
 A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
@@ -14668,9 +14668,9 @@ Private agents learn only from and into the requester's private workspace, and s
 
 ### History, archive, and notices
 
-Before the learner replaces or removes a file, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
+Before `skill_manage` replaces or removes a file, in chat or in a review, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
 Copy a saved version back to restore it.
-Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
+Before each review, learned skills with no use, creation, or `skill_manage` edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it; one recreated under the same name before that review stays learner-owned unless it carries `pinned: true`.
@@ -19971,7 +19971,7 @@ MindRoom's architecture consists of several key components working together.
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
-| `custom_tools/skill_manage.py` | Chat-time `skill_manage` of learning agents, like Hermes' foreground tool |
+| `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -21420,7 +21420,7 @@ Do not report or "fix" these; they are deliberate.
 - A skill review forks the request the reviewed agent's model just processed and resends it unredacted to the same provider, a digest replay for another model redacts the conversation on a best-effort basis, and the check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills it could already change itself.
   Every learner read and write goes through no-follow descriptors, and the primary takes no lock inside the workspace, so worker code cannot stall it through learned skills.
-- `skill_manage`, which learning agents use in chat and the review writes with, runs in the primary process and writes only below the agent's workspace `skills/` directory through the same no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
+- `skill_manage`, which agents that list it or learn skills use in chat and the review writes with, runs in the primary process and writes only below the agent's workspace `skills/` directory through the same no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.

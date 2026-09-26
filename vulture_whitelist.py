@@ -428,3 +428,4 @@ _.embed_captions  # MoviePyVideoTools registers this caption-style override dyna
 _.scrape_website
 _.custom_scrape_website
 _._execute_query
+_.ashould_compress  # Agno CompressionManager override (src/mindroom/skill_learning/reviewer.py)

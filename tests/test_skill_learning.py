@@ -111,7 +111,14 @@ class _ScriptedModel(SyntheticModel):
         tools: Sequence[Mapping[str, Any]] | None = None,
         **_kwargs: object,
     ) -> ModelResponse:
-        contents = [message.get_content_string() for message in messages]
+        # Like an adapter, a request sends a tool result's compressed text once the loop compresses tool results.
+        compressed = bool(_kwargs.get("compress_tool_results"))
+        contents = [
+            compressed_text
+            if compressed and isinstance(compressed_text := message.get_content(use_compressed_content=True), str)
+            else message.get_content_string()
+            for message in messages
+        ]
         self.requests.append(contents)
         self.offered_tools.append({tool["function"]["name"] for tool in tools or []})
         self.tool_requests.append(list(tools or []))
@@ -2243,3 +2250,49 @@ async def test_a_failed_usage_write_never_hides_a_stop(tmp_path: Path) -> None:
         await asyncio.wait_for(runner.stop(), timeout=10)
     assert task.cancelled()
     assert _entries(paths)["mind:session"]["failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fork_keeps_compressed_results_and_compresses_nothing_more(tmp_path: Path) -> None:
+    """The fork sends what the response compressed, but the skill file it loads reaches its patch in full."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    model = _model(("shell", {"cmd": "make deploy"}))
+    capture = SkillReviewCapture()
+    await _answer(model, capture, _agent_tools(config, paths, []), compression_manager=_ShortenToolResults())
+    assert capture.latest is not None
+    assert capture.latest.compressed_tool_results
+    patch_step = {"action": "patch", "name": "older-lesson", "old_string": "1. Run the smoke test."}
+    model.script = [
+        ("get_skill_instructions", {"skill_name": "older-lesson"}),
+        ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check logs."}),
+    ]
+    await _review(config, paths, captured=capture.latest)
+    _primary_call, primary_final, fork, loaded, _patched = model.requests
+    assert _COMPRESSED_RESULT in primary_final
+    assert fork[: len(primary_final)] == primary_final
+    assert "1. Run the smoke test." in loaded[-1], "the review's own tool result stays whole"
+    assert (_skills_root(config, paths) / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_skill_readers_is_not_forked_once_skills_exist(tmp_path: Path) -> None:
+    """A response made before the agent had any skill offered no reader, so a review of the grown library replays."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    primary = _model()
+    capture = SkillReviewCapture()
+    await _answer(primary, capture, _agent_tools(config, paths, []))
+    assert capture.latest is not None
+    assert "get_skill_instructions" not in {tool.name for tool in capture.latest.tools if isinstance(tool, Function)}
+    library.create_skill(
+        _skills_root(config, paths),
+        "older-lesson",
+        LEARNED.replace("deploy-checks", "older-lesson"),
+        reserved_names=frozenset(),
+        learner=True,
+    )
+    replay = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=replay):
+        await _review(config, paths, captured=capture.latest)
+    assert len(replay.requests) == 1
+    assert "get_skill_instructions" in replay.offered_tools[0]

@@ -2,8 +2,8 @@
 
 Registers the ``skill_manage`` tool in the metadata registry for UI display.
 The actual toolkit (``mindroom.custom_tools.skill_manage.SkillManageTools``)
-requires the agent's workspace and is injected directly in ``create_agent()``
-for agents with skill learning enabled, so it is NOT added to ``TOOL_REGISTRY``.
+requires the agent's workspace and is built in ``build_agent_toolkit()`` for
+agents that list it or learn skills, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
 from mindroom.tool_system.declarations import (

@@ -37,8 +37,8 @@ class CapturedRequest:
     tools: tuple[Function | dict[str, Any], ...]
     tool_choice: str | dict[str, Any] | None
     response_format: dict[str, Any] | type[BaseModel] | None
-    # Agents that compress tool results send the compressed text, which the fork must send the same way.
-    compression_manager: CompressionManager | None
+    # Agents that compress tool results sent the compressed text, which the fork must send the same way.
+    compressed_tool_results: bool
 
 
 @dataclass
@@ -68,7 +68,7 @@ def observe_final_request(
         messages = kwargs.get("messages")
         if not isinstance(run_response, RunOutput) or run_response.run_id != run_id or not isinstance(messages, list):
             return
-        compression_manager = kwargs.get("compression_manager")
+        compression = kwargs.get("compression_manager")
         capture.latest = CapturedRequest(
             model=model,
             model_name=model_name,
@@ -78,7 +78,7 @@ def observe_final_request(
             tools=tuple(cast("list[Function | dict[str, Any]]", kwargs.get("tools") or [])),
             tool_choice=cast("str | dict[str, Any] | None", kwargs.get("tool_choice")),
             response_format=cast("dict[str, Any] | type[BaseModel] | None", kwargs.get("response_format")),
-            compression_manager=compression_manager if isinstance(compression_manager, CompressionManager) else None,
+            compressed_tool_results=isinstance(compression, CompressionManager) and compression.compress_tool_results,
         )
 
     return temporary_response_observer(model, record)
