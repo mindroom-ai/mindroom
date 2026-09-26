@@ -227,6 +227,7 @@ The local journal keeps each reply as a durable receipt, and a command interrupt
 
 `status` reports which of applications, folders, and shell commands are enabled, whether a shell command is waiting for approval, the remaining auto-approval time, and only the caller's own handles.
 Remote status never includes a waiting command's text; only the person at the computer sees it.
+A remote status reply also fits one encrypted message, so with many selected folders it can trim the folder list and set `file_roots_truncated: true`; the local status a person at the computer sees always lists every folder.
 File contents and command output become model input after MindRoom decrypts them in the cloud process, so your model provider receives them.
 They can also remain in agent session storage, tool traces, automatically saved workspace files, and the local command journal.
 Commands and paths appear in tool-call arguments, Matrix tool traces, and approval cards, so never put secrets in them.

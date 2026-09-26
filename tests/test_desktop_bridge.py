@@ -540,6 +540,38 @@ async def test_list_folders_reply_is_bounded_by_the_real_enveloped_response(
 
 
 @pytest.mark.asyncio
+async def test_remote_status_file_roots_is_bounded_while_local_status_keeps_every_root(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """The remote status reply's file_roots must fit the envelope; the local view is never trimmed."""
+    base = tmp_path / ("a" * 200) / ("b" * 200)
+    base.mkdir(parents=True)
+    roots = []
+    for number in range(80):
+        leaf = base / f"root-{number:03}-{'c' * 200}"
+        leaf.mkdir()
+        roots.append(leaf)
+    files = DesktopFilesystem(tuple(roots))
+    bridge = _local_bridge(filesystem=files)
+    command = _command(
+        "status",
+        request_id="r" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+        session_id="s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+    )
+    await _handle(bridge, _event(command))
+    response = _response(transport)
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    file_roots = response.result["bridge"]["file_roots"]
+    assert isinstance(file_roots, list)
+    assert response.result["bridge"]["file_roots_truncated"] is True
+    assert 0 < len(file_roots) < len(roots)
+    # The native NDJSON channel the Mac app reads has no to-device limit, so it keeps every root.
+    assert len(bridge.local_status()["file_roots"]) == len(roots)
+    bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_long_local_paths_reach_folder_reads_and_shell_cwd(transport: AsyncMock, tmp_path: Path) -> None:
     """Paths inside selected folders and working directories are not limited to identifier length."""
     nested = Path(*["d" * 60] * 5)
@@ -1817,6 +1849,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "browser_enabled": False,
         "gui_available": True,
         "file_roots": [],
+        "file_roots_truncated": False,
         "shell": {
             "enabled": False,
             "pending": False,

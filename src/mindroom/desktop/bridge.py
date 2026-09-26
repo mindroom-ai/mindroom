@@ -409,12 +409,17 @@ class DesktopBridge:
                 self._response_available.set()
 
     def local_status(self) -> dict[str, object]:
-        """Report local authority, including pending shell details only for the local approver."""
+        """Report local authority, including pending shell details only for the local approver.
+
+        ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
+        has no to-device size limit, unlike the remote ``status`` action reply.
+        """
         remaining = 0.0
         if self._control_available() and self._control_lease_deadline is not None:
             remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
         return {
             **self._bridge_status(),
+            "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
             "mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
@@ -812,11 +817,17 @@ class DesktopBridge:
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            status = (
+            status: dict[str, object] = (
                 await asyncio.to_thread(self.provider.status) if self.provider is not None else {"gui_available": False}
             )
+            folders = self.filesystem.list_folders()["folders"] if self.filesystem is not None else []
             return _Execution(
-                {**status, "bridge": {**self._bridge_status(), "shell": self._caller_shell_status(command)}},
+                self._fit_status(
+                    command,
+                    status,
+                    self._caller_shell_status(command),
+                    cast("list[dict[str, str]]", folders),
+                ),
             )
         if command.action == "list_apps":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
@@ -982,6 +993,27 @@ class DesktopBridge:
         finally:
             output.release()
 
+    def _leftmost_fitting(
+        self,
+        command: DesktopCommand,
+        low: int,
+        high: int,
+        build: Callable[[int], dict[str, object]],
+    ) -> int:
+        """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
+
+        Shared by every trimmed reply (shell output, listings, status), all measured the same way:
+        ``self._success_response(command, result=build(x)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES``.
+        Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
+        """
+        while low < high:
+            middle = (low + high) // 2
+            if self._success_response(command, result=build(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+                high = middle
+            else:
+                low = middle + 1
+        return low
+
     def _fit_output_tail(
         self,
         command: DesktopCommand,
@@ -999,14 +1031,8 @@ class DesktopBridge:
             return {**payload, "output": shown, "output_truncated": truncated}
 
         # Dropping older characters never grows the reply, so search for the fewest to drop.
-        low, high = 0, len(text)
-        while low < high:
-            middle = (low + high) // 2
-            if self._success_response(command, result=reply(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
-                high = middle
-            else:
-                low = middle + 1
-        return reply(low)
+        start = self._leftmost_fitting(command, 0, len(text), reply)
+        return reply(start)
 
     def _fit_listing(
         self,
@@ -1016,26 +1042,45 @@ class DesktopBridge:
         key: str,
         already_truncated: bool,
     ) -> dict[str, object]:
-        """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline budget.
-
-        Measures the real enveloped response the same way ``_fit_output_tail`` measures shell output.
-        """
+        """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline budget."""
         total = len(entries)
 
-        def reply(count: int) -> dict[str, object]:
+        def reply(dropped: int) -> dict[str, object]:
+            count = total - dropped
             return {key: entries[:count], "truncated": already_truncated or count < total}
 
-        if self._success_response(command, result=reply(total)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
-            return reply(total)
-        # Dropping later entries never grows the reply, so search for the most that still fit.
-        low, high = 0, total - 1
-        while low < high:
-            middle = (low + high + 1) // 2
-            if self._success_response(command, result=reply(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
-                low = middle
-            else:
-                high = middle - 1
-        return reply(low)
+        # Dropping later entries never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
+
+    def _fit_status(
+        self,
+        command: DesktopCommand,
+        provider_status: dict[str, object],
+        shell_status: dict[str, object],
+        folders: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Keep the fitting prefix of ``folders`` in the remote reply's ``bridge.file_roots``.
+
+        ``local_status()`` reports every folder unconditionally: only this remote, to-device reply
+        is bounded by the inline budget.
+        """
+        total = len(folders)
+
+        def reply(dropped: int) -> dict[str, object]:
+            count = total - dropped
+            return {
+                **provider_status,
+                "bridge": {
+                    **self._bridge_status(),
+                    "file_roots": folders[:count],
+                    "file_roots_truncated": count < total,
+                    "shell": shell_status,
+                },
+            }
+
+        dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
 
     async def _execute_semantic_control(
         self,
@@ -1192,6 +1237,7 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
 
     def _bridge_status(self) -> dict[str, object]:
+        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not)."""
         control_available = self._control_available()
         status: dict[str, object] = {
             "mode": "control" if control_available else "observe_only",
@@ -1200,7 +1246,6 @@ class DesktopBridge:
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
             "gui_available": self.provider is not None,
-            "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }
