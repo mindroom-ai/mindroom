@@ -135,7 +135,7 @@ def _origin_from_dict(value: object) -> TurnOrigin | None:
         trust=TurnTrust(cast("str", stored["trust"])),
         # LEGACY_COMPAT: Approval origin snapshots without a relayed source kind.
         # Legacy format: A stored origin without `relayed_source_kind`, written before router handoffs recorded it.
-        # Last legacy release: v2026.9.313; replacement: the next release stores it with every origin.
+        # Last legacy release: v2026.9.314; replacement: the next release stores it with every origin.
         # Handling: Read it as None, so a routed automation paused before the upgrade counts as its requester's turn.
         # Coverage: tests/test_turn_origin.py::test_approval_snapshots_keep_the_automation_a_router_handoff_carried.
         relayed_source_kind=cast("str | None", stored.get("relayed_source_kind")),
