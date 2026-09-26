@@ -27,7 +27,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
-from mindroom.history.storage import read_scope_state, write_scope_state
+from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionOutcome,
@@ -53,6 +53,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.history_helpers import archived_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -617,11 +618,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     session = _session("session-1")
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(
-        session,
-        scope,
-        HistoryScopeState(force_compact_before_next_run=True),
-    )
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     summary_mock = AsyncMock()
@@ -668,11 +665,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(
-        session,
-        scope,
-        HistoryScopeState(force_compact_before_next_run=True),
-    )
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     agent = _agent()
@@ -707,7 +700,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
-    assert state.last_compacted_run_count == 1
+    assert len(archived_run_ids(storage)) == 1
     assert len(prepared.compaction_outcomes) == 1
 
 

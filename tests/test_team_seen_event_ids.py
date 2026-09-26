@@ -46,9 +46,10 @@ def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot
             event_ids=["$reply", "$unseen"],
         )
         reloaded = get_team_session(storage, "t1")
+        assert reloaded is not None
+        seen_event_ids = read_scope_seen_event_ids(storage, reloaded, scope)
     finally:
         storage.close()
 
-    assert reloaded is not None
     assert reloaded.session_data == {"session_state": {"phase": "after"}}
-    assert read_scope_seen_event_ids(reloaded, scope) == {"$reply", "$unseen"}
+    assert seen_event_ids == {"$reply", "$unseen"}
