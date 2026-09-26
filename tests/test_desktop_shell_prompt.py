@@ -333,3 +333,28 @@ async def test_closed_terminal_input_rejects_now_and_later(
     assert control.decisions == [("request-1", False, 0, False), ("request-2", False, 0, False)]
     assert "input closed" in output.getvalue()
     assert not (tmp_path / "marker").exists()
+
+
+@pytest.mark.asyncio
+async def test_background_job_rejects_without_touching_the_terminal(
+    shell: DesktopShell,
+    terminal: tuple[int, int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading or flushing the terminal from a background job would stop the bridge, so it rejects instead."""
+    master, slave = terminal
+    monkeypatch.setattr("mindroom.desktop.shell_prompt.os.tcgetpgrp", lambda _fd: os.getpgrp() + 1)
+    os.write(master, b"a\n")
+    control = _ShellControl(shell)
+    output = io.StringIO()
+    approvals = await _serve(control, input_fd=slave, output=output)
+    try:
+        with pytest.raises(DesktopShellError, match="denied locally"):
+            await asyncio.wait_for(shell.execute(_request(tmp_path)), 5)
+    finally:
+        await _stop(approvals)
+    assert control.decisions == [("request-1", False, 0, False)]
+    assert "runs in the background" in output.getvalue()
+    assert os.read(slave, 16) == b"a\n"
+    assert not (tmp_path / "marker").exists()

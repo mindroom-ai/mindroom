@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TextIO, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 _CHOICES = "[a]pprove once, [r]eject, [5]/[15]/[60] minutes, [u]ntil stopped"
 _POLL_SECONDS = 0.25
@@ -23,6 +23,10 @@ _NOT_INTERACTIVE = (
     "Standard input is not an interactive terminal, so nobody can approve shell commands here. "
     "Run `mindroom desktop run` in an interactive terminal to approve commands, or turn shell requests off "
     "with `mindroom desktop access --no-shell`."
+)
+_BACKGROUND = (
+    "The bridge runs in the background of its terminal, so it cannot ask for approval now. "
+    "Bring it to the foreground with `fg` to approve later commands."
 )
 _INPUT_CLOSED = (
     "Terminal input closed, so this and later shell requests are rejected. Restart "
@@ -151,13 +155,21 @@ class _RequestGoneError(Exception):
     """The pending request was settled elsewhere before an answer arrived."""
 
 
-async def _read_answer(control: _ShellApprovalControl, request_id: str, input_fd: int) -> str | None:
-    """Read one line typed after the prompt, or None at end of input, while the request is still pending."""
-    loop = asyncio.get_running_loop()
-    # Anything typed or queued before this prompt is not an answer to it.
-    with suppress(OSError, termios.error):
-        termios.tcflush(input_fd, termios.TCIFLUSH)
-    line: asyncio.Future[str | None] = loop.create_future()
+class _BackgroundTerminalError(Exception):
+    """Reading this terminal now would stop the whole bridge process."""
+
+
+def _in_background(input_fd: int) -> bool:
+    """Report whether this process is a background job of the terminal, where reading it stops the process."""
+    try:
+        return os.tcgetpgrp(input_fd) != os.getpgrp()
+    except OSError:
+        # Not this process's controlling terminal, so job control cannot stop it.
+        return False
+
+
+def _line_reader(input_fd: int, line: asyncio.Future[str | None]) -> Callable[[], None]:
+    """Build a readiness callback that settles *line* with one bounded line, or None at end of input."""
     buffer = bytearray()
 
     def on_readable() -> None:
@@ -178,11 +190,25 @@ async def _read_answer(control: _ShellApprovalControl, request_id: str, input_fd
         elif len(buffer) > _MAX_ANSWER_BYTES:
             line.set_result("")
 
-    loop.add_reader(input_fd, on_readable)
+    return on_readable
+
+
+async def _read_answer(control: _ShellApprovalControl, request_id: str, input_fd: int) -> str | None:
+    """Read one line typed after the prompt, or None at end of input, while the request is still pending."""
+    loop = asyncio.get_running_loop()
+    if _in_background(input_fd):
+        raise _BackgroundTerminalError
+    # Anything typed or queued before this prompt is not an answer to it.
+    with suppress(OSError, termios.error):
+        termios.tcflush(input_fd, termios.TCIFLUSH)
+    line: asyncio.Future[str | None] = loop.create_future()
+    loop.add_reader(input_fd, _line_reader(input_fd, line))
     try:
         while not line.done():
             if _pending_request_id(control) != request_id:
                 raise _RequestGoneError
+            if _in_background(input_fd):
+                raise _BackgroundTerminalError
             await asyncio.wait({line}, timeout=_POLL_SECONDS)
         return line.result()
     finally:
@@ -251,6 +277,9 @@ async def serve_terminal_shell_approvals(
         except _RequestGoneError:
             _write(output, "\nThe shell request is no longer pending.\n")
             continue
+        except _BackgroundTerminalError:
+            _write(output, f"\n{_BACKGROUND}\n")
+            choice = _REJECT
         if choice is None:
             interactive = False
             _write(output, f"\n{_INPUT_CLOSED}\n")
