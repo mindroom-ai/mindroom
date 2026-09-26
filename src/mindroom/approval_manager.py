@@ -418,7 +418,9 @@ class ApprovalManager:
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
         )
         if arguments_redacted:
-            content["approvable"] = False
+            content["arguments_redacted"] = True
+            content["body"] = f"🔒 Approval required: {tool_name} (sensitive arguments hidden)"
+            grant_operation = None
         if (
             grant_operation is not None
             and thread_id

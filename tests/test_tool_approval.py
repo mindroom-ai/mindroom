@@ -57,6 +57,7 @@ from mindroom.tool_approval import (
     shutdown_approval_runtime,
     tool_may_require_approval,
 )
+from mindroom.tool_approval_grants import ApprovalOperation
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -1756,7 +1757,7 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
 
 
 @pytest.mark.asyncio
-async def test_approval_card_is_not_approvable_when_redaction_changes_arguments(tmp_path: Path) -> None:
+async def test_redacted_approval_card_allows_only_exact_one_time_approval(tmp_path: Path) -> None:
     async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
         return content
 
@@ -1773,12 +1774,18 @@ async def test_approval_card_is_not_approvable_when_redaction_changes_arguments(
         requester_id="@user:localhost",
         approver_user_id="@user:localhost",
         expires_at_ns=9_000_000_000_000_000_000,
-        target_fields={},
+        target_fields={"approval_scope": {"id": "0" * 64}},
+        grant_operation=ApprovalOperation("deploy", "shell"),
     )
 
     assert card is not None
     assert card.payload["arguments"]["api_key"] == "***redacted***"
-    assert card.payload["approvable"] is False
+    assert card.payload["arguments_redacted"] is True
+    assert card.payload.get("approvable", True) is True
+    assert "sensitive arguments hidden" in card.payload["body"]
+    assert "auto_approve_options" not in card.payload
+    assert "approval_scope" not in card.payload
+    assert card.grant_operation is None
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:

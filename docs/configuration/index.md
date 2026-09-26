@@ -365,6 +365,8 @@ React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
 Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
+When sensitive argument values are hidden in a card, the exact call can still be
+approved once, but reusable and timed auto-approval are unavailable for that card.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.
 Subsequent matching calls do not publish another approval card.
 For generic MCP dispatch, the server and remote tool name are part of the operation, so approving one remote operation does not approve every tool on that server.
