@@ -92,7 +92,7 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
-from mindroom.workspaces import _copy_workspace_template
+from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -2033,6 +2033,9 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
     script_path = template_dir / "bootstrap.sh"
     script_path.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
     script_path.chmod(0o755)
+    template_mtime_ns = 1_700_000_000_000_000_000
+    os.utime(script_path, ns=(template_mtime_ns, template_mtime_ns))
+    os.setxattr(script_path, "user.mindroom-test", b"template")
 
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
@@ -2064,6 +2067,8 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
         copied_script = first_workspace.root / "bootstrap.sh"
         assert copied_script.exists()
         assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
+        assert copied_script.stat().st_mtime_ns == template_mtime_ns
+        assert os.getxattr(copied_script, "user.mindroom-test") == b"template"
         copied_script.write_text("#!/bin/sh\necho edited\n", encoding="utf-8")
         later_file = template_dir / "LATER.md"
         later_file.write_text("later\n", encoding="utf-8")
@@ -3411,8 +3416,8 @@ def test_copy_workspace_template_does_not_follow_predictable_temporary_symlink(t
     assert not (workspace_root / "AGENTS.md").is_symlink()
 
 
-def test_copy_workspace_template_replaces_dangling_destination_symlink(tmp_path: Path) -> None:
-    """A dangling destination link remains a missing file and is replaced without being followed."""
+def test_copy_workspace_template_rejects_dangling_destination_symlink(tmp_path: Path) -> None:
+    """A dangling destination link must be rejected instead of preserved or followed."""
     template_dir = tmp_path / "template"
     template_dir.mkdir()
     (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
@@ -3421,10 +3426,31 @@ def test_copy_workspace_template_replaces_dangling_destination_symlink(tmp_path:
     workspace_root.mkdir()
     (workspace_root / "AGENTS.md").symlink_to(tmp_path / "missing.txt")
 
+    with pytest.raises(ValueError, match="workspace template destination must stay within the workspace root"):
+        _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+
+def test_copy_workspace_template_supports_legal_long_filename(tmp_path: Path) -> None:
+    """A valid destination basename must not be duplicated into an oversized temporary name."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    filename = "a" * 230
+    (template_dir / filename).write_text("template\n", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+
     _copy_workspace_template(workspace_root, template_dir=template_dir)
 
-    assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
-    assert not (workspace_root / "AGENTS.md").is_symlink()
+    assert (workspace_root / filename).read_text(encoding="utf-8") == "template\n"
+
+
+def test_workspace_template_rejects_named_pipe(tmp_path: Path) -> None:
+    """Special files must fail validation before the mutation lock can be blocked by an open."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    os.mkfifo(template_dir / "input")
+
+    with pytest.raises(ValueError, match="must contain only regular files and directories"):
+        validate_workspace_template_dir(template_dir)
 
 
 @patch("mindroom.agent_storage._ConversationSqliteDb")

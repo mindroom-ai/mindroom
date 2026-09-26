@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import threading
 from dataclasses import dataclass
+from errno import EINVAL, ENODATA, ENOTSUP, EPERM
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,6 +26,23 @@ _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mi
 # Agent builds now run on worker threads (#1260), so concurrent scaffolding of
 # the same workspace must not interleave template copies or link reconciliation.
 _WORKSPACE_MUTATION_LOCK = threading.Lock()
+
+
+def _copy_xattrs(source_fd: int, destination_fd: int) -> None:
+    """Best-effort copy extended attributes with the same exclusions as copy2."""
+    try:
+        names = os.listxattr(source_fd)
+    except OSError as exc:
+        if exc.errno in {ENOTSUP, ENODATA, EINVAL}:
+            return
+        raise
+    for name in names:
+        try:
+            value = os.getxattr(source_fd, name)
+            os.setxattr(destination_fd, name, value)
+        except OSError as exc:
+            if exc.errno not in {EPERM, ENOTSUP, ENODATA, EINVAL}:
+                raise
 
 
 @dataclass(frozen=True)
@@ -98,6 +117,9 @@ def validate_local_copy_source_dir(
     for source_path, _ in iter_local_copy_source_entries(resolved_source_dir):
         if source_path.is_symlink():
             msg = f"{field_name} must not contain symlinks: {source_path}"
+            raise ValueError(msg)
+        if not source_path.is_dir() and not source_path.is_file():
+            msg = f"{field_name} must contain only regular files and directories: {source_path}"
             raise ValueError(msg)
     return resolved_source_dir
 
@@ -184,7 +206,7 @@ def _copy_workspace_template(
                 with open_directory_within_root(workspace_fd, relative_path, create=True):
                     pass
                 continue
-            resolve_relative_path_within_root_preserving_leaf(
+            resolve_relative_path_within_root(
                 workspace_path,
                 relative_path,
                 field_name="workspace template destination",
@@ -193,22 +215,29 @@ def _copy_workspace_template(
             with open_directory_within_root(workspace_fd, relative_path.parent, create=True) as parent_fd:
                 if not force:
                     try:
-                        os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=True)
+                        os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
                     except FileNotFoundError:
                         pass
                     else:
                         continue
-                source_mode = source_path.stat().st_mode & 0o777
-                with (
-                    source_path.open("rb") as source_file,
-                    atomic_write_file_at(
+                source_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                with os.fdopen(os.open(source_path, source_flags), "rb") as source_file:
+                    source_stat = os.fstat(source_file.fileno())
+                    if not stat.S_ISREG(source_stat.st_mode):
+                        msg = f"workspace template must contain only regular files and directories: {source_path}"
+                        raise ValueError(msg)
+                    with atomic_write_file_at(
                         parent_fd,
                         relative_path.name,
-                        file_mode=source_mode,
-                        temp_prefix=f".{relative_path.name}.",
-                    ) as output_file,
-                ):
-                    shutil.copyfileobj(source_file, output_file)
+                        file_mode=stat.S_IMODE(source_stat.st_mode),
+                    ) as output_file:
+                        shutil.copyfileobj(source_file, output_file)
+                        output_file.flush()
+                        os.utime(
+                            output_file.fileno(),
+                            ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+                        )
+                        _copy_xattrs(source_file.fileno(), output_file.fileno())
 
 
 def ensure_workspace_template(
