@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     name="desktop",
     file_access=ToolFileAccess.NONE,
     display_name="Matrix Desktop",
-    description="Let the agent interact with desktop apps you explicitly allow",
+    description="Let the agent use allowed apps, read selected folders, and run shell commands you approve on your computer",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
@@ -37,7 +37,10 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=30,
-            description="Short-lived command and response timeout, from 1 to 120 seconds.",
+            description=(
+                "Short-lived command and response timeout, from 1 to 120 seconds. Shell command starts always "
+                "wait up to 120 seconds for approval on the computer."
+            ),
         ),
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
