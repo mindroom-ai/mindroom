@@ -7,6 +7,8 @@ struct DesktopApplicationsView: View {
     var onSaved: (DesktopStatus) -> Void = { _ in }
     @State private var search = ""
     @State private var showingAppPicker = false
+    @State private var confirmingStop = false
+    private static let saveTitle = "Save App Access"
 
     var body: some View {
         AppSectionCard {
@@ -21,11 +23,9 @@ struct DesktopApplicationsView: View {
                 Text("Check the apps your paired agents may use, then save app access. This does not grant control or change macOS permissions.")
                     .font(.callout).foregroundStyle(.secondary)
                 DesktopAccessSaveBar(
-                    store: store, saveTitle: "Save App Access", confirmTitle: "Stop computer access and save apps?",
-                    hasChanges: store.hasAppSelectionChanges,
+                    store: store, saveTitle: Self.saveTitle, hasChanges: store.hasAppSelectionChanges,
                     idleNote: store.selectedAppIDs.isEmpty ? "No apps are selected. Agents will not have access to any apps." : nil,
-                    showSetup: showSetup,
-                    save: { store.saveAllowedApplications(completion: onSaved) },
+                    confirmingStop: $confirmingStop, showSetup: showSetup, save: save,
                     discard: store.discardAppSelectionChanges
                 )
                 Divider()
@@ -77,7 +77,13 @@ struct DesktopApplicationsView: View {
                 if let id = store.addApplication(at: url) { search = id }
             }
         }
+        .desktopAccessStopConfirmation(
+            isPresented: $confirmingStop, title: "Stop computer access and save apps?",
+            saveTitle: Self.saveTitle, onConfirm: save
+        )
     }
+
+    private func save() { store.saveAllowedApplications(completion: onSaved) }
 
     private var applications: [InstalledDesktopApplication] {
         var result = store.applications.filter { $0.id != "primary-screen" }

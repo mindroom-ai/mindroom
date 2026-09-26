@@ -7,6 +7,8 @@ struct DesktopLocalAccessView: View {
     var capability: DesktopAccessCapability
     var showSetup: () -> Void
     var onSaved: (DesktopStatus) -> Void = { _ in }
+    @State private var confirmingStop = false
+    private static let saveTitle = "Save Folder and Shell Access"
 
     var body: some View {
         AppSectionCard {
@@ -14,17 +16,21 @@ struct DesktopLocalAccessView: View {
                 if capability == .shell { shellSettings } else { folderSettings }
                 Divider()
                 DesktopAccessSaveBar(
-                    store: store, saveTitle: "Save Folder and Shell Access",
-                    confirmTitle: "Stop computer access and save folder and shell access?",
-                    hasChanges: store.hasLocalAccessChanges, idleNote: "Folders and shell settings save together.",
-                    showSetup: showSetup,
-                    save: { store.saveLocalAccess(completion: onSaved) },
+                    store: store, saveTitle: Self.saveTitle, hasChanges: store.hasLocalAccessChanges,
+                    idleNote: "Folders and shell settings save together.",
+                    confirmingStop: $confirmingStop, showSetup: showSetup, save: save,
                     discard: store.discardLocalAccessChanges
                 )
             }
             .disabled(store.isBusy)
         }
+        .desktopAccessStopConfirmation(
+            isPresented: $confirmingStop, title: "Stop computer access and save folder and shell access?",
+            saveTitle: Self.saveTitle, onConfirm: save
+        )
     }
+
+    private func save() { store.saveLocalAccess(completion: onSaved) }
 
     private var folderSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
