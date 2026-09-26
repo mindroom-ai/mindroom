@@ -72,7 +72,7 @@ The list includes apps in standard installation folders and currently running ap
 Saved applications remain visible even when they are no longer installed.
 For an existing connection, saving apps preserves the controller, requester, browser, and capture settings without requiring pairing again.
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
-Start Observe Only, or Start Access when folders or shell commands are saved, explicitly to resume with the saved choices.
+Resume explicitly with Start Observe Only, or with Start Access when folders or shell commands are saved.
 Saving an empty selection removes all app access; Start stays unavailable until at least one app, folder, or shell choice is saved.
 A saved browser setting alone does not make Start available.
 Read-only folders are chosen with a directory panel and saved as canonical paths; duplicates, including links to an already selected folder, are rejected.
@@ -101,7 +101,8 @@ Replacement requires pairing the new device again and is unavailable while the b
 Organization sign-in and pairing accept the imported Cloudflare Access requirement, prepare headers without blocking the native loop, and persist that requirement with the saved session.
 
 While access runs with shell requests allowed, a pending shell command appears on an approval card above the steps, with escaped control and text-direction characters.
-Reject and Approve Once send only the reviewed request ID and decision; Approve & Allow and Allow Without Asking first confirm the agents and requesters they cover for 5, 15, or 60 minutes or until stopped.
+Every decision sends only the reviewed request ID and choice, never the command text.
+Approve & Allow and Allow Without Asking first confirm the agents and requesters they cover for 5, 15, or 60 minutes or until stopped.
 The app sends a decision only while the helper still reports the exact request that was reviewed, and never sends an approval or grant on launch, reconnect, save, or status refresh.
 Revoke Shell Access and each running handle's Kill button stay available while other work is pending.
 The menu bar shows Command waiting with Review Command…, which opens the card without approving, and offers Revoke Shell Access while auto-approval or a shell command is active.

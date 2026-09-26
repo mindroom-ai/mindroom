@@ -9739,7 +9739,8 @@ Deliberately detached processes, such as those started in a new session with `se
 ### Environment and Output
 
 Commands run with the environment of your login shell, captured once when the bridge starts.
-MindRoom starts your account's login shell as an interactive login shell from a minimal environment of `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, and a `PATH` that includes the Homebrew and `~/.local/bin` directories, and never copies the helper's own environment or credentials.
+MindRoom starts your account's login shell as an interactive login shell from a minimal environment of `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, and a `PATH` that includes the Homebrew and `~/.local/bin` directories.
+Only `TMPDIR` and `LANG` come from the helper's own environment, so helper credentials are never copied.
 
 !!! warning "Your shell profile's exports are visible to commands"
     Anything your shell profile exports, including tokens and other secrets, is visible to every approved command.
@@ -9813,7 +9814,7 @@ Start in observe-only mode, then grant a bounded local lease when control is nee
 Stop and Revoke remain available while another setup operation is waiting.
 The menu displays the current mode, remaining lease, and active action without exposing its arguments.
 While a shell command waits for approval, its approval card stays above the **Computer access** steps, every window section shows a **Review Command** bar, and the menu bar shows **Command waiting** with a **Review Command…** item; approval happens only on that card.
-Changing configuration or restarting the app/helper does not renew control.
+Changing configuration or restarting the app/helper does not renew control or shell auto-approval.
 Once a command journal exists, saving a different controller identity is rejected before settings change.
 Pending work remains bound to its original controller.
 Saving settings can repair malformed local configuration or restore private file permissions; revision checks still apply.
