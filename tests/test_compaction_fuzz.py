@@ -72,6 +72,7 @@ class _Runner:
         self._created: list[str] = []
         self._events: list[str] = []
         self._redacted: set[str] = set()
+        self._ever_archived: set[str] = set()
         self._snapshots: list[AgentSession] = []
         seeding = self._open()
         if legacy:
@@ -165,6 +166,7 @@ class _Runner:
         if chunk is None:
             return
         session, runs, summary = chunk
+        self._ever_archived.update(run.run_id for run in runs if run.run_id)
         archive_compaction_chunk(
             storage=self._storage,
             session=session,
@@ -180,6 +182,7 @@ class _Runner:
         if chunk is None:
             return
         _session, runs, summary = chunk
+        self._ever_archived.update(run.run_id for run in runs if run.run_id)
         archive.archive_runs(
             self._storage,
             session_id=_SESSION,
@@ -200,9 +203,12 @@ class _Runner:
             self._storage.upsert_session(self._snapshots[action.index % len(self._snapshots)])
 
     def _resurrect(self, action: Action) -> None:
-        """Save an archived run's old copy as live again, as a late run save would."""
-        archived = self._archived_content_ids()
-        copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id in archived]
+        """Save an old copy of a run compaction archived as live again, as a late run save would.
+
+        That includes runs a redaction later removed, which must not replay either.
+        """
+        candidates = self._ever_archived - {run.run_id for run in self._load().runs or []}
+        copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id in candidates]
         if copies:
             run = copies[action.index % len(copies)]
             self._storage.upsert_run(run=run, session_id=_SESSION, user_id=None)
@@ -336,6 +342,18 @@ _ACTIONS = st.builds(
         Action("compact"),
     ],
     legacy=True,
+)
+@example(
+    # A stale copy of a run that a redaction rolled back out of the archive is saved again.
+    actions=[
+        Action("add"),
+        Action("add"),
+        Action("snapshot"),
+        Action("compact"),
+        Action("redact", index=0),
+        Action("resurrect"),
+    ],
+    legacy=False,
 )
 def test_generated_compaction_histories_keep_the_archive_invariants(actions: list[Action], *, legacy: bool) -> None:
     """Interleaved compaction, interruption, stale writes, and redaction never lose or leak history."""

@@ -24,6 +24,7 @@ from mindroom.history.storage import (
 )
 from mindroom.history.types import HistoryScope
 from tests.conftest import seed_session
+from tests.history_helpers import archived_content
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -164,7 +165,7 @@ def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: 
     stored = _stored(storage)
     assert [run.run_id for run in stored.runs or []] == ["r2"]
     assert _summary(stored) == "summary of r1"
-    assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1", "r2", "r3"]) == {"r1"}
+    assert archived_content(storage, "session") == {"r1": True, "r3": False}
     assert _seen(storage, stored) == {"$r1", "$r2"}
     assert _summary(session) == "summary of r1"
 
@@ -232,7 +233,7 @@ def test_redacting_legacy_provenance_clears_summary_and_archived_generations(
     assert stored.runs == []
     assert stored.summary is None
     assert _seen(storage, stored) == set()
-    assert archive.archived_run_ids(storage, session_id="session", run_ids=["r2"]) == set()
+    assert archived_content(storage, "session") == {"r2": False}
 
 
 def test_removing_a_live_run_retires_a_legacy_summary(open_legacy: Callable[[AgentSession], SqliteDb]) -> None:
@@ -266,6 +267,35 @@ def test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary(
     storage.upsert_session(stored)
     reconcile_compaction_state(storage, stored, _SCOPE)
     assert _stored(storage).summary is None
+
+
+def test_a_late_save_of_a_rolled_back_run_cannot_replay_it(storage: SqliteDb) -> None:
+    """A stale copy of a run redaction removed from the archive is pruned when it is written back."""
+    session = _seed(storage, ["r1", "r2"])
+    late_copy = next(run for run in session.runs or [] if run.run_id == "r1")
+    _compact(storage, session, ["r1"], "summary of r1")
+    assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$r1", removed_live_run=False)
+
+    storage.upsert_run(run=late_copy, session_id="session", user_id=None)
+    reconcile_compaction_state(storage, _stored(storage), _SCOPE)
+
+    assert _stored(storage).runs == []
+
+
+def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
+    open_legacy: Callable[[AgentSession], SqliteDb],
+) -> None:
+    """Runs archived after a legacy summary stay tombstoned when that summary is cleared."""
+    storage = open_legacy(_legacy_session(["r1", "r2"], "legacy summary", ["$legacy"]))
+    session = _stored(storage)
+    late_copy = next(run for run in session.runs or [] if run.run_id == "r1")
+    _compact(storage, session, ["r1"], "legacy summary and r1")
+    assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$legacy", removed_live_run=False)
+
+    storage.upsert_run(run=late_copy, session_id="session", user_id=None)
+    reconcile_compaction_state(storage, _stored(storage), _SCOPE)
+
+    assert _stored(storage).runs == []
 
 
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: SqliteDb) -> None:

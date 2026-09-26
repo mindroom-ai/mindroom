@@ -15,7 +15,7 @@ from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history import archive
 from tests.conftest import seed_session
-from tests.history_helpers import StoredGeneration, compaction_generations
+from tests.history_helpers import StoredGeneration, archived_content, compaction_generations
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -132,11 +132,8 @@ def test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order(storage:
     generation = archive.latest_generation(storage, session_id="session", scope_key=_SCOPE)
     assert generation is not None
     assert generation.summary == "generation one"
-    assert archive.archived_run_ids(
-        storage,
-        session_id="session",
-        run_ids=["r1", "r2", "r3", "r4", "r4-member", "r5"],
-    ) == {"r1"}
+    # Restored runs leave the archive; removed ones stay as content-free tombstones.
+    assert archived_content(storage, "session") == {"r1": True, "r4": False, "r4-member": False, "r5": False}
 
 
 def test_roll_back_drops_member_runs_archived_before_their_hit_team_run(storage: SqliteDb) -> None:
@@ -191,7 +188,7 @@ def test_clear_to_legacy_keeps_only_content_free_tombstones(tmp_path: Path) -> N
             StoredGeneration(summary=None, summary_model=None, legacy=True),
         ]
         assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE) == set()
-        assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone", "r2"]) == {"gone"}
+        assert archived_content(storage, "session") == {"gone": False, "r2": False}
     finally:
         storage.close()
 

@@ -387,6 +387,20 @@ def archived_run_ids(storage: object, session_id: str = "session-1") -> list[str
         ]
 
 
+def archived_content(storage: object, session_id: str = "session-1") -> dict[str, bool]:
+    """Return one session's archived run ids mapped to whether their content is still stored."""
+    assert isinstance(storage, SqliteDb)
+    table = quote_identifier(storage.session_table_name + "_compacted_runs")
+    with storage.db_engine.connect() as connection:
+        return {
+            row[0]: bool(row[1])
+            for row in connection.exec_driver_sql(
+                f"SELECT run_id, run_data IS NOT NULL FROM {table} WHERE session_id = ? ORDER BY id",  # noqa: S608
+                (session_id,),
+            )
+        }
+
+
 @dataclass(frozen=True)
 class StoredGeneration:
     """One compaction generation row as stored."""

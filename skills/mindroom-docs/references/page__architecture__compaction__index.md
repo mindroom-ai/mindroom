@@ -59,6 +59,7 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
 - A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
 - The session summary is a cache of the latest generation's summary, written after that transaction; before each run, reconciliation refreshes it from the archive and deletes live runs that are already archived.
+- A row whose cached summary had to be refreshed was written from an older snapshot, so reconciliation also drops its metadata seen ids; dropping ids can only re-offer messages, never hide them.
 - Seen ids are derived rather than stored: live runs supply their own, the archive supplies those of the runs the replayed summary covers, and session metadata keeps only ids no stored run carries, such as team consumption.
 - Archived runs keep the seen ids they counted while live apart from the wider set redaction matches, so compaction never changes which messages count as seen.
 - Metadata seen ids have no archive counterpart, so a stale whole-row session write can restore ids a redaction dropped; that only withholds those messages from unseen thread context.
@@ -67,8 +68,8 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
 - A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
 - Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
-- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see below).
-- The archive only grows; redaction and conversation deletion are its only removals.
+- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see above).
+- Redaction keeps the archived runs it removes as content-free tombstones, so a stale save of such a run is pruned like any other archived run; only conversation deletion removes archive rows.
 - State written by releases before the archive is adopted once, when the conversation database opens and before any response loads it; the archive tables' presence marks it done.
 - Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.

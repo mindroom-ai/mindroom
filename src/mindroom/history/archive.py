@@ -13,7 +13,8 @@ Two tables live beside ``<session_table>_usage`` in the conversation database:
 
 Both cascade from the session row. Every write that moves runs between the live
 table and the archive happens in one transaction with the matching run-row change.
-The archive only grows; redaction and session deletion are the only removals.
+The archive only grows: redaction replaces removed runs with content-free
+tombstones, and only session deletion removes rows.
 """
 
 from __future__ import annotations
@@ -154,17 +155,24 @@ def clear_to_legacy(
     scope_key: str,
     live_run_ids: Collection[str],
 ) -> None:
-    """Drop every archived generation and live run that may depend on content-free legacy history."""
+    """Drop every archived generation and live run that may depend on content-free legacy history.
+
+    The dropped generations' runs stay as tombstones.
+    """
     db = _sqlite(storage)
     compactions, _ = _table_names(db)
     with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)
         delete_run_subtrees(transaction, runs_table, sessions_table, live_run_ids)
-        connection.exec_driver_sql(
-            f"DELETE FROM {compactions} WHERE session_id = ? AND scope_key = ? AND legacy = 0",  # noqa: S608
-            (session_id, scope_key),
-        )
+        archive_era = [
+            generation_id
+            for (generation_id,) in connection.exec_driver_sql(
+                f"SELECT id FROM {compactions} WHERE session_id = ? AND scope_key = ? AND legacy = 0",  # noqa: S608
+                (session_id, scope_key),
+            )
+        ]
+        _retire_generations(connection, db, session_id=session_id, scope_key=scope_key, generation_ids=archive_era)
         _clear_summaries(connection, db, session_id=session_id, scope_key=scope_key)
 
 
@@ -284,7 +292,7 @@ def roll_back_to(
 
     The hit run and everything after it (later archived runs and every live run)
     is removed; the hit generation's runs archived before it return to the live
-    table in their original order.
+    table in their original order. Removed archived runs stay as tombstones.
     """
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
@@ -304,27 +312,68 @@ def roll_back_to(
         # members go with the hit.
         restored = runs_without(earlier, [hit.run_id])
         delete_run_subtrees(transaction, runs_table, sessions_table, live_run_ids)
-        connection.exec_driver_sql(
-            f"DELETE FROM {compactions} WHERE session_id = ? AND scope_key = ? AND id >= ?",  # noqa: S608
-            (session_id, scope_key, hit.generation_id),
+        rolled_back = [
+            generation_id
+            for (generation_id,) in connection.exec_driver_sql(
+                f"SELECT id FROM {compactions} WHERE session_id = ? AND scope_key = ? AND id >= ?",  # noqa: S608
+                (session_id, scope_key, hit.generation_id),
+            )
+        ]
+        _retire_generations(
+            connection,
+            db,
+            session_id=session_id,
+            scope_key=scope_key,
+            generation_ids=rolled_back,
+            restored_run_ids=[run.run_id for run in restored if run.run_id],
         )
-        _keep_scope_generation(connection, db, session_id=session_id, scope_key=scope_key)
         for run in restored:
             agno_compat_sqlite.insert_run_row(transaction, runs, run, session_id=session_id, user_id=run.user_id)
 
 
-def _keep_scope_generation(connection: Connection, db: SqliteDb, *, session_id: str, scope_key: str) -> None:
-    """Leave an empty generation when a rollback removed the scope's last one.
+def _retire_generations(
+    connection: Connection,
+    db: SqliteDb,
+    *,
+    session_id: str,
+    scope_key: str,
+    generation_ids: Sequence[int],
+    restored_run_ids: Sequence[str] = (),
+) -> None:
+    """Delete generations while their removed runs stay as content-free tombstones.
 
-    Its ``NULL`` summary keeps the scope archive-managed, so the next reconcile clears
-    a stale ``session.summary`` written back later instead of replaying it.
+    A tombstone keeps a stale save of a removed run from replaying again, because
+    reconcile prunes live runs the archive names. Restored runs leave the archive.
+    Tombstones move to the newest surviving generation, or to a new empty one whose
+    ``NULL`` summary keeps the scope archive-managed, so reconcile also clears a stale
+    ``session.summary`` written back later instead of replaying it.
     """
-    compactions, _ = _table_names(db)
+    if not generation_ids:
+        return
+    compactions, compacted_runs = _table_names(db)
+    retired = ", ".join("?" for _ in generation_ids)
+    keeper = connection.exec_driver_sql(
+        f"SELECT MAX(id) FROM {compactions} "  # noqa: S608
+        f"WHERE session_id = ? AND scope_key = ? AND id NOT IN ({retired})",
+        (session_id, scope_key, *generation_ids),
+    ).scalar()
+    if keeper is None:
+        keeper = connection.exec_driver_sql(
+            f"INSERT INTO {compactions} (session_id, scope_key, created_at) VALUES (?, ?, ?)",  # noqa: S608
+            (session_id, scope_key, int(time.time())),
+        ).lastrowid
+    if restored_run_ids:
+        connection.exec_driver_sql(
+            f"DELETE FROM {compacted_runs} WHERE compaction_id IN ({retired}) "  # noqa: S608
+            f"AND run_id IN ({', '.join('?' for _ in restored_run_ids)})",
+            (*generation_ids, *restored_run_ids),
+        )
     connection.exec_driver_sql(
-        f"INSERT INTO {compactions} (session_id, scope_key, created_at) "  # noqa: S608
-        f"SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM {compactions} WHERE session_id = ? AND scope_key = ?)",
-        (session_id, scope_key, int(time.time()), session_id, scope_key),
+        f"UPDATE {compacted_runs} SET compaction_id = ?, run_type = NULL, run_data = NULL, "  # noqa: S608
+        f"event_ids = '[]', seen_event_ids = '[]' WHERE compaction_id IN ({retired})",
+        (keeper, *generation_ids),
     )
+    connection.exec_driver_sql(f"DELETE FROM {compactions} WHERE id IN ({retired})", tuple(generation_ids))  # noqa: S608
 
 
 def _sqlite(storage: BaseDb) -> SqliteDb:
