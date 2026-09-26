@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from agno.compression.manager import CompressionManager
 from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -40,7 +41,7 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
 from mindroom.skill_learning import runner as runner_module
-from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture
+from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
@@ -1769,14 +1770,20 @@ async def _answer(
     tools: Sequence[Function | dict[str, Any]],
     run_id: str = "r1",
     model_name: str = "default",
+    compression_manager: CompressionManager | None = None,
 ) -> None:
     """Run one agent response loop whose final request the capture records, as a primary attempt does."""
     messages = [
         Message(role="system", content="You are Mind, a deployment assistant."),
         Message(role="user", content="Deploy the web service"),
     ]
-    with capture.observe(model, run_id=run_id, model_name=model_name):
-        await model.aresponse(messages=messages, tools=list(tools), run_response=RunOutput(run_id=run_id))
+    with observe_final_request(capture, model, run_id=run_id, model_name=model_name):
+        await model.aresponse(
+            messages=messages,
+            tools=list(tools),
+            run_response=RunOutput(run_id=run_id),
+            compression_manager=compression_manager,
+        )
 
 
 def _learning_agent_with_a_skill(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -1877,7 +1884,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent(tmp_pat
     tools = _agent_tools(config, paths, [])
     model = _model()
     capture = SkillReviewCapture()
-    with capture.observe(model, run_id="r1", model_name="default"):
+    with observe_final_request(capture, model, run_id="r1", model_name="default"):
         await model.aresponse(
             messages=[Message(role="user", content="helper request")],
             tools=tools,
@@ -1950,15 +1957,17 @@ _WIRE_REQUEST_PARTS = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire_name", list(_PROVIDER_WIRES))
 async def test_the_review_fork_replays_the_final_request_through_each_adapter(tmp_path: Path, wire_name: str) -> None:
-    """Each real adapter sends the fork's tools and conversation prefix exactly as the response sent them."""
+    """Each real adapter sends the fork's tools and conversation, tool calls and compressed results included, unchanged."""
     wire = _PROVIDER_WIRES[wire_name]
     config, paths = _learning_agent_with_a_skill(tmp_path)
     config.models["default"] = wire.model
     requests: list[dict[str, Any]] = []
+    # The response calls a skill tool, then answers; the review answers at once.
+    replies = [wire.replies[0], wire.replies[1], wire.replies[1]]
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json=wire.replies[1])
+        return httpx.Response(200, json=replies.pop(0))
 
     model = get_model_instance(config, paths, "default")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
@@ -1972,9 +1981,10 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(tm
                 http_options=HttpOptions(httpx_async_client=http_client, retry_options=HttpRetryOptions(attempts=1)),
             )
         capture = SkillReviewCapture()
-        await _answer(model, capture, _agent_tools(config, paths, []))
+        await _answer(model, capture, _agent_tools(config, paths, []), compression_manager=_ShortenToolResults())
         await _review(config, paths, captured=capture.latest)
-    primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
+    _first, primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
+    assert _COMPRESSED_RESULT in json.dumps(primary), "the response sent its tool result compressed"
     history, unchanged = _WIRE_REQUEST_PARTS[wire_name]
     assert {key: fork.get(key) for key in unchanged} == {key: primary.get(key) for key in unchanged}
     assert primary.get("tools"), "the response offered its tools"
@@ -1986,6 +1996,22 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(tm
         assert fork[history][: len(primary[history])] == primary[history]
         assert len(fork[history]) == len(primary[history]) + 2, "the fork adds the final answer and the review prompt"
     assert not wire.selection_disabled(fork)
+
+
+_COMPRESSED_RESULT = "Skill loaded; instructions shortened."
+
+
+@dataclass
+class _ShortenToolResults(CompressionManager):
+    """Tool-result compression like an agent's ``compress_tool_results``, without a compression model."""
+
+    async def ashould_compress(self, messages: list[Message], *_args: object, **_kwargs: object) -> bool:
+        return any(message.role == "tool" and message.compressed_content is None for message in messages)
+
+    async def acompress(self, messages: list[Message], *_args: object, **_kwargs: object) -> None:
+        for message in messages:
+            if message.role == "tool" and message.compressed_content is None:
+                message.compressed_content = _COMPRESSED_RESULT
 
 
 @pytest.mark.asyncio
