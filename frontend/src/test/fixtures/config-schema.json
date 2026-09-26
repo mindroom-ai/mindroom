@@ -441,6 +441,18 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "skill_learning": {
+          "$ref": "#/$defs/SkillLearningConfig",
+          "default": {
+            "enabled": false,
+            "model": null,
+            "review_interval": 10,
+            "timeout_seconds": 120,
+            "notify": true,
+            "archive_after_days": 30
+          },
+          "description": "Opt-in background reviews that create and maintain learned skills in this agent's workspace"
+        },
         "delegate_to": {
           "default": [],
           "description": "Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
@@ -3338,6 +3350,63 @@
         }
       },
       "title": "RouterConfig",
+      "type": "object"
+    },
+    "SkillLearningConfig": {
+      "additionalProperties": false,
+      "description": "Periodically review standalone agent conversations and maintain learned workspace skills.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Review conversations and maintain learned workspace skills",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Review model alias; defaults to the model of the reviewed response",
+          "title": "Model"
+        },
+        "review_interval": {
+          "default": 10,
+          "description": "Model replies, counting each tool-calling step, between reviews of one conversation",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Review Interval",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 120,
+          "description": "Maximum seconds per review",
+          "maximum": 900,
+          "minimum": 10,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "notify": {
+          "default": true,
+          "description": "Post a notice in the conversation when a review changes skills",
+          "title": "Notify",
+          "type": "boolean"
+        },
+        "archive_after_days": {
+          "default": 30,
+          "description": "Archive learned skills with no use, creation, or skill_manage edit for this many days; 0 keeps them indefinitely",
+          "maximum": 3650,
+          "minimum": 0,
+          "title": "Archive After Days",
+          "type": "integer"
+        }
+      },
+      "title": "SkillLearningConfig",
       "type": "object"
     },
     "SpeechServiceConfig": {

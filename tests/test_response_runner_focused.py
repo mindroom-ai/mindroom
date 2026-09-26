@@ -30,6 +30,7 @@ from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
+from structlog.testing import capture_logs
 
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, cli_approval_waits, interactive, response_runner
@@ -45,7 +46,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import TeamConfig
+from mindroom.config.agent import AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
@@ -67,7 +68,14 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
+from mindroom.dispatch_source import (
+    AUTO_RESUME_MESSAGE,
+    HOOK_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ScheduledHistoryBudget,
+)
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
@@ -146,6 +154,7 @@ from mindroom.turn_record import EditPreparation, canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
@@ -172,7 +181,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -9726,3 +9735,272 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
     assert outcome.terminal_status == "cancelled"
     assert landed == [STREAM_STATUS_COMPLETED]
     assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("source_kind", ["message", SCHEDULED_SOURCE_KIND, HOOK_SOURCE_KIND])
+async def test_completed_response_counts_toward_a_scoped_skill_review(
+    tmp_path: Path,
+    streaming: bool,
+    private: bool,
+    source_kind: str,
+) -> None:
+    """Both response drivers record the completed run for skill review, except automation like Hermes' cron."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    config = coordinator.deps.runtime.config
+    config.agents["general"].skill_learning.enabled = True
+    if private:
+        config.agents["general"].private = AgentPrivateConfig(per="user")
+    request = _plain_request(_target())
+    request = replace(
+        request,
+        response_envelope=request_envelope(
+            target=request.response_envelope.target,
+            prompt=request.prompt,
+            user_id=request.user_id,
+            source_kind=source_kind,
+        ),
+    )
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        capture_logs() as logs,
+        patch("mindroom.model_loading.get_model_instance", return_value=model) as model_factory,
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=streaming),
+        ),
+    ):
+        await coordinator.generate_response(request)
+    assert model_factory.called, logs
+    state_path = coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json"
+    if source_kind != "message":
+        assert not state_path.exists()
+        return
+    (entry,) = json.loads(state_path.read_text())["entries"].values()
+    assert entry["agent"] == "general"
+    assert entry["identity"]["requester_id"] == "@user:localhost"
+    assert (entry["worker_key"] is not None) is private
+    # The run is persisted before post-response effects, so its one model reply is counted at completion.
+    assert entry["replies"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_kind", "requesting_agent"),
+    [("message", None), (SCHEDULED_SOURCE_KIND, None), ("message", "helper")],
+)
+async def test_approved_continuation_counts_toward_skill_review_unless_automated(
+    tmp_path: Path,
+    source_kind: str,
+    requesting_agent: str | None,
+) -> None:
+    """A resumed run a person asked for counts, while resumed scheduled runs and agent requests stay excluded."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="ready",
+        execution_identity=serialize_tool_execution_identity(identity),
+        source_kind=source_kind,
+        origin=(
+            message_origin(
+                sender_id=f"@mindroom_{requesting_agent}:localhost",
+                sender_entity_name=requesting_agent,
+                requester_entity_name=requesting_agent,
+            )
+            if requesting_agent is not None
+            else None
+        ),
+    )
+    queue = runner._approval_skill_review(continuation)
+    if source_kind != "message" or requesting_agent is not None:
+        assert queue is None
+        return
+    assert queue is not None
+    counted: list[dict[str, object]] = []
+    with patch(
+        "mindroom.response_runner.queue_skill_review",
+        side_effect=lambda *_args, **kwargs: counted.append(kwargs),
+    ):
+        await queue(("run-1",))
+    assert [(call["session_id"], tuple(call["run_ids"])) for call in counted] == [("session-1", ("run-1",))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_only_a_completed_response_counts_toward_its_skill_review(succeeded: bool) -> None:
+    """Post-response effects count a completed response's run, and nothing for a failed one."""
+    calls: list[tuple[str, ...]] = []
+
+    async def queue(run_ids: Sequence[str]) -> None:
+        calls.append(tuple(run_ids))
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
+        ResponseOutcome(response_run_ids=("run-1", "run-2"), run_succeeded=succeeded),
+        PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=queue),
+    )
+    assert calls == ([("run-1", "run-2")] if succeeded else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_by", ["another agent", "a routed schedule", "a restart resume"])
+async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
+    """Like cron runs in Hermes, agent requests, routed schedules, and restart resumes have no person to learn from."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    request = _plain_request(_target())
+    origin = (
+        message_origin(
+            sender_id="@mindroom_helper:localhost",
+            sender_entity_name="helper",
+            requester_entity_name="helper",
+        )
+        if requested_by == "another agent"
+        else replace(
+            message_origin(
+                sender_id="@mindroom_router:localhost",
+                requester_id="@user:localhost",
+                sender_entity_name="router",
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                original_sender="@user:localhost",
+                trusted_user_relay=True,
+            ),
+            relayed_source_kind=SCHEDULED_SOURCE_KIND if requested_by == "a routed schedule" else None,
+        )
+    )
+    body = f"@General {AUTO_RESUME_MESSAGE}" if requested_by == "a restart resume" else request.response_envelope.body
+    request = replace(request, response_envelope=replace(request.response_envelope, origin=origin, body=body))
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(request)
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+    assert bot.client.room_send.await_count >= 1
+    assert not (coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json").exists()
+
+
+def test_tool_context_carries_the_automation_that_started_the_turn(tmp_path: Path) -> None:
+    """Messages a tool sends while answering a routed schedule keep saying a schedule started the turn."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    envelope = _plain_request(_target()).response_envelope
+    envelope = replace(envelope, origin=replace(envelope.origin, relayed_source_kind=SCHEDULED_SOURCE_KIND))
+    context = coordinator.deps.tool_runtime.build_context(
+        envelope.target,
+        user_id="@user:localhost",
+        source_envelope=envelope,
+    )
+    assert context is not None
+    assert context.automation_source_kind == SCHEDULED_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
+    """Skill learning is background bookkeeping, so a broken queue file must not cost the user their answer."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.response_runner.queue_skill_review", side_effect=OSError("queue file unwritable")),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+        await wait_for_background_tasks(owner=coordinator.deps.runtime)
+    bot.client.room_send.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_due_response_hands_its_final_request_to_the_skill_review(tmp_path: Path, streaming: bool) -> None:
+    """The response that reaches the interval starts the review with its final model request, after stopping any."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    settings = coordinator.deps.runtime.config.agents["general"].skill_learning
+    settings.enabled = True
+    settings.review_interval = 1
+    reviews = MagicMock()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=streaming),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+    (key,) = reviews.cancel.call_args.args
+    _config, started_key, entry, captured = reviews.start.call_args.args
+    assert started_key == key
+    assert entry.replies == 1
+    assert captured is not None
+    assert captured.model is model
+    final = captured.messages[-1]
+    assert (final.role, bool(final.content), final.tool_calls) == ("assistant", True, None)
+    assert "skill_manage" in {tool.name for tool in captured.tools if isinstance(tool, Function)}

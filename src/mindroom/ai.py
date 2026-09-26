@@ -109,6 +109,7 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
@@ -899,6 +900,12 @@ async def _run_non_streaming_agent_attempts(
     try:
         with (
             participation_model(agent.model, run_context.turn.participation, run_id=attempt.attempt_run_id),
+            observe_final_request(
+                run_context.turn.skill_review_capture,
+                agent.model,
+                run_id=attempt.attempt_run_id,
+                model_name=run_context.prepared_run.runtime_model_name,
+            ),
             bind_llm_request_log_context(
                 **_attempt_request_log_context(
                     run_context.turn,
@@ -2207,7 +2214,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
             active_model_name=prepared_run.runtime_model_name,
         )
-        with participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id):
+        with (
+            participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id),
+            observe_final_request(
+                ctx.skill_review_capture,
+                prepared_run.agent.model,
+                run_id=attempt.attempt_run_id,
+                model_name=prepared_run.runtime_model_name,
+            ),
+        ):
             async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
                 owned_stream = context_bound_async_stream(
                     context_factory=bind_owner,

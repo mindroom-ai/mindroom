@@ -67,7 +67,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Iterable
+    from collections.abc import Awaitable, Callable, Generator, Iterable, Sequence
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -574,8 +574,8 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
     """Post-response support whose per-response deps carry no side effects.
 
     The real ``apply_post_response_effects`` still runs; every effect it guards
-    on (interactive registration, memory persistence, run-metadata linkage,
-    thread summaries) is absent from the built deps, so tests exercise the
+    on (interactive registration, memory persistence, skill review, run-metadata
+    linkage, thread summaries) is absent from the built deps, so tests exercise the
     lifecycle without patching the module function.
     """
 
@@ -585,9 +585,10 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
+        queue_skill_review: Callable[[Sequence[str]], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
-        del room_id, membership_turn_id, queue_memory_persistence, persist_response_event_id
+        del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)
 
 

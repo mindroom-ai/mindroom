@@ -124,7 +124,7 @@ if TYPE_CHECKING:
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
-    {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config"},
+    {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
 )
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
@@ -1919,8 +1919,8 @@ class Config(BaseModel):
         return "thread"
 
     @model_validator(mode="after")
-    def validate_agent_judgments(self) -> Config:
-        """Validate dedicated judgment model aliases for opted-in agents."""
+    def validate_agent_helper_models(self) -> Config:
+        """Validate dedicated judgment and skill-review model aliases for opted-in agents."""
         for agent_name, agent in self.agents.items():
             for settings in (agent.participation, agent.mid_turn):
                 if settings is None:
@@ -1929,6 +1929,10 @@ class Config(BaseModel):
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
                     msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                     raise ValueError(msg)
+            review_model = agent.skill_learning.model
+            if review_model is not None and review_model not in self.models:
+                msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
+                raise ValueError(msg)
         return self
 
     def _entity_model_name(self, entity_name: str) -> str:

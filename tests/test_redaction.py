@@ -15,7 +15,9 @@ from mindroom import redaction
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
+    find_credential,
     redact_log_event,
+    redact_private_keys,
     redact_sensitive_data,
     redact_sensitive_text,
 )
@@ -988,3 +990,104 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
         )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
+
+
+def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> None:
+    """A PEM private key is removed whole, and an unterminated block never leaks its body."""
+    block = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----"
+    assert redact_sensitive_text(f"before\n{block}\nafter") == f"before\n{REDACTED}\nafter"
+    assert redact_sensitive_text("-----BEGIN RSA PRIVATE KEY-----\nMIIabc") == REDACTED
+    pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----"
+    assert redact_sensitive_text(f"before\n{pgp}\nafter") == f"before\n{REDACTED}\nafter"
+    assert (
+        redact_private_keys("x" * 100_000 + "\n-----BEGIN EC PRIVATE KEY-----\nMHcC") == "x" * 100_000 + "\n" + REDACTED
+    )
+
+
+def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
+    """Learned skills may describe setup steps, so placeholders, code, identifiers, and prose are not credentials."""
+    # Provider-shaped fixtures are assembled at runtime so repository secret scanners do not read them as leaks.
+    jwt = ".".join(  # noqa: FLY002
+        ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36"],
+    )
+    aws_key_id = "".join(["AKIA", "Q3EGRZ7XK4M2P9TB"])  # noqa: FLY002
+    gitlab_token = "".join(["glpat-", "Zq8vN3pL7wX2kR9mT4yB"])  # noqa: FLY002
+    placeholders = (
+        "Set OPENAI_API_KEY=<your key>",
+        "OPENAI_API_KEY=sk-...",
+        "ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "https://api.example.test/?api_key=$API_KEY",
+        "https://user:${TOKEN}@git.example.test/repo",
+        "ssh://git@github.com/org/repo.git",
+        "postgres://postgres@localhost/db",
+        "postgres://postgres:postgres@localhost:5432/app",
+        "amqp://guest:guest@localhost:5672/",
+        "postgres://user:password@localhost/db",
+        "pip install sk-learn",
+        "Authorization: Bearer $TOKEN",
+        "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE",
+        "password: ask the user",
+        "password = getpass.getpass()",
+        "api_key = settings.OPENAI_API_KEY",
+        'api_key = "OPENAI_API_KEY_FROM_ENV"',
+        "token = credentials.access_token",
+        "AWS_SECRET_ACCESS_KEY=your-secret-access-key-here",
+        "max_tokens=4096",
+        'curl -d \'{"password":"","user":"admin2024"}\'',
+        '{"cache_key":"weather_v2","ttl":3600}',
+        '{"idempotency_key":"order-1","amount":1000}',
+        "token=abc&page=2&limit=100&sort=created_at_desc",
+        "cache_key: weather_forecast_2024_v2",
+        "s3_key: exports/2026/09/daily.parquet",
+        "ssh_key: ~/.ssh/id_ed25519",
+        "call hf_hub_download(repo_id) with gsk_client_timeout",
+        "GOOGLE_TOKEN_URI=https://oauth2.googleapis.com/token",
+        "OIDC_TOKEN_ENDPOINT=https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        "SSH_KEY_FILE=/home/user/.ssh/id_ed25519",
+        "TOKEN_CACHE_DIR=/var/cache/app/tokens-v2",
+        "SECRET_NAME=projects/my-proj/secrets/api-key/versions/3",
+        "DATABASE_URL=postgres://postgres:YOUR_DB_PASSWORD@localhost:5432/app",
+        "redis://default:REDIS_PASSWORD@localhost:6379",
+        'password: "xxxxxxxxxxxxxxxxxxxxxxxx"',
+        '{"token_endpoint": "https://oauth2.example.test/v2/token"}',
+    )
+    secrets = (
+        "token sk-abcdefghij0123456789",
+        "connect to https://alice:hunter2@db.example.test",
+        "https://api.example.test/?token=a8f3k2m9q7w1z5x0v6b4",
+        f"Authorization: Bearer {jwt}",
+        'GITHUB_TOKEN="0123456789abcdef0123456789abcdef"',
+        "export DB_PASSWORD='Zq8vN3pL7wX2kR9mT4yB6c'",
+        '{"api_key": "Zq8vN3pL7wX2kR9mT4yB6cD1"}',
+        "{'client_secret': 'Zq8vN3pL7wX2kR9mT4yB6cD1'}",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
+        'password: "Zq8vN3pL7wX2kR9mT4yB6c"',
+        'password: "correct-horse-battery-staple"',
+        "postgres://app:Password_2024@db.example.test/app",
+        'client = Client(api_key="Zq8vN3pL7wX2kR9mT4yB6cD1")',
+        f'access_token: "{jwt}"',
+        f"aws_access_key_id = {aws_key_id}",
+        f"PRIVATE-TOKEN: {gitlab_token}",
+    )
+    assert [text for text in placeholders if find_credential(text) is not None] == []
+    assert [text for text in secrets if find_credential(text) is None] == []
+    prefix = 'intro\nsteps\napi_key = "'
+    assert find_credential(prefix + '0123456789abcdef0123456789abcdef"') == len(prefix)
+
+
+def test_shared_redaction_leaves_ordinary_identifiers_alone() -> None:
+    """Skill-only credential shapes never widen log redaction, which judgments and error messages also rely on."""
+    for text in ("hf_hub_download(repo_id)", "gsk_client_timeout", "hf_transfer"):
+        assert redact_sensitive_text(text) == text
+
+
+def test_find_credential_scans_large_inputs_in_linear_time() -> None:
+    """Large skill files with many settings stay fast, so a learner write never stalls settlement."""
+    started = time.monotonic()
+    assert find_credential("token:\n" + "- token:\n" * 40_000) is None
+    assert find_credential("token: a " * 50_000) is None
+    assert find_credential('{"sort_key":"created_at","limit":100}' * 20_000) is None
+    assert find_credential("TOKEN" * 200_000) is None
+    assert find_credential('"token": ' * 100_000) is None
+    assert time.monotonic() - started < 5

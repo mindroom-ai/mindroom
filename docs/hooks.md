@@ -567,6 +567,7 @@ Their `config` and `runtime_paths` values may be absent, and they do not expose 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
+When the router, or an agent through `matrix_message`, hands on a turn that a scheduled task, hook dispatch, or external trigger started, `com.mindroom.relayed_source_kind` keeps which automation started it, so features that only learn from people, such as automatic skill learning, can tell it apart from a person's message.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
 Hook-originated sends always carry an internal synthetic-chain depth.
@@ -651,9 +652,12 @@ TurnOrigin(
     intent: TurnIntent,
     source_kind: str,
     trust: TurnTrust,
+    relayed_source_kind: str | None = None,
 )
 
 # TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
+# A router handoff or an agent's matrix_message relay reaches its agent with source_kind "trusted_internal_relay"; relayed_source_kind keeps the automation that started it, such as "scheduled".
+# origin.automation_source_kind returns the automation source kind of a direct or relayed automated turn, or None.
 # sender_kind and requester_kind are "user" or "managed_entity".
 # intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
 # trust is "external", "trusted_internal", or "trusted_user_relay".

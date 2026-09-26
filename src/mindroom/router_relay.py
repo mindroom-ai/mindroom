@@ -13,6 +13,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    RELAYED_SOURCE_KIND_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
 )
@@ -149,6 +150,7 @@ async def _send_router_relay_after_readiness_recheck(
     fallback_extra_content = dict(delivery_request.extra_content or {})
     fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
     fallback_extra_content.pop(SOURCE_KIND_KEY, None)
+    fallback_extra_content.pop(RELAYED_SOURCE_KIND_KEY, None)
     fallback_request = replace(
         delivery_request,
         response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,

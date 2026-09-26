@@ -26,7 +26,17 @@ __all__ = [
 
 
 _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
-    {"browser", "script", "compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
+    {
+        "browser",
+        "script",
+        "compact_context",
+        "delegate",
+        "dynamic_tools",
+        "dynamic_workflow",
+        "memory",
+        "self_config",
+        "skill_manage",
+    },
 )
 
 

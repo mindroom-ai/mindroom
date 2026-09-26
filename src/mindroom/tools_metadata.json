@@ -9141,6 +9141,30 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Create and change the agent's workspace skills",
+      "display_name": "Skill Manage",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "skill_manage"
+      ],
+      "helper_text": null,
+      "icon": "Brain",
+      "icon_color": "text-emerald-500",
+      "name": "skill_manage",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,

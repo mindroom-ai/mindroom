@@ -123,6 +123,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
+| `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
@@ -191,6 +192,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
+| `tool_system/workspace_skills.py` | No-follow workspace skill discovery, reads, and usage telemetry |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
@@ -210,6 +212,14 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, chat-time restarts, scope keys, retries, and retention |
+| `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
+| `skill_learning/runner.py` | Starts a review after the response that makes a conversation due, stops it when a new response starts, and posts change notices |
+| `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
+| `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
+| `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
+| `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
+| `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

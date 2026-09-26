@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 import os
 import signal
 import sys
@@ -19,6 +20,9 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.session import AgentSession
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
@@ -26,6 +30,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_storage import create_session_storage
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.approval_manager import (
@@ -80,6 +85,7 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
+from mindroom.skill_learning.queue import queue_skill_review
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -97,6 +103,7 @@ from tests.conftest import (
     bind_mock_config_event_journal,
     make_matrix_client_mock,
     runtime_paths_for,
+    seed_session,
 )
 
 
@@ -5212,3 +5219,54 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="No running Matrix owner"):
         await orchestrator.leave_matrix_room("general", "!room:localhost")
     assert gate.in_flight_response_count == 0
+
+
+def _count_a_skill_learning_reply(config: Config, paths: RuntimePaths, agent_name: str) -> None:
+    """Persist one run with a model reply for ``agent_name`` and count it toward skill learning."""
+    run = RunOutput(
+        run_id=f"{agent_name}-run",
+        agent_id=agent_name,
+        session_id="s",
+        messages=[Message(role="assistant", content="hi")],
+    )
+    storage = create_session_storage(agent_name, config, paths, execution_identity=None)
+    try:
+        seed_session(storage, AgentSession(session_id="s", agent_id=agent_name, runs=[run]))
+    finally:
+        storage.close()
+    queue_skill_review(
+        config,
+        paths,
+        agent_name=agent_name,
+        session_id="s",
+        execution_identity=None,
+        run_ids=(run.run_id,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_config_changes_forget_conversations_of_agents_that_stopped_learning(tmp_path: Path) -> None:
+    """While other agents keep learning, an agent that stops learning loses its counts and its running review."""
+    config = _runtime_bound_config(
+        Config(agents={name: AgentConfig(display_name=name) for name in ("general", "helper")}),
+        tmp_path,
+    )
+    paths = runtime_paths_for(config)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths)
+    for agent in config.agents.values():
+        agent.skill_learning.enabled = True
+    for name in config.agents:
+        _count_a_skill_learning_reply(config, paths, name)
+    config.agents["helper"].skill_learning.enabled = False
+    try:
+        with (
+            patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator.skill_reviews, "retire", new=AsyncMock()) as retire,
+        ):
+            await orchestrator._sync_runtime_support_services(config, start_watcher=False)
+        entries = json.loads((paths.storage_root / "skill_learning_state.json").read_text())["entries"]
+        assert [entry["agent"] for entry in entries.values()] == ["general"]
+        retire.assert_awaited_once_with(config)
+    finally:
+        await shutdown_approval_runtime()

@@ -154,6 +154,7 @@ agents:
 | `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](../tools/index.md) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
+| `skill_learning` | object | disabled | [Automatic skill learning](#automatic-skill-learning) settings; separate from Agno `learning_mode` |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
@@ -853,3 +854,20 @@ An existing shell-enabled agent can select [minimal mode](../tools/agent-cli.md)
 Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
 It keeps the same identity, workspace, memory, history, and permissions.
 The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
+
+## Automatic skill learning
+
+`agents.<name>.skill_learning` controls the optional background review that maintains learned skills in the agent's workspace, modeled on Hermes Agent's self-improvement loop.
+All fields are optional, and unknown fields are rejected.
+
+| Field | Type | Default | Bounds and behavior |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Count completed standalone responses, review conversations that reach the interval, and offer the `skill_manage` tool. |
+| `model` | string or null | `null` | Review model alias from `models`; null reviews on the model the response used and reuses its prompt cache, while another model replays a digest of the conversation. |
+| `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
+| `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
+| `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
+| `archive_after_days` | integer | `30` | 0–3650 days with no use, creation, or `skill_manage` edit before a learned skill is archived; `0` keeps learned skills indefinitely. |
+
+Reviews incur additional model usage.
+See [Automatic skill learning](../skills.md#automatic-skill-learning) for triggering, ownership, history, archival, and notices.

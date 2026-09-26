@@ -19,7 +19,9 @@ REDACTION_FAILED = "[redaction failed]"
 __all__ = [
     "REDACTED",
     "REDACTION_FAILED",
+    "find_credential",
     "redact_log_event",
+    "redact_private_keys",
     "redact_sensitive_data",
     "redact_sensitive_text",
 ]
@@ -59,6 +61,31 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
+_PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
+# An environment variable name such as OPENAI_API_KEY, which says where a credential lives instead of holding it.
+_ENV_NAME = r"(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"
+_ENV_NAME_PATTERN = re.compile(_ENV_NAME)
+# Credentials written into skill content, adapted from Hermes Agent's skill guard (tools/skills_guard.py): quoted
+# values of api-key, token, secret, or password settings unless they name an environment variable, also with a
+# quoted name as in JSON, AWS access key IDs, and Anthropic and GitLab tokens.
+_SKILL_SECRET_PATTERNS = (
+    re.compile(
+        r"(?:api[_-]?key|token|secret|password)[\"']?\s*[=:]\s*[\"']"
+        rf"(?!{_ENV_NAME}[\"'])(?P<secret>[A-Za-z0-9+/=_-]{{20,}})",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?P<secret>AKIA[0-9A-Z]{16})"),
+    re.compile(r"(?P<secret>sk-ant-[A-Za-z0-9_-]{90,})"),
+    re.compile(r"(?P<secret>glpat-[A-Za-z0-9_-]{20,})"),
+)
+# URL passwords that only name a local default rather than a secret.
+_DEFAULT_URL_PASSWORDS = frozenset({"changeme", "example", "pass", "password", "secret"})
+# An unterminated block still redacts through the end of the text, so a split key never leaks its body.
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
+    re.DOTALL,
+)
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -493,9 +520,12 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
-    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
+    has_private_key = "PRIVATE KEY" in bounded_value
+    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
-    redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redacted = _PRIVATE_KEY_PATTERN.sub(REDACTED, bounded_value) if has_private_key else bounded_value
+    if has_url:
+        redacted = _URL_PATTERN.sub(_redact_url_match, redacted)
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     if has_api_key_message:
@@ -514,11 +544,75 @@ def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) ->
         return _truncate_text(REDACTION_FAILED, max_length)
 
 
+def redact_private_keys(value: str) -> str:
+    """Remove PEM and PGP private-key blocks from text of any length, including a block without its END line."""
+    return _PRIVATE_KEY_PATTERN.sub(REDACTED, value) if "PRIVATE KEY" in value else value
+
+
 def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     """Redact common credential patterns without letting redaction break its caller."""
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+
+
+def find_credential(value: str) -> int | None:
+    """Return where text holds a likely literal credential rather than a placeholder or prose, or None.
+
+    Unlike redaction, which also hides harmless values, this flags private keys, long known token formats, bearer
+    tokens, URL passwords or secret query values, and the setting shapes of Hermes Agent's skill guard, while
+    exempting placeholders such as ``OPENAI_API_KEY=<your key>``, ``sk-...``, or ``$TOKEN``. It is a heuristic for
+    common formats, so an unusual secret format or an unquoted value of an unknown format can pass.
+    """
+    if match := _PRIVATE_KEY_PATTERN.search(value):
+        return match.start()
+    for pattern in (_TOKEN_LIKE_PATTERN, _BEARER_TOKEN_PATTERN):
+        for match in pattern.finditer(value):
+            if _looks_like_secret(match.group("token")):
+                return match.start("token")
+    for match in _URL_PATTERN.finditer(value):
+        if _url_holds_secret(match.group("url")):
+            return match.start("url")
+    for pattern in _SKILL_SECRET_PATTERNS:
+        for match in pattern.finditer(value):
+            # Like Hermes, a quoted passphrase counts, so only placeholder markers exempt these values.
+            if not _PLACEHOLDER_PATTERN.search(match.group("secret")):
+                return match.start("secret")
+    return None
+
+
+def _looks_like_secret(value: str) -> bool:
+    """Long mixed letters and digits that no placeholder marker stands in for."""
+    return (
+        len(value) >= 16
+        and len(set(value)) >= 8
+        and any(character.isdigit() for character in value)
+        and any(character.isalpha() for character in value)
+        and not _PLACEHOLDER_PATTERN.search(value)
+    )
+
+
+def _url_holds_secret(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        password = parsed.password
+    except ValueError:
+        return False
+    if password and not _url_password_is_placeholder(password, parsed.username):
+        return True
+    return any(
+        _is_redacted_query_key(key) and _looks_like_secret(item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    )
+
+
+def _url_password_is_placeholder(password: str, username: str | None) -> bool:
+    return (
+        password == username
+        or password.lower() in _DEFAULT_URL_PASSWORDS
+        or _ENV_NAME_PATTERN.fullmatch(password) is not None
+        or _PLACEHOLDER_PATTERN.search(password) is not None
+    )
 
 
 def _normalized_structured_value(value: object) -> object:

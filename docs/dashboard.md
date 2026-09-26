@@ -415,8 +415,8 @@ Voice duration does not increase token totals, request rows, or AI reply counts,
 Only new recorded calls appear; older voice duration and usage never reported or saved cannot be reconstructed.
 These rows contain no audio, transcripts, conversation IDs, or provider session IDs and are restricted to organization reports.
 
-Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
-Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Portable compaction summaries, background memory auto-flush extraction, automatic skill reviews, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, `kind: dynamic_workflow`, or `kind: skill_learning`; ordinary run requests use `kind: run`.
 Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
 Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
 Helpers use the current trusted requester and remain unattributed when unavailable.

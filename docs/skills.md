@@ -89,6 +89,9 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
+Workspace skills are read through no-follow descriptors because worker code can share the workspace.
+Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
+The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
 
 ## Authoring skills as an agent
 
@@ -120,7 +123,7 @@ Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for 
 This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
 
 Workspace auto-loading is a runtime capability, not a proactive behavior policy.
-If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions.
+If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 ## Using skills at runtime
 
@@ -154,3 +157,125 @@ For workspace skills created during an agent turn, assume they become available 
 1. Keep skills focused - one skill per capability
 2. Declare dependencies with `metadata.openclaw.requires`
 3. Use descriptive names like `code-review`
+
+## Automatic skill learning
+
+Automatic skill learning follows the self-improvement loop of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+After enough work in a conversation, a background review maintains a small library of class-level skills in the agent's workspace, and a curator pass archives the ones nobody uses.
+It is opt-in for each agent:
+
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    skill_learning:
+      enabled: true
+      model: default
+      review_interval: 10
+      timeout_seconds: 120
+      notify: true
+      archive_after_days: 30
+```
+
+All fields, defaults, and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).
+
+### When reviews run
+
+Like Hermes' `creation_nudge_interval`, each conversation keeps a count of model replies, one for each tool-calling step and one for the final answer.
+Each successful standalone-agent response to a person in Matrix adds the replies of its runs when it completes, including every run it continued in, for example after loading a tool.
+An approved continuation adds the paused run it completes, including its replies from before the pause, and the run it ends in.
+A few runs go uncounted, which only delays a review: runs a response finished before pausing for approval, runs between two tool reloads after an approval, and the earlier steps of a minimal-mode command approval resumed after a restart, which count as one reply.
+Like Hermes restarting its count when the agent saves a skill with `skill_manage`, a response that calls `skill_manage` restarts the count, which then holds only the replies after its last call.
+Minimal-mode agents call `skill_manage` through their command line, which does not restart the count.
+Once the count reaches `review_interval`, the review starts in the background right after that response, so it never delays a reply.
+A response that starts in the same conversation stops a running review, as a new Hermes turn cancels its review; the count stays, so the next completed reply starts the review again.
+A review subtracts the replies it covered, so replies that arrive while it runs count toward the next review.
+Replies are counted only as responses finish while learning is on, so replies from before learning was enabled or while it was off never count, and the counts and running reviews of an agent that stops learning are dropped on the next config change.
+Compaction and redaction never change a count, because replies are counted when their response completes.
+Automated responses from schedules, hooks, and external triggers, including ones the router or another agent hands on, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the conversation a review reads when people also use the thread.
+Team responses are excluded.
+Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
+The queue in `skill_learning_state.json` in the storage root holds each conversation's count, retry state, and scope metadata, never message content, so counts survive restarts.
+A review that a restart interrupts is not resumed on its own; like any due conversation, it starts again with the next completed reply.
+A conversation without a counted response for 30 days is forgotten.
+Reviews of one skills directory run one at a time across processes that share the storage root, while reviews of other agents and private instances run alongside.
+A failed review, including a provider error, keeps its count for the next completed reply to retry and is abandoned after three consecutive failures, which gives up the replies it would have covered.
+A review that already changed skills before failing, timing out, or being stopped counts as done, like Hermes' best-effort review, so it never repeats its edits; writes it started land first.
+
+### What a review sees
+
+Like Hermes' default review, the review forks the final model request of the response that made the conversation due.
+It sends that request again on the same model, with the same tools, the model's final answer, and the review prompt appended, so the provider can serve the conversation from its prompt cache and the review sees it verbatim, including every tool call and result.
+On a stored OpenAI Responses conversation, the fork continues from the response with `previous_response_id`, so the provider rebuilds the same conversation.
+Only the skill tools run in MindRoom; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use, while a tool that needs approval answers only that it is not available.
+Provider-hosted tools the request offered, such as a provider's web search, stay available to the fork, because the provider runs them.
+Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
+The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
+
+The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, for an approved continuation, when the response's final attempt left no request to fork, and when the final request cannot be forked because the response ended on a tool call or without a text answer, offered no `skill_manage`, needs approval for a skill tool, or offered no skill reader although the library now holds skills.
+Unlike Hermes' fork, which compacts the conversation between its requests, the fork resends the whole conversation with each request, so a response whose final request already used more than a quarter of the review's input budget is replayed as a digest too.
+A replay without its own `skill_learning.model` runs on the model the response used, or for an approved continuation on the agent's model for that room and thread.
+A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
+Older tool results are left out, and a very long message keeps its start and end.
+Private keys are removed from each whole message and other credential-like values are redacted on a best-effort basis.
+Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
+When compaction has replaced older turns with a summary, the digest starts with that summary, as a Hermes review sees the compressed conversation.
+
+One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+Like Hermes, each request adds the input tokens the provider reported, prompt-cache reads included, and the review ends before a request once the total reached the budget.
+A digest replay's transcript may use a quarter of that budget, estimated at four characters per token.
+A review makes at most 16 tool calls and stops after `timeout_seconds`.
+The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
+It also lists the skill tools the review can run, and the agent's skills and who owns each.
+Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configuration/index.md#built-in-prompt-overrides).
+
+### Skill tools
+
+Agents with skill learning on have a `skill_manage` tool, as Hermes agents do, and the review writes with the same tool.
+Other agents can list `skill_manage` in `tools` to save skills in chat; like `self_config`, it is not available to scripts and workflow participants.
+It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
+Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
+In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
+A workspace skill that this host does not load, for example because its requirements are unmet, can still be changed in chat by its directory name.
+Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
+The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
+Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
+A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters, and one the review creates also needs the `learned` marker shown below.
+Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, or a quoted value of at least 20 characters, including a passphrase, of an api-key, token, secret, or password setting such as `password: "..."`, `api_key="..."`, or `{"api_key": "..."}`.
+This is a heuristic for common formats, not a guarantee: like Hermes' guard, it lets an unusual secret format or an unquoted value of an unknown format, such as `API_KEY=...` in an environment file, pass.
+Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, environment variable names like `api_key = "OPENAI_API_KEY"` or `postgres://app:DB_PASSWORD@localhost/app`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
+Workspace skill scripts still cannot be executed through `get_skill_script`.
+
+### Ownership
+
+Like Hermes' usage records, ownership is recorded outside the skill file, in `skills/.usage.json`, so a skill the learner created stays learner-owned when the agent or a person later rewrites it.
+New learned skills also carry a visible marker in their frontmatter:
+
+```yaml
+metadata:
+  mindroom:
+    learned: true
+```
+
+Add the marker to a skill you wrote to hand it to the learner.
+Add `pinned: true` under `metadata.mindroom` to take any skill away from the learner and the curator, which then never edit or archive it.
+The review never edits bundled, plugin, and user skills or workspace skills that someone else wrote, and new skills cannot reuse their names.
+Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
+
+### History, archive, and notices
+
+Before `skill_manage` replaces or removes a file, in chat or in a review, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
+Copy a saved version back to restore it.
+Before each review, learned skills with no use, creation, or `skill_manage` edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
+Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
+Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
+A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
+A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
+A field that cannot be read is dropped without affecting the rest of its record or other records, a record that is not an object is ignored and left in place until its own skill's record is next updated, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
+A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.
+Rewrites keep a file's existing permissions.
+Archival is logged rather than announced, because other conversations may share the workspace.
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response or a config change stopped it after its writes landed; a review stopped by shutdown posts none.
+The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
+Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md), also for a review that times out or is interrupted.
+Learned skills are generated from conversation content, so review them before relying on them for sensitive work.

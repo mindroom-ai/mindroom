@@ -13,6 +13,7 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_automation_source_kind,
 )
 
 
@@ -58,6 +59,17 @@ class TurnOrigin:
     intent: TurnIntent
     source_kind: str
     trust: TurnTrust
+    # A router handoff or an agent's matrix_message relay replaces an automated turn's source kind; this keeps which
+    # automation started it.
+    relayed_source_kind: str | None = None
+
+    @property
+    def automation_source_kind(self) -> str | None:
+        """Return the automation that started this turn, directly or through a relay, or None."""
+        for source_kind in (self.source_kind, self.relayed_source_kind):
+            if source_kind is not None and is_automation_source_kind(source_kind):
+                return source_kind
+        return None
 
     @property
     def may_dispatch_without_mention(self) -> bool:
@@ -98,6 +110,7 @@ def classify_turn_origin(
     source_kind: str,
     original_sender: str | None,
     trusted_user_relay: bool,
+    relayed_source_kind: str | None = None,
 ) -> TurnOrigin:
     """Return the canonical origin policy for one inbound turn."""
     sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
@@ -122,6 +135,7 @@ def classify_turn_origin(
         ),
         source_kind=source_kind,
         trust=trust,
+        relayed_source_kind=relayed_source_kind,
     )
 
 

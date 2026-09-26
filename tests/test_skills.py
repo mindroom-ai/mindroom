@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import platform
+import threading
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -534,8 +536,151 @@ def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path)
     assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
 
 
-def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> None:
-    """Block workspace script execution even when the skill directory is a symlink."""
+def _workspace_skills(storage: Path) -> Path:
+    root = agent_workspace_root_path(storage, "code") / "skills"
+    root.mkdir(parents=True)
+    return root
+
+
+def _load(tmp_path: Path, storage: Path, allowlist: list[str] | None = None) -> Skills:
+    skills = build_agent_skills(
+        "code",
+        _base_config(allowlist or []),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    return skills
+
+
+def test_workspace_loader_skips_links_and_special_files(tmp_path: Path) -> None:
+    """Workspace skills load through no-follow reads, so planted links and FIFOs are never opened."""
+    storage = tmp_path / "storage"
+    outside = _write_skill(tmp_path / "outside", "secret", "Outside the workspace")
+    (outside.parent / "references").mkdir()
+    (outside.parent / "references" / "keys.md").write_text("private", encoding="utf-8")
+    workspace_skills = _workspace_skills(storage)
+    (workspace_skills / "linked-dir").symlink_to(outside.parent, target_is_directory=True)
+    (workspace_skills / "linked-file").mkdir()
+    (workspace_skills / "linked-file" / "SKILL.md").symlink_to(outside)
+    (workspace_skills / "fifo").mkdir()
+    os.mkfifo(workspace_skills / "fifo" / "SKILL.md")
+    good = _write_skill(workspace_skills, "good", "Good skill")
+    (good.parent / "references").symlink_to(outside.parent / "references", target_is_directory=True)
+    (good.parent / "scripts").mkdir()
+    (good.parent / "scripts" / "check.sh").write_text("echo ok", encoding="utf-8")
+    (good.parent / "scripts" / "linked.sh").symlink_to(outside)
+
+    skills = _load(tmp_path, storage)
+    assert _skill_names(skills) == ["good"]
+    skill = skills.get_skill("good")
+    assert skill is not None
+    assert (skill.scripts, skill.references) == (["check.sh"], [])
+
+
+def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> None:
+    """Worker code can replace the skills directory with a link to another workspace; the primary never follows it."""
+    storage = tmp_path / "storage"
+    other_skills = _write_skill(
+        tmp_path / "other" / "skills",
+        "private-notes",
+        "Another requester's notes",
+    ).parent.parent
+    workspace_root = agent_workspace_root_path(storage, "code")
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "skills").symlink_to(other_skills, target_is_directory=True)
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is None
+
+
+def test_workspace_skill_with_loose_frontmatter_loads_like_agno(tmp_path: Path) -> None:
+    """Frontmatter that is not strict YAML falls back to key: value lines, as Agno's LocalSkills does."""
+    storage = tmp_path / "storage"
+    skill_dir = _workspace_skills(storage) / "deploy-checks"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: deploy-checks\ndescription: Use when: deploying the app to staging\n---\nRun the smoke test.\n",
+        encoding="utf-8",
+    )
+    skills = _load(tmp_path, storage)
+    assert _skill_names(skills) == ["deploy-checks"]
+    skill = skills.get_skill("deploy-checks")
+    assert skill is not None
+    assert skill.description == "Use when: deploying the app to staging"
+
+
+def test_workspace_support_reads_refuse_swapped_links(tmp_path: Path) -> None:
+    """A reference replaced by a link after loading is refused instead of read through the link."""
+    storage = tmp_path / "storage"
+    skill_path = _write_skill(_workspace_skills(storage), "guide", "Guide")
+    (skill_path.parent / "references").mkdir()
+    reference = skill_path.parent / "references" / "notes.md"
+    reference.write_text("workspace notes", encoding="utf-8")
+    skills = _load(tmp_path, storage)
+    get_reference = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference").entrypoint
+    assert json.loads(get_reference(skill_name="guide", reference_path="notes.md"))["content"] == "workspace notes"
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("primary secret", encoding="utf-8")
+    reference.unlink()
+    reference.symlink_to(secret)
+    result = json.loads(get_reference(skill_name="guide", reference_path="notes.md"))
+    assert "error" in result
+    assert "primary secret" not in json.dumps(result)
+
+
+def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
+    """Loading a workspace skill feeds the learner's inactivity clock; configured skill roots stay untouched."""
+    storage = tmp_path / "storage"
+    workspace_skills = _workspace_skills(storage)
+    _write_skill(workspace_skills, "local", "Workspace skill")
+    _write_skill(tmp_path / "global", "shared", "Configured skill")
+    skills = _load(tmp_path, storage, ["shared"])
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    get_instructions(skill_name="local")
+    get_instructions(skill_name="local")
+    get_instructions(skill_name="shared")
+
+    usage = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))
+    assert usage["local"]["use_count"] == 2
+    assert "shared" not in usage
+    assert not (tmp_path / "global" / ".usage.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
+    """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""
+    storage = tmp_path / "storage"
+    workspace_skills = _workspace_skills(storage)
+    _write_skill(workspace_skills, "local", "Workspace skill")
+    skills = _load(tmp_path, storage, [])
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    writers: list[threading.Thread] = []
+    record = skills_module.record_skill_use
+
+    def spy(skill_path: Path) -> None:
+        writers.append(threading.current_thread())
+        record(skill_path)
+
+    with patch.object(skills_module, "record_skill_use", spy):
+        get_instructions(skill_name="local")
+        assert await wait_for_background_tasks(5)
+    assert writers
+    assert threading.main_thread() not in writers
+    assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1
+
+
+def test_symlinked_workspace_skill_is_not_loaded(tmp_path: Path) -> None:
+    """A workspace skill directory that is a link is skipped, so its scripts are unreachable."""
     storage = tmp_path / "storage"
     outside_root = tmp_path / "outside"
     outside_skill_path = _write_skill(outside_root, "linked", "Linked workspace skill")
@@ -545,18 +690,10 @@ def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> Non
     workspace_skills.mkdir(parents=True)
     (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
 
-    skills = build_agent_skills(
-        "code",
-        _base_config([]),
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is not None
-
+    skills = _load(tmp_path, storage, ["linked"])
+    assert _skill_names(skills) == []
     execute_result = _get_skill_script(skills, "linked", "hello.sh", execute=True)
-    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+    assert execute_result["error"] == "Skill 'linked' not found"
 
 
 def test_non_workspace_skill_script_execute_unchanged(tmp_path: Path) -> None:

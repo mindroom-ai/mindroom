@@ -1067,6 +1067,9 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+# The automation source kind of a turn handed on as a trusted human relay, by a router handoff or an agent's
+# matrix_message, which replaces its source kind.
+RELAYED_SOURCE_KIND_KEY = "com.mindroom.relayed_source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
@@ -1097,6 +1100,7 @@ MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
+SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 DURABLE_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
 DURABLE_FINAL_OUTCOME_VERSION = 2

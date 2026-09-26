@@ -210,18 +210,23 @@ def install_tool_result_callback(
 # get_function_calls_to_run before any limit accounting, so a model that keeps requesting tools
 # keeps its run alive indefinitely. The loop's counters are local to aresponse/aresponse_stream,
 # and one model object can serve concurrent runs, so bounding a run's model requests needs a
-# per-loop gate consulted before each request.
+# per-loop gate consulted before each request. The same missing pre-request hook also leaves callers no public way
+# to end a run on their own condition, which the skill review needs to stop at its aggregate input budget.
 # Upstream issue: https://github.com/agno-agi/agno/issues/8304 and
 # https://github.com/agno-agi/agno/issues/10041 cover refused tool_call_limit batches; no upstream
-# issue identified for loops of unknown-tool or unparseable-argument calls.
+# issue identified for loops of unknown-tool or unparseable-argument calls. Tracking gap: no issue proposes a
+# caller-owned hook, consulted before each model request, that can end the run.
 # Upstream PR: https://github.com/agno-agi/agno/pull/10042 and
 # https://github.com/agno-agi/agno/pull/8324 are open and stop only after a batch of limit refusals,
-# which unknown-tool and unparseable-argument batches never produce.
+# which unknown-tool and unparseable-argument batches never produce; none identified for a pre-request hook.
 # Remove when: Agno ends every async streaming and non-streaming response loop after a bounded
-# number of model requests, whatever the requested tool calls, through its normal completion path;
-# the owner's cap derived from tool_call_limit and its once-per-run tool_call_limit_reached warning
-# must remain.
-# Coverage: tests/test_tool_call_budget.py.
+# number of model requests, whatever the requested tool calls, through its normal completion path,
+# and offers a public hook consulted before each model request that can end the run; the owner's cap
+# derived from tool_call_limit, its once-per-run tool_call_limit_reached warning, and the skill
+# review's input budget must remain.
+# Coverage: tests/test_tool_call_budget.py,
+# tests/test_skill_learning.py::test_the_budget_counts_what_each_request_sends, and
+# tests/test_skill_learning.py::test_reviewer_refuses_protected_skills_and_stops_at_its_budget.
 def install_response_request_gate(
     model: Model,
     *,
@@ -406,11 +411,57 @@ def temporary_async_invocation_hooks(
     try:
         yield
     finally:
-        for name, value in saved.items():
-            if value is None:
-                model_dict.pop(name, None)
-            else:
-                model_dict[name] = value
+        _restore(model_dict, saved)
+
+
+def _restore(model_dict: dict[str, object], saved: dict[str, object | None]) -> None:
+    for name, value in saved.items():
+        if value is None:
+            model_dict.pop(name, None)
+        else:
+            model_dict[name] = value
+
+
+# AGNO_COMPAT: A run's final model request is not observable.
+# Reason: Agno reports neither the messages nor the tool definitions of a response loop's last request:
+# RunOutput.messages drops messages kept out of agent memory, and the tools stay inside aresponse. The skill
+# review forks that request to read the conversation from the provider's prompt cache.
+# Upstream issue: tracking gap; no Agno issue or PR proposes a scoped observer of response loops.
+# Upstream PR: none identified.
+# Remove when: Agno reports each response loop's final messages, tools, tool choice, and response format to a
+# scoped callback; the skill review's fork of that request remains MindRoom policy.
+# Coverage: tests/test_skill_learning.py::test_the_review_fork_replays_the_final_request_through_each_adapter.
+@contextmanager
+def temporary_response_observer(model: Model, observe: Callable[[dict[str, object]], None]) -> Iterator[None]:
+    """Pass the keyword arguments of each async response loop of ``model`` to ``observe`` once the loop returns.
+
+    Agno appends every assistant and tool message to the ``messages`` it was given, so they end with the loop.
+    """
+    model_dict = vars(model)
+    saved = {name: model_dict.get(name) for name in ("aresponse", "aresponse_stream")}
+    original_response = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
+    original_response_stream = cast(
+        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
+        model.aresponse_stream,
+    )
+
+    async def response(**kwargs: object) -> ModelResponse:
+        result = await original_response(**kwargs)
+        observe(kwargs)
+        return result
+
+    async def response_stream(**kwargs: object) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
+        async with aclosing(original_response_stream(**kwargs)) as stream:
+            async for event in stream:
+                yield event
+        observe(kwargs)
+
+    model_dict["aresponse"] = response
+    model_dict["aresponse_stream"] = response_stream
+    try:
+        yield
+    finally:
+        _restore(model_dict, saved)
 
 
 # AGNO_COMPAT: Retry cycles lack public context and classification hooks.

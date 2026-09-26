@@ -35,6 +35,7 @@ from mindroom.config.models import (
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.skill_learning import SkillLearningConfig
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
@@ -359,6 +360,10 @@ class AgentConfig(BaseModel):
     allow_self_config: bool | None = Field(
         default=None,
         description="Allow this agent to modify its own configuration via a tool",
+    )
+    skill_learning: SkillLearningConfig = Field(
+        default_factory=SkillLearningConfig,
+        description="Opt-in background reviews that create and maintain learned skills in this agent's workspace",
     )
     delegate_to: list[str] = Field(
         default_factory=list,

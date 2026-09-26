@@ -15,7 +15,7 @@ from uuid import uuid4
 from agno.agent import Agent
 
 from mindroom import model_loading
-from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
@@ -287,26 +287,6 @@ def reprioritize_auto_flush_sessions(
         _write_state_unlocked(storage_path, state)
 
     _notify_workers()
-
-
-def _load_agent_session(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    session_id: str,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> AgentSession | None:
-    storage = create_session_storage(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )
-    try:
-        return get_agent_session(storage, session_id)
-    finally:
-        storage.close()
 
 
 def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
@@ -615,10 +595,10 @@ class MemoryAutoFlushWorker:
             )
 
             session = await asyncio.to_thread(
-                _load_agent_session,
+                load_agent_session,
+                agent_name,
                 config,
                 self.runtime_paths,
-                agent_name,
                 session_id,
                 execution_identity=entry_execution_identity,
             )
@@ -724,10 +704,10 @@ class MemoryAutoFlushWorker:
 
         latest_session_updated_at: int | None = None
         latest_session = await asyncio.to_thread(
-            _load_agent_session,
+            load_agent_session,
+            agent_name,
             config,
             self.runtime_paths,
-            agent_name,
             session_id,
             execution_identity=entry_execution_identity,
         )
@@ -782,10 +762,10 @@ class MemoryAutoFlushWorker:
     ) -> bool:
         effective_storage_path = self.storage_path
         session = await asyncio.to_thread(
-            _load_agent_session,
+            load_agent_session,
+            agent_name,
             config,
             self.runtime_paths,
-            agent_name,
             session_id,
             execution_identity=execution_identity,
         )
