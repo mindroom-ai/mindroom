@@ -46,6 +46,8 @@ struct DesktopConfigStatus: Codable, Equatable {
     let allowedRequesterIDs: [String]?
     let allowedAgentNames: [String]?
     let allowedAppIDs: [String]?
+    var fileRoots: [String] = []
+    var shellEnabled = false
 
     enum CodingKeys: String, CodingKey {
         case state, revision, enabled
@@ -54,6 +56,25 @@ struct DesktopConfigStatus: Codable, Equatable {
         case allowedRequesterIDs = "allowed_requester_ids"
         case allowedAgentNames = "allowed_agent_names"
         case allowedAppIDs = "allowed_app_ids"
+        case fileRoots = "file_roots"
+        case shellEnabled = "shell_enabled"
+    }
+}
+
+extension DesktopConfigStatus {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        state = try container.decode(String.self, forKey: .state)
+        revision = try container.decode(Int.self, forKey: .revision)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        controllerUserID = try container.decodeIfPresent(String.self, forKey: .controllerUserID)
+        controllerDeviceID = try container.decodeIfPresent(String.self, forKey: .controllerDeviceID)
+        allowedRequesterIDs = try container.decodeIfPresent([String].self, forKey: .allowedRequesterIDs)
+        allowedAgentNames = try container.decodeIfPresent([String].self, forKey: .allowedAgentNames)
+        allowedAppIDs = try container.decodeIfPresent([String].self, forKey: .allowedAppIDs)
+        // Absent folder and shell fields mean those capabilities are off.
+        fileRoots = try container.decodeIfPresent([String].self, forKey: .fileRoots) ?? []
+        shellEnabled = try container.decodeIfPresent(Bool.self, forKey: .shellEnabled) ?? false
     }
 }
 
@@ -145,6 +166,102 @@ struct DesktopApplicationStatus: Codable, Equatable, Identifiable {
     let running: Bool?
 }
 
+/// One shell command waiting for local approval; only its request ID is ever sent back.
+struct DesktopShellRequest: Codable, Equatable, Identifiable {
+    let requestID: String
+    let requesterID: String
+    let agentName: String
+    let command: String
+    let cwd: String
+    let expiresAtMilliseconds: Double
+
+    var id: String { requestID }
+
+    enum CodingKeys: String, CodingKey {
+        case command, cwd
+        case requestID = "request_id"
+        case requesterID = "requester_id"
+        case agentName = "agent_name"
+        case expiresAtMilliseconds = "expires_at_ms"
+    }
+}
+
+struct DesktopShellHandle: Codable, Equatable, Identifiable {
+    let handle: String
+    let requesterID: String
+    let agentName: String
+    let commandPreview: String
+    let elapsedSeconds: Double
+    let state: String
+
+    var id: String { handle }
+
+    enum CodingKeys: String, CodingKey {
+        case handle, state
+        case requesterID = "requester_id"
+        case agentName = "agent_name"
+        case commandPreview = "command_preview"
+        case elapsedSeconds = "elapsed_seconds"
+    }
+}
+
+struct DesktopShellStatus: Codable, Equatable {
+    var enabled = false
+    var pending: DesktopShellRequest?
+    var autoApproveRemainingSeconds = 0.0
+    var autoApproveUntilRevoked = false
+    var activeRequestID: String?
+    var handles: [DesktopShellHandle] = []
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, pending, handles
+        case autoApproveRemainingSeconds = "auto_approve_remaining_seconds"
+        case autoApproveUntilRevoked = "auto_approve_until_revoked"
+        case activeRequestID = "active_request_id"
+    }
+}
+
+extension DesktopShellStatus {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        pending = try container.decodeIfPresent(DesktopShellRequest.self, forKey: .pending)
+        autoApproveRemainingSeconds = try container.decodeIfPresent(Double.self, forKey: .autoApproveRemainingSeconds) ?? 0
+        autoApproveUntilRevoked = try container.decodeIfPresent(Bool.self, forKey: .autoApproveUntilRevoked) ?? false
+        activeRequestID = try container.decodeIfPresent(String.self, forKey: .activeRequestID)
+        handles = try container.decodeIfPresent([DesktopShellHandle].self, forKey: .handles) ?? []
+    }
+}
+
+enum DesktopShellAutoApproval: Hashable, Identifiable {
+    case minutes(Int), untilStopped
+
+    static let choices: [Self] = [.minutes(5), .minutes(15), .minutes(60), .untilStopped]
+
+    var id: Self { self }
+
+    var grantParameters: [String: Any] {
+        switch self {
+        case let .minutes(minutes): ["duration_seconds": minutes * 60]
+        case .untilStopped: ["until_revoked": true]
+        }
+    }
+}
+
+enum DesktopShellDecision: Equatable {
+    case reject, approveOnce, approveAndAllow(DesktopShellAutoApproval)
+
+    func parameters(commandID: String) -> [String: Any] {
+        var parameters: [String: Any] = ["command_id": commandID, "approved": self != .reject, "auto_approve_seconds": 0]
+        switch self {
+        case .approveAndAllow(.minutes(let minutes)): parameters["auto_approve_seconds"] = minutes * 60
+        case .approveAndAllow(.untilStopped): parameters["auto_approve_until_revoked"] = true
+        case .reject, .approveOnce: break
+        }
+        return parameters
+    }
+}
+
 struct DesktopStatus: Codable, Equatable {
     let config: DesktopConfigStatus
     let pairing: DesktopPairingStatus
@@ -155,6 +272,11 @@ struct DesktopStatus: Codable, Equatable {
     let browser: DesktopBrowserStatus
     let apps: [DesktopApplicationStatus]
     let capabilities: [String]
+    var shell = DesktopShellStatus()
+
+    enum CodingKeys: String, CodingKey {
+        case config, pairing, helper, bridge, authority, permissions, browser, apps, capabilities, shell
+    }
 
     static let stopped = DesktopStatus(
         config: DesktopConfigStatus(
@@ -199,4 +321,20 @@ struct DesktopStatus: Codable, Equatable {
         apps: [],
         capabilities: []
     )
+}
+
+extension DesktopStatus {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        config = try container.decode(DesktopConfigStatus.self, forKey: .config)
+        pairing = try container.decode(DesktopPairingStatus.self, forKey: .pairing)
+        helper = try container.decode(DesktopHelperStatus.self, forKey: .helper)
+        bridge = try container.decode(DesktopRuntimeStatus.self, forKey: .bridge)
+        authority = try container.decode(DesktopAuthorityStatus.self, forKey: .authority)
+        permissions = try container.decode(DesktopPermissionsStatus.self, forKey: .permissions)
+        browser = try container.decode(DesktopBrowserStatus.self, forKey: .browser)
+        apps = try container.decode([DesktopApplicationStatus].self, forKey: .apps)
+        capabilities = try container.decode([String].self, forKey: .capabilities)
+        shell = try container.decodeIfPresent(DesktopShellStatus.self, forKey: .shell) ?? DesktopShellStatus()
+    }
 }

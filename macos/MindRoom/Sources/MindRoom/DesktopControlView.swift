@@ -4,6 +4,7 @@ struct DesktopControlView: View {
     @ObservedObject var store = DesktopControlStore.shared
     var scrollToTop: () -> Void
     @State private var section = DesktopControlSection.setup
+    @State private var accessCapability = DesktopAccessCapability.applications
     @State private var choseInitialSection = false
     @State private var reconnecting = false
     @State private var showDetails = false
@@ -15,25 +16,20 @@ struct DesktopControlView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Computer access").font(.largeTitle.bold())
-                Text("Connect an agent, choose its apps, then turn access on.")
+                Text("Connect an agent, choose what it may access, then turn access on.")
                     .foregroundStyle(.secondary)
             }
             connectionSummary
+            if store.status.shellApprovalState != .off {
+                DesktopShellApprovalView(store: store)
+            }
             stepNavigation
             switch section {
             case .setup: connectionCard
-            case .applications:
-                DesktopApplicationsView(store: store, showSetup: { show(.setup) }, onSaved: {
-                    if !store.selectedAppIDs.isEmpty {
-                        show(store.status.hasRequiredPermissions ? .session : .permissions)
-                    }
-                })
-                if store.status.hasSavedConnection, !store.hasAppSelectionChanges, store.status.config.allowedAppIDs?.isEmpty == false {
-                    Button("Continue to Permissions") { show(.permissions) }.buttonStyle(.borderedProminent)
-                }
+            case .access: accessContent
             case .permissions:
                 permissionsCard
-                if store.status.hasRequiredPermissions {
+                if !store.status.needsGUIPermissions || store.status.hasRequiredPermissions {
                     Button("Continue to Start") { show(.session) }.buttonStyle(.borderedProminent)
                 }
             case .session: sessionCard
@@ -64,11 +60,18 @@ struct DesktopControlView: View {
     }
 
     private var nextSection: DesktopControlSection {
-        store.status.nextSetupSection(hasAppSelectionChanges: store.hasAppSelectionChanges, needsPairing: store.needsPairing)
+        store.status.nextSetupSection(hasAccessChanges: store.hasAccessChanges, needsPairing: store.needsPairing)
     }
 
     private var startBlocker: DesktopStartBlocker? {
-        store.status.startBlocker(isBusy: store.isBusy, hasAppSelectionChanges: store.hasAppSelectionChanges, needsPairing: store.needsPairing)
+        store.status.startBlocker(isBusy: store.isBusy, hasAccessChanges: store.hasAccessChanges, needsPairing: store.needsPairing)
+    }
+
+    /// Moves on only when the save left no other access draft behind.
+    private func continueAfterSaving(_ saved: DesktopStatus) {
+        guard !store.hasAccessChanges(comparedTo: saved) else { return }
+        let next = saved.nextSetupSection(hasAccessChanges: false, needsPairing: store.needsPairing)
+        if next != .access { show(next) }
     }
 
     private func show(_ target: DesktopControlSection) {
@@ -116,24 +119,27 @@ struct DesktopControlView: View {
     private var nextActionTitle: String {
         switch nextSection {
         case .setup: store.confirmationCommand.isEmpty ? "Connect Agent" : "Confirm in Chat"
-        case .applications: "Choose Apps"
+        case .access: "Choose Access"
         case .permissions: "Allow Permissions"
-        case .session: "Start Observe Only"
+        case .session: store.status.startActionTitle
         }
     }
 
     private var nextStepDescription: String {
         if store.status.canStopBridge {
-            return "\(store.status.config.allowedAppIDs?.count ?? 0) saved apps. Stop access at any time."
+            return "Saved access: \(store.status.savedAccessSummary ?? "none"). Stop access at any time."
         }
         switch nextSection {
         case .setup:
             return store.confirmationCommand.isEmpty
                 ? "Next: connect this Mac to an agent from your MindRoom chat."
                 : "Next: send the confirmation command in the same agent chat."
-        case .applications: return "Next: choose which apps your agent may access and save your selection."
-        case .permissions: return "Next: allow macOS permissions for this copy of MindRoom."
-        case .session: return "Ready. Start observation when you want your agent to see your selected apps."
+        case .access: return "Next: choose which apps, read-only folders, or shell commands your agent may use, and save."
+        case .permissions: return "Next: allow macOS permissions for your selected apps."
+        case .session:
+            return store.status.hasSavedLocalAccess
+                ? "Ready. Start access when you want your agent to use what you saved."
+                : "Ready. Start observation when you want your agent to see your selected apps."
         }
     }
 
@@ -141,7 +147,7 @@ struct DesktopControlView: View {
         HStack(spacing: 8) {
             ForEach(DesktopControlSection.allCases, id: \.self) { step in
                 let progress = store.status.setupProgress(
-                    for: step, needsPairing: store.needsPairing, hasAppSelectionChanges: store.hasAppSelectionChanges
+                    for: step, needsPairing: store.needsPairing, hasAccessChanges: store.hasAccessChanges
                 )
                 Button { show(step) } label: {
                     VStack(spacing: 4) {
@@ -160,6 +166,44 @@ struct DesktopControlView: View {
                 .accessibilityLabel("\(step.rawValue + 1). \(step.title): \(progress.detail)")
                 .accessibilityAddTraits(section == step ? .isSelected : [])
             }
+        }
+    }
+
+    @ViewBuilder
+    private var accessContent: some View {
+        HStack(spacing: 8) {
+            ForEach(DesktopAccessCapability.allCases, id: \.self) { capability in
+                let progress = store.status.accessProgress(for: capability, hasChanges: store.hasChanges(for: capability))
+                Button { accessCapability = capability } label: {
+                    VStack(spacing: 4) {
+                        Label(capability.title, systemImage: capability.symbol)
+                        HStack(spacing: 4) {
+                            Image(systemName: progress.symbol)
+                                .foregroundStyle(progressColor(progress)).accessibilityHidden(true)
+                            Text(progress.detail).foregroundStyle(.secondary)
+                        }.font(.caption)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 7)
+                    .background(accessCapability == capability ? Color.accentColor.opacity(0.18) : .clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(capability.title): \(progress.detail)")
+                .accessibilityAddTraits(accessCapability == capability ? .isSelected : [])
+            }
+        }
+        switch accessCapability {
+        case .applications:
+            DesktopApplicationsView(store: store, showSetup: { show(.setup) }, onSaved: continueAfterSaving)
+        case .folders, .shell:
+            DesktopLocalAccessView(
+                store: store, capability: accessCapability, showSetup: { show(.setup) }, onSaved: continueAfterSaving
+            )
+        }
+        if store.status.hasSavedConnection, !store.needsPairing, !store.hasAccessChanges, store.status.hasSavedAccess {
+            let next: DesktopControlSection = store.status.needsGUIPermissions ? .permissions : .session
+            Button("Continue to \(next.title)") { show(next) }.buttonStyle(.borderedProminent)
         }
     }
 
@@ -185,7 +229,7 @@ struct DesktopControlView: View {
                     Button("I’ve Confirmed in Chat") {
                         store.finishChatConfirmation {
                             reconnecting = false
-                            show(.applications)
+                            show(.access)
                         }
                     }.buttonStyle(.borderedProminent)
                     Button("Use Fresh Setup Data") { reconnecting = true; store.cancelSetupImport() }
@@ -218,7 +262,7 @@ struct DesktopControlView: View {
                 Text("\((store.status.config.allowedAgentNames ?? []).joined(separator: ", ")) on \(store.status.pairing.homeserver ?? "")")
                 Text("Signed in as \(store.status.pairing.userID ?? ""). No need to connect again.").foregroundStyle(.secondary)
                 HStack {
-                    Button("Choose Apps") { show(.applications) }.buttonStyle(.borderedProminent)
+                    Button("Choose Access") { show(.access) }.buttonStyle(.borderedProminent)
                     Button("Reconnect…") { reconnecting = true }
                 }
                 DisclosureGroup("Connection details", isExpanded: $showDetails) { connectionDetails.padding(.top, 8) }
@@ -300,13 +344,22 @@ struct DesktopControlView: View {
                 Spacer()
                 Button("Check Again") { store.refresh() }.disabled(store.isBusy)
             }
-            Text("Accessibility lets your agent read app controls. Screen Recording lets it see selected app windows.")
-                .font(.callout).foregroundStyle(.secondary)
-            permissionRow(title: "Accessibility", key: "accessibility", status: store.status.permissions.accessibility)
-            Divider()
-            permissionRow(title: "Screen Recording", key: "screen_recording", status: store.status.permissions.screenRecording)
-            if !store.status.hasRequiredPermissions {
-                Text("After allowing access, quit and reopen this copy of MindRoom, then select Check Again. An enabled entry for an older copy may not apply to this one.")
+            if store.status.needsGUIPermissions || !store.selectedAppIDs.isEmpty {
+                Text("Accessibility lets your agent read app controls. Screen Recording lets it see selected app windows.")
+                    .font(.callout).foregroundStyle(.secondary)
+                permissionRow(title: "Accessibility", key: "accessibility", status: store.status.permissions.accessibility)
+                Divider()
+                permissionRow(title: "Screen Recording", key: "screen_recording", status: store.status.permissions.screenRecording)
+                if !store.status.hasRequiredPermissions {
+                    Text("After allowing access, quit and reopen this copy of MindRoom, then select Check Again. An enabled entry for an older copy may not apply to this one.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Read-only folders and shell commands do not need Accessibility or Screen Recording. Select apps in Access to let your agent see or use them.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if store.status.hasSavedLocalAccess || !store.fileRoots.isEmpty || store.shellEnabled {
+                Text("macOS may still ask before MindRoom or a shell command reads protected folders such as Desktop, Documents, or Downloads. Saving a folder does not grant that access, and MindRoom never requests Full Disk Access for you.")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
@@ -331,30 +384,36 @@ struct DesktopControlView: View {
                 Text(blocker.message)
                 if let destination = blocker.destination { Button("Review \(destination.title)") { show(destination) } }
             } else if !store.status.canStopBridge {
-                Text("Start Observe Only above to let your agent read the apps you selected. Control stays off until you grant it below.")
+                Text(store.status.hasSavedLocalAccess
+                     ? "Start Access above to let your agent use what you saved. Each shell command still waits for your approval, and app control stays off until you grant it."
+                     : "Start Observe Only above to let your agent read the apps you selected. Control stays off until you grant it below.")
             }
             if let action = store.status.bridge.activeAction { LabeledContent("Active action", value: action) }
-            DisclosureGroup("Optional control") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Stepper("Control duration: \(store.controlMinutes) minutes", value: $store.controlMinutes, in: 1...60)
-                    HStack {
-                        Button("Grant Control…") { isGrantConfirmationPresented = true }
-                            .disabled(store.isBusy || store.status.bridge.state != "observe_only")
-                        Button("Revoke Now", role: .destructive) { store.revokeControl() }
-                            .disabled(!store.status.authority.controlAvailable)
-                    }
-                    Text("Control expires automatically. Revoke it at any time, or move the pointer to the upper-left corner to stop input.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }.padding(.top, 8)
-            }
+            if store.status.needsGUIPermissions { appControlOptions }
             if store.status.authority.emergencyStopLatched {
-                Button("Reset Emergency Stop") { store.resetEmergencyStop() }.disabled(store.status.bridge.activeAction != nil)
+                Button("Reset Emergency Stop") { store.resetEmergencyStop() }.disabled(store.status.hasBridgeWorkInFlight)
             }
             browserOptions
             DisclosureGroup("Diagnostics") {
                 LabeledContent("Helper version", value: store.status.helper.version)
                 Button("Copy Redacted Diagnostics") { store.copyDiagnostics() }
             }
+        }
+    }
+
+    private var appControlOptions: some View {
+        DisclosureGroup("Optional app control") {
+            VStack(alignment: .leading, spacing: 10) {
+                Stepper("Control duration: \(store.controlMinutes) minutes", value: $store.controlMinutes, in: 1...60)
+                HStack {
+                    Button("Grant Control…") { isGrantConfirmationPresented = true }
+                        .disabled(store.isBusy || store.status.bridge.state != "observe_only")
+                    Button("Revoke Now", role: .destructive) { store.revokeControl() }
+                        .disabled(!store.status.authority.controlAvailable)
+                }
+                Text("Control applies only to the saved apps and expires automatically. Revoke it at any time, or move the pointer to the upper-left corner to stop input.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }.padding(.top, 8)
         }
     }
 

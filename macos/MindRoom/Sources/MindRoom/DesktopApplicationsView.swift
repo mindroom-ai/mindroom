@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 struct DesktopApplicationsView: View {
     @ObservedObject var store: DesktopControlStore
     var showSetup: () -> Void
-    var onSaved: () -> Void = {}
+    var onSaved: (DesktopStatus) -> Void = { _ in }
     @State private var search = ""
     @State private var showingAppPicker = false
     @State private var confirmingStop = false
@@ -22,7 +22,7 @@ struct DesktopApplicationsView: View {
                 Text("Check the apps your paired agents may use, then save app access. This does not grant control or change macOS permissions.")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
-                    Button(selectionAction.title) {
+                    Button(selectionAction.title(saving: "Save App Access")) {
                         switch selectionAction {
                         case .setup: showSetup()
                         case .stopAndSave: confirmingStop = true
@@ -45,7 +45,7 @@ struct DesktopApplicationsView: View {
                     Text("Connect your agent first. These app choices will be kept while you finish setup.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else if store.status.canStopBridge {
-                    Text("Saving stops observation and control. Start Observe Only again when you are ready.")
+                    Text("Saving stops computer access. Start it again when you are ready.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else if store.selectedAppIDs.isEmpty {
                     Text("No apps are selected. Agents will not have access to any apps.")
@@ -104,12 +104,12 @@ struct DesktopApplicationsView: View {
             Button("Stop and Save App Access") { store.saveAllowedApplications(completion: onSaved) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This stops observation and revokes control before saving. Computer access stays stopped until you start it again.")
+            Text("This stops computer access, including observation, control, and shell commands, before saving. It stays stopped until you start it again.")
         }
     }
 
-    private var selectionAction: DesktopAppSelectionAction {
-        store.needsPairing ? .setup : store.status.appSelectionAction
+    private var selectionAction: DesktopAccessSaveAction {
+        store.needsPairing ? .setup : store.status.accessSaveAction
     }
 
     private var applications: [InstalledDesktopApplication] {

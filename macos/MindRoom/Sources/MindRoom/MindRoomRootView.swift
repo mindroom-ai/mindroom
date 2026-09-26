@@ -33,6 +33,18 @@ struct MindRoomRootView: View {
                         .padding(28)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
+                    if desktop.status.shellApprovalState.isPending {
+                        Divider()
+                        HStack(spacing: 10) {
+                            Image(systemName: "terminal")
+                            Text("Shell command waiting for approval")
+                            Spacer()
+                            Button("Review Command") {
+                                navigation.section = .computerAccess
+                                withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                            }.buttonStyle(.borderedProminent)
+                        }.padding(14)
+                    }
                     if navigation.section == .computerAccess {
                         if let message = desktop.errorMessage {
                             Divider()
@@ -144,7 +156,7 @@ struct MindRoomRootView: View {
             }
             AppSectionCard {
                 sectionHeading("Computer access", status: desktop.connectionStatusLabel)
-                Text("Let agents running elsewhere see and use selected apps on this Mac.")
+                Text("Let agents running elsewhere use selected apps, read selected folders, or run commands you approve on this Mac.")
                     .foregroundStyle(.secondary)
                 Button(desktop.status.hasSavedConnection && !desktop.needsPairing ? "Manage Access" : "Set Up Computer Access") {
                     navigation.section = .computerAccess

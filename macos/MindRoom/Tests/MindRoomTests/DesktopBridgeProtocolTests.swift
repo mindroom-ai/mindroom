@@ -35,6 +35,52 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         XCTAssertEqual(status.browser.userDataDirectory, "/Users/test/Library/Application Support/Browser")
     }
 
+    func testStatusWithoutFolderAndShellFieldsDecodesThemAsOff() throws {
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+
+        XCTAssertEqual(status.config.fileRoots, [])
+        XCTAssertFalse(status.config.shellEnabled)
+        XCTAssertEqual(status.shell, DesktopShellStatus())
+    }
+
+    func testDecodesFolderRootsPendingShellCommandAndHandles() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.completeStatusData) as? [String: Any])
+        var config = try XCTUnwrap(object["config"] as? [String: Any])
+        config["file_roots"] = ["/Users/test/Projects"]
+        config["shell_enabled"] = true
+        object["config"] = config
+        object["shell"] = [
+            "enabled": true,
+            "pending": [
+                "request_id": "shell-7", "requester_id": "@me:example.org", "agent_name": "assistant",
+                "command": "ls -la", "cwd": "/Users/test", "expires_at_ms": 1_900_000_000_000,
+            ],
+            "auto_approve_remaining_seconds": 0.0,
+            "auto_approve_until_revoked": false,
+            "active_request_id": NSNull(),
+            "handles": [[
+                "handle": "handle-1", "requester_id": "@me:example.org", "agent_name": "assistant",
+                "command_preview": "sleep 100", "elapsed_seconds": 12.5, "state": "running",
+            ]],
+        ]
+
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: JSONSerialization.data(withJSONObject: object))
+
+        XCTAssertEqual(status.config.fileRoots, ["/Users/test/Projects"])
+        XCTAssertTrue(status.config.shellEnabled)
+        XCTAssertEqual(status.shell.pending, DesktopShellRequest(
+            requestID: "shell-7", requesterID: "@me:example.org", agentName: "assistant",
+            command: "ls -la", cwd: "/Users/test", expiresAtMilliseconds: 1_900_000_000_000
+        ))
+        XCTAssertEqual(status.shell.handles, [DesktopShellHandle(
+            handle: "handle-1", requesterID: "@me:example.org", agentName: "assistant",
+            commandPreview: "sleep 100", elapsedSeconds: 12.5, state: "running"
+        )])
+        XCTAssertNil(status.shell.activeRequestID)
+        let reencoded = try JSONDecoder().decode(DesktopStatus.self, from: JSONEncoder().encode(status))
+        XCTAssertEqual(reencoded, status)
+    }
+
     func testHydratesPersistedBrowserSettingsBeforeSaving() throws {
         let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
         let store = DesktopControlStore()

@@ -51,7 +51,13 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func refresh() {
-        statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
+        var toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
+        if let shell = desktop.status.shellApprovalState.label { toolTip += "\n\(shell)" }
+        statusItem?.button?.toolTip = toolTip
+        // Without notifications, a waiting command stays visible in the menu bar until someone reviews it.
+        let commandWaiting = desktop.status.shellApprovalState.isPending
+        statusItem?.button?.title = commandWaiting ? "Command waiting" : ""
+        statusItem?.button?.imagePosition = commandWaiting ? .imageLeading : .imageOnly
         menuNeedsUpdate(menu)
     }
 
@@ -82,8 +88,18 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             "Computer access: \(desktop.connectionStatusLabel)…",
             symbol: "desktopcomputer", action: #selector(openComputerAccess)
         ))
+        let shellState = desktop.status.shellApprovalState
+        if shellState.isPending {
+            menu.addItem(disabledItem("Shell command waiting for approval"))
+            menu.addItem(actionItem("Review Command…", symbol: "terminal", action: #selector(openComputerAccess)))
+        } else if shellState != .askEachTime, let label = shellState.label {
+            menu.addItem(disabledItem(label))
+        }
         if desktop.status.authority.controlAvailable {
             menu.addItem(actionItem("Revoke Computer Control", symbol: "hand.raised", action: #selector(revokeComputerControl)))
+        }
+        if desktop.status.isBridgeOnline, desktop.status.shell.hasRevocableWork {
+            menu.addItem(actionItem("Revoke Shell Access", symbol: "hand.raised", action: #selector(revokeShellAccess)))
         }
         if desktop.status.canStopBridge {
             menu.addItem(actionItem("Stop Computer Access", symbol: "stop.circle", action: #selector(stopComputerAccess)))
@@ -117,6 +133,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func openChat() { runner.run(.openHostedChat) }
     @objc private func refreshStatus() { runner.refreshStatus() }
     @objc private func revokeComputerControl() { desktop.revokeControl() }
+    @objc private func revokeShellAccess() { desktop.revokeShell() }
     @objc private func stopComputerAccess() { desktop.stop() }
     @objc private func toggleLocalAgents() {
         guard !runner.serviceStatus.state.needsSetup, let action = runner.serviceStatus.state.primaryAction else { return }
