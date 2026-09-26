@@ -245,6 +245,11 @@ def _runner(paths: RuntimePaths, client: object | None = None) -> SkillReviewRun
     return SkillReviewRunner(paths, client_provider=lambda _agent: client)
 
 
+async def _notices_sent(runner: SkillReviewRunner) -> None:
+    """Wait for the notices of settled reviews, which are sent apart from the reviews."""
+    await asyncio.wait_for(asyncio.gather(*runner._notices), timeout=10)
+
+
 async def _review_due(
     config: Config,
     paths: RuntimePaths,
@@ -254,9 +259,11 @@ async def _review_due(
 ) -> None:
     """Run the review that a completed response made due, as the response runner starts it."""
     assert due is not None, "the conversation should have reached its review interval"
-    task = _runner(paths, client).start(config, *due, captured)
+    runner = _runner(paths, client)
+    task = runner.start(config, *due, captured)
     assert task is not None
     await task
+    await _notices_sent(runner)
 
 
 async def _review(config: Config, paths: RuntimePaths, *, captured: CapturedRequest | None = None) -> None:
@@ -2064,6 +2071,7 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
         await asyncio.wait_for(model.blocked.get(), timeout=10)
         runner.cancel(due[0])
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+        await _notices_sent(runner)
     assert task.cancelled()
     assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
     assert _entries(paths)["mind:session"]["replies"] == 0
@@ -2345,6 +2353,41 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
     recreated = library.read_skill_file(root, "deploy-checks")
     assert recreated is not None
     assert not recreated.learned
+
+
+@pytest.mark.asyncio
+async def test_a_config_change_never_waits_for_a_retired_reviews_notice(tmp_path: Path) -> None:
+    """Retiring waits for the review's count to settle but not for its notice, whose send retries while Matrix is down."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    model.release = asyncio.Event()
+    model.released_requests = 1
+    sending = asyncio.Event()
+
+    async def unreachable_homeserver(*_args: object) -> None:
+        sending.set()
+        await asyncio.Event().wait()
+
+    runner = _runner(paths, object())
+    retired = config.model_copy(deep=True)
+    retired.agents["mind"].skill_learning.enabled = False
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.runner.send_message_result", unreachable_homeserver),
+    ):
+        due = _queue(config, paths, identity=ALICE)
+        assert due is not None
+        task = runner.start(config, *due, None)
+        assert task is not None
+        await asyncio.wait_for(model.blocked.get(), timeout=10)
+        await asyncio.wait_for(runner.retire(retired), timeout=10)
+        queue.drop_retired_reviews(retired, paths)
+        await asyncio.wait_for(sending.wait(), timeout=10)
+        await asyncio.wait_for(runner.stop(), timeout=10)
+    assert task.cancelled()
+    assert _entries(paths) == {}
+    assert not runner._notices
 
 
 @pytest.mark.asyncio
