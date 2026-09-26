@@ -972,6 +972,17 @@ def _same_oauth_client(existing_credentials: dict[str, Any] | None, token_data: 
     return isinstance(token_client_id, str) and token_client_id.strip() == existing_client_id.strip()
 
 
+def _same_token_endpoint(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
+    existing_token_uri = (existing_credentials or {}).get("token_uri")
+    token_uri = token_data.get("token_uri")
+    return (
+        isinstance(existing_token_uri, str)
+        and bool(existing_token_uri)
+        and isinstance(token_uri, str)
+        and token_uri == existing_token_uri
+    )
+
+
 def _token_data_preserving_refresh_token(
     existing_credentials: dict[str, Any] | None,
     safe_token_data: dict[str, Any],
@@ -984,6 +995,7 @@ def _token_data_preserving_refresh_token(
         and existing_refresh_token
         and _same_external_identity(existing_credentials, token_data)
         and _same_oauth_client(existing_credentials, token_data)
+        and _same_token_endpoint(existing_credentials, token_data)
     ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data

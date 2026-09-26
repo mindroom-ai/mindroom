@@ -90,6 +90,7 @@ class _FakeOAuthProvider:
     requester_scoped_credentials = False
     scopes: tuple[str, ...] = ()
     claim_validator = None
+    token_url = "https://oauth.example.test/token"  # noqa: S105
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh
@@ -125,6 +126,7 @@ class _FakeOAuthProvider:
         return OAuthTokenResult(
             token_data={
                 "token": "callback-access",
+                "token_uri": self.token_url,
                 "client_id": "public-client",
                 "scopes": [],
             },
@@ -177,6 +179,7 @@ def _credentials(token: str, refresh_token: str, *, expires_at: float) -> dict[s
     return {
         "token": token,
         "refresh_token": refresh_token,
+        "token_uri": _FakeOAuthProvider.token_url,
         "client_id": "public-client",
         "scopes": [],
         "expires_at": expires_at,

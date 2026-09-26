@@ -2387,6 +2387,7 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
+            "token_uri": provider.token_url,
             "client_id": "client-id",
             "scopes": list(provider.scopes),
             "_source": "oauth",
@@ -3655,6 +3656,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
+            "token_uri": provider.token_url,
             "client_id": "client-id",
             "_id_token": "old-raw-id-token",
             "id_token": "old-standard-id-token",
@@ -3685,6 +3687,27 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert "id_token" not in stored_credentials
     assert "client_secret" not in stored_credentials
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
+
+
+def test_refresh_token_is_not_preserved_across_token_endpoint_change() -> None:
+    existing = {
+        "refresh_token": "old-refresh-token",
+        "token_uri": "https://old.example.test/token",
+        "client_id": "client-id",
+        "_oauth_claims": {"sub": "subject-1"},
+        "_oauth_claims_verified": True,
+    }
+    replacement = {
+        "token": "new-access-token",
+        "token_uri": "https://new.example.test/token",
+        "client_id": "client-id",
+        "_oauth_claims": {"sub": "subject-1"},
+        "_oauth_claims_verified": True,
+    }
+
+    result = oauth_lifecycle._token_data_preserving_refresh_token(existing, replacement)
+
+    assert "refresh_token" not in result
 
 
 @pytest.mark.asyncio
