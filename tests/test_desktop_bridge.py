@@ -902,6 +902,39 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
 
 
 @pytest.mark.asyncio
+async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A finished check hands its handle over once, and request_status still returns that recorded reply."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("while [ ! -f release ]; do sleep 0.05; done; printf done", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    (tmp_path / "release").touch()
+    completed, sequence = await _check_until_completed(bridge, transport, handle, first_sequence=2)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
+    assert _response(transport).error == "Unknown shell handle."
+
+    query = _command(
+        "request_status",
+        request_id="query",
+        sequence=sequence + 2,
+        parameters={"request_id": f"check_shell-{sequence}"},
+    )
+    await _handle(bridge, _event(query))
+
+    recovered = _response(transport).result
+    assert recovered["state"] == "completed"
+    assert recovered["response"]["result"] == completed
+    assert completed["output"] == "done"
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_other_callers_cannot_check_or_kill_a_handle(transport: AsyncMock, tmp_path: Path) -> None:
     """Another allowed requester gets exactly the error of a handle that never existed."""
     shell = _local_shell()
