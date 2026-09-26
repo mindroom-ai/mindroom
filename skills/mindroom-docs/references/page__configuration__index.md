@@ -364,7 +364,7 @@ Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
 When the complete reviewable arguments differ from the original call after redaction or normalization, the exact call can still be approved once, but reusable and timed auto-approval are unavailable for that card.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.
 Subsequent matching calls do not publish another approval card.
-Calls whose argument previews require sanitization still publish a one-time approval card even when a timed approval is active.
+Calls whose complete reviewable arguments differ from the original after redaction or normalization still publish a one-time approval card even when a timed approval is active.
 For generic MCP dispatch, the server and remote tool name are part of the operation, so approving one remote operation does not approve every tool on that server.
 Timed approval requires a canonical thread and complete reviewable arguments; native tool-authored confirmations and background-script approvals remain per-call.
 The backend fixes the grant deadline when it accepts the originating call and preserves it across restarts; replaying an approval never extends or recreates the grant.
