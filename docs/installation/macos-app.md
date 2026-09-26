@@ -4,7 +4,7 @@ MindRoom provides a native macOS window with a small menu bar companion.
 Open the app from Applications or Spotlight to manage two independent roles:
 
 - **Local agents** run MindRoom on this Mac and connect to your Matrix chat account.
-- **Computer access** lets a paired agent running elsewhere observe or control selected applications on this Mac.
+- **Computer access** lets a paired agent running elsewhere observe or control selected applications, read selected folders, and request shell commands that you approve on this Mac.
 
 Use either role, or both.
 Starting local agents does not enable computer access, and starting computer access does not start local agents.
@@ -15,7 +15,7 @@ The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its gene
 - macOS 14 Sonoma or later, on Apple silicon or Intel.
 - Network access to install the MindRoom runtime and connect to your Matrix server.
 - For local agents, a configured model provider credential, local model, or supported provider login.
-- For computer access, an existing Desktop-enabled MindRoom agent and the macOS permissions described in the [Desktop guide](../tools/desktop.md).
+- For computer access, an existing Desktop-enabled MindRoom agent; application access also needs the macOS permissions described in the [Desktop guide](../tools/desktop.md).
 
 ## Install
 
@@ -60,46 +60,86 @@ The initialization actions explicitly target `~/.mindroom`.
 Computer access uses the bundled Desktop Helper and does not require the local-agent runtime or background service.
 Open **Computer access** to manage its session independently.
 
-The connection summary and four steps stay at the top of the section: **Connect**, **Apps**, **Permissions**, and **Start**.
-Each step shows a green check when complete and a short status below its name. Unsaved app choices, an empty app list, or missing permissions show an amber indicator. Start is checked only while access is running.
-A new setup shows **Not connected**. A saved setup shows **Connection saved · Access off** and opens the next incomplete step; **Connected** means observation or control is running.
+The connection summary and four steps stay at the top of the section: **Connect**, **Access**, **Permissions**, and **Start**.
+Each step shows a green check when complete and a short status below its name.
+Unsaved access choices, nothing saved, or missing permissions for saved applications show an amber indicator.
+Start is checked only while access is running.
+A new setup shows **Not connected**.
+A saved setup shows **Connection saved · Access off** and opens the next incomplete step; **Connected** means computer access is running.
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
 2. In **Connect**, paste it into **Setup data** and select **Import Setup**.
 3. Review the controller fingerprint, requester, and agent. The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
 4. Confirm the displayed identities and select **Save and Connect**.
 5. Copy the displayed confirmation command into the same agent chat. After the agent confirms pairing, select **I’ve Confirmed in Chat**.
-6. In **Apps**, search and check the applications to allow, then select **Save App Access** above the list. Search accepts partial names and reordered words, such as `chr goo` for Google Chrome.
-7. In **Permissions**, allow Accessibility and Screen Recording for this copy of MindRoom. Restart the app if macOS requires it, then select **Check Again**.
-8. Select **Start Observe Only**. The summary changes to **Connected** and offers **Stop Access**.
+6. In **Access**, choose **Applications**, **Read-only folders**, or **Shell commands**, and save each choice.
+   For applications, search and check the applications to allow, then select **Save App Access** above the list.
+   Search accepts partial names and reordered words, such as `chr goo` for Google Chrome.
+   For folders and shell commands, see [Folders and Shell Commands](#folders-and-shell-commands) and select **Save Folder and Shell Access**.
+7. If you saved applications, allow Accessibility and Screen Recording for this copy of MindRoom in **Permissions**.
+   Restart the app if macOS requires it, then select **Check Again**.
+   Folder and shell access need neither permission, so **Permissions** shows **Not needed** without saved applications.
+8. Select **Start Observe Only**, or **Start Access** when folders or shell commands are saved.
+   The summary changes to **Connected** and offers **Stop Access**.
 
 Setup stays disabled until you acknowledge the chat confirmation. If the app closes before that step, request fresh setup data and repeat Connect; the saved login remains available.
 For homeservers behind Cloudflare Access, the app opens the organization sign-in flow when needed. This requires `cloudflared` installed on the Mac; missing-helper errors explain how to install it.
 
 The terminal `mindroom desktop setup` command saves the same connection used by the app.
 An already open app refreshes that setup automatically while computer access is stopped, preserving unsaved edits.
-After confirming pairing in chat, choose and save allowed apps here, then start observation from either the app or `mindroom desktop run`.
+After confirming pairing in chat, choose and save access here or with `mindroom desktop access`, then start from either the app or `mindroom desktop run`.
 Stop the bridge in the interface that started it before starting it in the other interface.
 Terminal setup can also save app choices with repeated `--allow-app` options; omitting them preserves choices for the same controller.
 Both interfaces default to `~/.mindroom`; a terminal `--config` or `--storage-path` override creates a separate setup.
 The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
 
 The summary always names the next required action. The **Start** step explains any remaining blocker and links to its step.
-You can inspect any step without scrolling through the other steps. App choices made before connecting are retained through setup.
-Once setup is saved, **Save App Access** updates app selections independently.
+You can inspect any step without scrolling through the other steps.
+Access choices made before connecting are retained through setup.
+Once setup is saved, **Save App Access** updates app selections, and **Save Folder and Shell Access** updates folders and shell requests, each without changing the other.
+A saved browser setting alone does not enable Start; save an application, folder, or shell choice first.
 
 Permission status applies to the running copy of MindRoom.
 If System Settings already shows MindRoom enabled but the app reports **Not allowed yet**, quit and reopen MindRoom first.
 Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
 In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
-Observation and control are separate choices.
+Application observation and control are separate choices.
 **Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
 **Revoke Now** immediately removes input authority while observation continues; **Stop Access** ends the bridge session.
 Control expires according to the helper's bounded lease and is never renewed automatically at app launch or restart.
-The menu also provides an immediate control-revoke action while a lease is active.
+The menu also provides an immediate control-revoke action while a lease is active, and **Revoke Shell Access** while shell auto-approval or a shell command is active.
 Optional browser settings and redacted diagnostics are available in expandable sections.
 See the [Desktop guide](../tools/desktop.md) for macOS permissions, pairing recovery, and browser-extension setup.
+
+### Folders and Shell Commands
+
+In **Access**, **Read-only folders** lists the folders an agent may list and read; **Add Folder…** chooses more and **Remove** drops one.
+Agents cannot create, change, or delete files there.
+macOS may still ask before MindRoom reads protected folders such as Desktop, Documents, or Downloads, and MindRoom never requests Full Disk Access.
+**Shell commands** has one switch, **Allow shell command requests**.
+Save both with **Save Folder and Shell Access**; while access is running, **Stop and Save…** stops it first after confirmation.
+
+!!! warning "Shell commands run with your full macOS account access"
+    An approved command can use the network and every file your account can read or change, including files outside the read-only folders.
+    The working folder does not confine it.
+
+While access runs with shell requests allowed, each command request appears on an approval card above the steps.
+The card shows the command, working folder, agent, requester, and expiry, with control and text-direction characters shown escaped.
+Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
+Without a waiting request, **Allow Without Asking…** offers the same durations.
+**Approve & Allow…** and **Allow Without Asking…** ask for confirmation first and list the agents and requesters the choice covers.
+
+!!! warning "Auto-approval covers every allowed agent and requester"
+    While auto-approval lasts, every shell command from all locally allowed agents and requesters runs without asking.
+    It is never saved, so restarting MindRoom or its computer access asks for each command again.
+
+**Revoke Shell Access** ends auto-approval, rejects a waiting request, and stops running commands.
+**Background commands** lists commands that kept running after their first reply, with their agent, requester, elapsed time, and state, and a **Kill** button for each running one.
+While a command waits, a **Review Command** bar appears in every window section, and the menu bar shows **Command waiting** with **Review Command…**.
+The menu only opens the card; it never approves a command.
+Stopping computer access or quitting MindRoom also revokes auto-approval and stops every shell command.
+See [Shell Commands](../tools/desktop.md#shell-commands) for handles, output limits, the login-shell environment, and what the model provider receives.
 
 ## Window, Menu Bar, and Login
 

@@ -47,8 +47,9 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
 │ config                   Manage MindRoom configuration files.                          │
 │ plugins                  Validate and vendor external MindRoom plugins.                │
-│ desktop                  Connect allowlisted local applications to cloud MindRoom over │
-│                          Matrix E2EE.                                                  │
+│ desktop                  Connect allowlisted local apps, read-only folders, and        │
+│                          locally approved shell commands to cloud MindRoom over Matrix │
+│                          E2EE.                                                         │
 │ avatars                  Generate and sync managed avatar assets.                      │
 │ threads                  Export Matrix threads to local files.                         │
 │ journal                  Inspect and rebind the durable event journal.                 │
@@ -206,7 +207,7 @@ Start MindRoom with your configuration.
 
 ## desktop
 
-Connect explicitly allowlisted local applications to cloud MindRoom over Matrix end-to-end encryption.
+Connect explicitly allowlisted local applications, read-only folders, and locally approved shell commands to cloud MindRoom over Matrix end-to-end encryption.
 See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide for the complete secure setup.
 
 <!-- CODE:START -->
@@ -224,17 +225,21 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
  Usage: root desktop [OPTIONS] COMMAND [ARGS]...
 
- Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.
+ Connect allowlisted local apps, read-only folders, and locally approved shell commands
+ to cloud MindRoom over Matrix E2EE.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ app     Run the native app's private structured helper over inherited standard I/O.    │
-│ login   Log in once, create an Olm device, and save its access token privately.        │
-│ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
-│ setup   Pair and save the connection shared with the macOS app.                        │
-│ run     Observe using saved app/terminal setup; flags override this run only.          │
+│ app      Run the native app's private structured helper over inherited standard I/O.   │
+│ login    Log in once, create an Olm device, and save its access token privately.       │
+│ pair     Claim one requester-agent pairing through authenticated Matrix E2EE.          │
+│ setup    Pair and save the connection shared with the macOS app.                       │
+│ access   Save read-only folders and shell requests shared with the macOS app; omitted  │
+│          options keep saved values.                                                    │
+│ run      Run the bridge with the saved app, folder, and shell setup; flags override    │
+│          this run only.                                                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -246,6 +251,7 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
 Log in when needed, claim pairing, and save the connection shared with the macOS app.
 Use `--allow-app` to save app choices here, or choose them later in **Computer access**.
+Repeating setup for the same controller keeps saved folder and shell choices, and keeps saved apps unless you supply new app IDs.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -294,6 +300,47 @@ Use `--allow-app` to save app choices here, or choose them later in **Computer a
 │                                              env.                                      │
 │    --storage-path              -s      PATH  Desktop bridge state directory.           │
 │    --help                      -h            Show this message and exit.               │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+### desktop access
+
+Save read-only folders and shell command requests in the setup shared with the macOS app.
+Omitted options keep the saved values, and changes apply the next time the bridge starts.
+Shell commands run with your full account access, and each one still waits for approval on this computer; see [Shell Commands](https://docs.mindroom.chat/tools/desktop/#shell-commands) before enabling them.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["desktop", "access", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root desktop access [OPTIONS]
+
+ Save read-only folders and shell requests shared with the macOS app; omitted options
+ keep saved values.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --allow-folder                     PATH  Add a folder agents may list and read, never  │
+│                                          write; repeat as needed.                      │
+│ --clear-folders                          Remove every saved read-only folder.          │
+│ --shell              --no-shell          Let agents request shell commands, each       │
+│                                          approved on this computer while the bridge    │
+│                                          runs.                                         │
+│ --config         -c                PATH  MindRoom config path used for runtime env.    │
+│ --storage-path   -s                PATH  Desktop bridge state directory.               │
+│ --help           -h                      Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -388,6 +435,8 @@ Create and privately save the dedicated local desktop Matrix device.
 Run the outbound-only local Matrix worker using setup saved by the terminal or macOS app.
 Flags override settings for this run without changing the saved setup.
 Control remains disabled unless the local command grants a short lease.
+Saved read-only folders and shell settings also apply, and with shell requests enabled, each command waits for an answer at this terminal.
+`--shell-auto-approve-minutes` approves shell commands from every allowed requester and agent without asking for part of this run and is never saved.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -408,7 +457,7 @@ Control remains disabled unless the local command grants a short lease.
 
  Usage: root desktop run [OPTIONS]
 
- Observe using saved app/terminal setup; flags override this run only.
+ Run the bridge with the saved app, folder, and shell setup; flags override this run only.
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
 │ --controller-user-id                              TEXT                  Pinned cloud         │
@@ -433,13 +482,21 @@ Control remains disabled unless the local command grants a short lease.
 │                                                                         agent; repeat as     │
 │                                                                         needed.              │
 │ --allow-control                                                         Enable semantic and  │
-│                                                                         fallback input for a │
-│                                                                         short local lease.   │
-│                                                                         Default is           │
-│                                                                         observe-only.        │
+│                                                                         fallback app input   │
+│                                                                         for a short local    │
+│                                                                         lease. Default: apps │
+│                                                                         are observe-only.    │
 │ --lease-minutes                                   INTEGER RANGE         Local control lease  │
 │                                                   [1<=x<=60]            duration.            │
 │                                                                         [default: 15]        │
+│ --shell-auto-approve…                             INTEGER RANGE         Approve shell        │
+│                                                   [1<=x<=60]            commands from every  │
+│                                                                         allowed requester    │
+│                                                                         and agent            │
+│                                                                         automatically for    │
+│                                                                         this many minutes of │
+│                                                                         this run; never      │
+│                                                                         saved.               │
 │ --max-screenshot-wid…                             INTEGER RANGE                              │
 │                                                   [320<=x<=3840]                             │
 │ --jpeg-quality                                    INTEGER RANGE                              │

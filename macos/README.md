@@ -13,9 +13,9 @@ MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
 ```
 
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
-It runs the existing Python Accessibility, screen capture, input, browser, Matrix, and desktop bridge implementations.
+It runs the existing Python Accessibility, screen capture, input, browser, read-only folder, shell, Matrix, and desktop bridge implementations.
 The menu app launches it as a foreground child and communicates only through inherited stdin, stdout, and stderr pipes.
-Quitting the app closes that channel and clears every control lease.
+Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
 
 ## Build
@@ -66,14 +66,20 @@ Import only fills transient form state.
 The one-time pairing code is not written to the native configuration.
 The person at the Mac must confirm the exact controller fingerprint, requester, and agent after edits or configuration revision changes.
 
+The Access step has separate Applications, Read-only folders, and Shell commands editors, each with its own saved or unsaved indicator.
 Allowed applications has searchable checkboxes and a separate Save App Access action.
 The list includes apps in standard installation folders and currently running apps; Add App can select an application elsewhere.
 Saved applications remain visible even when they are no longer installed.
 For an existing connection, saving apps preserves the controller, requester, browser, and capture settings without requiring pairing again.
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
-Start Observe Only explicitly to resume with the saved app list.
-Saving an empty selection removes all app access; select and save at least one app before Start Observe Only becomes available again.
-Setup presents one step at a time: Connect, Apps, Permissions, Start. The top connection summary names the next required step.
+Start Observe Only, or Start Access when folders or shell commands are saved, explicitly to resume with the saved choices.
+Saving an empty selection removes all app access; Start stays unavailable until at least one app, folder, or shell choice is saved.
+A saved browser setting alone does not make Start available.
+Read-only folders are chosen with a directory panel and saved as canonical paths; duplicates, including links to an already selected folder, are rejected.
+Folders and the Allow shell command requests switch save together with Save Folder and Shell Access, using the same revision check and stop-before-saving confirmation as app access.
+Choosing only folders or shell commands needs no app selection, and the Permissions step reports that Accessibility and Screen Recording are not needed.
+Setup presents one step at a time: Connect, Access, Permissions, Start.
+The top connection summary names the next required step.
 Save and Connect saves a disabled configuration and claims pairing using the reviewed revision and saved session. I’ve Confirmed in Chat enables that exact saved setup after the user confirms the agent's response.
 A failed claim or app restart before confirmation leaves the configuration disabled; fresh setup data can be imported without replacing the saved login. Pairing codes and confirmation commands remain transient.
 The Start step explains remaining blockers and links to the corresponding step. App selection save controls appear above the list.
@@ -94,8 +100,15 @@ Use the existing device to finish pairing, or select **Replace Saved Login…** 
 Replacement requires pairing the new device again and is unavailable while the bridge is running.
 Organization sign-in and pairing accept the imported Cloudflare Access requirement, prepare headers without blocking the native loop, and persist that requirement with the saved session.
 
+While access runs with shell requests allowed, a pending shell command appears on an approval card above the steps, with escaped control and text-direction characters.
+Reject and Approve Once send only the reviewed request ID and decision; Approve & Allow and Allow Without Asking first confirm the agents and requesters they cover for 5, 15, or 60 minutes or until stopped.
+The app sends a decision only while the helper still reports the exact request that was reviewed, and never sends an approval or grant on launch, reconnect, save, or status refresh.
+Revoke Shell Access and each running handle's Kill button stay available while other work is pending.
+The menu bar shows Command waiting with Review Command…, which opens the card without approving, and offers Revoke Shell Access while auto-approval or a shell command is active.
+Approvals and auto-approval are never saved.
+
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
-Stop has a separate single request lane; status, revoke, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
+Stop has a separate single request lane; status, control and shell revoke, shell decisions and grants, handle kills, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
 Excess requests receive an immediate retryable `busy` response.
 A durable transport or bridge worker failure fences admission and control before its peer is cancelled.
 
@@ -111,5 +124,6 @@ A release still requires these checks on macOS:
 3. Confirm Accessibility and Screen Recording prompts name the packaged helper.
 4. Upgrade over a prior signed build and confirm permission continuity.
 5. Exercise keyboard and VoiceOver navigation in Computer access.
-6. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
-7. Notarize, staple, and launch the DMG build, then test a Sparkle update.
+6. With a disposable folder and a harmless command, check folder selection, a protected-folder prompt, the shell approval card, auto-approval confirmation, and Revoke Shell Access.
+7. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
+8. Notarize, staple, and launch the DMG build, then test a Sparkle update.
