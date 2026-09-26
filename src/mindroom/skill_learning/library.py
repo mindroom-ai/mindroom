@@ -186,8 +186,31 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
         content=content,
         digest=content_digest(content),
         learned=_learner_owns(frontmatter, usage, path=name),
-        name=skill_name if isinstance(skill_name, str) else name,
+        # A skill without a usable name keeps its directory's, so an edit can repair it.
+        name=skill_name if isinstance(skill_name, str) and skill_name else name,
     )
+
+
+def skill_directories(skills_root: Path) -> dict[str, SkillFile]:
+    """Return the SKILL.md of every workspace skill directory, however its frontmatter reads, by directory name.
+
+    An unreadable entry is skipped, so a planted one never hides the others.
+    """
+    if not skills_root.is_dir():
+        return {}
+    skills: dict[str, SkillFile] = {}
+    with open_skills_root(skills_root) as root_fd:
+        usage = load_skill_usage(root_fd)
+        for directory in list_entries(root_fd, directories=True):
+            try:
+                with _open_skill(root_fd, directory) as skill_fd:
+                    markdown = _read_skill_file(skill_fd, directory, SKILL_FILENAME, usage.get(directory, SkillUsage()))
+            except (OSError, ValueError) as exc:
+                logger.warning("Skipping unreadable workspace skill", path=str(skills_root / directory), error=str(exc))
+                continue
+            if markdown is not None:
+                skills[directory] = markdown
+    return skills
 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:

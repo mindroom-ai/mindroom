@@ -25,11 +25,12 @@ from mindroom.skill_learning.library import (
     create_skill,
     read_skill_file,
     remove_skill_file,
+    skill_directories,
     support_file_paths,
     write_skill_file,
 )
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import SKILL_FILENAME, load_workspace_skills, parse_skill_markdown
+from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -114,25 +115,23 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
 
 
 def _chat_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
-    """Return the agent's skills plus, like Hermes' foreground skill_manage, every other workspace skill directory.
+    """Return the agent's skills, with every workspace skill directory first under its own name.
 
-    A workspace skill whose requirements this host does not meet stays editable in chat by its directory name, so the
-    agent can fix it.
+    Like Hermes' foreground skill_manage, which finds a skill by its directory, chat reaches a workspace skill that
+    this host does not load, one whose frontmatter is broken, one that overrides a configured skill, and an adopted
+    skill by its directory; configured and adopted skills stay reachable under the names the agent loads them by.
     """
     catalog = load_skill_catalog(config, runtime_paths, agent_name, skills_root)
     entries = dict(catalog.entries)
-    loaded = {entry.directory for entry in entries.values()}
-    for skill in load_workspace_skills(skills_root):
-        directory = Path(skill.source_path).name
-        if directory in loaded or directory in entries:
-            continue
-        current = read_skill_file(skills_root, directory)
-        entries[directory] = _CatalogEntry(
+    loaded = {entry.directory: entry for entry in catalog.entries.values() if entry.directory is not None}
+    for directory, markdown in skill_directories(skills_root).items():
+        entries[directory] = loaded.get(directory) or _CatalogEntry(
             name=directory,
-            description=skill.description,
+            # Chat only changes files, so it never shows what an unloaded skill says.
+            description="",
             directory=directory,
-            learned=current is not None and current.learned,
-            instructions=skill.instructions,
+            learned=markdown.learned,
+            instructions="",
         )
     return replace(catalog, entries=entries)
 

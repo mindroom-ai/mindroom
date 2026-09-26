@@ -7596,21 +7596,13 @@ visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.redaction",
-    "mindroom.history_run_visibility",
-]
+depends_on = ["mindroom.history_run_visibility", "mindroom.redaction"]
 visibility = ["mindroom.skill_learning.queue", "mindroom.skill_learning.reviewer"]
 
 [[modules]]
 path = "mindroom.skill_learning.capture"
 depends_on = ["mindroom.agno_compat_model_hooks"]
-visibility = [
-    "mindroom.ai",
-    "mindroom.response_runner",
-    "mindroom.response_turn",
-    "mindroom.skill_learning.reviewer",
-    "mindroom.skill_learning.runner",
-]
+visibility = ["mindroom.ai", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.skill_learning.tools"
@@ -7635,7 +7627,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_loading",
     "mindroom.model_usage",
-    "mindroom.skill_learning.capture",
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_call_budget",
@@ -7646,13 +7637,13 @@ visibility = ["mindroom.skill_learning.runner"]
 path = "mindroom.skill_learning.queue"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.atomic_file",
     "mindroom.file_locks",
     "mindroom.logging_config",
+    "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_system.worker_routing",
-    "mindroom.atomic_file",
-    "mindroom.path_confinement",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.response_runner", "mindroom.skill_learning.runner"]
 
@@ -7666,12 +7657,10 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
     "mindroom.runtime_resolution",
-    "mindroom.skill_learning.capture",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.queue",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.tools",
     "mindroom.tool_system.skills",
-    "mindroom.tool_system.worker_routing",
 ]
-visibility = ["mindroom.orchestrator", "mindroom.runtime_protocols"]
+visibility = ["mindroom.orchestrator"]

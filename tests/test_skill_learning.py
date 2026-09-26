@@ -2116,29 +2116,44 @@ async def test_reviews_of_different_skills_directories_run_side_by_side(tmp_path
     assert all(entry["replies"] == 0 for entry in _entries(paths).values())
 
 
+_UNMET = (
+    "---\nname: {name}\ndescription: Use when checking the setup\nmetadata:\n  openclaw:\n    requires:\n"
+    "      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n---\nExport the variable first.\n"
+)
+
+
 @pytest.mark.asyncio
-async def test_chat_skill_manage_edits_a_workspace_skill_this_host_does_not_load(tmp_path: Path) -> None:
-    """Like Hermes' skill_manage, chat finds a workspace skill by its directory, so it can fix unmet requirements."""
+@pytest.mark.parametrize(
+    ("directory", "content", "configured"),
+    [
+        ("needs-env", _UNMET.format(name="needs-env"), []),
+        ("mindroom-docs", _UNMET.format(name="mindroom-docs"), ["mindroom-docs"]),
+        ("broken", "---\nname broken\n---\nExport the variable first.\n", []),
+        ("unnamed", "---\nname: ''\ndescription: Use when checking the setup\n---\nExport the variable first.\n", []),
+        ("adopted", "---\nname: other-name\ndescription: Use when checking the setup\n---\nExport it first.\n", []),
+    ],
+    ids=["unmet requirements", "overrides a configured skill", "broken frontmatter", "empty name", "adopted directory"],
+)
+async def test_chat_skill_manage_finds_workspace_skills_by_their_directory(
+    tmp_path: Path,
+    directory: str,
+    content: str,
+    configured: list[str],
+) -> None:
+    """Like Hermes' _find_skill, chat finds a workspace skill by its directory, even one this host does not load."""
     config, paths = _learner(tmp_path)
+    config.agents["mind"].skills = configured
     root = _skills_root(config, paths)
-    _write_skill(
-        root,
-        "needs-env",
-        "---\nname: needs-env\ndescription: Use when checking the setup\nmetadata:\n  openclaw:\n    requires:\n"
-        "      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n---\nExport the variable first.\n",
-    )
-    assert "needs-env" not in load_skill_catalog(config, paths, "mind", root).entries
-    tools = SkillManageTools("mind", config, paths, root)
+    _write_skill(root, directory, content)
+    current = library.read_skill_file(root, directory)
+    assert current is not None
+    # An edit keeps the skill's name, or its directory's when the frontmatter has none.
+    fixed = f"---\nname: {current.name}\ndescription: Use when checking the setup\n---\nRun the check.\n"
     result = json.loads(
-        await tools.skill_manage(
-            "patch",
-            "needs-env",
-            old_string="      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n",
-            new_string="",
-        ),
+        await SkillManageTools("mind", config, paths, root).skill_manage("edit", directory, content=fixed),
     )
     assert result["success"], result
-    assert "SKILL_LEARNING_TEST_MISSING_ENV" not in (root / "needs-env/SKILL.md").read_text()
+    assert (root / directory / "SKILL.md").read_text() == fixed
 
 
 @pytest.mark.asyncio
