@@ -119,14 +119,23 @@ async def test_missing_login_shell_uses_the_fixed_allowlist(tmp_path: Path) -> N
     assert await capture_login_environment(shell=str(tmp_path / "missing-shell")) == _expected_fallback()
 
 
-async def _wait_for_path(path: Path, *, timeout_seconds: float) -> bool:
-    """Poll for *path* to appear; under xdist load the writer can lag its own process start."""
+async def _wait_for_pid(path: Path, *, timeout_seconds: float) -> int | None:
+    """Poll for *path* to hold a parseable PID; under xdist load the writer can lag its own process start.
+
+    ``echo $$ > path`` truncates (and so creates) the file before the write lands, so a bare
+    existence check can observe it created but still empty; wait for parseable content instead.
+    """
     deadline = time.monotonic() + timeout_seconds
-    while not path.exists():
+    while True:
+        content = path.read_text().strip() if path.exists() else ""
+        if content:
+            try:
+                return int(content)
+            except ValueError:
+                pass
         if time.monotonic() >= deadline:
-            return False
+            return None
         await asyncio.sleep(0.01)
-    return True
 
 
 @pytest.mark.asyncio
@@ -148,12 +157,12 @@ async def test_hanging_profile_is_bounded_and_its_process_group_killed(tmp_path:
         assert time.monotonic() - started < capture_timeout + 10
         for name in ("helper.pid", "shell.pid"):
             path = tmp_path / name
-            if not await _wait_for_path(path, timeout_seconds=5.0):
+            pid = await _wait_for_pid(path, timeout_seconds=5.0)
+            if pid is None:
                 pytest.fail(
-                    f"{name} never appeared: the fake profile was never scheduled before the "
-                    f"{capture_timeout}s capture bound, even under load",
+                    f"{name} never held a parseable PID: the fake profile was never scheduled before "
+                    f"the {capture_timeout}s capture bound, even under load",
                 )
-            pid = int(path.read_text())
             for _ in range(300):
                 try:
                     os.kill(pid, 0)
