@@ -57,8 +57,9 @@ _GUEST_REMOVAL_REASON = "Personal rooms are private to their owner"
 _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
 )
-# Retries for a removal a member event could not finish; restart reconciliation
-# covers anything still left after the last one.
+# Retries for a removal a member event could not finish. After the last one,
+# the next member event in the room or a restart reconciliation of an eligible
+# owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 
 
@@ -459,12 +460,27 @@ class PersonalRoomService:
         path = await self._owner_record_path(room, excluding=user_id)
         if path is None or await self._remove_guests_now(path, room.room_id):
             return
-        if room.room_id not in self._guest_removal_retries:
-            self._guest_removal_retries[room.room_id] = create_background_task(
+        pending = self._guest_removal_retries.get(room.room_id)
+        if pending is None or pending.done():
+            task = create_background_task(
                 self._retry_guest_removal(path, room.room_id),
                 name=f"personal_room_guest_removal_{room.room_id}",
                 owner=self.runtime,
             )
+            self._guest_removal_retries[room.room_id] = task
+            task.add_done_callback(lambda done: self._forget_guest_removal_retry(room.room_id, done))
+
+    def _forget_guest_removal_retry(self, room_id: str, task: asyncio.Task[None]) -> None:
+        if self._guest_removal_retries.get(room_id) is task:
+            del self._guest_removal_retries[room_id]
+
+    async def cancel_guest_removal_retries(self, *, timeout_seconds: float) -> None:
+        """Cancel sleeping retries so they never spend the shutdown budget."""
+        tasks = tuple(self._guest_removal_retries.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=timeout_seconds)
 
     async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str) -> Path | None:
         """Return the record of the member whose personal room this is, if any.
@@ -500,13 +516,10 @@ class PersonalRoomService:
         return True
 
     async def _retry_guest_removal(self, path: Path, room_id: str) -> None:
-        try:
-            for delay in _GUEST_REMOVAL_RETRY_SECONDS:
-                await asyncio.sleep(delay)
-                if await self._remove_guests_now(path, room_id):
-                    return
-        finally:
-            self._guest_removal_retries.pop(room_id, None)
+        for delay in _GUEST_REMOVAL_RETRY_SECONDS:
+            await asyncio.sleep(delay)
+            if self._settings() is None or await self._remove_guests_now(path, room_id):
+                return
 
     def _template_values(self, record: PersonalRoomRecord) -> dict[str, str]:
         return {

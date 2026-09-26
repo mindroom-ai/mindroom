@@ -114,6 +114,7 @@ class PersonalRoomLifecycle:
                 await asyncio.gather(task, return_exceptions=True)
                 self._reconciliation_task = None
         self._next_reconciliation_at = 0.0
+        await self.service.cancel_guest_removal_retries(timeout_seconds=timeout_seconds)
 
     async def _onboard(
         self,

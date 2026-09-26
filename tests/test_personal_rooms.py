@@ -507,7 +507,7 @@ async def test_a_failed_guest_removal_is_retried_without_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A member event never raises, so a failure cannot hold the room's event lane; it retries on its own."""
-    monkeypatch.setattr("mindroom.matrix.personal_rooms._GUEST_REMOVAL_RETRY_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr("mindroom.matrix.personal_rooms._GUEST_REMOVAL_RETRY_SECONDS", (0.0,))
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
@@ -518,14 +518,71 @@ async def test_a_failed_guest_removal_is_retried_without_raising(
     server.fail_kick = True
 
     await owner.guest_membership_event(room, "@bob:localhost", "invite")
-    await owner.guest_membership_event(room, "@bob:localhost", "invite")
     assert server.membership(room_id, "@bob:localhost") == "invite"
-    assert len(owner._guest_removal_retries) == 1
     retry = owner._guest_removal_retries[room_id]
 
     server.fail_kick = False
     await retry
+    await asyncio.sleep(0)
     assert server.membership(room_id, "@bob:localhost") == "leave"
+    assert not owner._guest_removal_retries
+
+
+@pytest.mark.asyncio
+async def test_a_room_has_at_most_one_pending_guest_removal_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated failures while a retry sleeps reuse it rather than stacking more."""
+    monkeypatch.setattr("mindroom.matrix.personal_rooms._GUEST_REMOVAL_RETRY_SECONDS", (3600.0,))
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    room = nio.MatrixRoom(room_id, server.user_id)
+    room.add_member("@alice:localhost", None, None)
+    room.add_member("@bob:localhost", None, None, invited=True)
+    server.set_member(room_id, "@bob:localhost", "invite")
+    server.fail_kick = True
+
+    await owner.guest_membership_event(room, "@bob:localhost", "invite")
+    retry = owner._guest_removal_retries[room_id]
+    await owner.guest_membership_event(room, "@bob:localhost", "invite")
+    try:
+        assert owner._guest_removal_retries == {room_id: retry}
+        assert not retry.done()
+    finally:
+        await owner.cancel_guest_removal_retries(timeout_seconds=1)
+    assert not owner._guest_removal_retries
+
+
+@pytest.mark.asyncio
+async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown cancels a sleeping retry instead of waiting out its delay."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    room = nio.MatrixRoom(room_id, server.user_id)
+    room.add_member("@alice:localhost", None, None)
+    room.add_member("@bob:localhost", None, None, invited=True)
+    server.set_member(room_id, "@bob:localhost", "invite")
+    server.fail_kick = True
+    await owner.guest_membership_event(room, "@bob:localhost", "invite")
+    retry = owner._guest_removal_retries[room_id]
+    lifecycle = PersonalRoomLifecycle(
+        agent_name="helper",
+        runtime=owner.runtime,
+        runtime_paths=owner.runtime_paths,
+        service=owner,
+        lookup_target=lambda _agent: None,
+        requester_user_id=lambda event: event.sender,
+    )
+
+    await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
+
+    assert retry.cancelled()
     assert not owner._guest_removal_retries
 
 
