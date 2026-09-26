@@ -248,11 +248,12 @@ macOS supports native semantic state through AXUIElement and requires Accessibil
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
 When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
-Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
+Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
+Local `mindroom desktop` commands, including `mindroom desktop run`, currently need macOS or Linux because the saved Desktop setup and Matrix session use POSIX file locks.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.
-They require a POSIX system such as macOS or Linux, and the bridge refuses to start with them on other platforms.
+They require macOS or Linux.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
 Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
 
@@ -458,7 +459,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 Add only the applications needed for the current task.
 Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
 `primary-screen` has no semantic elements.
-On Windows and Linux, `primary-screen` is currently the only usable state target.
+On Linux, `primary-screen` is currently the only usable state target.
 
 ### Read-Only Folders and Shell Commands from the Terminal
 
@@ -666,7 +667,7 @@ Native semantic accessibility is implemented only for macOS in this version.
 Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
 On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
 ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
-Windows and Linux pixel operations currently target the primary display.
+Linux pixel operations currently target the primary display.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
