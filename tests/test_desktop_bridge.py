@@ -400,6 +400,15 @@ async def _wait_for_pending_shell(bridge: DesktopBridge) -> dict[str, object]:
     pytest.fail("shell approval never became pending")
 
 
+async def _wait_for_active_shell(bridge: DesktopBridge) -> str:
+    for _ in range(200):
+        active_request_id = bridge.local_status()["shell"]["active_request_id"]
+        if active_request_id is not None:
+            return active_request_id
+        await asyncio.sleep(0.005)
+    pytest.fail("shell command never became active")
+
+
 @pytest.mark.asyncio
 async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
     transport: AsyncMock,
@@ -762,6 +771,26 @@ async def test_other_callers_see_shell_state_without_pending_command(transport: 
     bridge.decide_local_shell("request-1", approved=False, auto_approve_seconds=0)
     await execution
     assert not (tmp_path / "marker").exists()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_other_callers_see_active_shell_without_its_request_id(transport: AsyncMock, tmp_path: Path) -> None:
+    """A different allowed caller sees that a command is active, but never learns its request ID."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = _command("run_shell", parameters={"command": "sleep 30", "cwd": str(tmp_path)})
+    await bridge.on_to_device_event(_event(command))
+    execution = asyncio.create_task(_execute(bridge))
+    await _wait_for_active_shell(bridge)
+    await _handle(bridge, _event(_command("status", request_id="status-bob", sequence=2, requester_id=BOB)))
+    assert _response(transport).result["bridge"]["shell"]["active_request_id"] is None
+    await _handle(bridge, _event(_command("status", request_id="status-alice", sequence=3)))
+    assert _response(transport).result["bridge"]["shell"]["active_request_id"] == "request-1"
+    await asyncio.wait_for(bridge.stop(), timeout=3)
+    await execution
+    await bridge.deliver_pending()
     bridge.close()
 
 

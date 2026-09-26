@@ -261,6 +261,24 @@ async def test_revoke_stops_running_process_group(tmp_path: Path, pids: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_status_hides_active_request_id_from_a_different_caller(tmp_path: Path, pids: Path) -> None:
+    """Another caller sees that a command is active, but not its request ID."""
+    shell = local_shell()
+    shell.grant(60)
+    command = f"echo $$ > {pids / 'leader.pid'}; sleep 2; touch marker"
+    task = asyncio.create_task(shell.execute(request(command, tmp_path)))
+    leader = int(await wait_for_file(pids / "leader.pid"))
+    assert shell.status(caller=(REQUESTER, AGENT))["active_request_id"] == "r1"
+    assert shell.status(caller=("@other:local", "other-agent"))["active_request_id"] is None
+    shell.revoke()
+    with pytest.raises(DesktopShellError, match="stopped"):
+        await asyncio.wait_for(task, timeout=3)
+    await wait_until_gone(leader)
+    assert not (tmp_path / "marker").exists()
+    await shell.close()
+
+
+@pytest.mark.asyncio
 async def test_revoke_kills_term_resistant_child_after_parent_exits(tmp_path: Path, pids: Path) -> None:
     """Revocation escalates even when shell exits and redirected pipes close."""
     shell = local_shell()

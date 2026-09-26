@@ -422,7 +422,7 @@ class DesktopBridge:
             "shell": self._shell_status(),
         }
 
-    def _shell_status(self) -> dict[str, object]:
+    def _shell_status(self, caller: tuple[str, str] | None = None) -> dict[str, object]:
         if self.shell is None:
             return {
                 "enabled": False,
@@ -432,11 +432,11 @@ class DesktopBridge:
                 "active_request_id": None,
                 "handles": [],
             }
-        return {"enabled": True, **self.shell.status()}
+        return {"enabled": True, **self.shell.status(caller=caller)}
 
     def _caller_shell_status(self, command: DesktopCommand) -> dict[str, object]:
-        """Show another allowed caller only whether approval is pending, and only its own handles."""
-        status = self._shell_status()
+        """Show another allowed caller only whether approval is pending, its own active ID, and its own handles."""
+        status = self._shell_status((command.requester_id, command.agent_name))
         return {
             **status,
             "pending": status["pending"] is not None,

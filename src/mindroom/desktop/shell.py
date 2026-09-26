@@ -144,6 +144,7 @@ class DesktopShell:
         self._pending: DesktopShellRequest | None = None
         self._decision: asyncio.Future[str] | None = None
         self._active_request_id: str | None = None
+        self._active_owner: tuple[str, str] | None = None
         self._cancel_event = asyncio.Event()
         self._finished = asyncio.Event()
         self._finished.set()
@@ -187,10 +188,15 @@ class DesktopShell:
             raise DesktopShellError(message)
         return self._monotonic_clock() + remaining
 
-    def status(self) -> dict[str, object]:
-        """Describe pending approval, active command, auto-approval, and every retained handle."""
+    def status(self, *, caller: tuple[str, str] | None = None) -> dict[str, object]:
+        """Describe pending approval, active command, auto-approval, and every retained handle.
+
+        ``caller``, given as (requester_id, agent_name), hides ``active_request_id`` unless the
+        active command belongs to that exact caller; omit it for the local, unrestricted view.
+        """
         pending = self._pending
         until_revoked = self._lease_until == math.inf
+        owns_active = caller is None or caller == self._active_owner
         return {
             "pending": (
                 {
@@ -208,7 +214,7 @@ class DesktopShell:
                 0.0 if until_revoked else max(0.0, self._lease_until - self._monotonic_clock())
             ),
             "auto_approve_until_revoked": until_revoked,
-            "active_request_id": self._active_request_id,
+            "active_request_id": self._active_request_id if owns_active else None,
             "handles": self.handles(),
         }
 
@@ -346,6 +352,7 @@ class DesktopShell:
             if self._cancel_event.is_set():
                 raise DesktopShellError(_NOT_STARTED)
             self._active_request_id = request.request_id
+            self._active_owner = (request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.
             remaining = deadline - self._monotonic_clock() - _INLINE_WAIT_SAFETY_SECONDS
             return await self._run(request, max(_MIN_INLINE_WAIT_SECONDS, min(request.timeout_seconds, remaining)))
@@ -353,6 +360,7 @@ class DesktopShell:
             self._pending = None
             self._decision = None
             self._active_request_id = None
+            self._active_owner = None
             self._busy = False
             self._finished.set()
 
