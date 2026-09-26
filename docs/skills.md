@@ -189,7 +189,7 @@ A review runs once the count reaches `review_interval`, and it subtracts the rep
 Replies are counted only as responses finish while learning is on, so replies from before learning was enabled or while it was off never count, and the queued conversations of an agent that stops learning are forgotten on the next config change.
 Compaction and redaction never change a count, because replies are counted when their response completes.
 A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
-Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the evidence when people also use the thread.
+Automated responses from schedules, hooks, and external triggers, including ones the router or another agent hands on, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the evidence when people also use the thread.
 Team responses are excluded.
 Hermes restarts its count when the agent saves a skill with its own `skill_manage` tool; MindRoom agents write skills with their file tools, which do not restart the count, so the next review sees the saved skill and is told to patch rather than duplicate it.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
@@ -247,7 +247,8 @@ Before the learner replaces or removes a file, it saves the previous version und
 Copy a saved version back to restore it.
 Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
-Archiving or deleting a skill forgets its record in `skills/.usage.json`, so a restored skill starts a new inactivity period and a new skill under the same name belongs to whoever wrote it.
+Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
+A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it; one recreated under the same name before that review stays learner-owned unless it carries `pinned: true`.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
 A field that cannot be read is dropped without affecting the rest of its record or other records, a record that is not an object is ignored and left in place until its own skill's record is next updated, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
 A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.

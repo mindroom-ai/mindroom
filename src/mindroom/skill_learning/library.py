@@ -330,8 +330,9 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
 def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: datetime) -> list[str]:
     """Move learner-owned skills without recent activity into ``skills/.archive``; never delete them.
 
-    Like Hermes forgetting deleted skills, records of archived or deleted directories are dropped, so a restored
-    or reused name starts over instead of inheriting the old ownership and inactivity.
+    Like Hermes forgetting deleted skills, records of archived or deleted directories are dropped here, before each
+    review, so a name restored or reused after that starts over instead of inheriting the old ownership and
+    inactivity; a skill recreated under the same name before this pass keeps the old record.
     """
     if not skills_root.is_dir():
         return []

@@ -130,6 +130,8 @@ class ToolRuntimeContext:
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
+    # The automation that started this turn, relayed with messages that hand the turn to another agent.
+    automation_source_kind: str | None = None
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
     membership: PrincipalStore | None = None
@@ -385,6 +387,9 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
             room_state_querier=self.hook_context.room_state_querier(),
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
+            automation_source_kind=(
+                source_envelope.origin.automation_source_kind if source_envelope is not None else None
+            ),
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
