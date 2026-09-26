@@ -868,14 +868,28 @@ class DesktopBridge:
         parameters = command.parameters
         if command.action == "list_folders":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            return _Execution(await asyncio.to_thread(files.list_folders))
+            folders = (await asyncio.to_thread(files.list_folders))["folders"]
+            return _Execution(
+                self._fit_listing(
+                    command,
+                    cast("list[dict[str, str]]", folders),
+                    key="folders",
+                    already_truncated=False,
+                ),
+            )
         if command.action == "list_directory":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path"}))
+            listing = await asyncio.to_thread(
+                files.list_directory,
+                _required_str_parameter(parameters, "root_id"),
+                _optional_str_parameter(parameters, "path", default="."),
+            )
             return _Execution(
-                await asyncio.to_thread(
-                    files.list_directory,
-                    _required_str_parameter(parameters, "root_id"),
-                    _optional_str_parameter(parameters, "path", default="."),
+                self._fit_listing(
+                    command,
+                    cast("list[dict[str, str]]", listing["entries"]),
+                    key="entries",
+                    already_truncated=bool(listing["truncated"]),
                 ),
             )
         _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path", "offset"}))
@@ -992,6 +1006,35 @@ class DesktopBridge:
                 high = middle
             else:
                 low = middle + 1
+        return reply(low)
+
+    def _fit_listing(
+        self,
+        command: DesktopCommand,
+        entries: list[dict[str, str]],
+        *,
+        key: str,
+        already_truncated: bool,
+    ) -> dict[str, object]:
+        """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline budget.
+
+        Measures the real enveloped response the same way ``_fit_output_tail`` measures shell output.
+        """
+        total = len(entries)
+
+        def reply(count: int) -> dict[str, object]:
+            return {key: entries[:count], "truncated": already_truncated or count < total}
+
+        if self._success_response(command, result=reply(total)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+            return reply(total)
+        # Dropping later entries never grows the reply, so search for the most that still fit.
+        low, high = 0, total - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._success_response(command, result=reply(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+                low = middle
+            else:
+                high = middle - 1
         return reply(low)
 
     async def _execute_semantic_control(

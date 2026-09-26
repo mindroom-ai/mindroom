@@ -259,6 +259,7 @@ def _command(
     action: str = "screenshot",
     *,
     request_id: str = "request-1",
+    session_id: str = "session-1",
     sequence: int = 1,
     requester_id: str = "@alice:example.org",
     agent_name: str = "computer",
@@ -268,7 +269,7 @@ def _command(
         parameters = {"app": APP_ID} if action in DESKTOP_APP_ACTIONS else {}
     return DesktopCommand(
         request_id=request_id,
-        session_id="session-1",
+        session_id=session_id,
         sequence=sequence,
         issued_at_ms=9_000,
         expires_at_ms=11_000,
@@ -468,6 +469,73 @@ async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
     assert _response(transport).result == {"apps": [], "metrics": _response(transport).result["metrics"]}
     await _handle(bridge, _event(_command("get_app_state", request_id="r7", sequence=7)))
     assert _response(transport).error == "Desktop command must target an application in the local allowlist."
+    bridge.close()
+
+
+# DesktopCommand/DesktopResponse identifiers are bounded to this many characters
+# (protocol.py's ``_bounded_identifier``); the worst case pads both to this length.
+_MAX_PROTOCOL_IDENTIFIER_LENGTH = 128
+
+
+@pytest.mark.asyncio
+async def test_list_directory_reply_is_bounded_by_the_real_enveloped_response(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """The trimmed listing must fit the real Olm-encrypted envelope, not just the bare entries dict."""
+    root = tmp_path / "root"
+    root.mkdir()
+    names = sorted(("字" * 60 + f"{number:03}") for number in range(200))
+    for name in names:
+        (root / name).write_text("x")
+    files = DesktopFilesystem((root,))
+    bridge = _local_bridge(filesystem=files)
+    root_id = _root_id(files)
+    command = _command(
+        "list_directory",
+        request_id="r" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+        session_id="s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+        parameters={"root_id": root_id},
+    )
+    await _handle(bridge, _event(command))
+    response = _response(transport)
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    entries = response.result["entries"]
+    assert isinstance(entries, list)
+    assert response.result["truncated"] is True
+    assert 0 < len(entries) < 200
+    # The kept prefix stays in the existing deterministic (sorted) order.
+    assert [entry["name"] for entry in entries] == names[: len(entries)]
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_list_folders_reply_is_bounded_by_the_real_enveloped_response(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Many long root paths must fit the real Olm-encrypted envelope, not just the bare folders dict."""
+    base = tmp_path / ("a" * 200) / ("b" * 200)
+    base.mkdir(parents=True)
+    roots = []
+    for number in range(80):
+        leaf = base / f"root-{number:03}-{'c' * 200}"
+        leaf.mkdir()
+        roots.append(leaf)
+    files = DesktopFilesystem(tuple(roots))
+    bridge = _local_bridge(filesystem=files)
+    command = _command(
+        "list_folders",
+        request_id="r" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+        session_id="s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+    )
+    await _handle(bridge, _event(command))
+    response = _response(transport)
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    folders = response.result["folders"]
+    assert isinstance(folders, list)
+    assert response.result["truncated"] is True
+    assert 0 < len(folders) < len(roots)
     bridge.close()
 
 

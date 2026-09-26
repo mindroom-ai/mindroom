@@ -4,40 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import heapq
-import json
 import os
 import stat
 from pathlib import Path
 
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 
 _MAX_ENTRIES = 200
 _MAX_READ_BYTES = 16_384
-
-
-def _serialized_size(value: object) -> int:
-    """Measure ``value`` the same way ``DesktopResponse.content_bytes`` measures a reply."""
-    return len(json.dumps(value, separators=(",", ":")).encode())
-
-
-def _fit_entries(entries: list[dict[str, str]], *, key: str, truncated: bool) -> dict[str, object]:
-    """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline reply budget."""
-    total = len(entries)
-
-    def reply(count: int) -> dict[str, object]:
-        return {key: entries[:count], "truncated": truncated or count < total}
-
-    if _serialized_size(reply(total)) <= MAX_INLINE_RESPONSE_BYTES:
-        return reply(total)
-    low, high = 0, total - 1
-    while low < high:
-        middle = (low + high + 1) // 2
-        if _serialized_size(reply(middle)) <= MAX_INLINE_RESPONSE_BYTES:
-            low = middle
-        else:
-            high = middle - 1
-    return reply(low)
 
 
 class DesktopFilesystemError(ValueError):
@@ -90,15 +64,26 @@ class DesktopFilesystem:
         return relative
 
     def list_folders(self) -> dict[str, object]:
-        """Return stable IDs and display paths for pinned folders, trimmed to fit the inline reply budget."""
+        """Return stable IDs and display paths for pinned folders.
+
+        The caller (the bridge, which knows the command envelope) trims this further to fit the
+        inline reply budget.
+        """
         if self._closed:
             message = "Local file access is closed."
             raise DesktopFilesystemError(message)
-        folders = [{"id": root_id, "name": path.name, "path": str(path)} for root_id, (path, _) in self._roots.items()]
-        return _fit_entries(folders, key="folders", truncated=False)
+        return {
+            "folders": [
+                {"id": root_id, "name": path.name, "path": str(path)} for root_id, (path, _) in self._roots.items()
+            ],
+        }
 
     def list_directory(self, root_id: str, path: str = ".") -> dict[str, object]:
-        """List at most 200 direct entries without following links, trimmed to fit the inline reply budget."""
+        """List at most 200 direct entries without following links.
+
+        The caller (the bridge, which knows the command envelope) trims this further to fit the
+        inline reply budget.
+        """
         _, root_fd = self._root(root_id)
         relative = self._relative(path)
         try:
@@ -122,7 +107,7 @@ class DesktopFilesystem:
                         else "other"
                     )
                     entries.append({"name": entry.name, "type": kind})
-                return _fit_entries(entries, key="entries", truncated=len(names) > _MAX_ENTRIES)
+                return {"entries": entries, "truncated": len(names) > _MAX_ENTRIES}
         except (OSError, ValueError) as exc:
             message = f"Cannot list local directory: {exc}"
             raise DesktopFilesystemError(message) from exc

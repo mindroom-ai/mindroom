@@ -1,13 +1,11 @@
 """Real filesystem checks for the locally authorized desktop file provider."""
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES
 
 
 def test_lists_pinned_root_and_reads_bounded_utf8(tmp_path: Path) -> None:
@@ -83,45 +81,6 @@ def test_oversized_offset_is_rejected_as_provider_error(tmp_path: Path) -> None:
         root_id = files.list_folders()["folders"][0]["id"]
         with pytest.raises(DesktopFilesystemError):
             files.read_file(root_id, "file", 2**128)
-    finally:
-        files.close()
-
-
-def test_list_directory_reply_is_bounded_by_the_inline_budget(tmp_path: Path) -> None:
-    """200 long, multibyte names would escape past the transport budget without trimming."""
-    root = tmp_path / "root"
-    root.mkdir()
-    names = sorted(("字" * 60 + f"{number:03}") for number in range(200))
-    for name in names:
-        (root / name).write_text("x")
-    files = DesktopFilesystem((root,))
-    try:
-        root_id = files.list_folders()["folders"][0]["id"]
-        reply = files.list_directory(root_id)
-        assert len(json.dumps(reply, separators=(",", ":")).encode()) <= MAX_INLINE_RESPONSE_BYTES
-        assert reply["truncated"] is True
-        assert 0 < len(reply["entries"]) < 200
-        # The kept prefix stays in the existing deterministic (sorted) order.
-        assert [entry["name"] for entry in reply["entries"]] == names[: len(reply["entries"])]
-    finally:
-        files.close()
-
-
-def test_list_folders_reply_is_bounded_by_the_inline_budget(tmp_path: Path) -> None:
-    """Many roots with long paths would escape past the transport budget without trimming."""
-    base = tmp_path / ("a" * 200) / ("b" * 200)
-    base.mkdir(parents=True)
-    roots = []
-    for number in range(80):
-        leaf = base / f"root-{number:03}-{'c' * 200}"
-        leaf.mkdir()
-        roots.append(leaf)
-    files = DesktopFilesystem(tuple(roots))
-    try:
-        reply = files.list_folders()
-        assert len(json.dumps(reply, separators=(",", ":")).encode()) <= MAX_INLINE_RESPONSE_BYTES
-        assert reply["truncated"] is True
-        assert 0 < len(reply["folders"]) < len(roots)
     finally:
         files.close()
 
