@@ -5,6 +5,31 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.316</title>
+            <pubDate>Sat, 26 Sep 2026 21:53:49 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1633</sparkle:version>
+            <sparkle:shortVersionString>2026.9.316</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.316
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Back off reconciliation of personal rooms that keep failing (#2358)](https://github.com/mindroom-ai/mindroom/commit/44832bf70) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.316/MindRoom.zip" length="123646641" type="application/octet-stream" sparkle:edSignature="AmdxX9GLRgeOrb1kXdOuI8LyDeUDWZ2K55aPRl5nmCVPXDx0nAPnTpdZylqivnpEOIbQSjT3vSwEOTpNIOvLDQ=="/>
+        </item>
+        <item>
             <title>2026.9.220</title>
             <pubDate>Tue, 22 Sep 2026 00:11:08 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
