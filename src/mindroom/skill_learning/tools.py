@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never
@@ -29,7 +29,7 @@ from mindroom.skill_learning.library import (
     write_skill_file,
 )
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
+from mindroom.tool_system.workspace_skills import SKILL_FILENAME, load_workspace_skills, parse_skill_markdown
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -113,6 +113,30 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
     return SkillCatalog(skills, entries, frozenset(reserved))
 
 
+def _chat_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
+    """Return the agent's skills plus, like Hermes' foreground skill_manage, every other workspace skill directory.
+
+    A workspace skill whose requirements this host does not meet stays editable in chat by its directory name, so the
+    agent can fix it.
+    """
+    catalog = load_skill_catalog(config, runtime_paths, agent_name, skills_root)
+    entries = dict(catalog.entries)
+    loaded = {entry.directory for entry in entries.values()}
+    for skill in load_workspace_skills(skills_root):
+        directory = Path(skill.source_path).name
+        if directory in loaded or directory in entries:
+            continue
+        current = read_skill_file(skills_root, directory)
+        entries[directory] = _CatalogEntry(
+            name=directory,
+            description=skill.description,
+            directory=directory,
+            learned=current is not None and current.learned,
+            instructions=skill.instructions,
+        )
+    return replace(catalog, entries=entries)
+
+
 @dataclass
 class ReviewProgress:
     """The skills a review changed, recorded as each write lands."""
@@ -129,7 +153,7 @@ async def manage_skill_in_chat(
 ) -> str:
     """Apply one chat-time change to the library as it is once this call's turn comes."""
     async with library_turn(skills_root):
-        catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
+        catalog = await asyncio.to_thread(_chat_catalog, config, runtime_paths, agent_name, skills_root)
         return await SkillTools(skills_root, catalog.entries, catalog.reserved_names)._apply(change)
 
 

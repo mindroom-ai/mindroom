@@ -2117,6 +2117,31 @@ async def test_reviews_of_different_skills_directories_run_side_by_side(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_chat_skill_manage_edits_a_workspace_skill_this_host_does_not_load(tmp_path: Path) -> None:
+    """Like Hermes' skill_manage, chat finds a workspace skill by its directory, so it can fix unmet requirements."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    _write_skill(
+        root,
+        "needs-env",
+        "---\nname: needs-env\ndescription: Use when checking the setup\nmetadata:\n  openclaw:\n    requires:\n"
+        "      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n---\nExport the variable first.\n",
+    )
+    assert "needs-env" not in load_skill_catalog(config, paths, "mind", root).entries
+    tools = SkillManageTools("mind", config, paths, root)
+    result = json.loads(
+        await tools.skill_manage(
+            "patch",
+            "needs-env",
+            old_string="      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n",
+            new_string="",
+        ),
+    )
+    assert result["success"], result
+    assert "SKILL_LEARNING_TEST_MISSING_ENV" not in (root / "needs-env/SKILL.md").read_text()
+
+
+@pytest.mark.asyncio
 async def test_parallel_chat_skill_edits_both_land(tmp_path: Path) -> None:
     """Several chat skill_manage calls of one reply take turns, so every patch builds on the one before."""
     config, paths = _learner(tmp_path)
