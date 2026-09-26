@@ -19,6 +19,7 @@ import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
+import mindroom.custom_tools.microsoft_365 as microsoft_365_module
 import mindroom.media_delivery as media_delivery_module
 from mindroom.attachments import load_attachment
 from mindroom.constants import resolve_runtime_paths
@@ -27,10 +28,14 @@ from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_atta
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.custom_tools.microsoft_365 import Microsoft365Tools
+from mindroom.oauth.microsoft import microsoft_365_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.file import file_tools
+from tests.microsoft_graph_test_support import ALICE_TOKEN, FakeGraph, publish_grant, save_client_config, worker_target
+from tests.microsoft_graph_test_support import runtime_paths as microsoft_runtime_paths
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
 from tests.test_e2b_tools import _FakeSandbox
@@ -51,6 +56,7 @@ _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
 )
 _TEXT = "contract text\n"
+_XLSX = b"PK\x03\x04contract workbook"
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,30 @@ async def _upload_to_google_drive(
     return service.files_resource.create_kwargs["media_body"].content == _PNG
 
 
+async def _save_to_microsoft_365(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    paths = microsoft_runtime_paths(tmp_path / "microsoft")
+    manager = save_client_config(paths)
+    publish_grant(microsoft_365_oauth_provider(), manager, ALICE_TOKEN)
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    tool = Microsoft365Tools(
+        runtime_paths=paths,
+        credentials_manager=manager,
+        worker_target=worker_target(),
+        tool_output_workspace_root=workspace,
+        file_access=file_access,
+    )
+    result = json.loads(await tool.save_office_document(raw_path))
+    if result["status"] != "ok":
+        return False
+    return [request.content for request in graph.requests if request.method == "PUT"] == [_XLSX]
+
+
 async def _upload_in_browser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -210,6 +240,13 @@ _PROBES = (
     _ToolProbe("matrix_message", "send attachments", _send_attachment_path, attachments_module),
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
+    _ToolProbe(
+        "microsoft_365",
+        "save_office_document",
+        _save_to_microsoft_365,
+        microsoft_365_module,
+        "doc.xlsx",
+    ),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     # `file` and `coding` run in a worker by default, where worker code shares their trust,
@@ -238,6 +275,7 @@ def workspace(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "doc.png").write_bytes(_PNG)
     (root / "doc.txt").write_text(_TEXT)
+    (root / "doc.xlsx").write_bytes(_XLSX)
     return root
 
 
@@ -248,6 +286,7 @@ def outside(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "doc.png").write_bytes(_PNG)
     (root / "doc.txt").write_text(_TEXT)
+    (root / "doc.xlsx").write_bytes(_XLSX)
     return root
 
 

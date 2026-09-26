@@ -68,6 +68,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Microsoft 365](microsoft-365.md) - Per-user OAuth OneDrive and SharePoint Excel workbooks, connected to conversations and edited in place after human approval.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](agent-orchestration.md) - OAuth connection recovery, Matrix threads, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
