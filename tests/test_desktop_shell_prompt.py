@@ -301,6 +301,7 @@ async def test_request_that_stops_pending_releases_the_terminal(
             await asyncio.wait_for(execution, 5)
         await _wait_for_text(output, "no longer pending")
         os.write(master, b"a\n")
+        # Longer than one approver poll, so a reader left registered would have consumed the line.
         await asyncio.sleep(0.3)
         assert os.read(slave, 16) == b"a\n"
     finally:
