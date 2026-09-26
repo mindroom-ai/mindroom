@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -2296,3 +2297,31 @@ async def test_a_request_without_skill_readers_is_not_forked_once_skills_exist(t
         await _review(config, paths, captured=capture.latest)
     assert len(replay.requests) == 1
     assert "get_skill_instructions" in replay.offered_tools[0]
+
+
+@pytest.mark.asyncio
+async def test_the_review_reads_support_files_by_the_paths_it_lists(tmp_path: Path) -> None:
+    """A support file listed as references/<name> loads by that path or by its bare file name, as Agno's schema says."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    (listed,) = json.loads(await tools.get_skill_instructions("deploy-checks"))["support_files"]
+    assert listed == "references/notes.md"
+    for reference_path in (listed, "notes.md"):
+        loaded = json.loads(await tools.get_skill_reference("deploy-checks", reference_path))
+        assert loaded["content"] == "Notes."
+
+
+def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_path: Path) -> None:
+    """Like Hermes' record of a create, a chat skill_manage create of a reused name starts a fresh, user-owned record."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    shutil.rmtree(root / "deploy-checks")
+    handwritten = HANDWRITTEN.replace("handwritten", "deploy-checks")
+    library.create_skill(root, "deploy-checks", handwritten, reserved_names=frozenset(), learner=False)
+    recreated = library.read_skill_file(root, "deploy-checks")
+    assert recreated is not None
+    assert not recreated.learned

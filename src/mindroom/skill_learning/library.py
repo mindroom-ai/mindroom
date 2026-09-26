@@ -218,12 +218,12 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
-        if learner:
-            update_skill_usage(
-                root_fd,
-                name,
-                lambda usage: usage.model_copy(update={"created_by": "learner", "created_at": now}),
-            )
+        # Like Hermes' record of a create, a new skill never inherits the record of a deleted one of the same name.
+        update_skill_usage(
+            root_fd,
+            name,
+            lambda _usage: SkillUsage(created_by="learner" if learner else None, created_at=now),
+        )
 
 
 def write_skill_file(
@@ -350,7 +350,8 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
 
     Like Hermes forgetting deleted skills, records of archived or deleted directories are dropped here, before each
     review, so a name restored or reused after that starts over instead of inheriting the old ownership and
-    inactivity; a skill recreated under the same name before this pass keeps the old record.
+    inactivity; a skill recreated with skill_manage starts over at once, and one recreated with other tools before this
+    pass keeps the old record.
     """
     if not skills_root.is_dir():
         return []

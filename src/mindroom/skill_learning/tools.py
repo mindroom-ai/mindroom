@@ -396,7 +396,8 @@ def _patched(
 
 
 def _support_path(directory: str, filename: str | None) -> str | None:
-    return f"{directory}/{filename}" if filename is not None else None
+    """Return a support file's path; a review lists support files with their directory, and readers accept both."""
+    return f"{directory}/{filename.removeprefix(f'{directory}/')}" if filename is not None else None
 
 
 def _loader(relative_path: str) -> str:
