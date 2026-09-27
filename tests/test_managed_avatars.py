@@ -55,8 +55,9 @@ class _FakeDownloads:
 
 @pytest.fixture
 def runtime_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> constants_mod.RuntimePaths:
-    """Point workspace avatar overrides at an empty temporary directory."""
+    """Point workspace overrides and the repository's bundled avatars at empty temporary directories."""
     monkeypatch.setattr(constants_mod, "_avatars_dir", lambda _runtime_paths: tmp_path / "avatars")
+    monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: tmp_path / "bundled")
     return constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data")
 
 
@@ -117,13 +118,19 @@ def test_stock_avatar_url_pins_the_assets_commit() -> None:
     )
 
 
-def test_only_the_root_space_avatar_is_bundled() -> None:
-    """Stock pictures are fetched by URL, so the package only carries the root-space avatar."""
-    bundled = constants_mod._bundled_avatars_dir()
+@pytest.mark.asyncio
+async def test_bundled_avatar_is_used_without_download(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+    tmp_path: Path,
+) -> None:
+    """Avatars bundled in the repository's avatars/ directory win over a stock download."""
+    bundled = tmp_path / "bundled" / "agents" / "code.png"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(_image_bytes())
 
-    assert bundled.parent == Path(constants_mod.__file__).resolve().parent
-    assert (bundled / "spaces" / "root_space.png").is_file()
-    assert not (bundled / "agents").exists()
+    assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) == bundled
+    assert downloads.urls == []
 
 
 @pytest.mark.asyncio
@@ -496,10 +503,11 @@ async def test_root_space_avatar_requires_the_bundled_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A checkout without the bundled root-space file simply sets no Space avatar."""
-    assert await managed_avatars.root_space_avatar_path(runtime_paths) == (
-        constants_mod._bundled_avatars_dir() / "spaces" / "root_space.png"
-    )
+    """The bundled root-space file is used when present; without it no Space avatar is set."""
+    bundled = tmp_path / "bundled" / "spaces" / "root_space.png"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(_image_bytes())
+    assert await managed_avatars.root_space_avatar_path(runtime_paths) == bundled
 
     monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: tmp_path / "missing")
 

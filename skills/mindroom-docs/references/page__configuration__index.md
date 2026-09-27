@@ -1080,7 +1080,8 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
-Stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
+Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
+Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
 Machines without internet access simply get no stock avatar.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
 To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
@@ -1098,7 +1099,7 @@ prompts:
   AVATAR_ROOM_SYSTEM_PROMPT: "You are creating a refined, minimalist icon design for a room avatar."
 ```
 
-`mindroom avatars generate` only creates missing local avatar files by default, and it creates a custom file for every entity without a workspace avatar file because stock defaults do not count.
+`mindroom avatars generate` only creates missing local avatar files by default, and it creates a custom file for every entity without a workspace or bundled avatar file because downloaded stock avatars do not count.
 Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
 Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for 1024x1024 high-quality PNG rendering.
 Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.

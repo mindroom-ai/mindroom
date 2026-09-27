@@ -1009,8 +1009,8 @@ def _avatars_dir(runtime_paths: RuntimePaths) -> Path:
 
 
 def _bundled_avatars_dir() -> Path:
-    """Return the avatar directory shipped inside the MindRoom package."""
-    return Path(__file__).resolve().parent / "avatars"
+    """Return the bundled avatar directory shipped with a source checkout or runtime image."""
+    return Path(__file__).resolve().parents[2] / "avatars"
 
 
 def workspace_avatar_path(

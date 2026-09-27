@@ -39,7 +39,7 @@ const crossPlatformConvo = {
       id: 4,
       user: {
         name: "MindRoom Assistant",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/general.png" },
+        avatar: { type: "image", value: "../../avatars/agents/general.png" },
         badge: { text: "AI Agent", type: "primary" }
       },
       content: "[Joins from Matrix] We're using Python 3.11 with FastAPI",
@@ -69,7 +69,7 @@ const crossPlatformConvo = {
       id: 7,
       user: {
         name: "MindRoom Assistant",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/general.png" },
+        avatar: { type: "image", value: "../../avatars/agents/general.png" },
         badge: { text: "AI Agent", type: "primary" }
       },
       content: "[Travels from your server] I'll review this against our FastAPI patterns...",
@@ -106,7 +106,7 @@ const crossOrgCollab = {
       id: 3,
       user: {
         name: "Your Assistant",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/general.png" },
+        avatar: { type: "image", value: "../../avatars/agents/general.png" },
         badge: { text: "AI Agent", type: "primary" }
       },
       content: "[Joins from your Matrix server] Ready to review the architecture. I have context on our FastAPI patterns and microservices design.",
@@ -116,7 +116,7 @@ const crossOrgCollab = {
       id: 4,
       user: {
         name: "Client's Architect AI",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/code.png" },
+        avatar: { type: "image", value: "../../avatars/agents/code.png" },
         badge: { text: "External AI", type: "external" }
       },
       content: "[Joins from their server] Excellent! I'll share our deployment patterns and scaling requirements.",
@@ -126,7 +126,7 @@ const crossOrgCollab = {
       id: 5,
       user: {
         name: "Your Assistant",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/general.png" },
+        avatar: { type: "image", value: "../../avatars/agents/general.png" },
         badge: { text: "AI Agent", type: "primary" }
       },
       content: "Based on your requirements, I recommend using our async request handling pattern with Redis caching for the high-traffic endpoints.",
@@ -136,7 +136,7 @@ const crossOrgCollab = {
       id: 6,
       user: {
         name: "Client's Architect AI",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/code.png" },
+        avatar: { type: "image", value: "../../avatars/agents/code.png" },
         badge: { text: "External AI", type: "external" }
       },
       content: "That aligns perfectly with our Kubernetes deployment. We can auto-scale those services based on queue depth.",
@@ -173,7 +173,7 @@ const multiAgentTeam = {
       id: 2,
       user: {
         name: "Research Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/research.png" },
+        avatar: { type: "image", value: "../../avatars/agents/research.png" },
         badge: { text: "Research AI", type: "primary" }
       },
       content: "I'll gather data on our top 5 competitors, including pricing, features, and recent product launches...",
@@ -183,7 +183,7 @@ const multiAgentTeam = {
       id: 3,
       user: {
         name: "Analyst Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/analyst.png" },
+        avatar: { type: "image", value: "../../avatars/agents/analyst.png" },
         badge: { text: "Analyst AI", type: "primary" }
       },
       content: "I'll identify strategic patterns and opportunities. Looking for gaps in their offerings and potential differentiation points...",
@@ -193,7 +193,7 @@ const multiAgentTeam = {
       id: 4,
       user: {
         name: "Writer Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/summary.png" },
+        avatar: { type: "image", value: "../../avatars/agents/summary.png" },
         badge: { text: "Writer AI", type: "primary" }
       },
       content: "I'll compile everything into an executive summary with actionable recommendations. Will have the draft ready in 30 minutes.",
@@ -203,7 +203,7 @@ const multiAgentTeam = {
       id: 5,
       user: {
         name: "Research Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/research.png" },
+        avatar: { type: "image", value: "../../avatars/agents/research.png" },
         badge: { text: "Research AI", type: "primary" }
       },
       content: "Research complete. Key findings: Competitor A raised prices 15%, Competitor B launched AI features, Competitor C expanded to Europe.",
@@ -213,7 +213,7 @@ const multiAgentTeam = {
       id: 6,
       user: {
         name: "Analyst Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/analyst.png" },
+        avatar: { type: "image", value: "../../avatars/agents/analyst.png" },
         badge: { text: "Analyst AI", type: "primary" }
       },
       content: "Analysis shows opportunity: We're the only solution offering cross-organization AI collaboration. This is our unique differentiator.",
@@ -223,7 +223,7 @@ const multiAgentTeam = {
       id: 7,
       user: {
         name: "Writer Agent",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/summary.png" },
+        avatar: { type: "image", value: "../../avatars/agents/summary.png" },
         badge: { text: "Writer AI", type: "primary" }
       },
       content: "Executive summary ready! Highlighting our unique position as the only platform enabling AI agent federation across organizations.",

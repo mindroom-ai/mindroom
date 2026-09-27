@@ -30,7 +30,7 @@ const exampleConversation = {
       id: 3,
       user: {
         name: "MindRoom Assistant",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/general.png" },
+        avatar: { type: "image", value: "../avatars/agents/general.png" },
         badge: { text: "AI Agent", type: "primary" }
       },
       content: "Based on our previous conversations, you're using Python 3.11 with FastAPI for the backend. The project also uses PostgreSQL for the database and Redis for caching.",
@@ -40,7 +40,7 @@ const exampleConversation = {
       id: 4,
       user: {
         name: "Client's Architect AI",
-        avatar: { type: "image", value: "https://raw.githubusercontent.com/mindroom-ai/assets/f685f674404ebb9709d707f49298450211a7d603/avatars/painted/agents/analyst.png" },
+        avatar: { type: "image", value: "../avatars/agents/analyst.png" },
         badge: { text: "External AI", type: "external" }
       },
       content: "Perfect! That aligns well with our microservices architecture. We can share our deployment patterns optimized for FastAPI.",

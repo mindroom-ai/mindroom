@@ -11,7 +11,7 @@ on:
       - docs/assets/favicon.png
       - saas-platform/platform-frontend/public/res/branding/mindroom.*
       - saas-platform/platform-frontend/src/app/favicon.ico
-      - src/mindroom/avatars/spaces/root_space.png
+      - avatars/spaces/root_space.png
       - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
       - macos/MindRoom/Sources/MindRoom/Resources/logo*
       - .github/workflows/logo.yml
@@ -24,7 +24,7 @@ on:
       - docs/assets/favicon.png
       - saas-platform/platform-frontend/public/res/branding/mindroom.*
       - saas-platform/platform-frontend/src/app/favicon.ico
-      - src/mindroom/avatars/spaces/root_space.png
+      - avatars/spaces/root_space.png
       - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
       - macos/MindRoom/Sources/MindRoom/Resources/logo*
       - .github/workflows/logo.yml
