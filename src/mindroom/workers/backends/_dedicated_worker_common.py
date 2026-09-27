@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index, worker_workspace_roots
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage_paths import private_scope_alias_paths
@@ -18,6 +18,7 @@ from mindroom.tool_system.worker_routing import (
     private_instances_root_path,
     resolved_worker_key_scope,
     shared_storage_root,
+    visible_workspace_roots,
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -260,7 +261,7 @@ def _scoped_workspaces(
             resolved_agent_policies=resolved_agent_policies,
         )
     try:
-        workspaces = worker_workspace_roots(
+        workspaces = visible_workspace_roots(
             storage_root,
             worker_key,
             resolved_agent_policies or {},

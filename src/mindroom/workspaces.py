@@ -11,7 +11,6 @@ from errno import EACCES, EINVAL, ENODATA, ENOTSUP, EPERM
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.agent_policy import private_root_name
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.constants import RuntimePaths, config_relative_path
 from mindroom.path_confinement import (
@@ -20,6 +19,7 @@ from mindroom.path_confinement import (
     resolve_path_within_root,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tool_system.worker_routing import private_root_name
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping

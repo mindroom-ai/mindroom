@@ -6,11 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.config.agent import AgentConfig
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_workspace_roots_for_worker_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -48,7 +46,7 @@ class ResolvedAgentPolicy:
     private_workspace_enabled: bool
     private_agent_knowledge_enabled: bool
     private_root: str | None
-    """The private workspace path below each private state root, or ``None`` for shared agents."""
+    """The authored ``private.root``; ``worker_routing.private_root_name`` applies its default."""
 
 
 @dataclass(frozen=True)
@@ -70,11 +68,6 @@ def _coerce_private_scope(value: object) -> _PrivateWorkerScope | None:
     if value in {"user", "user_agent"}:
         return cast("_PrivateWorkerScope", value)
     return None
-
-
-def private_root_name(agent_name: str, authored_root: str | None) -> str:
-    """Return the private workspace path below one private state root."""
-    return authored_root or f"{agent_name}_data"
 
 
 def _build_agent_policy_seed(
@@ -188,7 +181,7 @@ def _resolve_agent_policy(
         private_knowledge_base_id=private_knowledge_base_id,
         private_workspace_enabled=private_workspace_enabled,
         private_agent_knowledge_enabled=private_agent_knowledge_enabled,
-        private_root=private_root_name(seed.agent_name, seed.private_root) if seed.is_private else None,
+        private_root=seed.private_root if seed.is_private else None,
     )
 
 
@@ -366,57 +359,6 @@ def resolve_agent_policy_index(
     )
 
 
-def user_scope_shared_agent_names(policies: Mapping[str, ResolvedAgentPolicy]) -> frozenset[str]:
-    """Return the non-private agents whose canonical workspaces every `user` worker sees."""
-    return frozenset(
-        agent_name
-        for agent_name, policy in policies.items()
-        if policy.effective_execution_scope == "user" and not policy.is_private
-    )
-
-
-def _visible_private_root(policies: Mapping[str, ResolvedAgentPolicy], agent_name: str) -> str:
-    policy = policies.get(agent_name)
-    if policy is None or policy.private_root is None:
-        return private_root_name(agent_name, None)
-    return policy.private_root
-
-
-def worker_workspace_roots(
-    base_storage_path: Path,
-    worker_key: str,
-    policies: Mapping[str, ResolvedAgentPolicy],
-    *,
-    private_agent_names: frozenset[str],
-) -> tuple[Path, ...]:
-    """Return the canonical workspaces one worker key may mount and work in.
-
-    A ``user`` key sees the workspace of every ``per: user`` agent of its
-    requester. A ``user_agent`` key sees a private workspace exactly for agents
-    in the caller's explicit private visibility, so a stale policy can never
-    turn a private agent's worker toward the shared workspace; other scopes see
-    no private workspace.
-    """
-    scope = resolved_worker_key_scope(worker_key)
-    private_agent_roots: dict[str, str] = {}
-    if scope == "user":
-        private_agent_roots = {
-            agent_name: policy.private_root
-            for agent_name, policy in policies.items()
-            if policy.private_root is not None and policy.effective_execution_scope == "user"
-        }
-    elif scope == "user_agent":
-        private_agent_roots = {
-            agent_name: _visible_private_root(policies, agent_name) for agent_name in private_agent_names
-        }
-    return visible_workspace_roots_for_worker_key(
-        base_storage_path,
-        worker_key,
-        private_agent_roots=private_agent_roots,
-        user_scope_agent_names=user_scope_shared_agent_names(policies),
-    )
-
-
 def resolve_private_knowledge_base_agent(
     base_id: str,
     seeds: Mapping[str, AgentPolicySeed],
@@ -447,11 +389,8 @@ __all__ = [
     "dashboard_credentials_supported_for_scope",
     "get_agent_delegation_closure",
     "get_unsupported_team_agents",
-    "private_root_name",
     "resolve_agent_policy_from_data",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
     "unsupported_team_agent_message",
-    "user_scope_shared_agent_names",
-    "worker_workspace_roots",
 ]

@@ -19,11 +19,10 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from mindroom.agent_policy import private_root_name
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import private_instances_root_path, shared_storage_root
+from mindroom.tool_system.worker_routing import private_instances_root_path, private_root_name, shared_storage_root
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
 from mindroom.workers.runtime import primary_worker_backend_name

@@ -395,7 +395,6 @@ expose = [
 path = "mindroom.agent_cli.worker"
 depends_on = [
     "mindroom.agent_cli.worker_network",
-    "mindroom.agent_policy",
     "mindroom.agent_cli.worker_protocol",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -1099,7 +1098,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_policy"
-depends_on = ["mindroom.config.agent", "mindroom.tool_system.worker_routing"]
+depends_on = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.approval_manager"
@@ -1802,7 +1801,6 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
-    "mindroom.agent_policy",
     "mindroom.file_access",
     "mindroom.path_confinement",
     "mindroom.media_delivery",
@@ -1865,7 +1863,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
-    "mindroom.agent_policy",
     "mindroom.path_confinement",
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
@@ -5353,9 +5350,6 @@ expose = [
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
-    "private_root_name",
-    "user_scope_shared_agent_names",
-    "worker_workspace_roots",
 ]
 from = ["mindroom.agent_policy"]
 
@@ -5979,7 +5973,8 @@ expose = [
     "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
-    "visible_workspace_roots_for_worker_key",
+    "private_root_name",
+    "visible_workspace_roots",
     "worker_dir_name",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",
@@ -7285,7 +7280,6 @@ path = "mindroom.api.sandbox_runner_cli"
 depends_on = [
     "mindroom.agent_cli.worker_network",
     "mindroom.agent_cli.worker_protocol",
-    "mindroom.agent_policy",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",

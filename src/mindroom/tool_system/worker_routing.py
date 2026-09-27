@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 
@@ -17,6 +16,7 @@ from mindroom.tool_system.context_bound_streams import context_bound_async_strea
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
 
 WorkerScope = Literal["shared", "user", "user_agent"]
@@ -706,71 +706,44 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def _private_workspace_root_path(
-    base_storage_path: Path,
-    *,
-    worker_key: str,
-    agent_name: str,
-    private_root: str,
-) -> Path:
-    relative_root = Path(private_root)
-    if relative_root.is_absolute() or ".." in relative_root.parts or relative_root == Path():
-        msg = f"private.root must be a relative path below the private state root: {private_root}"
-        raise ValueError(msg)
-    return private_instance_scope_root_path(base_storage_path, worker_key) / agent_name / relative_root
+def private_root_name(agent_name: str, authored_root: str | None) -> str:
+    """Return the private workspace path below one private state root."""
+    return authored_root or f"{agent_name}_data"
 
 
-def visible_workspace_roots_for_worker_key(
+def visible_workspace_roots(
     base_storage_path: Path,
     worker_key: str,
+    policies: Mapping[str, ResolvedAgentPolicy],
     *,
-    private_agent_roots: Mapping[str, str] = MappingProxyType({}),
-    user_scope_agent_names: frozenset[str] = frozenset(),
+    private_agent_names: frozenset[str],
 ) -> tuple[Path, ...]:
-    """Return the canonical workspace roots one worker key may mount and work in.
+    """Return the canonical workspaces one worker key may mount and work in.
 
-    Workers see only workspaces, never the agent state roots or private scopes
-    that hold them, so worker code can neither replace a directory above a
-    workspace nor reach the sessions, memory, and identity records beside it.
-    ``private_agent_roots`` maps each private agent visible to this key to its
-    ``private.root``; shared agents use their canonical ``agents/<name>/workspace``.
-    A ``user`` key is a per-requester multi-agent workstation, so it sees the
-    workspaces of ``user_scope_agent_names`` (the non-private ``worker_scope:
-    user`` agents) and of its own ``per: user`` private agents, never agents on
-    other scopes.
+    Workers see only workspaces, never the state roots or private scopes around them.
+    A ``user`` key is a per-requester workstation that sees every ``worker_scope: user``
+    agent's workspace, private ones below its own scope. A ``user_agent`` key of an
+    agent in ``private_agent_names`` sees only that private workspace, so a stale
+    policy never widens it to the shared one.
     """
     scope = resolved_worker_key_scope(worker_key)
-    if scope is None:
-        return ()
     if scope == "user":
-        return (
-            *(
-                agent_workspace_root_path(base_storage_path, agent_name)
-                for agent_name in sorted(user_scope_agent_names)
-            ),
-            *(
-                _private_workspace_root_path(
-                    base_storage_path,
-                    worker_key=worker_key,
-                    agent_name=agent_name,
-                    private_root=private_root,
-                )
-                for agent_name, private_root in sorted(private_agent_roots.items())
-            ),
+        return tuple(
+            private_instance_scope_root_path(base_storage_path, worker_key)
+            / agent_name
+            / private_root_name(agent_name, policy.private_root)
+            if policy.is_private
+            else agent_workspace_root_path(base_storage_path, agent_name)
+            for agent_name, policy in sorted(policies.items())
+            if policy.effective_execution_scope == "user"
         )
-
-    agent_name = worker_key_agent_name(worker_key)
+    agent_name = worker_key_agent_name(worker_key) if scope is not None else None
     if agent_name is None:
         return ()
-    if scope == "user_agent" and agent_name in private_agent_roots:
-        return (
-            _private_workspace_root_path(
-                base_storage_path,
-                worker_key=worker_key,
-                agent_name=agent_name,
-                private_root=private_agent_roots[agent_name],
-            ),
-        )
+    if scope == "user_agent" and agent_name in private_agent_names:
+        policy = policies.get(agent_name)
+        root = private_root_name(agent_name, policy.private_root if policy is not None else None)
+        return (private_instance_scope_root_path(base_storage_path, worker_key) / agent_name / root,)
     return (agent_workspace_root_path(base_storage_path, agent_name),)
 
 

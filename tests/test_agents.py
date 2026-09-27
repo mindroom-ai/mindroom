@@ -91,7 +91,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     shared_storage_root,
     tool_execution_identity,
-    visible_workspace_roots_for_worker_key,
+    visible_workspace_roots,
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
@@ -2871,39 +2871,9 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == (
+    assert visible_workspace_roots(tmp_path, worker_key, {}, private_agent_names=frozenset()) == (
         agent_workspace_root_path(tmp_path, "general"),
     )
-
-
-def test_visible_workspace_roots_for_user_worker_include_only_user_scope_workspaces(tmp_path: Path) -> None:
-    """User workers see user-scope shared workspaces and their own per-user private workspaces, never state roots."""
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-1",
-    )
-
-    worker_key = resolve_worker_key("user", identity)
-
-    assert worker_key is not None
-    scope_root = private_instance_scope_root_path(tmp_path, worker_key)
-    assert visible_workspace_roots_for_worker_key(
-        tmp_path,
-        worker_key,
-        private_agent_roots={"mind": "mind_data", "notes": "workspace/notes"},
-        user_scope_agent_names=frozenset({"general", "coder"}),
-    ) == (
-        agent_workspace_root_path(tmp_path, "coder"),
-        agent_workspace_root_path(tmp_path, "general"),
-        scope_root / "mind" / "mind_data",
-        scope_root / "notes" / "workspace" / "notes",
-    )
-    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == ()
 
 
 def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_agent_scope() -> None:
@@ -2913,40 +2883,6 @@ def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_
     assert not requires_explicit_private_agent_visibility("v1:tenant:shared:mind")
     assert not requires_explicit_private_agent_visibility("v1:tenant:unscoped:mind")
     assert not requires_explicit_private_agent_visibility("legacy-worker-key")
-
-
-def test_visible_workspace_roots_for_private_user_agent_workers_hide_the_private_state_root(
-    tmp_path: Path,
-) -> None:
-    """Private requester-scoped workers see only their private workspace, not the state root above it."""
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-
-    worker_key = resolve_worker_key("user_agent", identity, agent_name="mind")
-
-    assert worker_key is not None
-    assert visible_workspace_roots_for_worker_key(
-        tmp_path,
-        worker_key,
-        private_agent_roots={"mind": "mind_data"},
-    ) == (private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data",)
-    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == (
-        agent_workspace_root_path(tmp_path, "mind"),
-    )
-    for escaping_root in ("/etc", "../other", "."):
-        with pytest.raises(ValueError, match=r"private\.root must be a relative path"):
-            visible_workspace_roots_for_worker_key(
-                tmp_path,
-                worker_key,
-                private_agent_roots={"mind": escaping_root},
-            )
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:

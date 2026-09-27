@@ -9,13 +9,15 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_agent_policy_index,
     resolve_private_knowledge_base_agent,
-    user_scope_shared_agent_names,
-    worker_workspace_roots,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.tool_system.worker_routing import agent_workspace_root_path, private_instance_scope_root_path
+from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
+    private_instance_scope_root_path,
+    visible_workspace_roots,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,24 +65,6 @@ def test_resolve_agent_policy_inherits_default_worker_scope_without_private_work
     assert policy.private_agent_knowledge_enabled is False
 
 
-def test_user_scope_shared_agent_names_excludes_other_scopes_and_private_agents() -> None:
-    """Only non-private agents resolving to worker_scope=user belong to a user worker's shared roots."""
-    agents = {
-        "inherits_user": AgentConfig(display_name="Inherits User"),
-        "explicit_user": AgentConfig(display_name="Explicit User", worker_scope="user"),
-        "shared": AgentConfig(display_name="Shared", worker_scope="shared"),
-        "per_pair": AgentConfig(display_name="Per Pair", worker_scope="user_agent"),
-        "private_user": AgentConfig(display_name="Private User", private={"per": "user"}),
-    }
-    seeds = build_agent_policy_seeds(agents, default_worker_scope="user")
-
-    names = user_scope_shared_agent_names(resolve_agent_policy_index(seeds).policies)
-
-    assert names == frozenset({"inherits_user", "explicit_user"})
-    config = Config(agents=agents, defaults={"worker_scope": "user"})
-    assert user_scope_shared_agent_names(config.get_agent_policies()) == names
-
-
 def test_policy_private_root_is_shared_between_typed_and_raw_config() -> None:
     """Backends read raw config and workers read typed config, so both derive the same private workspace path."""
     raw_agents = {
@@ -96,39 +80,48 @@ def test_policy_private_root_is_shared_between_typed_and_raw_config() -> None:
         ).policies
         assert {name: policy.private_root for name, policy in policies.items()} == {
             "mind": "workspace/mind",
-            "notes": "notes_data",
+            "notes": None,
             "helper": None,
         }
 
 
-def test_worker_workspace_roots_follow_private_visibility_and_scope(tmp_path: Path) -> None:
-    """User-agent keys see a private workspace only with explicit visibility; user keys see their per-user agents."""
-    policies = resolve_agent_policy_index(
-        build_agent_policy_seeds(
-            {
-                "mind": AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user_agent")),
-                "notes": AgentConfig(display_name="Notes", private=AgentPrivateConfig(per="user")),
-                "helper": AgentConfig(display_name="Helper", worker_scope="user"),
-            },
-            default_worker_scope=None,
-        ),
-    ).policies
+def test_visible_workspace_roots_follow_private_visibility_and_scope(tmp_path: Path) -> None:
+    """User-agent keys see a private workspace only with a private policy; user keys see only user-scope agents."""
+    agents = {
+        "mind": AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user_agent")),
+        "notes": AgentConfig(display_name="Notes", private=AgentPrivateConfig(per="user")),
+        "helper": AgentConfig(display_name="Helper", worker_scope="user"),
+        "inherits_user": AgentConfig(display_name="Inherits User"),
+        "shared": AgentConfig(display_name="Shared", worker_scope="shared"),
+        "per_pair": AgentConfig(display_name="Per Pair", worker_scope="user_agent"),
+    }
+    policies = Config(agents=agents, defaults={"worker_scope": "user"}).get_agent_policies()
     user_agent_key = "v1:tenant:user_agent:@alice:localhost:mind"
     user_key = "v1:tenant:user:@alice:localhost"
 
-    assert worker_workspace_roots(tmp_path, user_agent_key, policies, private_agent_names=frozenset({"mind"})) == (
+    def roots(worker_key: str, *private_agent_names: str) -> tuple[Path, ...]:
+        return visible_workspace_roots(
+            tmp_path,
+            worker_key,
+            policies,
+            private_agent_names=frozenset(private_agent_names),
+        )
+
+    assert roots(user_agent_key, "mind") == (
         private_instance_scope_root_path(tmp_path, user_agent_key) / "mind" / "mind_data",
     )
-    assert worker_workspace_roots(tmp_path, user_agent_key, policies, private_agent_names=frozenset()) == (
-        agent_workspace_root_path(tmp_path, "mind"),
+    assert roots(user_agent_key) == (agent_workspace_root_path(tmp_path, "mind"),)
+    # A private agent the policies do not know keeps its default private workspace, never the shared one.
+    assert visible_workspace_roots(tmp_path, user_agent_key, {}, private_agent_names=frozenset({"mind"})) == roots(
+        user_agent_key,
+        "mind",
     )
-    assert worker_workspace_roots(tmp_path, user_key, policies, private_agent_names=frozenset()) == (
+    assert roots(user_key) == (
         agent_workspace_root_path(tmp_path, "helper"),
+        agent_workspace_root_path(tmp_path, "inherits_user"),
         private_instance_scope_root_path(tmp_path, user_key) / "notes" / "notes_data",
     )
-    assert worker_workspace_roots(tmp_path, "v1:tenant:shared:helper", policies, private_agent_names=frozenset()) == (
-        agent_workspace_root_path(tmp_path, "helper"),
-    )
+    assert roots("v1:tenant:shared:helper") == (agent_workspace_root_path(tmp_path, "helper"),)
 
 
 def test_resolve_agent_policy_index_marks_private_team_ineligibility() -> None:

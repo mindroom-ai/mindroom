@@ -36,7 +36,6 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
-from mindroom.agent_policy import worker_workspace_roots
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -77,6 +76,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
     resolve_worker_target,
+    visible_workspace_roots,
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -3273,7 +3273,7 @@ def test_resolve_worker_base_dir_rejects_paths_outside_visible_workspaces(tmp_pa
             "writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user", root="writer_data")),
         },
     )
-    workspace_roots = worker_workspace_roots(
+    workspace_roots = visible_workspace_roots(
         storage_root,
         worker_key,
         config.get_agent_policies(),

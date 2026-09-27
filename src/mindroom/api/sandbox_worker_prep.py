@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import HTTPException
 
-from mindroom.agent_policy import worker_workspace_roots
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     requires_explicit_private_agent_visibility,
+    visible_workspace_roots,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -310,7 +310,7 @@ def prepare_worker_request(
                 storage_root,
                 worker_key,
                 tool_init_overrides.get("base_dir"),
-                worker_workspace_roots(
+                visible_workspace_roots(
                     storage_root,
                     worker_key,
                     agent_policies,

@@ -23,7 +23,6 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, shell_supervisor, yaml_io
-from mindroom.agent_policy import worker_workspace_roots
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.worker_responses import (
@@ -78,6 +77,7 @@ from mindroom.tool_system.worker_routing import (
     build_worker_target_from_runtime_env,
     resolved_worker_key_scope,
     tool_execution_identity,
+    visible_workspace_roots,
 )
 from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
@@ -661,7 +661,7 @@ def resolve_script_state_workspace(
     if (agent_name in private_agent_names) != (agent_config.private is not None):
         msg = "Script state scope does not match private-agent visibility."
         raise ValueError(msg)
-    workspaces = worker_workspace_roots(
+    workspaces = visible_workspace_roots(
         sandbox_exec.runner_storage_root(runtime_paths),
         state_scope_worker_key,
         config.get_agent_policies(),

@@ -15,11 +15,10 @@ from pydantic import SecretStr
 
 from mindroom.agent_cli.worker_network import validate_cli_primary_auth
 from mindroom.agent_cli.worker_protocol import CliShellRequest, CliShellSettings, CliWorkerLaunch, safe_origin
-from mindroom.agent_policy import worker_workspace_roots
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.worker_routing import resolve_worker_key
+from mindroom.tool_system.worker_routing import resolve_worker_key, visible_workspace_roots
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerSpec, process_worker_key, worker_api_endpoint
@@ -114,8 +113,8 @@ class CliWorkerLease:
             key = self.spec.state_scope_worker_key or ""
             private = self.spec.private_agent_names or frozenset()
             policies = self.context.config.get_agent_policies()
-            local_roots = worker_workspace_roots(runtime.storage_root, key, policies, private_agent_names=private)
-            worker_roots = worker_workspace_roots(
+            local_roots = visible_workspace_roots(runtime.storage_root, key, policies, private_agent_names=private)
+            worker_roots = visible_workspace_roots(
                 self.container_storage_root,
                 key,
                 policies,

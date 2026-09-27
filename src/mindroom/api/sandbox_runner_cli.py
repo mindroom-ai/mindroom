@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH, CliShellRequest, CliWorkerLaunch
-from mindroom.agent_policy import worker_workspace_roots
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_cli_state,
@@ -28,6 +27,7 @@ from mindroom.background_tasks import run_blocking_until_complete, wait_for_futu
 from mindroom.shell_supervisor import ensure_shell_supervisor
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
+from mindroom.tool_system.worker_routing import visible_workspace_roots
 from mindroom.tools.shell import ShellWorkerBinding, shell_tools
 from mindroom.workers.models import is_cli_worker_key
 
@@ -64,7 +64,7 @@ def _workspace(
     runtime: RuntimePaths,
     agent_policies: Mapping[str, ResolvedAgentPolicy],
 ) -> Path:
-    roots = worker_workspace_roots(
+    roots = visible_workspace_roots(
         runtime.storage_root,
         launch.state_scope_worker_key,
         agent_policies,
