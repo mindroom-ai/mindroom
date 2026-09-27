@@ -10,7 +10,7 @@ enum MindRoomRuntimeAction: Equatable {
     case serviceStatus
     case initializeHostedConfig
     case initializeSelfHostedConfig
-    case pairHosted(pairCode: String)
+    case pairHosted
 }
 
 struct MindRoomCommandInvocation: Equatable {
@@ -93,8 +93,8 @@ struct MindRoomRuntime {
             return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "mindroom.chat", "--no-input"])
         case .initializeSelfHostedConfig:
             return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "self-hosted", "--no-input"])
-        case let .pairHosted(pairCode):
-            return mindroomCommand(arguments: ["connect", "--pair-code", pairCode])
+        case .pairHosted:
+            return mindroomCommand(arguments: ["connect", "--open-browser"])
         }
     }
 

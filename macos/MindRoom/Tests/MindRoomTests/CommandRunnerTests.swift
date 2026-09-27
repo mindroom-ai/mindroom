@@ -30,17 +30,18 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
-    func testPairingFeedbackDoesNotRetainPairCode() async throws {
+    func testPairHostedInvokesConnectWithOpenBrowser() async throws {
         let completed = expectation(description: "Pairing finished")
-        let pairCode = "test-pair-code-must-be-discarded"
-        let runner = MindRoomCommandRunner(processRunner: { _ in
-            CommandResult(exitCode: 0, output: "Paired")
+        var capturedInvocation: MindRoomCommandInvocation?
+        let runner = MindRoomCommandRunner(processRunner: { invocation in
+            capturedInvocation = invocation
+            return CommandResult(exitCode: 0, output: "Paired")
         })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
-        runner.run(.pairHosted(pairCode: pairCode))
+        runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
-        let feedback = try XCTUnwrap(runner.feedback)
-        XCTAssertFalse(String(reflecting: feedback).contains(pairCode))
-        XCTAssertEqual(feedback.title, "Pair Chat Account")
+        let invocation = try XCTUnwrap(capturedInvocation)
+        XCTAssertEqual(invocation.arguments, ["mindroom", "connect", "--open-browser"])
+        XCTAssertEqual(runner.feedback?.title, "Pair Chat Account")
     }
 }

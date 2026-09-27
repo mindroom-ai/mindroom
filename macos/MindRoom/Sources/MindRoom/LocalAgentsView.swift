@@ -3,7 +3,6 @@ import SwiftUI
 struct LocalAgentsView: View {
     @ObservedObject var runner: MindRoomCommandRunner
     @State private var showSetup = false
-    @State private var pairCode = ""
 
     private var state: MindRoomServiceState { runner.serviceStatus.state }
 
@@ -71,18 +70,11 @@ struct LocalAgentsView: View {
                 HStack {
                     Button("Prepare Configuration") { runner.run(.initializeHostedConfig) }
                         .disabled(runner.isRunningCommand || state == .runtimeMissing)
-                    Button("Open MindRoom Chat") { runner.run(.openHostedChat) }
+                    Button("Connect Account") { runner.run(.pairHosted) }
+                        .disabled(runner.isRunningCommand || state == .runtimeMissing)
                 }
-                Text("Sign in, open Local MindRoom in the chat sidebar, and generate a pair code.")
+                Text("Your browser opens MindRoom Chat. Sign in if needed and click Approve; this finishes when you do, or after 10 minutes.")
                     .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    SecureField("Pair code", text: $pairCode).textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 220)
-                        .onSubmit(pair)
-                    Button("Pair Account", action: pair)
-                        .disabled(pairCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  || runner.isRunningCommand || state == .runtimeMissing)
-                }
             }
             AppSectionCard {
                 setupHeading(3, "Connect an AI provider", "Add your model credentials to .env in the config folder, or configure a local model in config.yaml before starting agents.")
@@ -110,12 +102,5 @@ struct LocalAgentsView: View {
             Text("\(number). \(title)").font(.headline)
             Text(detail).foregroundStyle(.secondary)
         }
-    }
-
-    private func pair() {
-        let code = pairCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !code.isEmpty, !runner.isRunningCommand, state != .runtimeMissing else { return }
-        pairCode = ""
-        runner.run(.pairHosted(pairCode: code))
     }
 }
