@@ -94,7 +94,6 @@ agents:
     - website
     - browser
     - scheduler
-    - update_awareness
     - todo
     - matrix_message
     - name: thread_model
@@ -155,7 +154,6 @@ authorization:
 defaults:
   tools:
   - scheduler
-  - update_awareness
   markdown: true
   compaction:
     enabled: true

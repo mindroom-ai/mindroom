@@ -49,6 +49,11 @@ def saas_config() -> dict:
     # An explicit worker_tools list overrides the chart's sandbox routing, and [] would run
     # shell/file/python in the primary pod beside tenant credentials.
     config["defaults"].pop("worker_tools", None)
+
+    # The platform upgrades hosted instances, so tenants cannot act on update notices.
+    config["defaults"]["tools"].remove("update_awareness")
+    for agent in config["agents"].values():
+        agent["tools"].remove("update_awareness")
     return config
 
 
