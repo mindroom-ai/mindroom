@@ -750,13 +750,18 @@ def _runner_tool_output_workspace_root(
 ) -> Path | None:
     """Return the runner-visible workspace root for redirected tool output."""
     if routing_agent_name is not None:
-        agent_runtime = resolve_agent_runtime(
-            routing_agent_name,
-            config,
-            _runtime_paths_for_runner_agent_paths(runtime_paths),
-            execution_identity=execution_identity,
-            create=True,
-        )
+        try:
+            agent_runtime = resolve_agent_runtime(
+                routing_agent_name,
+                config,
+                _runtime_paths_for_runner_agent_paths(runtime_paths),
+                execution_identity=execution_identity,
+                create=True,
+            )
+        except OSError as exc:
+            # A dedicated worker cannot create a workspace its pod does not mount; the next ensure mounts it.
+            msg = f"Agent workspace is not mounted in this worker yet; retry the call: {exc}"
+            raise sandbox_worker_prep.WorkerRequestPreparationError(msg) from exc
         return agent_runtime.tool_base_dir
 
     base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
@@ -785,6 +790,8 @@ def _optional_runner_tool_output_workspace_root(
             execution_identity=execution_identity,
             routing_agent_name=routing_agent_name,
         )
+    except sandbox_worker_prep.WorkerRequestPreparationError:
+        raise
     except ValueError:
         if output_path is not None:
             raise

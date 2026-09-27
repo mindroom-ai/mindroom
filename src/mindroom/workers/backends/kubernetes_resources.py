@@ -51,7 +51,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
-    prepare_workspace_mount_sources,
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
@@ -819,38 +818,6 @@ class KubernetesResourceManager:
                 self._patch_secret_merge(worker_id, self._auth_secret_patch(worker_key=worker_key, worker_id=worker_id))
             return
         self._patch_secret_merge(worker_id, self._auth_secret_patch(worker_key=worker_key, worker_id=worker_id))
-
-    def prepare_workspace_mount_sources(
-        self,
-        *,
-        worker_key: str,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None = None,
-    ) -> None:
-        """Create the missing shared workspaces one worker mounts; kubelet would create them as root."""
-        prepare_workspace_mount_sources(
-            worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
-            local_shared_storage_root=self.storage_root,
-            private_agent_names=private_agent_names,
-            resolved_agent_policies=self.resolved_agent_policies,
-        )
-
-    def workspace_mounts(
-        self,
-        *,
-        worker_key: str,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None = None,
-    ) -> tuple[tuple[str, str], ...]:
-        """Return the current ``(mountPath, subPath)`` workspace mounts of one worker without changing storage."""
-        return tuple(
-            (str(mount["mountPath"]), str(mount["subPath"]))
-            for mount in self._workspace_storage_mounts(
-                worker_key,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
-            )
-        )
 
     def apply_deployment(
         self,

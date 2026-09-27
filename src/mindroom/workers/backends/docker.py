@@ -50,7 +50,6 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_workspace_mounts,
-    prepare_workspace_mount_sources,
     resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
@@ -673,11 +672,13 @@ class DockerWorkerBackend:
 
         with self._worker_lock(spec.worker_key):
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
-            prepare_workspace_mount_sources(
+            plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
                 local_shared_storage_root=self._storage_path,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+                create_shared=True,
             )
             launch_config = self._resolve_launch_config()
             paths = self._worker_paths(spec.worker_key)

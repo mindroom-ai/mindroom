@@ -4886,6 +4886,67 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace missing from the pod is a request error the primary does not count against the worker."""
+    _set_sandbox_token(monkeypatch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    # Only the pod's read-only root filesystem lies where the unmounted workspace belongs.
+    unmounted_parent = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha"
+    unmounted_parent.mkdir(parents=True)
+    unmounted_parent.chmod(0o555)
+    (tmp_path / "config.yaml").write_text(
+        "agents:\n  alpha:\n    display_name: Alpha\n    private:\n      per: user_agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
+
+    try:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["true"]],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "worker_scope": "user_agent",
+                "routing_agent_name": "alpha",
+                "execution_identity": asdict(identity),
+                "private_agent_names": ["alpha"],
+            },
+        )
+    finally:
+        unmounted_parent.chmod(0o755)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["failure_kind"] == "tool"
+    assert "not mounted" in response.json()["error"]
+
+
 def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

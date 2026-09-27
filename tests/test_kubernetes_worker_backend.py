@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import load_yaml_config_source
@@ -3296,9 +3297,11 @@ def test_kubernetes_backend_never_mounts_a_linked_workspace(tmp_path: Path) -> N
     attacker_agent_root.rename(attacker_agent_root.with_name("mind-moved"))
     attacker_agent_root.symlink_to(private_instance_scope_root_path(backend.storage_root, victim_key) / "mind")
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
+    with capture_logs() as logs:
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
 
     assert not any("private_instances" in path for path in _storage_mounts(apps_api.created_bodies[-1]))
+    assert any(entry["log_level"] == "warning" and "link" in entry["event"] for entry in logs)
 
 
 def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path: Path) -> None:
@@ -3403,6 +3406,60 @@ def _materialize_private_workspace(storage_root: Path, worker_key: str, requeste
     workspace = private_instance_scope_root_path(storage_root, worker_key) / "mind" / "mind_data"
     workspace.mkdir(parents=True)
     return workspace
+
+
+@pytest.mark.parametrize("materialized", ["after_ready_then_touched", "during_cold_start"])
+def test_kubernetes_user_worker_mounts_a_private_workspace_that_materializes_later(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    materialized: str,
+) -> None:
+    """The ready cache compares the mounts the pod got, so a workspace created after planning recreates the pod."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user:~@alice:localhost"
+    workspace = private_instance_scope_root_path(backend.storage_root, worker_key) / "notes" / "notes_data"
+    mount_path = f"/app/worker/{workspace.relative_to(backend.storage_root).as_posix()}"
+    if materialized == "during_cold_start":
+        wait_for_ready = backend._resources.wait_for_ready
+
+        def materialize_while_starting(*args: object, **kwargs: object) -> object:
+            workspace.mkdir(parents=True, exist_ok=True)
+            return wait_for_ready(*args, **kwargs)
+
+        monkeypatch.setattr(backend._resources, "wait_for_ready", materialize_while_starting)
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    assert mount_path not in _storage_mounts(apps_api.created_bodies[-1])
+    if materialized == "after_ready_then_touched":
+        workspace.mkdir(parents=True)
+        backend.touch_worker(worker_key, now=15.0)
+    backend.ensure_worker(WorkerSpec(worker_key), now=20.0)
+
+    assert len(apps_api.created_bodies) == 2
+    assert mount_path in _storage_mounts(apps_api.created_bodies[-1])
+
+
+def test_kubernetes_shared_worker_reuse_skips_mount_planning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only user workers can gain a workspace while running, so other cached workers never re-plan on reuse."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:helper"), now=10.0)
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "plan_scoped_workspace_mounts",
+        lambda **_kwargs: pytest.fail("cached shared workers must not re-plan their mounts"),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:helper"), now=20.0)
 
 
 def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes(tmp_path: Path) -> None:

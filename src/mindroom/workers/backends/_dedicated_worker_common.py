@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
@@ -35,7 +36,6 @@ __all__ = [
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
     "plan_scoped_workspace_mounts",
-    "prepare_workspace_mount_sources",
     "resolve_state_scope_worker_key",
     "resolved_agent_policies_from_config_data",
     "stable_signature_json",
@@ -44,6 +44,7 @@ __all__ = [
     "validate_unique_worker_visible_paths",
 ]
 
+logger = get_logger(__name__)
 
 _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
     {
@@ -275,14 +276,6 @@ def _scoped_workspaces(
     return workspaces
 
 
-def _is_real_directory(storage_root: Path, relative_path: Path) -> bool:
-    try:
-        with open_directory_within_root(storage_root, relative_path):
-            return True
-    except OSError:
-        return False
-
-
 def plan_scoped_workspace_mounts(
     *,
     worker_key: str,
@@ -290,18 +283,18 @@ def plan_scoped_workspace_mounts(
     worker_visible_shared_storage_root: Path,
     private_agent_names: frozenset[str] | None,
     resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
+    create_shared: bool = False,
 ) -> tuple[ScopedWorkspaceMount, ...]:
-    """Return the workspaces one dedicated worker mounts writable, without changing storage.
+    """Return the workspaces one dedicated worker mounts writable, at their canonical paths.
 
-    Workers never mount the agent state roots or private scopes above a
-    workspace. A workspace is mounted only when it already exists as a real
-    directory reached without links from the storage root: the container
-    runtime creates missing sources as root, and a private workspace created
-    before its scope's identity record makes the scope look like unowned data.
-    Each mount keeps its canonical path inside the worker, plus the verified
-    legacy spelling of a private scope at the same granularity.
+    A workspace is mounted only when it is a real directory reached without links
+    from the storage root, because container runtimes create missing sources as
+    root. ``create_shared`` first creates missing shared workspaces that way; private
+    workspaces appear only after the primary writes their scope's identity record.
+    Private mounts repeat at the verified legacy spellings of their scope.
     """
     storage_root = shared_storage_root(local_shared_storage_root)
+    private_root = private_instances_root_path(storage_root)
     mounts: list[ScopedWorkspaceMount] = []
     for workspace in _scoped_workspaces(
         worker_key=worker_key,
@@ -310,8 +303,25 @@ def plan_scoped_workspace_mounts(
         resolved_agent_policies=resolved_agent_policies,
     ):
         relative_path = workspace.relative_to(storage_root)
-        if _is_real_directory(storage_root, relative_path):
-            mounts.append(ScopedWorkspaceMount(workspace, worker_visible_shared_storage_root / relative_path))
+        create = create_shared and not workspace.is_relative_to(private_root)
+        try:
+            with open_directory_within_root(storage_root, relative_path, create=create):
+                mounts.append(ScopedWorkspaceMount(workspace, worker_visible_shared_storage_root / relative_path))
+        except FileNotFoundError:
+            logger.info(
+                "Not mounting a workspace that does not exist yet",
+                worker_key=worker_key,
+                workspace=str(relative_path),
+            )
+        except OSError as exc:
+            if create:
+                msg = f"Worker workspace must be a real directory below the storage root: {relative_path}"
+                raise WorkerBackendError(msg) from exc
+            logger.warning(
+                "Not mounting a workspace reached through a link",
+                worker_key=worker_key,
+                workspace=str(relative_path),
+            )
     canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
     private_mounts = [mount for mount in mounts if mount.local_path.is_relative_to(canonical_scope)]
     if private_mounts:
@@ -330,37 +340,6 @@ def plan_scoped_workspace_mounts(
             for mount in private_mounts
         )
     return tuple(mounts)
-
-
-def prepare_workspace_mount_sources(
-    *,
-    worker_key: str,
-    local_shared_storage_root: Path,
-    private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
-) -> None:
-    """Create missing shared workspaces by a no-follow walk before a worker starts.
-
-    Private workspaces are never created here: the primary materializes them
-    only after writing their scope's identity record.
-    """
-    storage_root = shared_storage_root(local_shared_storage_root)
-    private_root = private_instances_root_path(storage_root)
-    for workspace in _scoped_workspaces(
-        worker_key=worker_key,
-        storage_root=storage_root,
-        private_agent_names=private_agent_names,
-        resolved_agent_policies=resolved_agent_policies,
-    ):
-        if workspace.is_relative_to(private_root):
-            continue
-        relative_path = workspace.relative_to(storage_root)
-        try:
-            with open_directory_within_root(storage_root, relative_path, create=True):
-                pass
-        except OSError as exc:
-            msg = f"Worker workspace must be a real directory below the storage root: {relative_path}"
-            raise WorkerBackendError(msg) from exc
 
 
 def validate_unique_worker_visible_paths(

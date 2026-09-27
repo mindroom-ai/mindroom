@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
@@ -26,6 +27,11 @@ from mindroom.workers.backend import (
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
+)
+from mindroom.workers.backends._dedicated_worker_common import (
+    ScopedWorkspaceMount,
+    plan_scoped_workspace_mounts,
+    resolve_state_scope_worker_key,
 )
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
@@ -48,7 +54,6 @@ from .kubernetes_config import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
@@ -84,7 +89,7 @@ class _ReadyWorkerCacheEntry:
     handle: WorkerHandle
     validated_at: float
     credentials_encryption_key_hash: str | None
-    workspace_mounts: tuple[tuple[str, str], ...]
+    workspace_mounts: tuple[ScopedWorkspaceMount, ...]
 
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
@@ -551,11 +556,9 @@ class KubernetesWorkerBackend:
                     # kubelet resolves the read-only mirror subPath when the pod starts, so the
                     # primary validates and creates the worker's credential directories first.
                     get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
-                    self._resources.prepare_workspace_mount_sources(
-                        worker_key=worker_key,
-                        private_agent_names=spec.private_agent_names,
-                        state_scope_worker_key=spec.state_scope_worker_key,
-                    )
+                    # kubelet creates missing subPath sources as root, so shared workspaces exist first;
+                    # the cache keeps these mounts to notice a workspace that appears after planning.
+                    workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
@@ -632,7 +635,7 @@ class KubernetesWorkerBackend:
                     now=timestamp,
                     annotations_override=final_deployment_annotations,
                 )
-                self._store_ready_worker(spec, handle, validated_at=timestamp)
+                self._store_ready_worker(spec, handle, validated_at=timestamp, workspace_mounts=workspace_mounts)
                 return handle
         finally:
             if progress_sink is not None:
@@ -953,20 +956,26 @@ class KubernetesWorkerBackend:
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
-    def _workspace_mounts(self, spec: WorkerSpec) -> tuple[tuple[str, str], ...]:
-        return self._resources.workspace_mounts(
-            worker_key=spec.worker_key,
+    def _plan_workspace_mounts(self, spec: WorkerSpec, *, create_shared: bool) -> tuple[ScopedWorkspaceMount, ...]:
+        return plan_scoped_workspace_mounts(
+            worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
+            local_shared_storage_root=self._resources.storage_root,
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
             private_agent_names=spec.private_agent_names,
-            state_scope_worker_key=spec.state_scope_worker_key,
+            resolved_agent_policies=self._resources.resolved_agent_policies,
+            create_shared=create_shared,
         )
 
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
         if entry is None:
             return None
-        # A workspace materialized after this pod started, such as a user worker's
-        # next private agent, is mounted only by rebuilding the pod template.
-        if self._workspace_mounts(spec) != entry.workspace_mounts:
+        # A workspace appears while a worker runs only for a user worker, when another of its requester's
+        # private agents materializes, or for a worker whose private workspace was missing; mounting it
+        # requires rebuilding the pod template, so only those workers re-plan on reuse.
+        state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
+        may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
+        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
@@ -997,13 +1006,14 @@ class KubernetesWorkerBackend:
         handle: WorkerHandle,
         *,
         validated_at: float,
+        workspace_mounts: tuple[ScopedWorkspaceMount, ...],
     ) -> None:
         entry = _ReadyWorkerCacheEntry(
             spec=spec,
             handle=handle,
             validated_at=validated_at,
             credentials_encryption_key_hash=self._current_credentials_encryption_key_hash(),
-            workspace_mounts=self._workspace_mounts(spec),
+            workspace_mounts=workspace_mounts,
         )
         with self._ready_workers_lock:
             self._ready_workers[spec.worker_key] = entry
@@ -1057,6 +1067,7 @@ class KubernetesWorkerBackend:
             entry.spec,
             handle,
             validated_at=entry.validated_at,
+            workspace_mounts=entry.workspace_mounts,
         )
         return handle
 
