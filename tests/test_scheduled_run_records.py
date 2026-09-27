@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from threading import Event
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -20,7 +19,7 @@ from mindroom.scheduled_run_records import (
     record_silent_schedule_result_if_needed,
     record_silent_schedule_started_if_needed,
 )
-from tests.conftest import request_envelope, test_runtime_paths
+from tests.conftest import plant_workspace_entry, request_envelope, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -353,14 +352,9 @@ async def test_silent_run_receipts_never_follow_planted_workspace_entries(tmp_pa
     victim_file.write_text('{"victim": "victim-only note"}', encoding="utf-8")
     receipt_name = scheduled_run_records._receipt_relative_path(envelope.source_event_id).name
     if planted == "linked_runs_dir":
-        runs_dir.parent.mkdir(parents=True)
-        runs_dir.symlink_to(victim, target_is_directory=True)
+        plant_workspace_entry(runs_dir, "link", victim)
     else:
-        runs_dir.mkdir(parents=True)
-        if planted == "linked_receipt":
-            (runs_dir / receipt_name).symlink_to(victim_file)
-        else:
-            os.mkfifo(runs_dir / receipt_name)
+        plant_workspace_entry(runs_dir / receipt_name, "fifo" if planted == "fifo_receipt" else "link", victim_file)
 
     started = record_silent_schedule_started_if_needed(
         entity_name="watcher",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,6 +28,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    plant_workspace_entry,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -928,12 +928,7 @@ def test_workspace_template_swapped_after_resolution_is_not_read(
 
     def resolve_then_swap(name: str, template_roots: object) -> object:
         resolved = resolve_template_path(name, template_roots)
-        path = resolved[0]
-        path.unlink()
-        if planted == "link":
-            path.symlink_to(victim)
-        else:
-            os.mkfifo(path)
+        plant_workspace_entry(resolved[0], planted, victim)
         return resolved
 
     monkeypatch.setattr(todo_module, "_resolve_template_path", resolve_then_swap)

@@ -2289,14 +2289,18 @@ def test_kubernetes_backend_honors_custom_worker_port() -> None:
     assert container["livenessProbe"]["httpGet"]["port"] == "api"
 
 
-def test_kubernetes_backend_mounts_only_the_workspace_for_shared_workers(tmp_path: Path) -> None:
-    """Shared-scope dedicated workers mount their agent workspace, never the agent state root above it."""
+@pytest.mark.parametrize(
+    "worker_key",
+    ["v1:tenant-123:shared:code", resolve_unscoped_worker_key(agent_name="code")],
+    ids=["shared", "unscoped"],
+)
+def test_kubernetes_backend_mounts_only_the_workspace_for_agent_workers(tmp_path: Path, worker_key: str) -> None:
+    """Shared and unscoped dedicated workers mount their agent workspace, never the agent state root above it."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
     )
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    worker_key = "v1:tenant-123:shared:code"
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
@@ -3306,8 +3310,7 @@ def test_kubernetes_backend_user_agent_mounts_only_the_existing_private_workspac
     assert "/app/worker/agents/mind/workspace" not in _storage_mounts(apps_api.created_bodies[-1])
     assert not scope_root.exists()
 
-    ensure_private_instance_identity(backend.storage_root, worker_key=worker_key, requester_id="@alice:localhost")
-    (scope_root / "mind" / "mind_data").mkdir(parents=True)
+    _materialize_private_workspace(backend.storage_root, worker_key, "@alice:localhost")
     backend.ensure_worker(spec, now=20.0)
 
     private_mounts = {
@@ -3334,8 +3337,7 @@ def test_kubernetes_backend_never_mounts_a_linked_workspace(tmp_path: Path) -> N
     worker_key = "v1:tenant-123:user_agent:~@mallory:localhost:mind"
     victim_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
     for key, requester in ((worker_key, "@mallory:localhost"), (victim_key, "@alice:localhost")):
-        ensure_private_instance_identity(backend.storage_root, worker_key=key, requester_id=requester)
-        (private_instance_scope_root_path(backend.storage_root, key) / "mind" / "mind_data").mkdir(parents=True)
+        _materialize_private_workspace(backend.storage_root, key, requester)
     attacker_agent_root = private_instance_scope_root_path(backend.storage_root, worker_key) / "mind"
     attacker_agent_root.rename(attacker_agent_root.with_name("mind-moved"))
     attacker_agent_root.symlink_to(private_instance_scope_root_path(backend.storage_root, victim_key) / "mind")
@@ -3355,12 +3357,10 @@ def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path:
     )
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = "v1:default:user_agent:~@alice:example.org:mind"
-    ensure_private_instance_identity(backend.storage_root, worker_key=worker_key, requester_id="@alice:example.org")
+    _materialize_private_workspace(backend.storage_root, worker_key, "@alice:example.org")
     canonical = private_instance_scope_root_path(backend.storage_root, worker_key)
     legacy = private_instance_scope_root_path(backend.storage_root, "v1:default:user_agent:@alice:example.org:mind")
     legacy.symlink_to(canonical.name, target_is_directory=True)
-
-    (canonical / "mind" / "mind_data").mkdir(parents=True)
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
 
@@ -3391,14 +3391,7 @@ def test_kubernetes_script_worker_mounts_the_owning_private_workspace(tmp_path: 
     state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
     run_id = f"script-{'a' * 32}"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
-    ensure_private_instance_identity(
-        backend.storage_root,
-        worker_key=state_scope_worker_key,
-        requester_id="@alice:localhost",
-    )
-    (private_instance_scope_root_path(backend.storage_root, state_scope_worker_key) / "mind" / "mind_data").mkdir(
-        parents=True,
-    )
+    _materialize_private_workspace(backend.storage_root, state_scope_worker_key, "@alice:localhost")
 
     backend.ensure_worker(
         WorkerSpec(
@@ -3583,26 +3576,6 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate(tmp_pa
         _storage_mounts(apps_api.created_bodies[-1])[f"/app/worker/{relative_workspace}"]["subPath"]
         == relative_workspace
     )
-
-
-def test_kubernetes_backend_mounts_only_the_workspace_for_unscoped_workers() -> None:
-    """Unscoped dedicated workers mount only the addressed agent's workspace."""
-    backend, apps_api, _core_api = _backend()
-    worker_key = resolve_unscoped_worker_key(agent_name="general")
-
-    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
-
-    deployment = apps_api.created_bodies[0]
-    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
-    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
-
-    assert mount_paths["/app/worker/agents/general/workspace"] == "agents/general/workspace"
-    assert "/app/worker/agents/general" not in mount_paths
-    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
-    assert "/app/worker/agents" not in mount_paths
-    assert "/app/worker/credentials" not in mount_paths
-    assert "/app/worker/.shared_credentials" not in mount_paths
 
 
 def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
