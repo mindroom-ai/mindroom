@@ -31,15 +31,16 @@ A workspace is mounted only when it is a real directory reached from the storage
 Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 The primary treats everything inside a mounted workspace as worker-controlled.
 Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files atomically or create them exclusively without hard links.
-Reads through those descriptors stop at 64 MiB, and each surface handles a larger file as follows.
+Reads through those descriptors are capped per surface.
 
-| Surface | Above 64 MiB |
-|---|---|
-| Context files, call transcripts sent to Mem0 | Read up to the cap; context preload truncation shortens them further |
-| Knowledge sources | Left out of the listing with a warning |
-| Skill files, todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | Refused with a logged error |
-| Delegation event logs | No cap: streamed while reading and appended in place |
-| Workspace skills | Also at most 256 skills per workspace, with a warning when more exist |
+| Surface | Cap | Above the cap |
+|---|---|---|
+| Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each, 8 MiB of skills and 256 skills per workspace | The file is refused, and skills beyond the budget or count are skipped, with a warning |
+| Call transcripts sent to Mem0 | 64 MiB | Truncated |
+| Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
+| Delegation event logs | 4 MiB per event, 256 MiB per log | The record becomes unreadable; values above 64 KiB already move to artifacts |
+| Todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 
 Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment so programs named in workspace Git config never run.
 

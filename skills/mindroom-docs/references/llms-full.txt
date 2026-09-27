@@ -21062,17 +21062,22 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 Releases after v2026.9.324 mount only agent workspaces into dedicated Docker and Kubernetes workers.
 Drain worker activity before upgrading, because primary startup stops every worker from an older release, which ends its tool calls, shells, background scripts, and CLI sessions.
 Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
-Rolling back to v2026.9.324 is safe; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
+Rolling back to v2026.9.324 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
 
-Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted:
+Before upgrading, check two new limits:
+
+- A `private.root` may no longer start with a name the primary writes beside the private workspace: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock`; such a configuration now fails validation, so rename the root first.
+- Knowledge files above 64 MiB are left out of every knowledge base, including operator-managed ones, and the next refresh removes their existing vectors; find them with `find <knowledge folder> -type f -size +64M`.
+
+Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, replacing `<private-root>` with each configured `private.root` (default `<agent>_data`):
 
 ```bash
-find "$STORAGE/agents" -mindepth 2 -path "$STORAGE/agents/*/workspace" -prune -o -type l -print
-find "$STORAGE/private_instances" -mindepth 2 -type l -print
+find "$STORAGE/agents" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/agents/[^/]*/workspace" -prune
+find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/[^/]*/<private-root>" -prune
 find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 ```
 
-Links inside a private workspace (`private_instances/<scope>/<agent>/<private.root>`) are the worker's own, and verified legacy aliases sit directly below `private_instances`; remove any other link, and inspect hard-linked files for data copied out of another instance.
+The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
@@ -21433,15 +21438,16 @@ A workspace is mounted only when it is a real directory reached from the storage
 Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 The primary treats everything inside a mounted workspace as worker-controlled.
 Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files atomically or create them exclusively without hard links.
-Reads through those descriptors stop at 64 MiB, and each surface handles a larger file as follows.
+Reads through those descriptors are capped per surface.
 
-| Surface | Above 64 MiB |
-|---|---|
-| Context files, call transcripts sent to Mem0 | Read up to the cap; context preload truncation shortens them further |
-| Knowledge sources | Left out of the listing with a warning |
-| Skill files, todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | Refused with a logged error |
-| Delegation event logs | No cap: streamed while reading and appended in place |
-| Workspace skills | Also at most 256 skills per workspace, with a warning when more exist |
+| Surface | Cap | Above the cap |
+|---|---|---|
+| Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each, 8 MiB of skills and 256 skills per workspace | The file is refused, and skills beyond the budget or count are skipped, with a warning |
+| Call transcripts sent to Mem0 | 64 MiB | Truncated |
+| Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
+| Delegation event logs | 4 MiB per event, 256 MiB per log | The record becomes unreadable; values above 64 KiB already move to artifacts |
+| Todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 
 Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment so programs named in workspace Git config never run.
 

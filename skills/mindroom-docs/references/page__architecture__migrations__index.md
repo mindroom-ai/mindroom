@@ -248,17 +248,22 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 Releases after v2026.9.324 mount only agent workspaces into dedicated Docker and Kubernetes workers.
 Drain worker activity before upgrading, because primary startup stops every worker from an older release, which ends its tool calls, shells, background scripts, and CLI sessions.
 Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
-Rolling back to v2026.9.324 is safe; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
+Rolling back to v2026.9.324 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
 
-Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted:
+Before upgrading, check two new limits:
+
+- A `private.root` may no longer start with a name the primary writes beside the private workspace: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock`; such a configuration now fails validation, so rename the root first.
+- Knowledge files above 64 MiB are left out of every knowledge base, including operator-managed ones, and the next refresh removes their existing vectors; find them with `find <knowledge folder> -type f -size +64M`.
+
+Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, replacing `<private-root>` with each configured `private.root` (default `<agent>_data`):
 
 ```bash
-find "$STORAGE/agents" -mindepth 2 -path "$STORAGE/agents/*/workspace" -prune -o -type l -print
-find "$STORAGE/private_instances" -mindepth 2 -type l -print
+find "$STORAGE/agents" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/agents/[^/]*/workspace" -prune
+find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/[^/]*/<private-root>" -prune
 find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 ```
 
-Links inside a private workspace (`private_instances/<scope>/<agent>/<private.root>`) are the worker's own, and verified legacy aliases sit directly below `private_instances`; remove any other link, and inspect hard-linked files for data copied out of another instance.
+The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
