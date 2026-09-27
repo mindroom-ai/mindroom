@@ -225,7 +225,7 @@ The sandbox-runner startup manifest lives in `.runtime` inside the worker's stat
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
 Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts: Kubernetes scales their Deployments to zero and waits up to 60 seconds for their pods to exit, and Docker removes their containers, so the next use recreates them with workspace-only mounts.
-A failure to reach the backend is logged and never blocks startup.
+A failure never blocks startup: it is retried in the background with backoff and logged as an error until no such worker remains, `/api/health` reports it as `legacy_workers` meanwhile, and ensure replaces an old worker before it serves a request.
 Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](https://docs.mindroom.chat/architecture/migrations/#workspace-only-worker-mounts) describes.
 
 Dedicated Kubernetes workers also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
