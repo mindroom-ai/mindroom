@@ -50,6 +50,17 @@ def saas_config() -> dict:
     # shell/file/python in the primary pod beside tenant credentials.
     config["defaults"].pop("worker_tools", None)
 
+    # Voice messages transcribe through OpenRouter's OpenAI-compatible endpoint with the tenant's OpenRouter key.
+    config["voice"] = {
+        "enabled": True,
+        "stt": {
+            "provider": "openai_compatible",
+            "model": model_defaults.OPENROUTER_OPENAI_TRANSCRIPTION,
+            "host": model_defaults.OPENROUTER_BASE_URL_DEFAULT,
+            "credentials_service": "openrouter",
+        },
+    }
+
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
     config["defaults"]["tools"].remove("update_awareness")
     for agent in config["agents"].values():

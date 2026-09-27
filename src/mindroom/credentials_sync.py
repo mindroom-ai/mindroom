@@ -431,8 +431,8 @@ def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> 
 
 
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get an API key from one explicitly named shared credential service."""
-    return get_runtime_shared_credentials_manager(runtime_paths).get_api_key(service)
+    """Get an API key from one explicitly named shared credential service or its env-var-named twin."""
+    return _get_provider_service_api_key(service, runtime_paths)
 
 
 def get_embedder_api_key(

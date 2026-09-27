@@ -897,6 +897,10 @@ class TestCredentialsSync:
 
         assert get_api_key_for_service("openai-realtime", runtime_paths) == "realtime-key"
         assert get_api_key_for_service("missing", runtime_paths) is None
+        assert get_api_key_for_service("openrouter", runtime_paths) is None
+
+        credentials_manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "env-named-openrouter-key"})
+        assert get_api_key_for_service("openrouter", runtime_paths) == "env-named-openrouter-key"
 
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
         """Test getting Ollama host configuration."""

@@ -64,7 +64,12 @@ def test_saas_default_config_works_with_only_an_openrouter_key() -> None:
     assert {config.models[agent.model].provider for agent in config.agents.values()} == {"openrouter"}
     # File memory extracts with the agent's own model, so no separate memory LLM is needed.
     assert config.memory.backend == "file"
-    assert config.voice.enabled is False
+    assert config.voice.enabled is True
+    assert config.voice.stt.provider == "openai_compatible"
+    assert config.voice.stt.model == model_defaults.OPENROUTER_OPENAI_TRANSCRIPTION
+    assert config.voice.stt.host == model_defaults.OPENROUTER_BASE_URL_DEFAULT
+    assert config.voice.stt.credentials_service == "openrouter"
+    assert config.models[config.voice.intelligence.model].provider == "openrouter"
     embedder = config.memory.embedder
     assert embedder.provider == "openai"
     assert embedder.config.host == model_defaults.OPENROUTER_BASE_URL_DEFAULT

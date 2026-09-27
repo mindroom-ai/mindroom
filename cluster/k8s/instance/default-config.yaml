@@ -157,3 +157,10 @@ defaults:
   markdown: true
   compaction:
     enabled: true
+voice:
+  enabled: true
+  stt:
+    provider: openai_compatible
+    model: openai/gpt-transcribe
+    host: https://openrouter.ai/api/v1
+    credentials_service: openrouter
