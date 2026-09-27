@@ -475,7 +475,7 @@ def check_docker_workers_absent_for_storage_upgrade(
 def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_DockerContainer]:
     """List every container, running or stopped, in this runtime's namespace."""
     workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
-    client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths, ensure_dependencies=False)
+    client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
     return client.containers.list(
         all=True,
         filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},

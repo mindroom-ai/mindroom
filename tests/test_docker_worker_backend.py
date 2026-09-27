@@ -51,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import runtime as worker_runtime
 from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends import docker_projection as docker_projection_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
@@ -855,6 +856,26 @@ def test_docker_storage_preflight_blocks_unavailable_or_late_inventory(
     monkeypatch.setattr(fake_client.containers, "list", inventory)
     with pytest.raises(WorkerBackendError):
         check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+
+def test_docker_startup_retirement_installs_the_docker_extra_like_first_use(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retirement runs before any first use, so it must auto-install the Docker SDK just as first use would."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    loader = docker_backend_module._load_docker_client_and_errors
+    requested: list[bool] = []
+
+    def record_loader(*args: object, ensure_dependencies: bool = True, **kwargs: object) -> object:
+        requested.append(ensure_dependencies)
+        return loader(*args, **kwargs)
+
+    monkeypatch.setattr(docker_backend_module, "_load_docker_client_and_errors", record_loader)
+    _remove_docker_workers_mounting_state_roots(runtime_paths)
+
+    assert requested == [True]
 
 
 def test_docker_startup_removes_workers_mounting_state_roots(

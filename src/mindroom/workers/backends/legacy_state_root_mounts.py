@@ -62,7 +62,9 @@ def _warn_to_check_for_links(backend_name: str, workers: list[str]) -> None:
 #   recreates it with workspace mounts; durable worker state stays. A container that cannot be removed fails startup
 #   after the others were attempted, so the primary restarts until none remain.
 # Coverage: tests/test_docker_worker_backend.py::test_docker_startup_removes_workers_mounting_state_roots;
-#   tests/test_docker_worker_backend.py::test_docker_retirement_keeps_removing_old_containers_after_one_fails.
+#   tests/test_docker_worker_backend.py::test_docker_retirement_keeps_removing_old_containers_after_one_fails;
+#   tests/test_docker_worker_backend.py::test_docker_startup_retirement_installs_the_docker_extra_like_first_use;
+#   tests/test_legacy_state_root_mounts.py::test_failed_retirement_fails_startup_before_anything_serves.
 def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> None:
     """Remove this runtime's containers created before workers mounted only workspaces."""
     removed: list[str] = []
@@ -98,7 +100,9 @@ def _written_by_older_release(annotations: Mapping[str, str]) -> bool:
 #   fails startup after the other Deployments were attempted, so the primary restarts until none run. Scaled-down
 #   Deployments stay; ensure recreates any Deployment whose template this release did not write.
 # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots;
-#   tests/test_kubernetes_worker_backend.py::test_kubernetes_pod_wait_ignores_finished_pods.
+#   tests/test_kubernetes_worker_backend.py::test_kubernetes_pod_wait_ignores_finished_pods;
+#   tests/test_legacy_state_root_mounts.py::test_unreachable_kubernetes_api_fails_retirement;
+#   tests/test_legacy_state_root_mounts.py::test_failed_retirement_fails_startup_before_anything_serves.
 def _stop_kubernetes_workers_mounting_state_roots(resources: KubernetesResourceManager) -> None:
     """Scale to zero every worker whose pod template this release did not write, and wait for its pods to exit."""
     legacy = [
