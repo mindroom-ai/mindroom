@@ -6,13 +6,15 @@ import asyncio
 import hashlib
 import json
 import os
+import tempfile
 import time
 import uuid
-from contextlib import closing, suppress
+from contextlib import closing, contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
 from agno.knowledge.document.base import Document
@@ -75,6 +77,7 @@ from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
     knowledge_files_from_relative_paths,
     list_knowledge_files,
+    open_knowledge_file,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource
 from mindroom.knowledge.index_metadata import (
@@ -98,7 +101,6 @@ from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
-    from pathlib import Path
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
@@ -395,12 +397,42 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _file_content_digest(file_path: Path) -> str:
+def _file_signature(file_path: Path) -> FileSignature:
+    """Stat and hash one listed file through the same no-follow descriptor."""
     digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
+    with open_knowledge_file(file_path) as descriptor:
+        status = os.fstat(descriptor)
+        while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
-    return digest.hexdigest()
+    return status.st_mtime_ns, status.st_size, digest.hexdigest()
+
+
+def _insert_snapshot(
+    knowledge: Knowledge,
+    file_path: Path,
+    metadata: dict[str, str | int],
+    upsert: bool,
+    reader: Reader,
+) -> None:
+    with _knowledge_source_snapshot(file_path) as snapshot:
+        knowledge.insert(path=str(snapshot), metadata=metadata, upsert=upsert, reader=reader)
+
+
+@contextmanager
+def _knowledge_source_snapshot(file_path: Path) -> Iterator[Path]:
+    """Copy one listed file through a no-follow descriptor into a private directory readers open by path.
+
+    Agno readers reopen their source by path, and knowledge files can sit in
+    workspaces agent code writes. Readers get this primary-private copy with the
+    same name, so a link swapped onto the listed path after listing is refused
+    instead of followed into another workspace or primary-owned state.
+    """
+    with tempfile.TemporaryDirectory(prefix="mindroom-knowledge-") as snapshot_dir:
+        snapshot = Path(snapshot_dir) / file_path.name
+        with open_knowledge_file(file_path) as source_fd, snapshot.open("xb") as output:
+            while chunk := os.read(source_fd, 1024 * 1024):
+                output.write(chunk)
+        yield snapshot
 
 
 def _knowledge_source_signature(
@@ -412,7 +444,7 @@ def _knowledge_source_signature(
     tracked_relative_paths: Iterable[str] | None = None,
 ) -> str:
     """Return a robust signature for the currently managed local file corpus."""
-    root = knowledge_root.resolve()
+    root = knowledge_root
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
     if base_config.git is None:
@@ -427,15 +459,14 @@ def _knowledge_source_signature(
     files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
     for relative_path, path in sorted(files_with_relative_paths):
         try:
-            stat = path.stat()
-            source_digest = _file_content_digest(path)
-        except OSError:
+            mtime_ns, size, source_digest = _file_signature(path)
+        except (OSError, ValueError):
             continue
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        digest.update(str(mtime_ns).encode("ascii"))
         digest.update(b"\0")
-        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(size).encode("ascii"))
         digest.update(b"\0")
         digest.update(source_digest.encode("ascii"))
         digest.update(b"\0")
@@ -648,8 +679,7 @@ class KnowledgeManager:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
     def _file_signature(self, file_path: Path) -> FileSignature:
-        stat = file_path.stat()
-        return stat.st_mtime_ns, stat.st_size, _file_content_digest(file_path)
+        return _file_signature(file_path)
 
     def _has_vectors_for_source_path(
         self,
@@ -839,13 +869,7 @@ class KnowledgeManager:
             # API via asyncio.to_thread so reading, embedding, and the vector
             # database write all run on a worker thread and the loop stays
             # responsive to Matrix sync, tool calls, and cache writes.
-            await asyncio.to_thread(
-                knowledge.insert,
-                path=str(resolved_path),
-                metadata=metadata,
-                upsert=upsert,
-                reader=selected_reader,
-            )
+            await asyncio.to_thread(_insert_snapshot, knowledge, resolved_path, metadata, upsert, selected_reader)
 
         try:
             # Remove-then-insert is idempotent, so a transient embedding fault
@@ -940,7 +964,8 @@ class KnowledgeManager:
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return ()
         try:
-            documents: Sequence[Document] = reader.read(resolved_path, name=resolved_path.name)
+            with _knowledge_source_snapshot(resolved_path) as snapshot:
+                documents: Sequence[Document] = reader.read(snapshot, name=resolved_path.name)
         except Exception:
             logger.debug(
                 "Skipping embedding prefetch for knowledge file",
@@ -978,8 +1003,9 @@ class KnowledgeManager:
             if remaining <= 0:
                 break
             try:
-                source_size = resolved_path.stat().st_size
-            except OSError:
+                with open_knowledge_file(resolved_path) as descriptor:
+                    source_size = os.fstat(descriptor).st_size
+            except (OSError, ValueError):
                 continue
             if chunking_strategy.max_chunk_text_bytes(source_size) > remaining:
                 skipped += 1

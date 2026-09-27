@@ -1845,21 +1845,19 @@ def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path
     assert "not allowed" in result.stderr
 
 
-def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
-    """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
+def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path) -> None:
+    """A ".." listing target, which pathlib's lexical ``relative_to`` lets through, yields nothing.
 
-    This is the containment control that replaced ``resolve(strict=True)``. Without
-    it a "../*.md" include pattern yields a listing target at the parent directory
-    whose candidates pass every remaining per-file safety check.
+    Without this a "../*.md" include pattern that bypassed config validation yields a
+    listing target at the parent directory.
     """
     root = tmp_path / "docs"
     root.mkdir()
-    guard = knowledge_file_listing_module._DirectoryGuard(root=root)
+    (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
+    target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    assert guard.is_safe(root) is True
-    assert guard.is_safe(root / "..") is False
-    assert guard.is_safe(root / ".." / "..") is False
-    assert guard.is_safe(root / "nested" / ".." / ".." / "outside") is False
+    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+        assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 
 def test_tracked_path_listing_rejects_parent_traversal_escape(tmp_path: Path) -> None:
@@ -2019,18 +2017,18 @@ def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
     )
 
     walked_roots: list[Path] = []
-    original_walk = knowledge_file_listing_module.os.walk
+    original_walk = knowledge_file_listing_module._walk_relative_files
 
-    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
-        walked_roots.append(Path(top))
-        return original_walk(top, *args, **kwargs)
+    def recording_walk(root_fd: int, base: Path) -> list[Path]:
+        walked_roots.append(base)
+        return original_walk(root_fd, base)
 
-    monkeypatch.setattr(knowledge_file_listing_module.os, "walk", recording_walk)
+    monkeypatch.setattr(knowledge_file_listing_module, "_walk_relative_files", recording_walk)
 
     files = list_knowledge_files(config, "docs", docs_path)
 
     assert files == [memory_file.resolve()]
-    assert walked_roots == [memory_dir.resolve()]
+    assert walked_roots == [Path("memory")]
 
 
 def test_extra_extensions_extend_default_semantic_set(tmp_path: Path) -> None:
@@ -9626,7 +9624,8 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
 
     def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
         nonlocal source_reads
-        if path == source_path:
+        # Readers open a private same-name snapshot of the listed source.
+        if path.name == source_path.name:
             source_reads += 1
         return original_read_text(path, *args, **kwargs)
 

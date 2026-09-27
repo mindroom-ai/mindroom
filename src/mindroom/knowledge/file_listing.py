@@ -2,10 +2,14 @@
 
 This module decides which files belong to a knowledge base, in three composable layers:
 include patterns derive listing targets that bound where traversal looks, traversal
-yields only candidates whose directory chain is vetted, and per-file rules run cheap
-relative-path checks before filesystem safety checks.
+walks directory descriptors pinned from the knowledge root without following links, and
+per-file rules run cheap relative-path checks before filesystem safety checks.
+Knowledge roots can sit in workspaces that agent code writes, so callers pass the
+canonical root their binding resolved; a root that no longer resolves to itself, because
+a directory on its path was swapped for a link, lists nothing.
 Every path returned by the listing functions is a regular file, not a symlink, with no
 symlinked ancestors and no ".." traversal, so it always stays inside the knowledge root.
+Read listed files through ``open_knowledge_file``, which refuses a swap made after listing.
 """
 
 from __future__ import annotations
@@ -13,13 +17,14 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.path_confinement import is_git_metadata_path
+from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, open_regular_file_within_root
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
@@ -189,86 +194,114 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
     return include_semantic_knowledge_relative_path(config, base_id, relative_path)
 
 
-@dataclass
-class _DirectoryGuard:
-    """Cached directory-chain vetting for one listing pass."""
-
-    root: Path
-    _symlink_cache: dict[Path, bool] = field(default_factory=dict)
-
-    def is_safe(self, directory: Path) -> bool:
-        """Return whether a directory is inside root and reached without symlinks."""
-        try:
-            relative_path = directory.relative_to(self.root)
-        except ValueError:
-            return False
-        # ``relative_to`` is lexical, so it happily walks back out through "..".
-        if ".." in relative_path.parts:
-            return False
-
-        current = self.root
-        for part in relative_path.parts:
-            current = current / part
-            cached = self._symlink_cache.get(current)
-            if cached is None:
-                cached = current.is_symlink()
-                self._symlink_cache[current] = cached
-            if cached:
-                return False
-        return True
+@contextmanager
+def _pinned_directory(path: Path) -> Iterator[int]:
+    """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
+    with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
+        yield directory_fd
 
 
-def _iter_target_files(target: _ListingTarget, guard: _DirectoryGuard) -> Iterator[Path]:
-    """Yield candidate files for one target, vetting their directory chain via the guard."""
-    if target.mode == "file":
-        if guard.is_safe(target.path.parent):
-            yield target.path
+@contextmanager
+def open_knowledge_file(path: Path) -> Iterator[int]:
+    """Open one listed knowledge file without following a link swapped onto its path after listing.
+
+    Listed paths are canonical, so a no-follow walk of every component from the
+    filesystem root reaches exactly the listed regular file or fails.
+    """
+    with open_regular_file_within_root(Path(path.anchor), path.relative_to(path.anchor)) as file_fd:
+        yield file_fd
+
+
+def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
+    try:
+        with open_directory_within_root(root_fd, relative_path.parent) as parent_fd:
+            status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(status.st_mode)
+
+
+def _walk_relative_files(root_fd: int, base: Path) -> list[Path]:
+    """Return files below ``base`` by a descriptor walk that never enters a linked directory."""
+    files: list[Path] = []
+    try:
+        with open_directory_within_root(root_fd, base) as base_fd:
+            pending: list[tuple[int, Path]] = [(os.dup(base_fd), base)]
+    except (OSError, ValueError):
+        return files
+    try:
+        while pending:
+            directory_fd, relative_dir = pending.pop()
+            try:
+                entries = list(os.scandir(directory_fd))
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        if not entry.is_symlink():
+                            files.append(relative_dir / entry.name)
+                        continue
+                    if entry.name.casefold() == ".git":
+                        continue
+                    try:
+                        child_fd = os.open(
+                            entry.name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError:
+                        continue
+                    pending.append((child_fd, relative_dir / entry.name))
+            except OSError:
+                continue
+            finally:
+                os.close(directory_fd)
+    finally:
+        for directory_fd, _relative_dir in pending:
+            os.close(directory_fd)
+    return files
+
+
+def _iter_target_files(root_fd: int, target: _ListingTarget, root: Path) -> Iterator[Path]:
+    """Yield candidate paths relative to the root for one listing target."""
+    relative_target = target.path.relative_to(root)
+    if ".." in relative_target.parts:
         return
-    if not target.path.is_dir() or not guard.is_safe(target.path):
+    if target.mode == "file":
+        yield relative_target
         return
     if target.mode == "dir":
-        yield from (path for path in target.path.iterdir() if path.is_file())
+        try:
+            with open_directory_within_root(root_fd, relative_target) as directory_fd:
+                names = [entry.name for entry in os.scandir(directory_fd) if entry.is_file(follow_symlinks=False)]
+        except (OSError, ValueError):
+            return
+        yield from (relative_target / name for name in names)
         return
-    for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            yield current_dir / filename
+    yield from _walk_relative_files(root_fd, relative_target)
 
 
-def _safe_regular_file(candidate: Path) -> Path | None:
-    """Return a chain-vetted candidate when it is a regular file inside the knowledge root.
-
-    The candidate is returned as given, not canonicalized: ``_DirectoryGuard`` has
-    already vetted every directory component and rejected ".." traversal, so a
-    candidate that is not itself a symlink is already canonical and cannot point
-    outside the root. A single ``lstat`` therefore settles both questions, where
-    ``resolve(strict=True)`` re-walked the whole path for every file — several
-    extra round trips per file on a network filesystem.
-    """
-    try:
-        status = candidate.lstat()
-    except OSError:
-        return None
-    return candidate if stat.S_ISREG(status.st_mode) else None
+def _canonical_root(knowledge_root: Path) -> Path | None:
+    """Return the knowledge root when it still resolves to itself, else ``None``."""
+    root = knowledge_root.expanduser()
+    return root if root.is_absolute() and root.resolve() == root else None
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
     """List managed files without constructing a knowledge manager."""
-    root = knowledge_root.resolve()
-    if not root.is_dir():
+    root = _canonical_root(knowledge_root)
+    if root is None:
         return []
-
-    guard = _DirectoryGuard(root=root)
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
-    for target in _listing_targets(root, include_patterns):
-        for candidate in _iter_target_files(target, guard):
-            if not include_knowledge_relative_path(config, base_id, candidate.relative_to(root).as_posix()):
-                continue
-            safe_file = _safe_regular_file(candidate)
-            if safe_file is not None:
-                files.add(safe_file)
+    try:
+        with _pinned_directory(root) as root_fd:
+            for target in _listing_targets(root, include_patterns):
+                for relative_path in _iter_target_files(root_fd, target, root):
+                    if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
+                        continue
+                    if _is_regular_file_at(root_fd, relative_path):
+                        files.add(root / relative_path)
+    except (OSError, ValueError):
+        return []
     return sorted(files)
 
 
@@ -279,18 +312,19 @@ def knowledge_files_from_relative_paths(
     relative_paths: Iterable[str],
 ) -> list[Path]:
     """Resolve claimed relative paths through the same inclusion rules and safety checks."""
-    root = knowledge_root.resolve()
-    guard = _DirectoryGuard(root=root)
+    root = _canonical_root(knowledge_root)
+    if root is None:
+        return []
     files: list[Path] = []
-    for relative_path in sorted(set(relative_paths)):
-        if not include_knowledge_relative_path(config, base_id, relative_path):
-            continue
-        candidate = root / relative_path
-        if not guard.is_safe(candidate.parent):
-            continue
-        safe_file = _safe_regular_file(candidate)
-        if safe_file is not None:
-            files.append(safe_file)
+    try:
+        with _pinned_directory(root) as root_fd:
+            for relative_path in sorted(set(relative_paths)):
+                if not include_knowledge_relative_path(config, base_id, relative_path):
+                    continue
+                if _is_regular_file_at(root_fd, Path(relative_path)):
+                    files.append(root / relative_path)
+    except (OSError, ValueError):
+        return []
     return files
 
 
@@ -356,8 +390,8 @@ def list_git_tracked_knowledge_files(
     timeout_seconds: float | None = None,
 ) -> list[Path]:
     """List Git-tracked files using the active source set for one base."""
-    root = knowledge_root.resolve()
-    if not git_checkout_present(root, git_dir):
+    root = _canonical_root(knowledge_root)
+    if root is None or not git_checkout_present(root, git_dir):
         return []
     return knowledge_files_from_relative_paths(
         config,

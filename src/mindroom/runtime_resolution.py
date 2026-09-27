@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.agent_policy import (
@@ -13,16 +15,19 @@ from mindroom.agent_policy import (
 )
 from mindroom.constants import (
     RuntimePaths,
+    config_relative_path,
     resolve_config_relative_path,
     resolve_config_relative_path_preserving_leaf,
     resolve_session_state_root,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
     resolve_worker_key,
+    shared_storage_root,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
@@ -34,8 +39,6 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -302,6 +305,32 @@ def resolve_agent_storage(
     )
 
 
+def _shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
+    """Resolve one shared knowledge path, refusing links below the agent workspace that holds it.
+
+    Operator links elsewhere are followed as configured, but agent code writes
+    ``agents/<name>/workspace``, so a base inside one is reached without any
+    link below that workspace, never into another workspace or private instance.
+    """
+    lexical = Path(os.path.normpath(config_relative_path(raw_path, runtime_paths)))
+    storage_root = shared_storage_root(runtime_paths.storage_root)
+    lexical_storage_root = Path(os.path.normpath(runtime_paths.storage_root.expanduser().absolute()))
+    for spelling in dict.fromkeys((lexical_storage_root, storage_root)):
+        if not lexical.is_relative_to(spelling):
+            continue
+        parts = lexical.relative_to(spelling).parts
+        if len(parts) < 3 or parts[0] != "agents":
+            continue
+        workspace = agent_workspace_root_path(storage_root, parts[1])
+        if storage_root.joinpath(*parts[:3]) == workspace:
+            return resolve_workspace_relative_path(
+                workspace,
+                Path(*parts[3:]),
+                field_name="shared knowledge base path",
+            )
+    return resolve_config_relative_path(raw_path, runtime_paths).resolve()
+
+
 def resolve_knowledge_binding(
     base_id: str,
     config: Config,
@@ -326,7 +355,7 @@ def resolve_knowledge_binding(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     if effective_agent_name is None:
-        knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
+        knowledge_path = _shared_knowledge_path(base_config.path, runtime_paths)
         return ResolvedKnowledgeBinding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
