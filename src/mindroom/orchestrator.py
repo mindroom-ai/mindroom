@@ -3068,7 +3068,7 @@ async def main(
         # Credential synchronization and storage setup are synchronous. Keep the
         # ordered unit off-loop while retaining exception propagation to startup.
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
-        auxiliary_tasks.extend(await retire_state_root_worker_mounts(runtime_paths))
+        await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

@@ -1638,7 +1638,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
-    "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
@@ -6415,13 +6414,15 @@ visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 [[modules]]
 path = "mindroom.workers.backends.legacy_state_root_mounts"
 depends_on = [
-    "mindroom.background_tasks",
     "mindroom.logging_config",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends._lifecycle",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.kubernetes",
+    "mindroom.workers.backends.kubernetes_resources",
     "mindroom.workers.runtime",
 ]
-visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.workers.storage_preflight"

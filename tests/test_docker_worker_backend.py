@@ -62,7 +62,6 @@ from mindroom.workers.backends.docker import (
     _WorkerImageIncompatibleError,
     check_docker_workers_absent_for_storage_upgrade,
     ensure_docker_dependencies,
-    remove_docker_workers_mounting_state_roots,
 )
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
@@ -75,6 +74,7 @@ from mindroom.workers.backends.docker_projection import (
     _WORKER_CONFIG_STATE_DIRNAME,
     DockerProjectionManager,
 )
+from mindroom.workers.backends.legacy_state_root_mounts import _remove_docker_workers_mounting_state_roots
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec, process_worker_key
@@ -876,9 +876,10 @@ def test_docker_startup_removes_workers_mounting_state_roots(
     sentinel = worker_root_path(tmp_path, "v1:default:shared:legacy") / "retained.bin"
     sentinel.write_bytes(b"retained worker bytes")
 
-    stopped: set[str] = set()
-    remove_docker_workers_mounting_state_roots(runtime_paths, stopped=stopped)
-    assert stopped == {legacy_container.id}
+    with capture_logs() as logs:
+        _remove_docker_workers_mounting_state_roots(runtime_paths)
+    [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warning["workers"] == [legacy_container.id]
 
     assert legacy_container.removed == 1
     assert fake_client.containers.get(current.worker_id).removed == 0
@@ -912,7 +913,7 @@ def test_docker_retirement_keeps_removing_old_containers_after_one_fails(
     monkeypatch.setattr(containers[0], "remove", refuse_removal)
 
     with pytest.raises(WorkerBackendError, match=containers[0].id):
-        remove_docker_workers_mounting_state_roots(runtime_paths, stopped=set())
+        _remove_docker_workers_mounting_state_roots(runtime_paths)
 
     assert [container.removed for container in containers[1:]] == [1, 1]
 

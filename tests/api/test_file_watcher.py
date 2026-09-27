@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -71,16 +70,3 @@ def test_config_format_validation(test_client: TestClient, temp_config_file: Pat
     # Should be able to load the fixed config
     response = test_client.post("/api/config/load")
     assert response.status_code == 200
-
-
-def test_health_reports_workers_from_an_older_release_that_still_run(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A retirement still being retried is a degraded detail, not a liveness failure."""
-    monkeypatch.setattr("mindroom.api.main.legacy_worker_retirement_pending", lambda: "cluster unavailable")
-
-    response = test_client.get("/api/health")
-
-    assert response.status_code == 200
-    assert response.json()["legacy_workers"] == {"status": "retiring", "detail": "cluster unavailable"}

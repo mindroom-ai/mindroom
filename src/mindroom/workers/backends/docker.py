@@ -182,18 +182,20 @@ _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
 _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 # Containers that mount only workspaces; earlier releases mounted whole state roots.
-_LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
-_LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
+LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
+LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
 
 _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
 
 __all__ = [
+    "LABEL_STORAGE_LAYOUT",
+    "LABEL_STORAGE_LAYOUT_VALUE",
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "docker_backend_config_signature",
     "ensure_docker_dependencies",
-    "remove_docker_workers_mounting_state_roots",
+    "list_docker_worker_containers",
 ]
 
 
@@ -470,46 +472,14 @@ def check_docker_workers_absent_for_storage_upgrade(
         raise WorkerBackendError(msg)
 
 
-# LEGACY_COMPAT: Docker worker containers that mount whole agent state roots.
-# Legacy format: containers in this runtime namespace without the mindroom.ai/storage-layout label, created by
-#   releases that bind-mounted agents/<agent> and private_instances/<scope> writable.
-# Last legacy release: v2026.9.326; the next release mounts only workspaces and labels its containers.
-# Handling: remove each such container, running or stopped, so the next ensure recreates it with workspace mounts;
-#   durable worker state and metadata stay untouched.
-# Coverage: tests/test_docker_worker_backend.py::test_docker_startup_removes_workers_mounting_state_roots.
-def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths, *, stopped: set[str]) -> None:
-    """Remove this runtime's containers created before workers mounted only workspaces, adding each to ``stopped``."""
+def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_DockerContainer]:
+    """List every container, running or stopped, in this runtime's namespace."""
     workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
-    client, docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths, ensure_dependencies=False)
-    try:
-        containers = client.containers.list(
-            all=True,
-            filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
-        )
-    except docker_errors.DockerException as exc:
-        msg = f"Failed to list Docker workers: {exc}"
-        raise WorkerBackendError(msg) from exc
-    failed: list[str] = []
-    for container in containers:
-        config = container.attrs.get("Config")
-        labels = cast("dict[str, object]", config).get("Labels") if isinstance(config, dict) else None
-        if (
-            isinstance(labels, dict)
-            and cast("dict[str, object]", labels).get(_LABEL_STORAGE_LAYOUT) == _LABEL_STORAGE_LAYOUT_VALUE
-        ):
-            continue
-        try:
-            container.remove(force=True)
-        except docker_errors.NotFound:
-            continue
-        except docker_errors.DockerException as exc:
-            # One failure must not leave the remaining old containers running.
-            failed.append(f"{container.id} ({exc})")
-            continue
-        stopped.add(container.id)
-    if failed:
-        msg = f"Failed to remove Docker workers: {', '.join(failed)}"
-        raise WorkerBackendError(msg)
+    client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths, ensure_dependencies=False)
+    return client.containers.list(
+        all=True,
+        filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1703,7 +1673,7 @@ class DockerWorkerBackend:
             _LABEL_WORKER_ID: container_name,
             _LABEL_LAUNCH_CONFIG_HASH: launch_config_hash,
             _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
-            _LABEL_STORAGE_LAYOUT: _LABEL_STORAGE_LAYOUT_VALUE,
+            LABEL_STORAGE_LAYOUT: LABEL_STORAGE_LAYOUT_VALUE,
         }
         labels.update(self.config.extra_labels)
         return labels

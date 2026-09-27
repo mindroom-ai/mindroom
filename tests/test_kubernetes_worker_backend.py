@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import itertools
 import json
 import shutil
 import tempfile
@@ -47,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
+from mindroom.workers.backends import legacy_state_root_mounts
 from mindroom.workers.backends.kubernetes import (
     KubernetesWorkerBackend,
     KubernetesWorkerBackendConfig,
@@ -192,7 +192,6 @@ class _FakeAppsApi:
         self.deployments: dict[str, object] = {}
         self.replica_sets: dict[str, object] = {}
         self.read_names: list[str] = []
-        self.read_request_timeouts: list[object] = []
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
@@ -201,12 +200,10 @@ class _FakeAppsApi:
         self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
-        self._resource_versions = itertools.count(1)
 
-    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> object:
+    def read_namespaced_deployment(self, name: str, namespace: str) -> object:
         _ = namespace
         self.read_names.append(name)
-        self.read_request_timeouts.append(kwargs.get("_request_timeout"))
         deployment = self.deployments.get(name)
         if deployment is None:
             raise _FakeApiError(404)
@@ -225,7 +222,6 @@ class _FakeAppsApi:
         deployment = _to_namespace(body)
         deployment.metadata.generation = 1
         deployment.metadata.uid = f"{deployment.metadata.name}-uid"
-        deployment.metadata.resource_version = str(next(self._resource_versions))
         deployment.status = SimpleNamespace(ready_replicas=body["spec"]["replicas"], observed_generation=1)
         self._active_delete_read_lag_by_name.pop(deployment.metadata.name, None)
         self.deployments[deployment.metadata.name] = deployment
@@ -244,12 +240,6 @@ class _FakeAppsApi:
         if deployment is None:
             raise _FakeApiError(404)
         metadata = body.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("resourceVersion") not in {
-            None,
-            getattr(deployment.metadata, "resource_version", None),
-        }:
-            raise _FakeApiError(409)
-        deployment.metadata.resource_version = str(next(self._resource_versions))
         if isinstance(metadata, dict):
             annotations = metadata.get("annotations")
             if isinstance(annotations, dict):
@@ -318,7 +308,6 @@ class _FakeAppsApi:
                         "labels": deployment.metadata.labels,
                         "generation": deployment.metadata.generation,
                         "uid": deployment.metadata.uid,
-                        "resourceVersion": getattr(deployment.metadata, "resource_version", None),
                     },
                     "spec": {"replicas": deployment.spec.replicas},
                     "status": {
@@ -5492,73 +5481,13 @@ def test_kubernetes_pod_wait_ignores_finished_pods(
         "list_namespaced_pod",
         lambda *_args, **_kwargs: _FakeRawResponse(json.dumps({"items": [pod]}).encode()),
     )
+    monkeypatch.setattr(legacy_state_root_mounts, "_POD_EXIT_TIMEOUT_SECONDS", 0)
 
     if gone:
-        backend._resources.wait_for_worker_pods_absent(("old-worker",), timeout_seconds=0)
+        legacy_state_root_mounts._wait_for_pods_to_exit(backend._resources, {"old-worker"})
     else:
         with pytest.raises(WorkerBackendError, match="did not stop"):
-            backend._resources.wait_for_worker_pods_absent(("old-worker",), timeout_seconds=0)
-
-
-def test_kubernetes_retirement_never_stops_a_worker_an_ensure_replaced_meanwhile(tmp_path: Path) -> None:
-    """A Deployment ensure recreated after the retirement listing is left running instead of scaled to zero."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-    )
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    handle = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:legacy"), now=10.0)
-    _stamp_legacy_template(apps_api, handle.worker_id, "legacy", keep_marker=False)
-    list_deployments = backend._resources.list_deployments
-
-    def list_then_ensure(**kwargs: object) -> list[object]:
-        listed = list_deployments(**kwargs)
-        backend._invalidate_ready_worker(handle.worker_key)
-        backend.ensure_worker(WorkerSpec(handle.worker_key), now=20.0)
-        return listed
-
-    backend._resources.list_deployments = list_then_ensure  # type: ignore[method-assign]
-
-    stopped: set[str] = set()
-    assert backend._resources.stop_workers_mounting_state_roots(now=30.0, stopped=stopped) == ()
-    assert stopped == set()
-    assert apps_api.deployments[handle.worker_id].spec.replicas == 1
-
-
-def test_kubernetes_retirement_keeps_stopping_old_workers_when_a_conflict_reread_fails(tmp_path: Path) -> None:
-    """A failed, time-limited re-read after a conflict counts as one failure; the other old workers still stop."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-    )
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    first = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:first"), now=10.0)
-    second = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:second"), now=10.0)
-    for handle in (first, second):
-        _stamp_legacy_template(apps_api, handle.worker_id, handle.worker_key.rsplit(":", 1)[-1], keep_marker=False)
-    list_deployments = backend._resources.list_deployments
-    read_deployment = apps_api.read_namespaced_deployment
-
-    def list_then_race(**kwargs: object) -> list[object]:
-        listed = list_deployments(**kwargs)
-        apps_api.deployments[first.worker_id].metadata.resource_version = "changed-after-listing"
-        return listed
-
-    def reread_fails(name: str, namespace: str, **kwargs: object) -> object:
-        if name == first.worker_id:
-            apps_api.read_request_timeouts.append(kwargs.get("_request_timeout"))
-            raise _FakeApiError(503)
-        return read_deployment(name, namespace, **kwargs)
-
-    backend._resources.list_deployments = list_then_race  # type: ignore[method-assign]
-    apps_api.read_namespaced_deployment = reread_fails  # type: ignore[method-assign]
-
-    stopped: set[str] = set()
-    with pytest.raises(WorkerBackendError, match=first.worker_id):
-        backend._resources.stop_workers_mounting_state_roots(now=30.0, stopped=stopped)
-    assert stopped == {second.worker_id}
-    assert apps_api.deployments[second.worker_id].spec.replicas == 0
-    assert apps_api.read_request_timeouts[-1] is not None
+            legacy_state_root_mounts._wait_for_pods_to_exit(backend._resources, {"old-worker"})
 
 
 def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
@@ -5597,7 +5526,6 @@ def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
 def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Old-template workers stop, even after a downgrade kept this release's marker, and their pods exit first."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -5613,12 +5541,12 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
         # A downgrade rewrites the template and its hash but leaves this release's marker behind.
         _stamp_legacy_template(apps_api, handles[name].worker_id, name, keep_marker=name == "downgraded")
     apps_api.deployments[handles["idle"].worker_id].spec.replicas = 0
-    pod_selectors: list[str] = []
+    pod_lists: list[object] = []
 
     def list_pods(namespace: str, **kwargs: object) -> _FakeRawResponse:
         assert namespace == "chat"
-        pod_selectors.append(str(kwargs["label_selector"]))
-        running = [handles["legacy"].worker_id, "unrelated-worker"] if len(pod_selectors) < 3 else ["unrelated-worker"]
+        pod_lists.append(kwargs["_request_timeout"])
+        running = [handles["idle"].worker_id, "unrelated-worker"] if len(pod_lists) < 2 else ["unrelated-worker"]
         items = [{"metadata": {"labels": {"mindroom.ai/worker-id": worker_id}}} for worker_id in running]
         return _FakeRawResponse(json.dumps({"items": items}).encode())
 
@@ -5633,40 +5561,30 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
 
     monkeypatch.setattr(core_api, "list_namespaced_pod", list_pods)
     monkeypatch.setattr(apps_api, "patch_namespaced_deployment", patch_unless_broken)
-    monkeypatch.setattr(kubernetes_resources_module, "_DELETE_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(kubernetes_backend_module, "_standalone_resource_manager", lambda _paths: backend._resources)
+    monkeypatch.setattr(legacy_state_root_mounts, "_POD_POLL_INTERVAL_SECONDS", 0)
 
-    # One Deployment that cannot be patched never leaves the others running, and fails the pass so it is retried.
-    stopped: set[str] = set()
-    with pytest.raises(WorkerBackendError, match=handles["broken"].worker_id):
-        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=stopped)
-    assert stopped == {handles["legacy"].worker_id, handles["downgraded"].worker_id}
+    # One Deployment that cannot be patched never leaves the others running, and fails startup.
+    with capture_logs() as logs, pytest.raises(WorkerBackendError, match=handles["broken"].worker_id):
+        legacy_state_root_mounts._stop_kubernetes_workers_mounting_state_roots(backend._resources)
+    [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warning["workers"] == [handles["legacy"].worker_id, handles["downgraded"].worker_id]
     assert patch_timeouts
-    assert all(timeout for timeout in patch_timeouts)
+    assert all(patch_timeouts)
     assert apps_api.deployments[handles["broken"].worker_id].spec.replicas == 1
-
-    broken_worker_id = handles["broken"].worker_id
-    handles["broken"] = handles["idle"]
-    kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=stopped)
-
-    # The retry stops what failed and waits for every old worker's pods, including those stopped earlier.
-    assert broken_worker_id in stopped
-    assert len(pod_selectors) == 3
-    assert not any(worker_id in pod_selectors[0] for worker_id in stopped)
     for name in ("legacy", "downgraded"):
         deployment = apps_api.deployments[handles[name].worker_id]
         assert deployment.spec.replicas == 0
         assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "idle"
     assert apps_api.deployments[handles["current"].worker_id].spec.replicas == 1
 
-    # Pods that never exit fail the bounded wait, so it is retried, and the stopped workers are still reported.
-    _stamp_legacy_template(apps_api, handles["current"].worker_id, "current", keep_marker=False)
-    monkeypatch.setattr(kubernetes_backend_module, "_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS", 0)
-    handles["legacy"] = handles["current"]
-    pod_selectors.clear()
-    with (
-        caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__),
-        pytest.raises(WorkerBackendError, match="did not stop"),
-    ):
-        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=set())
-    assert handles["current"].worker_id in caplog.text
+    # The restarted primary stops what failed and waits for every old worker's pods, including scaled-down ones.
+    handles["broken"] = handles["current"]
+    legacy_state_root_mounts._stop_kubernetes_workers_mounting_state_roots(backend._resources)
+    assert len(pod_lists) == 2
+    assert all(pod_lists)
+
+    # Pods that never exit fail the bounded wait, and so startup.
+    monkeypatch.setattr(legacy_state_root_mounts, "_POD_EXIT_TIMEOUT_SECONDS", 0)
+    pod_lists.clear()
+    with pytest.raises(WorkerBackendError, match="did not stop"):
+        legacy_state_root_mounts._stop_kubernetes_workers_mounting_state_roots(backend._resources)

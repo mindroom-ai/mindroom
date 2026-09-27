@@ -62,12 +62,10 @@ __all__ = [
     "KubernetesWorkerBackendConfig",
     "check_kubernetes_workers_absent_for_storage_upgrade",
     "kubernetes_backend_config_signature",
-    "stop_kubernetes_workers_mounting_state_roots",
+    "standalone_resource_manager",
 ]
 
 _COLD_START_GRACE_SECONDS = 1.5
-# Covers the default 30s termination grace period of a stopped worker pod.
-_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS = 60.0
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
@@ -96,7 +94,7 @@ def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> Non
     del _phase, _error
 
 
-def _standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.KubernetesResourceManager:
+def standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.KubernetesResourceManager:
     """Build a resource manager for startup maintenance without constructing a worker backend."""
     return resources.KubernetesResourceManager(
         runtime_paths=runtime_paths,
@@ -115,22 +113,9 @@ def check_kubernetes_workers_absent_for_storage_upgrade(
     timeout_seconds: float,
 ) -> None:
     """Verify Kubernetes worker absence without constructing a worker backend."""
-    _standalone_resource_manager(runtime_paths).check_workers_absent_for_storage_upgrade(
+    standalone_resource_manager(runtime_paths).check_workers_absent_for_storage_upgrade(
         timeout_seconds=timeout_seconds,
     )
-
-
-def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths, *, stopped: set[str]) -> None:
-    """Stop running workers whose pods still mount whole state roots, adding each to ``stopped``, and wait for them."""
-    resource_manager = _standalone_resource_manager(runtime_paths)
-    legacy = resource_manager.stop_workers_mounting_state_roots(now=time.time(), stopped=stopped)
-    if legacy:
-        try:
-            # Every old worker's pods must be gone, including ones an earlier attempt already scaled down.
-            resource_manager.wait_for_worker_pods_absent(legacy, timeout_seconds=_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS)
-        except Exception:
-            logger.warning("Old workers' pods did not stop in time: %s", ", ".join(legacy))
-            raise
 
 
 def _progress_event(

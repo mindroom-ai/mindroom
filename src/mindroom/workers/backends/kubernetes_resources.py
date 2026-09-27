@@ -23,7 +23,6 @@ import os
 import posixpath
 import time
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -59,7 +58,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
 )
-from mindroom.workers.backends._lifecycle import WorkerLifecycleState, mark_worker_idle
+from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
@@ -77,7 +76,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
@@ -88,7 +87,6 @@ logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
-_RETIREMENT_REQUEST_TIMEOUT_SECONDS = 30.0
 _HOSTNAME_ENV = "HOSTNAME"
 
 ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
@@ -108,7 +106,7 @@ _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
 # The template hash this release wrote, so a template an older release rewrote after a downgrade reads as old.
-_ANNOTATION_WORKSPACE_TEMPLATE_HASH = "mindroom.ai/workspace-template-hash"
+ANNOTATION_WORKSPACE_TEMPLATE_HASH = "mindroom.ai/workspace-template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -223,9 +221,6 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
-    @property
-    def resource_version(self) -> str | None: ...
-
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -260,7 +255,6 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
-    resource_version: str | None = None
 
 
 @dataclass(slots=True)
@@ -613,9 +607,6 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
-            resource_version=resource_version
-            if isinstance(resource_version := metadata.get("resourceVersion"), str)
-            else None,
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
@@ -641,12 +632,6 @@ def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | 
         (candidate for candidate in candidates if path.is_relative_to(candidate) or candidate.is_relative_to(path)),
         None,
     )
-
-
-def _written_by_older_release(annotations: Mapping[str, str]) -> bool:
-    """Return whether a release before workspace-only mounts wrote this Deployment's current template."""
-    template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
-    return template_hash is None or annotations.get(_ANNOTATION_WORKSPACE_TEMPLATE_HASH) != template_hash
 
 
 def _plan_knowledge_storage_mounts(
@@ -786,6 +771,10 @@ class KubernetesResourceManager:
         assert self.api_exception_cls is not None
         return self.api_exception_cls
 
+    def api_clients(self) -> tuple[_AppsApiProtocol, _CoreApiProtocol]:
+        """Return the loaded apps and core API clients."""
+        return self._apps, self._core
+
     def list_deployments(self, *, request_timeout: float | None = None) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
         response = self._apps.list_namespaced_deployment(
@@ -806,16 +795,10 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(
-        self,
-        deployment_name: str,
-        *,
-        request_timeout: float | None = None,
-    ) -> KubernetesDeployment | None:
+    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
-        kwargs = {} if request_timeout is None else {"_request_timeout": request_timeout}
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace, **kwargs)
+            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
         except self._api_exception as exc:
             if exc.status == 404:
                 return None
@@ -946,92 +929,6 @@ class KubernetesResourceManager:
         """Delete one worker Deployment after its dependent pods terminate."""
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
-
-    # LEGACY_COMPAT: Running worker Deployments whose pods mount whole agent state roots.
-    # Legacy format: Deployments whose template hash is not the one this release recorded beside it, because an
-    #   older release, including after a downgrade, wrote a template that mounted agents/<agent> and
-    #   private_instances/<scope> writable.
-    # Last legacy release: v2026.9.326; the next release mounts only workspaces and records its template hash.
-    # Handling: scale each such running Deployment to zero, as idle cleanup does, and wait for its pods to exit; the
-    #   next ensure or idle reconciliation recreates it from the current template. Scaled-down Deployments stay.
-    # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots.
-    def stop_workers_mounting_state_roots(self, *, now: float, stopped: set[str]) -> tuple[str, ...]:
-        """Scale to zero every running worker whose pod template this release did not write.
-
-        Adds each worker it stops to ``stopped`` and returns every such worker, including ones already at zero.
-        """
-        legacy: list[str] = []
-        failed: list[str] = []
-        for deployment in self.list_deployments(request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS):
-            annotations = dict(deployment.metadata.annotations or {})
-            if not _written_by_older_release(annotations):
-                continue
-            legacy.append(deployment.metadata.name)
-            if int(deployment.spec.replicas or 0) == 0:
-                continue
-            apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
-            # The listed version is a precondition, so a Deployment changed since, such as by an ensure, is not patched.
-            metadata: dict[str, object] = {
-                "annotations": annotations,
-                "resourceVersion": deployment.metadata.resource_version,
-            }
-            try:
-                self._apps.patch_namespaced_deployment(
-                    deployment.metadata.name,
-                    self.config.namespace,
-                    {"metadata": metadata, "spec": {"replicas": 0}},
-                    _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                current = None
-                if getattr(exc, "status", None) == 409:
-                    with suppress(Exception):
-                        current = self.read_deployment(
-                            deployment.metadata.name,
-                            request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
-                        )
-                if current is not None and not _written_by_older_release(dict(current.metadata.annotations or {})):
-                    legacy.remove(deployment.metadata.name)
-                    continue
-                # One failure must not leave the remaining old workers running.
-                logger.exception(
-                    "Could not stop a worker that mounts whole state roots",
-                    worker=deployment.metadata.name,
-                )
-                failed.append(deployment.metadata.name)
-                continue
-            stopped.add(deployment.metadata.name)
-        if failed:
-            msg = f"Could not stop workers that mount whole state roots: {', '.join(failed)}"
-            raise WorkerBackendError(msg)
-        return tuple(legacy)
-
-    def wait_for_worker_pods_absent(self, worker_ids: Collection[str], *, timeout_seconds: float) -> None:
-        """Poll until no Pod of these workers remains, such as after scaling them to zero."""
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            response = self._core.list_namespaced_pod(
-                self.config.namespace,
-                label_selector=_list_selector(extra_labels=self.config.extra_labels),
-                _preload_content=False,
-                _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
-            )
-            try:
-                items = json.loads(response.data).get("items") or []
-            finally:
-                response.release_conn()
-            # Evicted and completed pod objects wait for garbage collection but no longer run; terminating pods still do.
-            running = {
-                item.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID)
-                for item in items
-                if item.get("status", {}).get("phase") not in {"Succeeded", "Failed"}
-            }
-            if not running & set(worker_ids):
-                return
-            if time.monotonic() >= deadline:
-                msg = f"Kubernetes worker pods did not stop within {timeout_seconds:.0f}s: {', '.join(worker_ids)}"
-                raise WorkerBackendError(msg)
-            time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
 
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
         """Require all worker controllers and Pods absent throughout this namespace."""
@@ -1601,7 +1498,7 @@ class KubernetesResourceManager:
             metadata["ownerReferences"] = [owner_reference]
         desired_annotations = dict(annotations)
         desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
-        desired_annotations[_ANNOTATION_WORKSPACE_TEMPLATE_HASH] = desired_annotations[_ANNOTATION_TEMPLATE_HASH]
+        desired_annotations[ANNOTATION_WORKSPACE_TEMPLATE_HASH] = desired_annotations[_ANNOTATION_TEMPLATE_HASH]
         if private_agent_names is not None:
             desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
                 sorted(private_agent_names),
