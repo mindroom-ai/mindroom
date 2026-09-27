@@ -40,8 +40,7 @@ struct MindRoomRootView: View {
                             Text("Shell command waiting for approval")
                             Spacer()
                             Button("Review Command") {
-                                navigation.section = .computerAccess
-                                withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                DesktopApprovalWindowController.shared.showPending()
                             }.buttonStyle(.borderedProminent)
                         }.padding(14)
                     }
@@ -66,6 +65,7 @@ struct MindRoomRootView: View {
             }
             .background(Color(nsColor: .windowBackgroundColor))
         }
+        .disclosureGroupStyle(AppDisclosureGroupStyle())
     }
 
     @ViewBuilder
@@ -107,27 +107,32 @@ struct MindRoomRootView: View {
         .frame(width: 195)
         .frame(maxHeight: .infinity)
         .background(.regularMaterial)
-        .onAppear { focusedSection = navigation.section }
         .onChange(of: navigation.section) { _, section in
-            if focusedSection != nil {
-                focusedSection = section
-            }
+            // Keep keyboard focus with the selected section when setup redirects navigation.
+            if focusedSection != nil { focusedSection = section }
         }
     }
 
     private func navigationButton(_ section: AppSection) -> some View {
         Button {
             navigation.section = section
-            focusedSection = section
         } label: {
             Label(section.rawValue, systemImage: section.symbol)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10).padding(.vertical, 9)
                 .background(navigation.section == section ? Color.accentColor.opacity(0.16) : .clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7).strokeBorder(
+                        focusedSection == section && navigation.section != section ? Color.accentColor : .clear,
+                        lineWidth: 1
+                    )
+                }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focused($focusedSection, equals: section)
+        .focusEffectDisabled()
         .accessibilityAddTraits(navigation.section == section ? .isSelected : [])
     }
 

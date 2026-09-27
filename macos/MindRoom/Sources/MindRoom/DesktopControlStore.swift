@@ -63,7 +63,8 @@ final class DesktopControlStore: ObservableObject {
             try await helper.request(action: action, parameters: parameters, timeout: timeout)
         }
         helper.$status
-            .receive(on: RunLoop.main)
+            // The helper publishes on MainActor already. Rescheduling on RunLoop.main stalls
+            // approval/status updates while a folder picker runs in modal mode.
             .sink { [weak self] value in
                 self?.status = value
                 self?.hydrateConfiguration(from: value)

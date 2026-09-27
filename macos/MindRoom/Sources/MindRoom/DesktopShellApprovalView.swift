@@ -93,7 +93,7 @@ struct DesktopShellApprovalView: View {
                 .fixedSize()
                 revokeButton
             }
-            Text("Each command request waits here for your approval. The menu bar shows when one is waiting.")
+            Text("Each command opens an approval window. If you close it, review the waiting command here or from the menu bar.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }

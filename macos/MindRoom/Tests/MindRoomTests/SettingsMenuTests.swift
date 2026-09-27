@@ -43,7 +43,7 @@ final class SettingsMenuTests: XCTestCase {
         }
     }
 
-    func testPendingShellCommandOffersReviewThatOpensComputerAccessWithoutApproving() async throws {
+    func testPendingShellCommandOffersReviewThatOpensApprovalPanelWithoutApproving() async throws {
         var actions: [String] = []
         let helper = DesktopBridgeProcess()
         let desktop = DesktopControlStore(helper: helper, request: { action, _, _ in
@@ -56,8 +56,9 @@ final class SettingsMenuTests: XCTestCase {
         )
         try await publish(shell: DesktopShellStatus(enabled: true, pending: request), through: helper, to: desktop)
         let controller = StatusMenuController(runner: idleRunner(), desktop: desktop)
-        var selected: AppSection?
-        controller.showWindow = { selected = $0 }
+        let approval = DesktopApprovalWindowController(store: desktop)
+        defer { approval.stop() }
+        controller.showShellApproval = { approval.showPending() }
         let menu = NSMenu()
 
         controller.menuNeedsUpdate(menu)
@@ -68,7 +69,7 @@ final class SettingsMenuTests: XCTestCase {
         XCTAssertTrue(review.isEnabled)
         XCTAssertFalse(menu.items.contains { $0.title.contains("Approve") || $0.title == "Revoke Shell Access" })
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(review.action), to: review.target, from: review))
-        XCTAssertEqual(selected, .computerAccess)
+        XCTAssertTrue(approval.window?.isVisible == true)
         XCTAssertTrue(actions.isEmpty, "Reviewing from the menu never answers the request")
     }
 

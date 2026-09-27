@@ -278,7 +278,8 @@ The permission controls show Accessibility and Screen Recording readiness and li
 Start in observe-only mode, then grant a bounded local lease when control is needed.
 Stop and Revoke remain available while another setup operation is waiting.
 The menu displays the current mode, remaining lease, and active action without exposing its arguments.
-While a shell command waits for approval, its approval card stays above the **Computer access** steps, every window section shows a **Review Command** bar, and the menu bar shows **Command waiting** with a **Review Command…** item; approval happens only on that card.
+Each shell command opens a separate approval window without taking keyboard focus from your current app. It shows the exact command, working folder, agent, requester, and expiry, with **Reject**, **Approve Once**, and **Approve & Allow…** choices. Timed or until-stopped approval still requires a second confirmation describing its scope.
+Closing the window or choosing **Later** leaves the command waiting until it expires. The approval card also stays above the **Computer access** steps; **Review Command** in the app or menu bar reopens the separate window. The window closes when the request is answered, expires, or access stops, and remains usable while a folder picker is open.
 Changing configuration or restarting the app/helper does not renew control or shell auto-approval.
 Once a command journal exists, saving a different controller identity is rejected before settings change.
 Pending work remains bound to its original controller.
@@ -663,6 +664,7 @@ A separate setup does not transfer pending commands or their outcomes from the o
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
 Shutdown also revokes shell auto-approval, rejects a waiting shell request, and kills running shell commands and handles.
+Before disconnecting, shutdown allows up to two seconds to deliver saved replies, including the cancellation. If the network is unavailable, undelivered replies remain saved for recovery after restart; commands are not executed again.
 Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.
 For stronger isolation, run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
 

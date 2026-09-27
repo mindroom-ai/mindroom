@@ -736,6 +736,23 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertEqual(store.fileRoots, [])
     }
 
+    func testHelperStatusReachesStoreWhileFolderPickerRunsModally() throws {
+        let helper = DesktopBridgeProcess()
+        let store = DesktopControlStore(helper: helper)
+        let pending = runningShellStatus(DesktopShellStatus(enabled: true, pending: shellRequest(id: "modal", command: "pwd")))
+        let json = String(decoding: try JSONEncoder().encode(pending), as: UTF8.self)
+        _ = helper.decode(Data("{\"v\":1,\"type\":\"status\",\"sequence\":1,\"status\":\(json)}".utf8))
+        // Keep only modal mode alive, as NSOpenPanel.runModal does. Default-mode scheduling stalls here.
+        let timer = Timer(timeInterval: 0.01, repeats: true) { _ in }
+        RunLoop.main.add(timer, forMode: .modalPanel)
+        defer { timer.invalidate() }
+        let deadline = Date().addingTimeInterval(0.1)
+        while store.status != pending && Date() < deadline {
+            RunLoop.main.run(mode: .modalPanel, before: deadline)
+        }
+        XCTAssertEqual(store.status.shell.pending?.requestID, "modal")
+    }
+
     func testShellDecisionsSendOnlyTheReviewedRequestIDAndChoice() async throws {
         let helper = DesktopBridgeProcess()
         // Remote text can try to hide what runs; the preview escapes it while the decision sends only the ID.

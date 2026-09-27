@@ -6,6 +6,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     static let shared = StatusMenuController()
 
     var showWindow: (AppSection?) -> Void = { AppWindowController.shared.show(section: $0) }
+    var showShellApproval: () -> Void = { DesktopApprovalWindowController.shared.showPending() }
 
     private let runner: MindRoomCommandRunner
     private let desktop: DesktopControlStore
@@ -31,7 +32,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         item.button?.setAccessibilityLabel("MindRoom")
         statusItem = item
         runner.objectWillChange.merge(with: desktop.objectWillChange)
-            .receive(on: RunLoop.main)
+            // Defer until the published value is assigned, including while menus/panels are open.
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &subscriptions)
         let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
@@ -54,7 +56,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         var toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
         if let shell = desktop.status.shellApprovalState.label { toolTip += "\n\(shell)" }
         statusItem?.button?.toolTip = toolTip
-        // Without notifications, a waiting command stays visible in the menu bar until someone reviews it.
+        // Keep a dismissed approval discoverable without reopening its popup on every status update.
         let commandWaiting = desktop.status.shellApprovalState.isPending
         statusItem?.button?.title = commandWaiting ? "Command waiting" : ""
         statusItem?.button?.imagePosition = commandWaiting ? .imageLeading : .imageOnly
@@ -91,7 +93,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let shellState = desktop.status.shellApprovalState
         if shellState.isPending {
             menu.addItem(disabledItem("Shell command waiting for approval"))
-            menu.addItem(actionItem("Review Command…", symbol: "terminal", action: #selector(openComputerAccess)))
+            menu.addItem(actionItem("Review Command…", symbol: "terminal", action: #selector(reviewCommand)))
         } else if shellState != .askEachTime, let label = shellState.label {
             menu.addItem(disabledItem(label))
         }
@@ -129,6 +131,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func openWindow() { showWindow(nil) }
     @objc private func openLocalAgents() { showWindow(.localAgents) }
     @objc private func openComputerAccess() { showWindow(.computerAccess) }
+    @objc private func reviewCommand() { showShellApproval() }
     @objc private func openSettings() { showWindow(.settings) }
     @objc private func openChat() { runner.run(.openHostedChat) }
     @objc private func refreshStatus() { runner.refreshStatus() }

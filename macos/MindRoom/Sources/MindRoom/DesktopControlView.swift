@@ -161,6 +161,7 @@ struct DesktopControlView: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background(section == step ? Color.accentColor.opacity(0.18) : .clear)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(step.rawValue + 1). \(step.title): \(progress.detail)")
@@ -187,6 +188,7 @@ struct DesktopControlView: View {
                     .background(accessCapability == capability ? Color.accentColor.opacity(0.18) : .clear)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(capability.title): \(progress.detail)")
