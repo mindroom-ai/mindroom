@@ -144,6 +144,7 @@ struct MindRoomRootView: View {
                 Divider()
                 ZStack {
                     EmbeddedWebView(webView: webTabs.dashboard)
+                        .id(ObjectIdentifier(webTabs.dashboard))
                         .allowsHitTesting(webTabs.dashboardError == nil && !webTabs.dashboardLoading)
                         .accessibilityHidden(webTabs.dashboardError != nil || webTabs.dashboardLoading)
                     if let error = webTabs.dashboardError {

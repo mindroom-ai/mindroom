@@ -97,7 +97,7 @@ struct ChatSSONavigation {
 @MainActor
 final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     let chat: WKWebView
-    let dashboard: WKWebView
+    @Published private(set) var dashboard: WKWebView
     let preferences: ChatWebsitePreferences
 
     @Published private(set) var chatError: String?
@@ -111,6 +111,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
     private var chatLoadedURL: URL?
     private var dashboardLoaded = false
     private var dashboardAttempt = 0
+    private var dashboardPopups: [UUID: DashboardPopupWindow] = [:]
 
     init(desktop: DesktopControlStore, preferences: ChatWebsitePreferences) {
         self.desktop = desktop
@@ -145,18 +146,20 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         let attempt = dashboardAttempt
         dashboardError = nil
         dashboardLoading = true
+        replaceDashboardWebView()
+        let webView = dashboard
         Task {
             do {
                 let configuration = try await desktop.dashboardConfiguration()
                 let cookie = try await configuration.login()
-                guard attempt == dashboardAttempt else { return }
+                guard attempt == dashboardAttempt, webView === dashboard else { return }
                 dashboardConfiguration = configuration
                 if let cookie {
-                    await dashboard.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
+                    await webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
                 }
-                guard attempt == dashboardAttempt else { return }
+                guard attempt == dashboardAttempt, webView === dashboard else { return }
                 dashboardLoaded = true
-                dashboard.load(URLRequest(url: configuration.url))
+                webView.load(URLRequest(url: configuration.url))
             } catch let error as LocalDashboardError {
                 guard attempt == dashboardAttempt else { return }
                 dashboardLoading = false
@@ -171,10 +174,24 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
 
     func serviceStopped() {
         dashboardAttempt += 1
-        dashboardLoaded = false
-        dashboardConfiguration = nil
         dashboardLoading = false
+        replaceDashboardWebView()
+    }
+
+    private func replaceDashboardWebView() {
+        for popup in Array(dashboardPopups.values) { popup.close() }
+        dashboardPopups.removeAll()
         dashboard.stopLoading()
+        dashboard.navigationDelegate = nil
+        dashboard.uiDelegate = nil
+        dashboardConfiguration = nil
+        dashboardLoaded = false
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let replacement = WKWebView(frame: .zero, configuration: configuration)
+        replacement.navigationDelegate = self
+        replacement.uiDelegate = self
+        dashboard = replacement
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
@@ -184,6 +201,16 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         let decision: WebNavigationDecision
         if webView === dashboard {
             guard let dashboardConfiguration else { decisionHandler(.cancel); return }
+            if action.targetFrame == nil && !clicked {
+                let allowed = DashboardPopupPolicy.canOpen(
+                    url, source: action.sourceFrame.request.url,
+                    isMainFrame: action.sourceFrame.isMainFrame,
+                    sessionReady: dashboardLoaded && !dashboardLoading && dashboardError == nil,
+                    dashboard: dashboardConfiguration
+                )
+                decisionHandler(allowed ? .allow : .cancel)
+                return
+            }
             decision = WebNavigationPolicy.dashboard(url, clicked: clicked, configuration: dashboardConfiguration)
         } else {
             decision = chatSSO.decide(url, clicked: clicked)
@@ -199,8 +226,32 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard let url = action.request.url, WebNavigationPolicy.isWebURL(url) else { return nil }
+        guard let url = action.request.url else { return nil }
         let clicked = action.navigationType == .linkActivated
+        if webView === dashboard {
+            guard let dashboardConfiguration else { return nil }
+            if clicked {
+                switch WebNavigationPolicy.dashboard(url, clicked: true, configuration: dashboardConfiguration) {
+                case .allow: webView.load(URLRequest(url: url))
+                case .openBrowser: NSWorkspace.shared.open(url)
+                case .cancel: break
+                }
+                return nil
+            }
+            guard DashboardPopupPolicy.canOpen(
+                url, source: action.sourceFrame.request.url,
+                isMainFrame: action.sourceFrame.isMainFrame,
+                sessionReady: dashboardLoaded && !dashboardLoading && dashboardError == nil,
+                dashboard: dashboardConfiguration
+            ) else { return nil }
+            let popup = DashboardPopupWindow(configuration: configuration, dashboard: dashboardConfiguration) {
+                [weak self] id in self?.dashboardPopups.removeValue(forKey: id)
+            }
+            dashboardPopups[popup.id] = popup
+            popup.show()
+            return popup.webView
+        }
+        guard WebNavigationPolicy.isWebURL(url) else { return nil }
         if !clicked {
             // Some SSO buttons use window.open. Accept only a Matrix SSO start from Chat itself.
             guard webView === chat, action.targetFrame == nil,
@@ -208,19 +259,10 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
                   WebNavigationPolicy.sameOrigin(source, preferences.url),
                   ChatSSONavigation.isStart(url, returningTo: preferences.url) else { return nil }
         }
-        if webView === dashboard {
-            guard let dashboardConfiguration else { return nil }
-            switch WebNavigationPolicy.dashboard(url, clicked: true, configuration: dashboardConfiguration) {
-            case .allow: webView.load(URLRequest(url: url))
-            case .openBrowser: NSWorkspace.shared.open(url)
-            case .cancel: break
-            }
-        } else {
-            switch chatSSO.decide(url, clicked: true) {
-            case .allow: webView.load(URLRequest(url: url))
-            case .openBrowser: NSWorkspace.shared.open(url)
-            case .cancel: break
-            }
+        switch chatSSO.decide(url, clicked: true) {
+        case .allow: webView.load(URLRequest(url: url))
+        case .openBrowser: NSWorkspace.shared.open(url)
+        case .cancel: break
         }
         return nil
     }

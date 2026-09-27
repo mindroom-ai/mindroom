@@ -44,6 +44,55 @@ final class EmbeddedWebTabsTests: XCTestCase {
         XCTAssertFalse((store.errorMessage ?? "").contains("test-secret"))
     }
 
+    func testDashboardConfigurationAcceptsJSONNullKey() async throws {
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(
+            #"{"url":"http://127.0.0.1:8877","api_key":null}"#.utf8
+        )) as? [String: Any])
+        let store = DesktopControlStore(request: { _, _, _ in payload })
+        let configuration = try await store.dashboardConfiguration()
+        XCTAssertNil(configuration.apiKey)
+        XCTAssertNil(configuration.loginRequest)
+    }
+
+    func testDashboardConfigurationMapsTypedInvalidErrorWithoutLeakingHelperText() async {
+        let store = DesktopControlStore(request: { _, _, _ in
+            throw DesktopBridgeProcessError.helper(DesktopBridgeErrorPayload(
+                code: "dashboard_configuration_invalid", message: "secret URL and key", recovery: nil, retryable: false
+            ))
+        })
+        do {
+            _ = try await store.dashboardConfiguration()
+            XCTFail("Invalid helper configuration must fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, LocalDashboardError.invalidConfiguration.localizedDescription)
+            XCTAssertFalse(error.localizedDescription.contains("secret"))
+        }
+    }
+
+    func testDashboardReloadRetiresOldCookieStoreBeforeNewPortWithoutKey() async throws {
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(
+            #"{"url":"http://127.0.0.1:8878","api_key":null}"#.utf8
+        )) as? [String: Any])
+        let desktop = DesktopControlStore(request: { _, _, _ in response })
+        let tabs = EmbeddedWebTabs(desktop: desktop, preferences: ChatWebsitePreferences())
+        let oldView = tabs.dashboard
+        let oldStore = oldView.configuration.websiteDataStore
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "127.0.0.1", .path: "/", .name: "mindroom_api_key", .value: "old-key"
+        ]))
+        await oldStore.httpCookieStore.setCookie(cookie)
+        let oldCookies = await oldStore.httpCookieStore.allCookies()
+        XCTAssertEqual(oldCookies.first?.value, "old-key")
+
+        tabs.openDashboard(force: true)
+        let newView = tabs.dashboard
+        XCTAssertFalse(newView === oldView)
+        XCTAssertFalse(newView.configuration.websiteDataStore === oldStore)
+        let newCookies = await newView.configuration.websiteDataStore.httpCookieStore.allCookies()
+        XCTAssertTrue(newCookies.isEmpty)
+        newView.stopLoading()
+    }
+
     func testDashboardFailureIsBoundedAndRetryRequestsFreshConfiguration() async {
         var requests = 0
         let desktop = DesktopControlStore(request: { _, _, _ in
