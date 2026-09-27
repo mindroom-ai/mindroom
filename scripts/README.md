@@ -260,7 +260,7 @@ Failures report content-free invariant coordinates, while the optional failure l
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.
 When you run this from a source checkout, generated files are written under `./avatars/`.
-In containerized deployments, generated overrides are stored under the persistent MindRoom storage path instead of the image-bundled `/app/avatars`.
+In containerized deployments, generated overrides are stored under the persistent MindRoom storage path.
 
 ```bash
 OPENAI_API_KEY_FILE=/path/to/openai_api_key uv run mindroom avatars generate

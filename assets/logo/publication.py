@@ -50,7 +50,7 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "saas-platform/platform-frontend/public/res/branding/mindroom.svg": mark,
         "saas-platform/platform-frontend/public/res/branding/mindroom.png": png[1024],
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
-        "avatars/spaces/root_space.png": png[256],
+        "src/mindroom/avatars/spaces/root_space.png": png[256],
         **{
             f"macos/MindRoom/Sources/MindRoom/Resources/logo-menu{suffix}.png": render(root, size)
             for suffix, size in (("", 20), ("@2x", 40))

@@ -18,7 +18,6 @@ on:
       - "skills/**"
       - "scripts/**"
       - "src/**"
-      - "avatars/**"
       - "config.yaml"
       - "run-sandbox-runner.sh"
       - "uv.lock"

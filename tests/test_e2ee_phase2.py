@@ -246,7 +246,7 @@ class TestManagedRoomEncryptionReconcile:
         monkeypatch.setattr(matrix_state, "load_rooms", dict)
         monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
         monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
-        monkeypatch.setattr(matrix_rooms, "_set_room_avatar_if_available", AsyncMock())
+        monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))
         created = AsyncMock(return_value="!new:example.com")
         monkeypatch.setattr(matrix_rooms, "create_room", created)

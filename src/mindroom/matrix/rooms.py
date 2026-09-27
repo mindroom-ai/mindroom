@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -11,11 +12,11 @@ import aiohttp
 import nio
 
 from mindroom.access_policy import EffectiveRoomPolicy, resolve_room_policy
-from mindroom.constants import resolve_avatar_path
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.logging_config import get_logger
+from mindroom.managed_avatars import room_avatar_path, root_space_avatar_path
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.avatar import check_and_set_avatar
+from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.client_room_admin import (
     RoomJoinOutcome,
     add_room_to_space,
@@ -44,13 +45,13 @@ from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
-_ROOT_SPACE_AVATAR_KEY = "root_space"
 _DENIED_ROOM_STATE_ERROR_CODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
@@ -62,25 +63,24 @@ class _AliasResolution(Enum):
     RETRY_LATER = "retry_later"
 
 
-async def _set_room_avatar_if_available(
+async def _set_room_avatar(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    avatar_category: str,
-    avatar_name: str,
+    resolve_avatar: Callable[[], Awaitable[Path | None]],
     context: str,
-    runtime_paths: RuntimePaths,
 ) -> None:
-    """Set a room avatar when a managed asset exists.
+    """Set a room avatar when the room has none yet, resolving the picture only then.
 
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.
     """
-    avatar_path = resolve_avatar_path(avatar_category, avatar_name, runtime_paths)
-    if not avatar_path.exists():
+    if await room_has_avatar(client, room_id):
         return
-
-    if await check_and_set_avatar(client, avatar_path, room_id=room_id):
+    avatar_path = await resolve_avatar()
+    if avatar_path is None:
+        return
+    if await set_room_avatar_from_file(client, room_id, avatar_path):
         logger.info(
             "Set avatar for managed Matrix room",
             room_id=room_id,
@@ -427,13 +427,11 @@ async def _ensure_room_exists(
             context="new_room_creation",
         )
 
-        await _set_room_avatar_if_available(
+        await _set_room_avatar(
             client,
             created_room_id,
-            avatar_category="rooms",
-            avatar_name=room_key,
+            resolve_avatar=functools.partial(room_avatar_path, room_key, config, runtime_paths),
             context=f"managed_room:{room_key}",
-            runtime_paths=runtime_paths,
         )
 
         return created_room_id
@@ -634,13 +632,11 @@ async def ensure_root_space(
             )
             return None
 
-    await _set_room_avatar_if_available(
+    await _set_room_avatar(
         client,
         root_space_id,
-        avatar_category="spaces",
-        avatar_name=_ROOT_SPACE_AVATAR_KEY,
+        resolve_avatar=functools.partial(root_space_avatar_path, runtime_paths),
         context="root_space",
-        runtime_paths=runtime_paths,
     )
 
     return root_space_id
