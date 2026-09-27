@@ -2210,6 +2210,49 @@ async def test_chat_skill_manage_refuses_a_skills_directory_replaced_by_a_link(t
     assert (elsewhere / "deploy-checks/SKILL.md").read_text() == LEARNED
 
 
+def test_deeply_nested_skill_content_is_refused_and_archival_skips_it(tmp_path: Path) -> None:
+    """Nesting that overflows libyaml's C stack is invalid YAML to the library, never a crash of the primary."""
+    root = tmp_path / "skills"
+    depth = 30_000
+    nested = f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n"
+    with pytest.raises(library.SkillEditError, match="not a valid YAML mapping"):
+        library.create_skill(root, "nested", nested, reserved_names=frozenset(), learner=False)
+    _write_skill(root, "nested", nested)
+    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+
+
+@pytest.mark.asyncio
+async def test_chat_patches_a_skill_written_with_crlf_line_endings(tmp_path: Path) -> None:
+    """Skill tools serve files with normalized line endings, so a patch of that text lands, written with LF."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    (root / "deploy-checks").mkdir(parents=True)
+    (root / "deploy-checks" / "SKILL.md").write_bytes(LEARNED.replace("\n", "\r\n").encode())
+    (root / "deploy-checks" / "references").mkdir()
+    (root / "deploy-checks" / "references" / "notes.md").write_bytes(b"one\r\ntwo\r\n")
+    tools = SkillManageTools("mind", config, paths, root)
+    patched = await tools.skill_manage(
+        "patch",
+        "deploy-checks",
+        old_string="---\n1. Run the smoke test.\n",
+        new_string="---\n1. Run smoke.\n",
+    )
+    assert json.loads(patched)["success"], patched
+    reference = await tools.skill_manage(
+        "patch",
+        "deploy-checks",
+        old_string="one\ntwo\n",
+        new_string="one\n",
+        file_path="references/notes.md",
+    )
+    assert json.loads(reference)["success"], reference
+    assert (root / "deploy-checks" / "SKILL.md").read_bytes() == LEARNED.replace(
+        "1. Run the smoke test.",
+        "1. Run smoke.",
+    ).encode()
+    assert (root / "deploy-checks" / "references" / "notes.md").read_bytes() == b"one\n"
+
+
 @pytest.mark.asyncio
 async def test_parallel_chat_skill_edits_both_land(tmp_path: Path) -> None:
     """Several chat skill_manage calls of one reply take turns, so every patch builds on the one before."""

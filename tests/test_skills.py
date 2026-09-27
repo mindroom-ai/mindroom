@@ -643,6 +643,20 @@ def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
     assert json.loads(get_reference(skill_name="deploy-checks", reference_path="notes.md"))["content"] == "one\ntwo\n"
 
 
+def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path) -> None:
+    """Nesting that overflows libyaml's C stack must fall back like LocalSkills, not kill the process."""
+    storage = tmp_path / "storage"
+    root = _workspace_skills(storage)
+    (root / "nested").mkdir()
+    depth = 30_000
+    (root / "nested" / "SKILL.md").write_text(
+        f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _write_skill(root, "good", "Good")
+    assert _skill_names(_load(tmp_path, storage)) == ["good", "nested"]
+
+
 def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:
     """Only skills/<name>/SKILL.md loads; LocalSkills loaded skills/SKILL.md alone and hid every skill beside it."""
     storage = tmp_path / "storage"

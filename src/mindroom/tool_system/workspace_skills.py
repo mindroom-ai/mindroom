@@ -11,16 +11,16 @@ import os
 import re
 import stat
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
+import yaml
 from agno.skills.skill import Skill
 from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
-from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -128,17 +128,22 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
 
 
 def _strict_frontmatter(text: str) -> Any:  # noqa: ANN401
+    """Parse frontmatter with PyYAML's pure-Python loader, like Agno's LocalSkills.
+
+    libyaml overflows the C stack on deeply nested input that worker code can plant, killing the process, where the
+    pure-Python loader raises RecursionError.
+    """
     try:
-        return yaml_io.safe_load(text) or {}
+        return yaml.load(text, Loader=yaml.SafeLoader) or {}
+    except YAMLError:
+        raise
     except Exception as exc:
-        if isinstance(exc, YAMLError):
-            raise
-        # PyYAML constructors refuse values such as 2026-02-30, `!!int ""`, or `!!bool maybe` with ValueError,
-        # IndexError, KeyError, or AttributeError; like Agno's LocalSkills, any of them makes the YAML invalid.
+        # PyYAML refuses values such as 2026-02-30, `!!int ""`, `!!bool maybe`, or deep nesting with ValueError,
+        # IndexError, KeyError, AttributeError, or RecursionError; like LocalSkills, any of them makes the YAML invalid.
         raise YAMLError(str(exc)) from exc
 
 
-def _normalized_newlines(text: str) -> str:
+def normalized_newlines(text: str) -> str:
     """Return text with the line endings Agno's LocalSkills reads, which ``Path.read_text`` normalizes."""
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -148,7 +153,7 @@ def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str
 
     Ownership and edit checks need strict YAML; ``loose`` loads a skill for the agent the way Agno does.
     """
-    content = _normalized_newlines(content)
+    content = normalized_newlines(content)
     match = FRONTMATTER_PATTERN.match(content)
     if match is None:
         return {}, content
@@ -196,6 +201,10 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
     results: list[Result] = []
     try:
         with open_skills_root(skills_root) as root_fd:
+            with suppress(FileNotFoundError):
+                os.stat(SKILL_FILENAME, dir_fd=root_fd, follow_symlinks=False)
+                # LocalSkills loaded such a file as the only skill of the root, hiding every skill directory beside it.
+                logger.warning("Ignoring SKILL.md directly in the workspace skills directory", path=str(skills_root))
             for directory in list_entries(root_fd, directories=True):
                 try:
                     with open_directory_within_root(root_fd, directory) as skill_fd:
@@ -227,9 +236,6 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
-    if os.path.lexists(skills_root / SKILL_FILENAME):
-        # LocalSkills loaded such a file as the only skill of the root, hiding every skill directory beside it.
-        logger.warning("Ignoring SKILL.md directly in the workspace skills directory", path=str(skills_root))
     return _each_skill_directory(
         skills_root,
         lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
@@ -292,7 +298,7 @@ def read_support_file(skill_path: Path, directory: str, filename: str) -> str:
     if content is None:
         msg = f"{directory}/{filename} does not exist"
         raise FileNotFoundError(msg)
-    return _normalized_newlines(content)
+    return normalized_newlines(content)
 
 
 def _usage_records(root_fd: int) -> dict[str, object] | None:

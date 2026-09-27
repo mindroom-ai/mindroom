@@ -29,7 +29,12 @@ from mindroom.skill_learning.library import (
     write_skill_file,
 )
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown, workspace_skill_directories
+from mindroom.tool_system.workspace_skills import (
+    SKILL_FILENAME,
+    normalized_newlines,
+    parse_skill_markdown,
+    workspace_skill_directories,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -238,7 +243,7 @@ class SkillTools:
             "file_path": relative_path,
             "owner": "learner" if loaded.learned else "user",
             "support_files": await asyncio.to_thread(support_file_paths, self.skills_root, entry.directory),
-            "content": loaded.content,
+            "content": normalized_newlines(loaded.content),
         }
 
     async def skill_manage(
@@ -407,13 +412,17 @@ def _patched(
     if read is None:
         msg = f"Load {relative_path} of {directory!r} with {_loader(relative_path)} before patching it."
         raise SkillEditError(msg)
-    old, new = _required(old_string, "old_string"), _required(new_string, "new_string")
-    matches = read.content.count(old) if old else 0
+    # The skill tools serve files with normalized line endings, so like Hermes' read_text and write_text, a patch
+    # matches and writes that text.
+    content = normalized_newlines(read.content)
+    old = normalized_newlines(_required(old_string, "old_string"))
+    new = normalized_newlines(_required(new_string, "new_string"))
+    matches = content.count(old) if old else 0
     if matches == 0 or (matches > 1 and not replace_all):
         problem = "was not found" if matches == 0 else f"occurs {matches} times; add context or set replace_all"
-        msg = f"old_string {problem}. Current start of {relative_path}: {read.content[:500]!r}"
+        msg = f"old_string {problem}. Current start of {relative_path}: {content[:500]!r}"
         raise SkillEditError(msg)
-    return read.content.replace(old, new, -1 if replace_all else 1)
+    return content.replace(old, new, -1 if replace_all else 1)
 
 
 def _support_path(directory: str, filename: str | None) -> str | None:
