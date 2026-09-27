@@ -962,7 +962,14 @@ class DockerWorkerBackend:
                 msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
         with self._worker_lock(worker_key):
@@ -971,6 +978,9 @@ class DockerWorkerBackend:
                 paths,
                 expected_worker_key=worker_key,
             ) or self._default_metadata(worker_key, timestamp)
+            if startup_count is not None and metadata.startup_count != startup_count:
+                # The request failed on a container this worker has since replaced.
+                return self._to_handle(metadata, None, now=timestamp, paths=paths)
             return self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
 
     def _adopt_legacy_worker_records(self) -> None:

@@ -3504,6 +3504,28 @@ def test_kubernetes_user_worker_mounts_a_private_workspace_that_materializes_lat
     assert mount_path in _storage_mounts(apps_api.created_bodies[-1])
 
 
+def test_kubernetes_failure_from_a_replaced_pod_never_stops_its_replacement(tmp_path: Path) -> None:
+    """A request that failed on the pod a workspace change replaced must not scale down the new Deployment."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user:~@alice:localhost"
+    old_handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    (private_instance_scope_root_path(backend.storage_root, worker_key) / "notes" / "notes_data").mkdir(parents=True)
+    new_handle = backend.ensure_worker(WorkerSpec(worker_key), now=20.0)
+    assert new_handle.startup_count != old_handle.startup_count
+
+    backend.record_failure(worker_key, "connection reset", now=21.0, startup_count=old_handle.startup_count)
+    assert apps_api.deployments[new_handle.worker_id].spec.replicas == 1
+
+    backend.record_failure(worker_key, "runner crashed", now=22.0, startup_count=new_handle.startup_count)
+    assert apps_api.deployments[new_handle.worker_id].spec.replicas == 0
+
+
 def test_kubernetes_shared_worker_reuse_skips_mount_planning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only user workers can gain a workspace while running, so other cached workers never re-plan on reuse."""
     runtime_paths = resolve_primary_runtime_paths(

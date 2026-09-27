@@ -896,6 +896,7 @@ class KubernetesWorkerBackend:
         *,
         now: float | None = None,
         annotations_override: dict[str, str] | None = None,
+        startup_count: int | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
@@ -905,6 +906,7 @@ class KubernetesWorkerBackend:
                 failure_reason,
                 now=timestamp,
                 annotations_override=annotations_override,
+                startup_count=startup_count,
             )
 
     def _record_failure_locked(
@@ -914,14 +916,19 @@ class KubernetesWorkerBackend:
         *,
         now: float,
         annotations_override: dict[str, str] | None = None,
+        startup_count: int | None = None,
     ) -> WorkerHandle:
         """Persist failure state while holding the worker provisioning lock."""
-        self._invalidate_ready_worker(worker_key)
         worker_id = self._worker_id(worker_key)
         deployment = self._resources.read_deployment(worker_id)
         if deployment is None:
             msg = f"Unknown worker '{worker_key}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
+        current = self._handle_from_deployment(deployment, now=now)
+        if startup_count is not None and current.startup_count != startup_count:
+            # The request failed on a pod this worker has since replaced, such as for a new workspace mount.
+            return current
+        self._invalidate_ready_worker(worker_key)
 
         annotations = dict(deployment.metadata.annotations or {})
         if annotations_override is not None:

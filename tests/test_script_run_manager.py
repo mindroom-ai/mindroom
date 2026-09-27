@@ -212,7 +212,14 @@ class _WorkerBackend:
         del now
         return []
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        **_kwargs: object,
+    ) -> WorkerHandle:
         del failure_reason, now
         return self.handles[worker_key]
 
