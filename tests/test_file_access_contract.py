@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.tools.file as file_tool_module
+import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments import load_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -365,3 +367,30 @@ async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
         doc.truncate(65 << 20)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])
+def test_worker_path_tool_writes_replace_the_entry_instead_of_the_linked_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    interrupted: bool,
+) -> None:
+    """A workspace file hard-linked to a primary file is replaced, never written through, and never left partial."""
+    outside = tmp_path / "primary-owned.db"
+    outside.write_text("primary-only state", encoding="utf-8")
+    target = workspace / "notes.md"
+    os.link(outside, target)
+    if interrupted:
+
+        def fail_rename(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", fail_rename)
+        with pytest.raises(OSError, match="No space"):
+            path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+        assert target.read_text(encoding="utf-8") == "primary-only state"
+    else:
+        path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+        assert target.read_text(encoding="utf-8") == "new notes"
+    assert outside.read_text(encoding="utf-8") == "primary-only state"

@@ -357,7 +357,10 @@ async def test_finalize_keeps_the_memory_of_a_transcript_above_the_read_cap(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("planted", ["linked_transcript", "linked_calls_dir", "fifo_transcript"])
+@pytest.mark.parametrize(
+    "planted",
+    ["linked_transcript", "linked_calls_dir", "fifo_transcript", "hard_linked_transcript"],
+)
 async def test_file_memory_transcript_never_follows_planted_workspace_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -379,11 +382,13 @@ async def test_file_memory_transcript_never_follows_planted_workspace_entries(
         calls_dir.mkdir(parents=True)
         if planted == "linked_transcript":
             transcript.path.symlink_to(victim_memory)
+        elif planted == "hard_linked_transcript":
+            os.link(victim_memory, transcript.path)
         else:
             os.mkfifo(transcript.path)
     transcript._pending.append("- attacker-controlled line\n")
 
-    with pytest.raises(OSError, match=r"Too many levels|Not a directory|No such device|not a regular file"):
+    with pytest.raises((OSError, ValueError), match=r"Too many levels|Not a directory|No such device|hard link"):
         await transcript._flush()
 
     assert victim_memory.read_text(encoding="utf-8") == "victim-only note\n"

@@ -137,12 +137,17 @@ def open_directory_within_root(
 
 
 def open_regular_file_at(directory_fd: int, name: str, flags: int = os.O_RDONLY, mode: int = 0o600) -> int:
-    """Open one entry of a pinned directory as a regular file; the caller closes the returned descriptor."""
+    """Open one entry of a pinned directory as a regular file; the caller closes the returned descriptor.
+
+    A file opened for writing must have no other hard link, so writing it never changes another file.
+    """
     descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=directory_fd)
-    if stat.S_ISREG(os.fstat(descriptor).st_mode):
+    status = os.fstat(descriptor)
+    hard_linked = bool(flags & (os.O_WRONLY | os.O_RDWR)) and status.st_nlink > 1
+    if stat.S_ISREG(status.st_mode) and not hard_linked:
         return descriptor
     os.close(descriptor)
-    message = "Path must name a regular file."
+    message = "File to write has another hard link." if hard_linked else "Path must name a regular file."
     raise ValueError(message)
 
 

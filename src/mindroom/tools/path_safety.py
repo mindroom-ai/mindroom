@@ -7,9 +7,9 @@ import stat
 from glob import has_magic
 from pathlib import Path
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_at,
     read_regular_file_within_root,
     resolve_path_within_root,
 )
@@ -98,17 +98,22 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
-    """Create or overwrite one resolved file in place, keeping an existing file's mode and inode."""
+    """Publish one resolved file by atomic replacement, keeping an existing file's mode.
+
+    Replacing the entry never writes a hard-linked inode or leaves a partial file.
+    """
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(payload)
         return
     with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
-        descriptor = open_regular_file_at(directory_fd, relative.name, os.O_WRONLY | os.O_CREAT, 0o666)
-    with os.fdopen(descriptor, "wb") as file:
-        file.truncate(0)
-        file.write(payload)
+        try:
+            existing = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        mode = stat.S_IMODE(existing.st_mode) if existing is not None and stat.S_ISREG(existing.st_mode) else 0o644
+        atomic_write_bytes_at(directory_fd, relative.name, payload, file_mode=mode)
 
 
 def remove_resolved_path(base_dir: Path, resolved: Path) -> None:

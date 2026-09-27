@@ -138,6 +138,28 @@ async def test_event_append_refuses_what_would_make_the_log_unreadable(
         await owner.finish(handle, status="completed", output="Done")
 
 
+@pytest.mark.asyncio
+async def test_event_append_never_writes_through_a_hard_link(tmp_path: Path) -> None:
+    """An event log hard-linked to a primary file by an older worker is refused instead of appended to."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    outside = tmp_path / "primary-owned.db"
+    outside.write_bytes(event_path.read_bytes())
+    event_path.unlink()
+    os.link(outside, event_path)
+
+    with pytest.raises(ValueError, match="hard link"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+
+    assert outside.read_bytes().count(b"\n") == 1
+
+
 def _config(*, private_child: bool = False) -> Config:
     child = AgentConfig(display_name="Child")
     if private_child:
