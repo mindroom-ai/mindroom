@@ -987,7 +987,12 @@ class KubernetesResourceManager:
                 items = json.loads(response.data).get("items") or []
             finally:
                 response.release_conn()
-            running = {item.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID) for item in items}
+            # Evicted and completed pod objects wait for garbage collection but no longer run; terminating pods still do.
+            running = {
+                item.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID)
+                for item in items
+                if item.get("status", {}).get("phase") not in {"Succeeded", "Failed"}
+            }
             if not running & set(worker_ids):
                 return
             if time.monotonic() >= deadline:

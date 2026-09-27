@@ -5460,6 +5460,28 @@ def _stamp_legacy_template(apps_api: _FakeAppsApi, worker_id: str, agent_name: s
     apps_api.create_namespaced_deployment("chat", body)
 
 
+@pytest.mark.parametrize(("phase", "gone"), [("Failed", True), ("Succeeded", True), ("Running", False)])
+def test_kubernetes_pod_wait_ignores_finished_pods(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    gone: bool,
+) -> None:
+    """An evicted or completed pod object left for garbage collection no longer runs, unlike a terminating one."""
+    backend, _apps_api, core_api = _backend()
+    pod = {"metadata": {"labels": {"mindroom.ai/worker-id": "old-worker"}}, "status": {"phase": phase}}
+    monkeypatch.setattr(
+        core_api,
+        "list_namespaced_pod",
+        lambda *_args, **_kwargs: _FakeRawResponse(json.dumps({"items": [pod]}).encode()),
+    )
+
+    if gone:
+        backend._resources.wait_for_worker_pods_absent(("old-worker",), timeout_seconds=0)
+    else:
+        with pytest.raises(WorkerBackendError, match="did not stop"):
+            backend._resources.wait_for_worker_pods_absent(("old-worker",), timeout_seconds=0)
+
+
 def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
