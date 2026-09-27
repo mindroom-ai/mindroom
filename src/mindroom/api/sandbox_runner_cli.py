@@ -158,6 +158,8 @@ async def invoke_cli_shell(payload: CliShellRequest, request: Request) -> dict[s
         toolkit,
         ToolOutputFilePolicy(
             Path(launch.shell.workspace),
+            # The worker owns every path its workspace can reach.
+            storage_root=Path(launch.shell.workspace),
             max_bytes=launch.shell.output_max_bytes,
             auto_save_threshold_bytes=launch.shell.output_auto_save_threshold_bytes,
         ),

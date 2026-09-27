@@ -813,6 +813,8 @@ def _resolve_entrypoint(
             runtime_overrides=runtime_overrides,
             allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
             tool_output_workspace_root=tool_output_workspace_root,
+            # A worker sees only its own mounts, so its workspace is its trusted root.
+            tool_output_storage_root=tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
             worker_target=worker_target,
         )
@@ -1677,7 +1679,8 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
             failure_kind="worker",
         )
 
-    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
+    # A worker sees only its own mounts, so its workspace is its trusted root.
+    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths, storage_root=workspace_root)
     path_error = validate_output_path(policy, output_path)
     if path_error is not None:
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=path_error, failure_kind="tool")

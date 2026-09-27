@@ -122,6 +122,8 @@ class ShellOutputCapture:
             request = prepare_tool_output_file(
                 ToolOutputFilePolicy(
                     workspace_root=Path(self.destination.workspace_root),
+                    # Shell code shares every path its workspace can reach, in a worker or a trusted primary.
+                    storage_root=Path(self.destination.workspace_root),
                     max_bytes=self.destination.max_bytes,
                 ),
                 tool_name="run_shell_command",

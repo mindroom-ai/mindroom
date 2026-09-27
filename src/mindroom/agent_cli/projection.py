@@ -75,17 +75,21 @@ def register_cli_media(
             content = item.content
             filename = item.filename if isinstance(item, File) else None
             path = Path(filepath) if filepath else None
+            source_root = None
             if path is None and isinstance(content, bytes) and policy is not None:
                 relative = f"mindroom_tool_outputs/media-{uuid4().hex}"
                 saved = write_bytes_to_output_path(policy, relative, content)
                 if not isinstance(saved, str):
                     path = saved.absolute_path
+                    # Reread the saved copy from the policy's trusted root, like it was written.
+                    source_root = policy.storage_root
                     reference["path"] = relative
             if path is not None and context.storage_path is not None:
                 record = register_local_attachment(
                     context.storage_path,
                     path,
                     kind=kind,
+                    source_root=source_root,
                     filename=filename or path.name,
                     mime_type=item.mime_type,
                     room_id=context.room_id,

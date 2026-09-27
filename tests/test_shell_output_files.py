@@ -43,7 +43,7 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
+        storage_path=tmp_path,
         process_env={},
     )
     try:
@@ -189,7 +189,10 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
             process_env={},
         ),
     )
-    wrap_toolkit_for_output_files(tool, ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
+    wrap_toolkit_for_output_files(
+        tool,
+        ToolOutputFilePolicy(workspace_root=tmp_path, storage_root=tmp_path, max_bytes=60000),
+    )
     destination = tmp_path / "existing.txt"
     destination.write_text("keep existing")
     result = await FunctionCall(

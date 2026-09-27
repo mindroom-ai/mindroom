@@ -34,7 +34,10 @@ from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
+    ToolOutputFileRequest,
     ensure_output_path_schema_optional,
+    finalize_tool_output_file,
+    prepare_tool_output_file,
     saved_tool_output_receipt,
     validate_output_path_syntax,
     wrap_function_for_output_files,
@@ -42,13 +45,14 @@ from mindroom.tool_system.output_files import (
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from tests.storage_swap_support import VICTIM_NOTE, SwappedAncestor, private_layout
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
 def _policy(tmp_path: Path, *, max_bytes: int = 1024 * 1024) -> ToolOutputFilePolicy:
-    return ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=max_bytes)
+    return ToolOutputFilePolicy(workspace_root=tmp_path, storage_root=tmp_path, max_bytes=max_bytes)
 
 
 def _first_function(toolkit: Toolkit) -> Function:
@@ -898,7 +902,12 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
     marker = "ISSUE200_AUTO_MARKER"
     raw_output = marker * 1_000
     toolkit = _EchoToolkit(result=raw_output)
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100_000, auto_save_threshold_bytes=100)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=100_000,
+        auto_save_threshold_bytes=100,
+    )
     wrap_toolkit_for_output_files(toolkit, policy)
 
     result = FunctionCall(
@@ -919,7 +928,12 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 
 
 def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> None:
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=40)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=10_000,
+        auto_save_threshold_bytes=40,
+    )
     toolkit = _EchoToolkit(result={"items": ["z" * 30, "a" * 30]})
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -938,7 +952,12 @@ def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 
 
 def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path: Path) -> None:
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=10)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=10_000,
+        auto_save_threshold_bytes=10,
+    )
     toolkit = _EchoToolkit(result="x" * 200)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -956,7 +975,12 @@ def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path
 
 def test_large_result_over_auto_save_limit_returns_compact_error(tmp_path: Path) -> None:
     marker = "ISSUE200_TOO_LARGE"
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=100,
+        auto_save_threshold_bytes=10,
+    )
     toolkit = _EchoToolkit(result=marker * 20)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -980,7 +1004,12 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
             raise RuntimeError(msg)
 
     raw_result = Unstringable()
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=100,
+        auto_save_threshold_bytes=10,
+    )
     toolkit = _EchoToolkit(result=raw_result)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -996,7 +1025,12 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
 
 def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> None:
     raw_result = "x" * 200
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=1_000, auto_save_threshold_bytes=10)
+    policy = ToolOutputFilePolicy(
+        workspace_root=tmp_path,
+        storage_root=tmp_path,
+        max_bytes=1_000,
+        auto_save_threshold_bytes=10,
+    )
     toolkit = _EchoToolkit(result=raw_result)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1066,3 +1100,27 @@ def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_path: P
     assert not (tmp_path / "blocked.txt").exists()
     assert seen == [("after", True, result.result)]
     assert "[TOOL CALL DECLINED]" in str(result.result)
+
+
+@pytest.mark.parametrize("ancestor", ["agent", "workspace"])
+def test_output_files_refuse_a_replaced_workspace_ancestor(tmp_path: Path, ancestor: SwappedAncestor) -> None:
+    """Redirected and auto-saved output never lands in another requester's workspace after an ancestor swap."""
+    layout = private_layout(tmp_path, victim_files={"report.txt": VICTIM_NOTE})
+    policy = ToolOutputFilePolicy.from_runtime(
+        layout.attacker_workspace,
+        layout.runtime_paths,
+        auto_save_threshold_bytes=4,
+    )
+    victim_before = layout.victim_files()
+    layout.swap(ancestor)
+
+    assert write_bytes_to_output_path(policy, "report.txt", b"attacker bytes") == (
+        "Failed to write redirected tool output."
+    )
+    request = prepare_tool_output_file(policy, tool_name="probe", output_path="nested/out.txt")
+    assert isinstance(request, ToolOutputFileRequest)
+    assert _receipt(finalize_tool_output_file(request, "redirected"))["status"] == "error"
+    auto_request = prepare_tool_output_file(policy, tool_name="probe")
+    assert isinstance(auto_request, ToolOutputFileRequest)
+    assert _receipt(finalize_tool_output_file(auto_request, "large enough output"))["status"] == "error"
+    assert layout.victim_files() == victim_before

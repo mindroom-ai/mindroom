@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
+from mindroom.path_confinement import is_git_metadata_path, open_directory_below_root
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -51,9 +51,17 @@ _TEXT_FALLBACK_HEADER = (
 
 @dataclass(frozen=True)
 class ToolOutputFilePolicy:
-    """Resolved policy for one toolkit's model-requested output files."""
+    """Resolved policy for one toolkit's model-requested output files.
+
+    Writes reach ``workspace_root`` by a no-follow walk from ``storage_root``, a
+    trusted root above it. The primary uses its runtime storage root, because
+    sandbox workers can replace directories above their workspace; code that
+    already owns everything the workspace can reach, such as a worker, may pass
+    the workspace itself.
+    """
 
     workspace_root: Path
+    storage_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 
@@ -63,11 +71,13 @@ class ToolOutputFilePolicy:
         workspace_root: Path,
         runtime_paths: RuntimePaths,
         *,
+        storage_root: Path | None = None,
         auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     ) -> ToolOutputFilePolicy:
-        """Build a policy using the runtime-visible byte cap."""
+        """Build a policy using the runtime-visible byte cap, anchored at the runtime storage root by default."""
         return cls(
             workspace_root=workspace_root,
+            storage_root=storage_root if storage_root is not None else runtime_paths.storage_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
             auto_save_threshold_bytes=auto_save_threshold_bytes,
         )
@@ -441,19 +451,20 @@ def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "j
 
 def _write_atomic(
     payload: bytes,
-    workspace_root: Path,
+    policy: ToolOutputFilePolicy,
     relative_path: Path,
     *,
     file_mode: int | None = None,
 ) -> str | None:
     try:
-        with open_directory_within_root(
-            workspace_root.expanduser().resolve(),
-            relative_path.parent,
+        # Never resolve the workspace here: a directory above it may have become a link.
+        with open_directory_below_root(
+            policy.storage_root,
+            policy.workspace_root.expanduser() / relative_path.parent,
             create=True,
         ) as directory_fd:
             atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=file_mode)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("tool_output_redirect_write_failed", error_type=type(exc).__name__)
         return "Failed to write redirected tool output."
     return None
@@ -478,7 +489,7 @@ def write_bytes_to_output_path(
 
     write_error = _write_atomic(
         payload,
-        policy.workspace_root,
+        policy,
         validated_path.relative_path,
         file_mode=file_mode,
     )
@@ -516,7 +527,7 @@ def _redirect_result_to_file(
 
     write_error = _write_atomic(
         serialized.payload,
-        policy.workspace_root,
+        policy,
         validated_path.relative_path,
     )
     if write_error is not None:
@@ -576,7 +587,7 @@ def _write_auto_saved_result(
 
     write_error = _write_atomic(
         serialized.payload,
-        policy.workspace_root,
+        policy,
         validated_path.relative_path,
     )
     if write_error is not None:

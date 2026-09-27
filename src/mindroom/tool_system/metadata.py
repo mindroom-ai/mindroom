@@ -682,6 +682,7 @@ def _build_tool_instance(
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    tool_output_storage_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
@@ -761,6 +762,7 @@ def _build_tool_instance(
         ToolOutputFilePolicy.from_runtime(
             tool_output_workspace_root,
             runtime_paths,
+            storage_root=tool_output_storage_root,
             auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         )
         if tool_output_workspace_root is not None
@@ -798,10 +800,15 @@ def get_tool_by_name(
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    tool_output_storage_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
-    """Get a tool instance by its registered name."""
+    """Get a tool instance by its registered name.
+
+    Output files are written below ``tool_output_workspace_root`` by a no-follow
+    walk from ``tool_output_storage_root``, which defaults to the runtime storage root.
+    """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
@@ -822,6 +829,7 @@ def get_tool_by_name(
         shared_storage_root_path=shared_storage_root_path,
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=tool_output_workspace_root,
+        tool_output_storage_root=tool_output_storage_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )
