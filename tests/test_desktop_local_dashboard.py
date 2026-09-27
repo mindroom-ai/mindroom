@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -9,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.desktop.native_host import NativeDesktopHost
+from mindroom.desktop.native_host import NativeDesktopHost, serve_native_stream
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
 
 if TYPE_CHECKING:
@@ -83,3 +85,61 @@ def test_dashboard_request_is_only_a_native_protocol_action() -> None:
     """The desktop device's private parent pipe accepts the dashboard action."""
     raw = {"v": 1, "request_id": str(uuid4()), "action": "dashboard_configuration", "parameters": {}}
     assert parse_native_request(json.dumps(raw).encode()).action == "dashboard_configuration"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_configuration_does_not_wait_for_lifecycle_lock(tmp_path: Path) -> None:
+    """A slow login or bridge start must not delay this local config read."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    host = NativeDesktopHost(paths, helper_version="test")
+    await host._lock.acquire()
+    try:
+        result = await asyncio.wait_for(
+            host.handle(NativeRequest(str(uuid4()), "dashboard_configuration", {})),
+            timeout=0.1,
+        )
+    finally:
+        host._lock.release()
+    assert result == {"url": "http://127.0.0.1:8765", "api_key": None}
+
+
+def test_dashboard_configuration_bypasses_saturated_regular_stdio_lane() -> None:
+    """Four waiting regular requests must not make the dashboard handoff busy."""
+
+    class SaturatedHost:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        def hello(self) -> dict[str, object]:
+            return {"v": 1, "type": "hello"}
+
+        def status(self) -> dict[str, object]:
+            return {}
+
+        async def handle(self, request: NativeRequest) -> dict[str, object]:
+            if request.action == "dashboard_configuration":
+                self.release.set()
+                return {"url": "http://127.0.0.1:8765", "api_key": None}
+            await self.release.wait()
+            return {}
+
+        async def shutdown(self) -> None:
+            self.release.set()
+
+    requests = [NativeRequest(str(uuid4()), "login", {}) for _ in range(5)]
+    dashboard_request = NativeRequest(str(uuid4()), "dashboard_configuration", {})
+    requests.append(dashboard_request)
+    records = b"".join(
+        json.dumps({"v": 1, "request_id": request.request_id, "action": request.action, "parameters": {}}).encode()
+        + b"\n"
+        for request in requests
+    )
+    output = io.BytesIO()
+    asyncio.run(serve_native_stream(SaturatedHost(), input_stream=io.BytesIO(records), output_stream=output))  # type: ignore[arg-type]
+    responses = {
+        message["request_id"]: message
+        for line in output.getvalue().splitlines()
+        if (message := json.loads(line)).get("type") == "response"
+    }
+    assert responses[dashboard_request.request_id]["result"] == {"url": "http://127.0.0.1:8765", "api_key": None}
+    assert sum(response.get("error", {}).get("code") == "busy" for response in responses.values()) == 1

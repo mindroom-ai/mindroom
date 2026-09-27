@@ -46,6 +46,7 @@ _MAX_STOP_NATIVE_REQUESTS = 1
 _IMMEDIATE_NATIVE_ACTIONS = frozenset(
     {
         "status",
+        "dashboard_configuration",
         "revoke_control",
         "reset_emergency_stop",
         "decide_shell",
