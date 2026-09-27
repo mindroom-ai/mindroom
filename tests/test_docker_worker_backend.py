@@ -1264,6 +1264,8 @@ def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publis
         "mindroom.ai/launch-config-hash",
         "mindroom.ai/worker-key",
         "mindroom.ai/component",
+        # An operator override would make startup remove every container as one from an older release.
+        "mindroom.ai/storage-layout",
     ],
 )
 def test_docker_worker_backend_rejects_reserved_extra_labels(
