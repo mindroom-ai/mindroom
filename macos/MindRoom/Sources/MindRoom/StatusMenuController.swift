@@ -37,7 +37,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &subscriptions)
         let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runner.refreshStatus() }
+            Task { @MainActor in self?.runner.refreshStatus(queueIfBusy: false) }
         }
         RunLoop.main.add(timer, forMode: .common)
         statusRefreshTimer = timer

@@ -13,8 +13,23 @@ final class LocalAgentsSetupTests: XCTestCase {
         let setup = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: true)
         XCTAssertEqual(setup.nextStep(service: .notInstalled, check: nil), .check)
         XCTAssertEqual(setup.progress(for: .check, service: .notInstalled, check: nil), .idle("Not checked"))
-        XCTAssertEqual(setup.nextStep(service: .notInstalled, check: CommandResult(exitCode: 0, output: "Passed")), .start)
+        XCTAssertEqual(setup.nextStep(service: .notInstalled, check: CommandResult(exitCode: 0, output: "6 passed, 0 failed, 0 warnings")), .start)
         XCTAssertTrue(setup.canStart(service: .notInstalled))
+    }
+
+    func testStoppedServiceCanUseConfigurationSavedByTerminalInstall() {
+        let setup = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: false)
+        XCTAssertTrue(setup.canStart(service: .stopped))
+        XCTAssertFalse(setup.canStart(service: .notInstalled))
+    }
+
+    func testDoctorWarningsAndUnrecognizedResultsNeedAttention() {
+        let setup = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: true)
+        for output in ["! OPENAI_API_KEY not set\n6 passed, 0 failed, 1 warning\n", "Check finished"] {
+            let result = CommandResult(exitCode: 0, output: output)
+            XCTAssertEqual(setup.nextStep(service: .notInstalled, check: result), .check)
+            XCTAssertEqual(setup.progress(for: .check, service: .notInstalled, check: result), .needsAction("Needs attention"))
+        }
     }
 
     func testRunningAndStoppedServicesOpenEverydayControls() {

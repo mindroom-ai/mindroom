@@ -49,9 +49,9 @@ final class MindRoomCommandRunner: ObservableObject {
 
     // Status refreshes run independently of user commands so a background
     // refresh never swallows a menu click.
-    func refreshStatus() {
+    func refreshStatus(queueIfBusy: Bool = true) {
         guard !isRefreshingStatus else {
-            refreshRequested = true
+            refreshRequested = refreshRequested || queueIfBusy
             return
         }
         isRefreshingStatus = true

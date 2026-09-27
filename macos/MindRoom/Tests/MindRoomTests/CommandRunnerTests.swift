@@ -105,6 +105,33 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testPeriodicPollingDoesNotStarveSlowStatusRead() async {
+        let started = expectation(description: "Status started")
+        let published = expectation(description: "Slow status published")
+        let release = DispatchSemaphore(value: 0)
+        let calls = StatusRefreshCalls()
+        let runner = MindRoomCommandRunner(processRunner: { _ in
+            let call = calls.next()
+            XCTAssertEqual(call, 1)
+            if call == 1 {
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 3)
+            }
+            return CommandResult(exitCode: 0, output: "MindRoom service: running (pid 123)")
+        })
+        let observation = runner.$hasRefreshedStatus.filter { $0 }.sink { _ in published.fulfill() }
+        runner.refreshStatus()
+        await fulfillment(of: [started], timeout: 2)
+        runner.refreshStatus(queueIfBusy: false)
+        runner.refreshStatus(queueIfBusy: false)
+        release.signal()
+        await fulfillment(of: [published], timeout: 2)
+        XCTAssertEqual(runner.serviceStatus.state, .running)
+        XCTAssertFalse(runner.isRefreshingStatus)
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
     func testWebActionsNavigateInsideApp() {
         var sections: [AppSection] = []
         let runner = MindRoomCommandRunner(processRunner: { _ in

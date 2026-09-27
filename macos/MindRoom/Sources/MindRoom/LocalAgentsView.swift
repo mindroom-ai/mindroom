@@ -49,7 +49,7 @@ struct LocalAgentsView: View {
             if choseInitialStep, !wasInstalled, installed, step == .install { show(.configure) }
         }
         .onChange(of: runner.setupCheck) { _, result in
-            if result?.isSuccess == true { show(.start) }
+            if result?.setupCheckPassed == true { show(.start) }
         }
         .onChange(of: runner.runningCommandTitle) { _, _ in scrollToTop() }
     }
@@ -164,7 +164,9 @@ struct LocalAgentsView: View {
             Label("Check your setup", systemImage: "checkmark.shield").font(.headline)
             Text("MindRoom Doctor checks your configuration, AI providers, Matrix server, and local storage. It contacts the services you configured; checks can take several minutes.")
             if let result = runner.setupCheck {
-                Text(result.isSuccess ? "The last setup check passed." : "The last check found issues. Review the result above, fix your configuration, then check again.")
+                Text(result.setupCheckPassed ? "The last setup check passed." : "The last check needs attention. Review the command output above, fix any issues, then check again.")
+                Text(result.setupCheckSummary ?? "No recognized check summary was returned. Review the command output.")
+                    .font(.callout).foregroundStyle(result.setupCheckPassed ? Color.secondary : Color.orange)
             } else {
                 Text("Not checked in this session. Files found does not mean credentials or connections have been verified.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -195,7 +197,7 @@ struct LocalAgentsView: View {
                     Button("Restart") { runner.run(.restartService) }.disabled(busy)
                 }
             } else {
-                if runner.setupCheck?.isSuccess != true {
+                if runner.setupCheck?.setupCheckPassed != true {
                     Text("A setup check is recommended before starting. You can also start using configuration you already know works.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
@@ -206,8 +208,12 @@ struct LocalAgentsView: View {
                     Button("Check Setup First") { show(.check) }
                 }
                 if !setup.runtimeInstalled { Text("Install the runtime in step 1 before starting.").foregroundStyle(.secondary) }
-                else if !setup.configurationExists { Text("Prepare configuration in step 2 before starting.").foregroundStyle(.secondary) }
+                else if !setup.configurationExists && state == .notInstalled { Text("Prepare configuration in step 2 before starting.").foregroundStyle(.secondary) }
                 else if state == .unknown { Text("Refresh Status to determine whether the service can be started.").foregroundStyle(.secondary) }
+                if state == .stopped {
+                    Text("Start uses the configuration saved when this service was installed, including a custom location chosen in the terminal.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             Divider()
             Button("View Logs") { runner.run(.openLogsFolder) }
