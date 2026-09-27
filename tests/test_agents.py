@@ -3447,8 +3447,19 @@ def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path)
         _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
 
-def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sandbox_worker(tmp_path: Path) -> None:
-    """Dedicated sandbox workers should not validate control-plane private template paths."""
+@pytest.mark.parametrize(
+    "worker_env",
+    [
+        {"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice"},
+        {},
+    ],
+    ids=["dedicated_worker", "static_runner"],
+)
+def test_bind_runtime_paths_allows_missing_private_template_dir_for_sandbox_runner(
+    tmp_path: Path,
+    worker_env: dict[str, str],
+) -> None:
+    """Sandbox runners should not validate control-plane private template paths the primary already checked."""
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
@@ -3458,10 +3469,7 @@ def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sa
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={
-            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice",
-        },
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true", **worker_env},
     )
 
     bound = _bind_runtime_paths(config, runtime_paths)

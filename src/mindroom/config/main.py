@@ -107,11 +107,10 @@ from mindroom.prompt_templates import render_prompt_template, validate_prompt_te
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
-from mindroom.workspaces import validate_workspace_template_dir
+from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -380,15 +379,6 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
     return any(
         _relative_paths_overlap(source_path.relative_to(template_dir), target_path)
         for source_path in template_dir.rglob("*")
-    )
-
-
-def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) -> bool:
-    """Return whether runtime-local workers should skip control-plane template validation."""
-    if runtime_paths is None:
-        return False
-    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
     )
 
 
@@ -1009,7 +999,7 @@ class Config(BaseModel):
     def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
         """Ensure private template directories exist when runtime path resolution is available."""
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
-        if runtime_paths is None or _skip_private_template_dir_validation(runtime_paths):
+        if runtime_paths is None or control_plane_owns_private_templates(runtime_paths):
             return self
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private

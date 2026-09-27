@@ -10,7 +10,10 @@ final class DesktopControlStore: ObservableObject {
 
     @Published private(set) var status = DesktopStatus.stopped
     @Published private(set) var isBusy = false
-    @Published private(set) var errorMessage: String?
+    @Published private(set) var errorMessage: String? {
+        didSet { errorCode = nil }
+    }
+    @Published private(set) var errorCode: String?
     @Published private(set) var recovery: String?
     @Published private(set) var verification = ""
     @Published private(set) var confirmationCommand = ""
@@ -63,7 +66,8 @@ final class DesktopControlStore: ObservableObject {
             try await helper.request(action: action, parameters: parameters, timeout: timeout)
         }
         helper.$status
-            .receive(on: RunLoop.main)
+            // The helper publishes on MainActor already. Rescheduling on RunLoop.main stalls
+            // approval/status updates while a folder picker runs in modal mode.
             .sink { [weak self] value in
                 self?.status = value
                 self?.hydrateConfiguration(from: value)
@@ -460,7 +464,7 @@ final class DesktopControlStore: ObservableObject {
         }
     }
 
-    func copyDiagnostics() {
+    var diagnosticsText: String {
         let diagnostics: [String: Any] = [
             "helper_version": status.helper.version,
             "helper_state": status.helper.state,
@@ -476,12 +480,15 @@ final class DesktopControlStore: ObservableObject {
             "browser_extension": status.browser.extensionState,
             "control_available": status.authority.controlAvailable,
             "emergency_stop_latched": status.authority.emergencyStopLatched,
-            "last_error_code": status.bridge.lastError.map { $0.code as Any } ?? NSNull(),
+            "last_error_code": (errorCode ?? status.bridge.lastError?.code).map { $0 as Any } ?? NSNull(),
         ]
         let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys])
-        let statusText = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+
+    func copyDiagnostics() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(statusText, forType: .string)
+        NSPasteboard.general.setString(diagnosticsText, forType: .string)
     }
 
     @discardableResult
@@ -513,6 +520,7 @@ final class DesktopControlStore: ObservableObject {
                 completion?(result)
             } catch let DesktopBridgeProcessError.helper(error) {
                 errorMessage = error.message
+                errorCode = error.code
                 recovery = error.recovery
             } catch {
                 errorMessage = error.localizedDescription

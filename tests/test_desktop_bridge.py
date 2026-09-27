@@ -821,7 +821,8 @@ async def test_stop_settles_shell_work_promptly_without_replay(
     assert (started.read_text() if started.exists() else None) == expected_runs
     await asyncio.wait_for(bridge.stop(), timeout=3)
     await execution
-    await bridge.deliver_pending()
+    # Native shutdown closes the transport as soon as stop returns. No caller-side flush.
+    assert transport.await_args is not None, "Stop must deliver the cancellation before closing transport"
     stopped = _response(transport)
     assert stopped.error is not None
     assert ("did not run" if phase == "pending" else "was stopped") in stopped.error
@@ -834,6 +835,67 @@ async def test_stop_settles_shell_work_promptly_without_replay(
     assert restarted.local_status()["shell"]["pending"] is None
     assert (started.read_text() if started.exists() else None) == expected_runs
     restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["offline", "unexpected", "stalled", "sender_busy"])
+async def test_stop_preserves_undelivered_cancellation_when_delivery_fails(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Stop stays bounded even if delivery is already blocked, and restart delivers without executing."""
+    monkeypatch.setattr("mindroom.desktop.bridge._STOP_DELIVERY_TIMEOUT_SECONDS", 0.05)
+    journal = tmp_path / "commands.sqlite3"
+    bridge = _local_bridge(shell=_local_shell(), journal_path=journal)
+    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    await bridge.on_to_device_event(_event(command))
+    execution = asyncio.create_task(_execute(bridge))
+    await _wait_for_pending_shell(bridge)
+    sending = asyncio.Event()
+
+    async def failed_send(*_args: object, **_kwargs: object) -> None:
+        sending.set()
+        if failure == "offline":
+            message = "Offline"
+            raise OlmToDeviceError(message)
+        if failure == "unexpected":
+            message = "Unexpected encrypted delivery failure"
+            raise RuntimeError(message)
+        await asyncio.Event().wait()
+
+    transport.side_effect = failed_send
+    sender = None
+    if failure == "sender_busy":
+        await bridge.on_to_device_event(_event(_command("status", request_id="status", sequence=2)))
+        await bridge.execute_pending(shell_starts=False)
+        sender = asyncio.create_task(bridge.deliver_pending())
+        await asyncio.wait_for(sending.wait(), 1)
+    try:
+        await asyncio.wait_for(bridge.stop(), 1)
+        await execution
+        assert sending.is_set(), "Shutdown must attempt delivery"
+        assert not (tmp_path / "marker").exists()
+    finally:
+        if sender is not None:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+        bridge.close()
+
+    transport.side_effect = None
+    transport.reset_mock()
+    restarted = _local_bridge(shell=_local_shell(), journal_path=journal)
+    try:
+        restarted.recover_interrupted()
+        await restarted.deliver_pending()
+        replies = [DesktopResponse.from_content(call.kwargs["content"]) for call in transport.await_args_list]
+        cancellation = next(reply for reply in replies if reply.request_id == command.request_id)
+        assert "did not run" in (cancellation.error or "")
+        assert not (tmp_path / "marker").exists()
+        assert not restarted._journal.pending_responses()
+    finally:
+        restarted.close()
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -2831,6 +2832,209 @@ def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_ref
     data = response.json()
     assert data["ok"] is True
     assert '"result": 3' in data["result"]
+
+
+def _primary_config_snapshot(*, file_access: str = "workspace") -> dict[str, object]:
+    """Return a live primary config whose `mind` agent the runner's seed config never saw."""
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "memory_backend": "file",
+                "tools": ["shell", "file"],
+                "file_access": file_access,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+) -> None:
+    """Agents added after the runner's config was seeded run through the primary's live config snapshot."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    assert "mind" not in sandbox_runner_module.app_runtime_config(sandbox_runner_app).agents
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    _write_workspace_env_hook(workspace, "export MIND_HOOK=from-mind-workspace\n")
+    request = {
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [["bash", "-c", 'printf "%s" "$MIND_HOOK"']],
+        "execution_env": {"PATH": os.environ["PATH"]},
+        "routing_agent_name": "mind",
+        "tool_init_overrides": {"base_dir": str(workspace)},
+    }
+
+    with pytest.raises(ValueError, match="Unknown agent: mind"):
+        runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={**request, "config_snapshot": _primary_config_snapshot()},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=workspace) == "from-mind-workspace"
+
+
+@pytest.mark.parametrize(("file_access", "readable"), [("workspace", False), ("unrestricted", True)])
+def test_sandbox_runner_enforces_snapshot_agent_file_access_over_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    file_access: str,
+    readable: bool,
+) -> None:
+    """The primary's snapshot decides the agent's settings, so a stale seed cannot widen them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models: {}\nagents:\n  mind:\n    display_name: Mind\n    file_access: unrestricted\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-workspace-contents", encoding="utf-8")
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "kwargs": {"file_name": str(outside)},
+                "routing_agent_name": "mind",
+                "tool_init_overrides": {"base_dir": str(workspace)},
+                "config_snapshot": _primary_config_snapshot(file_access=file_access),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert ("outside-workspace-contents" in data["result"]) is readable
+
+
+def test_sandbox_runner_rejects_invalid_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid primary snapshot is refused instead of falling back to the seed config."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = _primary_config_snapshot(file_access="everything")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "routing_agent_name": "mind",
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every request carries the snapshot, so plugins missing from the runner are dropped without a log line per call."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = {**_primary_config_snapshot(), "plugins": ["./plugins/primary-only"]}
+
+    with capture_logs() as logs:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "routing_agent_name": "mind",
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_static_runner_relies_on_primary_private_template_from_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private template that exists only beside the primary's config does not fail the shared runner's calls."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="mind")
+    assert worker_key is not None
+    private_workspace_relative = f"private_instances/{worker_dir_name(worker_key)}/mind/mind_data"
+    snapshot = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "tools": ["shell"],
+                "private": {"per": "user", "template_dir": "./primary-only-template"},
+            },
+        },
+    }
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", "printf ok"]],
+            "execution_env": {"PATH": os.environ["PATH"]},
+            "worker_key": worker_key,
+            "worker_scope": "user",
+            "routing_agent_name": "mind",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["mind"],
+            "tool_init_overrides": {"base_dir": private_workspace_relative},
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=runtime_paths.storage_root / private_workspace_relative) == "ok"
 
 
 def test_sandbox_runner_applies_tool_init_overrides(

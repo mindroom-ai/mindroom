@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class DesktopControlStoreTests: XCTestCase {
+    func testDiagnosticsRetainsOperationErrorCodeWithoutIncludingCredentials() async throws {
+        let store = DesktopControlStore(request: { action, _, _ in
+            if action == "start" {
+                throw DesktopBridgeProcessError.helper(DesktopBridgeErrorPayload(
+                    code: "tls_certificate_error", message: "Certificate verification failed",
+                    recovery: "Update MindRoom and retry.", retryable: true
+                ))
+            }
+            return [:]
+        })
+        store.matrixPassword = "private-password"
+        store.pairingCode = "private-pairing-code"
+        store.start()
+        await waitUntilIdle(store)
+        let snapshot = DesktopErrorDetails(
+            message: try XCTUnwrap(store.errorMessage), recovery: store.recovery,
+            diagnostics: store.diagnosticsText
+        )
+        XCTAssertTrue(snapshot.diagnostics.contains("tls_certificate_error"))
+        XCTAssertFalse(snapshot.diagnostics.contains("private-password"))
+        XCTAssertFalse(snapshot.diagnostics.contains("private-pairing-code"))
+
+        store.refresh()
+        await waitUntilIdle(store)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertNil(store.errorCode)
+        XCTAssertFalse(store.diagnosticsText.contains("tls_certificate_error"))
+        XCTAssertTrue(snapshot.diagnostics.contains("tls_certificate_error"), "An open details panel keeps the failure snapshot")
+    }
+
     func testRefreshRetainsManuallyAddedAppMetadataAfterDeselecting() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -734,6 +764,23 @@ final class DesktopControlStoreTests: XCTestCase {
 
         store.removeFileRoot(canonical)
         XCTAssertEqual(store.fileRoots, [])
+    }
+
+    func testHelperStatusReachesStoreWhileFolderPickerRunsModally() throws {
+        let helper = DesktopBridgeProcess()
+        let store = DesktopControlStore(helper: helper)
+        let pending = runningShellStatus(DesktopShellStatus(enabled: true, pending: shellRequest(id: "modal", command: "pwd")))
+        let json = String(decoding: try JSONEncoder().encode(pending), as: UTF8.self)
+        _ = helper.decode(Data("{\"v\":1,\"type\":\"status\",\"sequence\":1,\"status\":\(json)}".utf8))
+        // Keep only modal mode alive, as NSOpenPanel.runModal does. Default-mode scheduling stalls here.
+        let timer = Timer(timeInterval: 0.01, repeats: true) { _ in }
+        RunLoop.main.add(timer, forMode: .modalPanel)
+        defer { timer.invalidate() }
+        let deadline = Date().addingTimeInterval(0.1)
+        while store.status != pending && Date() < deadline {
+            RunLoop.main.run(mode: .modalPanel, before: deadline)
+        }
+        XCTAssertEqual(store.status.shell.pending?.requestID, "modal")
     }
 
     func testShellDecisionsSendOnlyTheReviewedRequestIDAndChoice() async throws {

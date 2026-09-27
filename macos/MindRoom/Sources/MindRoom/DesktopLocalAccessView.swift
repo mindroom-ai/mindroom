@@ -64,7 +64,7 @@ struct DesktopLocalAccessView: View {
             Toggle("Allow shell command requests", isOn: $store.shellEnabled)
             Text("While access is on, allowed agents can ask to run commands on this Mac. Commands run with your macOS account's access, including files outside the read-only folders, the network, and anything your account can change. They are not confined to a folder.")
                 .font(.callout).foregroundStyle(.secondary)
-            Text("Each command waits for your approval in this window, unless you choose to approve commands for a while. Approvals are never saved, so restarting asks again.")
+            Text("Each command opens an approval window, unless you choose to approve commands for a while. Approvals are never saved, so restarting asks again.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }
@@ -76,7 +76,11 @@ struct DesktopLocalAccessView: View {
         panel.allowsMultipleSelection = true
         panel.prompt = "Allow Read-Only Access"
         panel.message = "Choose folders your paired agents may read."
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls { store.addFileRoot(at: url) }
+        // Do not nest a synchronous modal loop inside SwiftUI's main-queue callback: helper
+        // status and approval delivery must keep running while the person chooses folders.
+        panel.begin { response in
+            guard response == .OK else { return }
+            for url in panel.urls { store.addFileRoot(at: url) }
+        }
     }
 }

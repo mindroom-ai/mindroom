@@ -71,6 +71,7 @@ _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _MAX_WARNING_DETAIL = 500
 # Stop drains the action in flight, so every media upload it may wait on must be bounded.
 _MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
+_STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 _MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
 
@@ -538,14 +539,25 @@ class DesktopBridge:
         return self.local_status()
 
     async def stop(self) -> None:
-        """Fence admission, settle local shell work, and drain only the currently executing actions."""
+        """Fence admission, settle active work, and give recorded replies a bounded final delivery."""
         self._accepting = False
         self.revoke_local_control()
         if self.shell is not None:
             # Pending approval can otherwise hold the shell lane until the command expires.
             await self.shell.close()
         async with self._execution_lock, self._shell_start_lock:
-            self._stopped.set()
+            try:
+                # Native/CLI shutdown closes transport immediately after this method returns.
+                # Include an already-busy sender in the bound; undelivered receipts stay durable.
+                async with asyncio.timeout(_STOP_DELIVERY_TIMEOUT_SECONDS):
+                    await self.deliver_pending()
+            except TimeoutError:
+                logger.warning("desktop_stop_response_delivery_timed_out")
+            except Exception:
+                # Delivery is best effort here; its failure must not prevent callers releasing resources.
+                logger.exception("desktop_stop_response_delivery_failed")
+            finally:
+                self._stopped.set()
 
     def close(self) -> None:
         """Close durable command storage and pinned folders after workers have stopped."""

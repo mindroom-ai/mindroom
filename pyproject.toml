@@ -485,6 +485,7 @@ dev = [
 # Only the frozen helper's dependencies; the backend's ML packages are not needed.
 # uv resolves this group with the application's exact NIO pin in the same lockfile.
 desktop-helper = [
+  "certifi",
   "mcp[cli]>=1.28.1,<2",
   "mindroom-nio[e2e]",
   "pillow>=10.2",

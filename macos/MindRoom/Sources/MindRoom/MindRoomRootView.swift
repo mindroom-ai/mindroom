@@ -5,6 +5,7 @@ struct MindRoomRootView: View {
     @ObservedObject var runner: MindRoomCommandRunner
     @ObservedObject var desktop: DesktopControlStore
     @FocusState private var focusedSection: AppSection?
+    @State private var errorDetails: DesktopErrorDetails?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -40,8 +41,7 @@ struct MindRoomRootView: View {
                             Text("Shell command waiting for approval")
                             Spacer()
                             Button("Review Command") {
-                                navigation.section = .computerAccess
-                                withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                DesktopApprovalWindowController.shared.showPending()
                             }.buttonStyle(.borderedProminent)
                         }.padding(14)
                     }
@@ -53,7 +53,10 @@ struct MindRoomRootView: View {
                                 Text(message).lineLimit(2)
                                 Spacer()
                                 Button("View Details") {
-                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                    errorDetails = DesktopErrorDetails(
+                                        message: message, recovery: desktop.recovery,
+                                        diagnostics: desktop.diagnosticsText
+                                    )
                                 }
                             }.padding(14)
                         }
@@ -65,6 +68,10 @@ struct MindRoomRootView: View {
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
+        }
+        .disclosureGroupStyle(AppDisclosureGroupStyle())
+        .sheet(item: $errorDetails) { details in
+            DesktopErrorDetailsView(details: details)
         }
     }
 
@@ -107,27 +114,32 @@ struct MindRoomRootView: View {
         .frame(width: 195)
         .frame(maxHeight: .infinity)
         .background(.regularMaterial)
-        .onAppear { focusedSection = navigation.section }
         .onChange(of: navigation.section) { _, section in
-            if focusedSection != nil {
-                focusedSection = section
-            }
+            // Keep keyboard focus with the selected section when setup redirects navigation.
+            if focusedSection != nil { focusedSection = section }
         }
     }
 
     private func navigationButton(_ section: AppSection) -> some View {
         Button {
             navigation.section = section
-            focusedSection = section
         } label: {
             Label(section.rawValue, systemImage: section.symbol)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10).padding(.vertical, 9)
                 .background(navigation.section == section ? Color.accentColor.opacity(0.16) : .clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7).strokeBorder(
+                        focusedSection == section && navigation.section != section ? Color.accentColor : .clear,
+                        lineWidth: 1
+                    )
+                }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focused($focusedSection, equals: section)
+        .focusEffectDisabled()
         .accessibilityAddTraits(navigation.section == section ? .isSelected : [])
     }
 

@@ -400,9 +400,19 @@ def runs_in_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
     )
 
 
-def _template_unavailable_for_dedicated_worker(template_dir: Path, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a dedicated worker should rely on the control plane's existing scaffold."""
-    return runs_in_dedicated_worker(runtime_paths) and not template_dir.expanduser().is_dir()
+def control_plane_owns_private_templates(runtime_paths: RuntimePaths) -> bool:
+    """Return whether this runtime is a sandbox runner that relies on the control plane's private templates.
+
+    The primary validates private template paths against its own config directory
+    and seeds requester workspaces from them; a runner resolves the same paths
+    against its seed config location, where they need not exist.
+    """
+    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+
+
+def _template_unavailable_in_sandbox_runner(template_dir: Path, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a sandbox runner should rely on the control plane's existing scaffold."""
+    return control_plane_owns_private_templates(runtime_paths) and not template_dir.expanduser().is_dir()
 
 
 def _resolve_workspace(
@@ -454,7 +464,7 @@ def _resolve_workspace(
         root.mkdir(parents=True, exist_ok=True)
         if template_dir is not None:
             assert template_dir is not None
-            if not _template_unavailable_for_dedicated_worker(template_dir, runtime_paths):
+            if not _template_unavailable_in_sandbox_runner(template_dir, runtime_paths):
                 _copy_workspace_template(root, template_dir=template_dir)
 
     context_files = tuple(
