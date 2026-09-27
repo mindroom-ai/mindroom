@@ -3,6 +3,17 @@ import XCTest
 
 final class CommandRunnerTests: XCTestCase {
     @MainActor
+    func testWebActionsNavigateInsideApp() {
+        var sections: [AppSection] = []
+        let runner = MindRoomCommandRunner(processRunner: { _ in
+            XCTFail("Web navigation must not run a process")
+            return CommandResult(exitCode: 1, output: "")
+        }, showSection: { sections.append($0) })
+        runner.run(.openHostedChat)
+        runner.run(.openDashboard)
+        XCTAssertEqual(sections, [.chat, .dashboard])
+    }
+    @MainActor
     func testCommandCompletionPublishesFailureWithoutBlockingNextAction() async {
         let completed = expectation(description: "Command finished")
         let runner = MindRoomCommandRunner(processRunner: { _ in

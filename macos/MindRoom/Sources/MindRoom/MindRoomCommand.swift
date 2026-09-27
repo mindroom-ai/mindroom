@@ -39,7 +39,7 @@ enum MindRoomCommand: Equatable {
         case .pairHosted:
             return "Pair Chat Account"
         case .openDashboard:
-            return "Configure Agents"
+            return "Open Dashboard"
         case .openHostedChat:
             return "Open Chat"
         case .openConfigFolder:
@@ -56,9 +56,9 @@ enum MindRoomCommand: Equatable {
         case .updateRuntime:
             return "The runtime update finished. In Settings, use Apply Runtime to Service to start or restart local agents with this version."
         case .installService:
-            return "The background service was installed and started. Open Chat or Configure Agents to check that your agents are ready."
+            return "The background service was installed and started. Open Chat or Open Dashboard to check that your agents are ready."
         case .startService:
-            return "The service start command finished. Open Chat or Configure Agents to check that your agents are ready."
+            return "The service start command finished. Open Chat or Open Dashboard to check that your agents are ready."
         case .stopService:
             return "The MindRoom service was stopped."
         case .restartService:

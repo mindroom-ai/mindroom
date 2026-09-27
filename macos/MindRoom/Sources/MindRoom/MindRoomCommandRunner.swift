@@ -27,13 +27,16 @@ final class MindRoomCommandRunner: ObservableObject {
     private var isRefreshingStatus = false
     private let runtime: MindRoomRuntime
     private let processRunner: MindRoomProcessRunner
+    private let showSection: (AppSection) -> Void
 
     init(
         runtime: MindRoomRuntime = MindRoomRuntime(),
-        processRunner: @escaping MindRoomProcessRunner = MindRoomCommandRunner.runProcess
+        processRunner: @escaping MindRoomProcessRunner = MindRoomCommandRunner.runProcess,
+        showSection: ((AppSection) -> Void)? = nil
     ) {
         self.runtime = runtime
         self.processRunner = processRunner
+        self.showSection = showSection ?? { AppWindowController.shared.show(section: $0) }
     }
 
     var isRunningCommand: Bool {
@@ -59,9 +62,9 @@ final class MindRoomCommandRunner: ObservableObject {
     func run(_ command: MindRoomCommand) {
         switch command {
         case .openDashboard:
-            NSWorkspace.shared.open(URL(string: "http://localhost:8765")!)
+            showSection(.dashboard)
         case .openHostedChat:
-            NSWorkspace.shared.open(URL(string: "https://chat.mindroom.chat")!)
+            showSection(.chat)
         case .openConfigFolder:
             NSWorkspace.shared.open(runtime.configDirectoryURL)
         case .openLogsFolder:

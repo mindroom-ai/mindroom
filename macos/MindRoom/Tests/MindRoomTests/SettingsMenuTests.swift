@@ -5,6 +5,19 @@ import XCTest
 
 @MainActor
 final class SettingsMenuTests: XCTestCase {
+    func testDashboardMenuRequiresRunningService() async throws {
+        for (output, enabled) in [("Service: running", true), ("Service installed but not running", false)] {
+            let runner = MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: output) })
+            let refreshed = expectation(description: "Status refreshed")
+            let subscription = runner.$serviceStatus.dropFirst().prefix(1).sink { _ in refreshed.fulfill() }
+            runner.refreshStatus()
+            await fulfillment(of: [refreshed], timeout: 3)
+            let menu = NSMenu()
+            StatusMenuController(runner: runner, desktop: DesktopControlStore()).menuNeedsUpdate(menu)
+            XCTAssertEqual(menu.items.first { $0.title == "Open Dashboard" }?.isEnabled, enabled)
+            withExtendedLifetime(subscription) {}
+        }
+    }
     func testServiceControlsRequireCompletedSetup() async {
         let toggle = NSSelectorFromString("toggleLocalAgents")
         for (output, hasToggle) in [

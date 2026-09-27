@@ -68,6 +68,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(.sectionHeader(title: "MindRoom"))
         menu.addItem(actionItem("Open MindRoom…", symbol: "macwindow", action: #selector(openWindow)))
         menu.addItem(actionItem("Open Chat", symbol: "bubble.left.and.bubble.right", action: #selector(openChat)))
+        let dashboardItem = actionItem("Open Dashboard", symbol: "square.grid.2x2", action: #selector(openDashboard))
+        dashboardItem.isEnabled = runner.serviceStatus.state.canOpenDashboard
+        menu.addItem(dashboardItem)
         menu.addItem(.separator())
         menu.addItem(actionItem(
             "Local agents: \(runner.serviceStatus.state.shortTitle)…",
@@ -134,6 +137,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func reviewCommand() { showShellApproval() }
     @objc private func openSettings() { showWindow(.settings) }
     @objc private func openChat() { runner.run(.openHostedChat) }
+    @objc private func openDashboard() { runner.run(.openDashboard) }
     @objc private func refreshStatus() { runner.refreshStatus() }
     @objc private func revokeComputerControl() { desktop.revokeControl() }
     @objc private func revokeShellAccess() { desktop.revokeShell() }

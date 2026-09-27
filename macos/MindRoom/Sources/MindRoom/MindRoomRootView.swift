@@ -4,8 +4,19 @@ struct MindRoomRootView: View {
     @ObservedObject var navigation: AppNavigation
     @ObservedObject var runner: MindRoomCommandRunner
     @ObservedObject var desktop: DesktopControlStore
+    @StateObject private var webTabs: EmbeddedWebTabs
     @FocusState private var focusedSection: AppSection?
     @State private var errorDetails: DesktopErrorDetails?
+
+    init(navigation: AppNavigation, runner: MindRoomCommandRunner, desktop: DesktopControlStore,
+         webTabs: EmbeddedWebTabs? = nil) {
+        self.navigation = navigation
+        self.runner = runner
+        self.desktop = desktop
+        _webTabs = StateObject(wrappedValue: webTabs ?? EmbeddedWebTabs(
+            desktop: desktop, preferences: ChatWebsitePreferences()
+        ))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -13,26 +24,34 @@ struct MindRoomRootView: View {
             Divider()
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 22) {
-                            switch navigation.section {
-                            case .overview:
-                                overview
-                            case .localAgents:
-                                LocalAgentsView(runner: runner)
-                            case .computerAccess:
-                                DesktopControlView(store: desktop) {
-                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
-                                }.id(AppSection.computerAccess)
-                            case .settings:
-                                AppSettingsView(runner: runner)
+                    if navigation.section == .chat {
+                        chatContent
+                    } else if navigation.section == .dashboard {
+                        dashboardContent
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 22) {
+                                switch navigation.section {
+                                case .overview:
+                                    overview
+                                case .chat, .dashboard:
+                                    EmptyView()
+                                case .localAgents:
+                                    LocalAgentsView(runner: runner)
+                                case .computerAccess:
+                                    DesktopControlView(store: desktop) {
+                                        withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                    }.id(AppSection.computerAccess)
+                                case .settings:
+                                    AppSettingsView(runner: runner, chatPreferences: webTabs.preferences)
+                                }
+                                if navigation.section != .computerAccess {
+                                    CommandFeedbackView(runner: runner).id("command-feedback")
+                                }
                             }
-                            if navigation.section != .computerAccess {
-                                CommandFeedbackView(runner: runner).id("command-feedback")
-                            }
+                            .padding(28)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
-                        .padding(28)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                     if desktop.status.shellApprovalState.isPending {
                         Divider()
@@ -60,7 +79,7 @@ struct MindRoomRootView: View {
                                 }
                             }.padding(14)
                         }
-                    } else {
+                    } else if navigation.section != .chat && navigation.section != .dashboard {
                         commandActivity {
                             withAnimation { proxy.scrollTo("command-feedback", anchor: .top) }
                         }
@@ -73,6 +92,67 @@ struct MindRoomRootView: View {
         .sheet(item: $errorDetails) { details in
             DesktopErrorDetailsView(details: details)
         }
+        .onChange(of: runner.serviceStatus.state) { _, state in
+            if state != .running { webTabs.serviceStopped() }
+            else if navigation.section == .dashboard { webTabs.openDashboard() }
+        }
+    }
+
+    private var chatContent: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Chat").font(.headline)
+                Spacer()
+                Button("Open in Browser") { NSWorkspace.shared.open(webTabs.preferences.url) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 9)
+            Divider()
+            ZStack {
+                EmbeddedWebView(webView: webTabs.chat)
+                if let error = webTabs.chatError {
+                    webMessage(error, retry: { webTabs.openChat(force: true) })
+                } else if webTabs.chatLoading {
+                    ProgressView("Loading Chat…").padding().background(.regularMaterial)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { webTabs.openChat() }
+    }
+
+    @ViewBuilder
+    private var dashboardContent: some View {
+        if runner.serviceStatus.state != .running {
+            VStack(spacing: 14) {
+                Text("Local dashboard unavailable").font(.title2)
+                Text("Start local agents to open the dashboard.").foregroundStyle(.secondary)
+                Button("Open Local Agents") { navigation.section = .localAgents }
+                Button("Refresh Status") { runner.refreshStatus() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack {
+                EmbeddedWebView(webView: webTabs.dashboard)
+                if let error = webTabs.dashboardError {
+                    webMessage(error, retry: { webTabs.openDashboard(force: true) })
+                } else if webTabs.dashboardLoading {
+                    ProgressView("Opening Dashboard…").padding().background(.regularMaterial)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear { webTabs.openDashboard() }
+        }
+    }
+
+    private func webMessage(_ message: String, retry: @escaping () -> Void) -> some View {
+        VStack(spacing: 14) {
+            Text(message).multilineTextAlignment(.center)
+            HStack {
+                Button("Retry", action: retry)
+            }
+        }
+        .padding(28)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder

@@ -40,7 +40,7 @@ struct LocalAgentsView: View {
             if !state.needsSetup {
                 HStack {
                     Button("Open Chat") { runner.run(.openHostedChat) }.buttonStyle(.borderedProminent)
-                    Button("Configure Agents…") { runner.run(.openDashboard) }.disabled(!state.canOpenDashboard)
+                    Button("Open Dashboard") { runner.run(.openDashboard) }.disabled(!state.canOpenDashboard)
                 }
                 Text(state.canOpenDashboard
                      ? "Agent and model settings open in the local web dashboard."
@@ -87,7 +87,7 @@ struct LocalAgentsView: View {
             AppSectionCard {
                 setupHeading(3, "Connect an AI provider", "Add your model credentials to .env in the config folder, or configure a local model in config.yaml before starting agents.")
                 Button("Open Config Folder") { runner.run(.openConfigFolder) }
-                Text("Already running? Use Configure Agents above to manage providers in the dashboard.")
+                Text("Already running? Use Open Dashboard above to manage providers.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             AppSectionCard {
