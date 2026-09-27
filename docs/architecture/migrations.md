@@ -259,14 +259,15 @@ Before upgrading, check two new limits:
 - A `private.root` may no longer start with a name the primary writes beside the private workspace: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock`; such a configuration now fails validation, so rename the root first.
 - Knowledge files above 64 MiB are left out of every knowledge base, including operator-managed ones, and the next refresh removes their existing vectors; find them with `find <knowledge folder> -type f -size +64M`.
 
-Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, replacing `<private-root>` with each configured `private.root` (default `<agent>_data`):
+Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, running each command once with GNU find:
 
 ```bash
 find "$STORAGE/agents" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/agents/[^/]*/workspace" -prune
-find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/[^/]*/<private-root>" -prune
+find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/\([^/]*\)/\1_data" -prune
 find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 ```
 
+The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, list every private agent's root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/[^/]*/\(notes_data\|mail_data\)"`, because a run per root would print the other agents' own workspace links.
 The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
