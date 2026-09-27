@@ -540,6 +540,10 @@ def _append_jsonl(record_fd: int, payload: Mapping[str, object]) -> None:
     descriptor = open_regular_file_at(record_fd, "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     try:
         committed = os.fstat(descriptor).st_size
+        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > _MAX_EVENT_LOG_BYTES:
+            # Refused before writing, so the log never holds what its readers refuse.
+            msg = "Delegation event exceeds its size limit"
+            raise ValueError(msg)
         try:
             remaining = memoryview(line)
             while remaining:

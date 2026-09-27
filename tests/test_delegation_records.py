@@ -106,6 +106,38 @@ async def test_event_log_refuses_an_oversized_event_line(tmp_path: Path) -> None
         await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", ["line", "log"])
+async def test_event_append_refuses_what_would_make_the_log_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: str,
+) -> None:
+    """An event above the line cap, or one that would push the log over its cap, is refused before it is written."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    if limit == "line":
+        # Each field stays below the artifact threshold, so together they exceed the line cap.
+        data: dict[str, object] = {f"field_{index}": "x" * (60 << 10) for index in range(80)}
+    else:
+        monkeypatch.setattr(module, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + 64)
+        data = {"content": "y" * 128}
+    committed = event_path.read_bytes()
+
+    with pytest.raises(ValueError, match="size limit"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data=data))
+
+    assert event_path.read_bytes() == committed
+    if limit == "line":
+        await owner.finish(handle, status="completed", output="Done")
+
+
 def _config(*, private_child: bool = False) -> Config:
     child = AgentConfig(display_name="Child")
     if private_child:
