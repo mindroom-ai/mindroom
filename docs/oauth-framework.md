@@ -90,6 +90,7 @@ If a configured restriction cannot be checked from verified provider claims, the
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](tools/atlassian.md#scopes) call.
 The built-in provider reads its app client from `atlassian_oauth_client`, and each additional site configured through `AtlassianConnectionConfig` gets a separate provider that defaults to its own `<name>_atlassian_oauth_client` service.
+The built-in Microsoft 365 provider uses the Microsoft identity platform v2 endpoints, stores tokens only in the requester's `user` scope, requests `offline_access` and `Files.ReadWrite.All` for [connected workbooks](tools/microsoft-365.md), reads its app client from `microsoft_365_oauth_client`, and takes its tenant from `MICROSOFT_365_TENANT_ID`.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.

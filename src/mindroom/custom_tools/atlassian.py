@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import mimetypes
 import re
 import unicodedata
@@ -41,24 +40,9 @@ from mindroom.oauth.atlassian import (
     normalize_cloud_id,
     normalize_site_url,
 )
-from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.credential_lifecycle import (
-    OAuthCredentialUnreadableError,
-    oauth_credentials_usable,
-    refresh_oauth_credentials_with_result,
-)
-from mindroom.oauth.providers import (
-    OAuthConnectionRequired,
-    OAuthProviderError,
-    OAuthRefreshRejectedError,
-    oauth_connection_required_payload,
-)
-from mindroom.oauth.service import (
-    OAUTH_ACCESS_REJECTED_REASON,
-    OAUTH_REFRESH_REJECTED_REASON,
-    OAUTH_RESET_REQUIRED_REASON,
-    oauth_connection_required,
-)
+from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.oauth.requester_access import OAuthRefreshUnavailableError, RequesterOAuthAccess
+from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
 
@@ -66,7 +50,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
-    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -365,15 +348,17 @@ class AtlassianToolkit(Toolkit):
         if credentials_manager is None:
             msg = "Atlassian tools require an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = provider
+        self._oauth = RequesterOAuthAccess(
+            provider=provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            config=runtime_config,
+        )
         self._pin = AtlassianSitePin(
             site_url=normalize_site_url(site_url) if site_url and site_url.strip() else None,
             cloud_id=normalize_cloud_id(cloud_id) if cloud_id and cloud_id.strip() else None,
         )
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
         super().__init__(name=provider.id)
         functions = {
             "jira_search_issues": self.jira_search_issues,
@@ -396,52 +381,15 @@ class AtlassianToolkit(Toolkit):
     def _payload(self, status: str, **fields: object) -> str:
         return custom_tool_payload(self.name, status, **fields)
 
-    def _credential_context(self) -> OAuthCredentialContext:
-        return active_oauth_credential_context(
-            self._provider,
-            self._runtime_paths,
-            self._credentials_manager,
-            self._worker_target,
-            config=self._config,
-        )
-
-    async def _connection_required(
-        self,
-        context: OAuthCredentialContext,
-        *,
-        reason: str | None = None,
-    ) -> OAuthConnectionRequired:
-        # Building the link reads credential state synchronously, so keep it off the event loop.
-        return await asyncio.to_thread(oauth_connection_required, context, reason=reason)
-
     async def _access_token(self) -> str:
         """Return a current access token for the requester, refreshing it when it is about to expire."""
-        context = self._credential_context()
-        if context.worker_target is None:
-            # Requester-only credentials never fall back to a shared or global store.
-            raise await self._connection_required(context)
         try:
-            refreshed = await refresh_oauth_credentials_with_result(context)
-        except OAuthCredentialUnreadableError:
-            raise await self._connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
-        except OAuthRefreshRejectedError:
-            raise await self._connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from None
-        except OAuthProviderError as exc:
-            logger.warning(
-                "atlassian_oauth_refresh_failed",
-                provider_id=self._provider.id,
-                error_type=type(exc).__name__,
-            )
+            return await self._oauth.access_token()
+        except OAuthRefreshUnavailableError:
             raise AtlassianError(
                 code="oauth_refresh_failed",
                 message="Atlassian authorization could not be refreshed. Retry this request shortly.",
             ) from None
-        credentials = refreshed.credentials
-        usable = await asyncio.to_thread(oauth_credentials_usable, self._provider, self._runtime_paths, credentials)
-        token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
-        if not usable or not isinstance(token, str) or not token:
-            raise await self._connection_required(context)
-        return token
 
     async def _call(self, product: AtlassianProduct, operation: _Operation) -> str:
         """Authenticate, resolve the pinned site, and run one operation, reducing every failure to a safe payload."""
@@ -457,7 +405,7 @@ class AtlassianToolkit(Toolkit):
         except OAuthConnectionRequired as exc:
             return self._payload("error", **oauth_connection_required_payload(exc))
         except AtlassianAccessRejectedError:
-            exc = await self._connection_required(self._credential_context(), reason=OAUTH_ACCESS_REJECTED_REASON)
+            exc = await self._oauth.connection_required(reason=OAUTH_ACCESS_REJECTED_REASON)
             return self._payload("error", **oauth_connection_required_payload(exc))
         except AtlassianError as exc:
             return self._error(exc)
@@ -832,7 +780,7 @@ class AtlassianToolkit(Toolkit):
                 message="Attachment downloads require a conversation with MindRoom attachment storage.",
             )
         storage_path = context.storage_path
-        max_bytes = inline_attachment_byte_limit(self._runtime_paths)
+        max_bytes = inline_attachment_byte_limit(self._oauth.runtime_paths)
 
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"

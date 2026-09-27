@@ -6,11 +6,10 @@ from typing import Literal, get_args
 
 from agno.tools import Toolkit
 
+from mindroom.custom_tools.conversation_notices import ConversationNoticeError, send_conversation_notice
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import parse_historical_matrix_user_id
-from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 _SettingsSection = Literal[
@@ -138,20 +137,6 @@ class ChatUITools(Toolkit):
             return validated
         context, requester_id = validated
         thread_id = context.resolved_thread_id
-        latest_thread_event_id = context.reply_to_event_id
-        if thread_id is not None and latest_thread_event_id is None:
-            latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
-                room_id=context.room_id,
-                thread_id=thread_id,
-            )
-            if latest_thread_event_id is None:
-                return cls._payload(
-                    "error",
-                    action=action,
-                    room_id=context.room_id,
-                    thread_id=thread_id,
-                    message="Failed to resolve Matrix thread fallback for UI action request.",
-                )
         metadata: dict[str, object] = {
             "version": 1,
             "action": action,
@@ -161,36 +146,29 @@ class ChatUITools(Toolkit):
             "thread_id": thread_id,
             **action_fields,
         }
-        content = build_message_content(
-            body,
-            thread_event_id=thread_id,
-            reply_to_event_id=context.reply_to_event_id if thread_id is not None else None,
-            latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
-            extra_content={
-                "msgtype": "m.notice",
-                _UI_ACTION_CONTENT_KEY: metadata,
-            },
-        )
-        delivered = await send_message_result(
-            context.client,
-            context.room_id,
-            content,
-            operation="chat_ui_action",
-        )
-        if delivered is None:
+        try:
+            event_id = await send_conversation_notice(
+                context,
+                body,
+                {_UI_ACTION_CONTENT_KEY: metadata},
+                operation="chat_ui_action",
+            )
+        except ConversationNoticeError as exc:
             return cls._payload(
                 "error",
                 action=action,
                 room_id=context.room_id,
                 thread_id=thread_id,
-                message="Failed to send the UI action request.",
+                message="Failed to resolve Matrix thread fallback for UI action request."
+                if exc.reason == "thread_fallback"
+                else "Failed to send the UI action request.",
             )
         return cls._payload(
             "ok",
             action=action,
             room_id=context.room_id,
             thread_id=thread_id,
-            event_id=delivered.event_id,
+            event_id=event_id,
             message="UI action request sent.",
         )
 

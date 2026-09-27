@@ -17,6 +17,7 @@ from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
+from mindroom.oauth.microsoft import microsoft_365_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -55,6 +56,7 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
+        microsoft_365_oauth_provider(),
     )
 
 
