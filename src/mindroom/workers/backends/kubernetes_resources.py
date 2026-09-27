@@ -222,6 +222,9 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
+    @property
+    def resource_version(self) -> str | None: ...
+
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -256,6 +259,7 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
+    resource_version: str | None = None
 
 
 @dataclass(slots=True)
@@ -608,6 +612,9 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
+            resource_version=resource_version
+            if isinstance(resource_version := metadata.get("resourceVersion"), str)
+            else None,
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
@@ -633,6 +640,12 @@ def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | 
         (candidate for candidate in candidates if path.is_relative_to(candidate) or candidate.is_relative_to(path)),
         None,
     )
+
+
+def _written_by_older_release(annotations: Mapping[str, str]) -> bool:
+    """Return whether a release before workspace-only mounts wrote this Deployment's current template."""
+    template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
+    return template_hash is None or annotations.get(_ANNOTATION_WORKSPACE_TEMPLATE_HASH) != template_hash
 
 
 def _plan_knowledge_storage_mounts(
@@ -945,21 +958,31 @@ class KubernetesResourceManager:
         failed: list[str] = []
         for deployment in self.list_deployments(request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS):
             annotations = dict(deployment.metadata.annotations or {})
-            template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
-            if template_hash is not None and annotations.get(_ANNOTATION_WORKSPACE_TEMPLATE_HASH) == template_hash:
+            if not _written_by_older_release(annotations):
                 continue
             legacy.append(deployment.metadata.name)
             if int(deployment.spec.replicas or 0) == 0:
                 continue
             apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
+            # The listed version is a precondition, so a Deployment changed since, such as by an ensure, is not patched.
+            metadata: dict[str, object] = {
+                "annotations": annotations,
+                "resourceVersion": deployment.metadata.resource_version,
+            }
             try:
                 self._apps.patch_namespaced_deployment(
                     deployment.metadata.name,
                     self.config.namespace,
-                    {"metadata": {"annotations": annotations}, "spec": {"replicas": 0}},
+                    {"metadata": metadata, "spec": {"replicas": 0}},
                     _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
                 )
-            except Exception:
+            except Exception as exc:
+                current = (
+                    self.read_deployment(deployment.metadata.name) if getattr(exc, "status", None) == 409 else None
+                )
+                if current is not None and not _written_by_older_release(dict(current.metadata.annotations or {})):
+                    legacy.remove(deployment.metadata.name)
+                    continue
                 # One failure must not leave the remaining old workers running.
                 logger.exception(
                     "Could not stop a worker that mounts whole state roots",

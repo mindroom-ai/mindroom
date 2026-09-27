@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import shutil
 import tempfile
@@ -199,6 +200,7 @@ class _FakeAppsApi:
         self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
+        self._resource_versions = itertools.count(1)
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -221,18 +223,31 @@ class _FakeAppsApi:
         deployment = _to_namespace(body)
         deployment.metadata.generation = 1
         deployment.metadata.uid = f"{deployment.metadata.name}-uid"
+        deployment.metadata.resource_version = str(next(self._resource_versions))
         deployment.status = SimpleNamespace(ready_replicas=body["spec"]["replicas"], observed_generation=1)
         self._active_delete_read_lag_by_name.pop(deployment.metadata.name, None)
         self.deployments[deployment.metadata.name] = deployment
         return deployment
 
-    def patch_namespaced_deployment(self, name: str, namespace: str, body: dict[str, object]) -> object:
+    def patch_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        **_kwargs: object,
+    ) -> object:
         _ = namespace
         self.patched_bodies.append((name, body))
         deployment = self.deployments.get(name)
         if deployment is None:
             raise _FakeApiError(404)
         metadata = body.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("resourceVersion") not in {
+            None,
+            getattr(deployment.metadata, "resource_version", None),
+        }:
+            raise _FakeApiError(409)
+        deployment.metadata.resource_version = str(next(self._resource_versions))
         if isinstance(metadata, dict):
             annotations = metadata.get("annotations")
             if isinstance(annotations, dict):
@@ -301,6 +316,7 @@ class _FakeAppsApi:
                         "labels": deployment.metadata.labels,
                         "generation": deployment.metadata.generation,
                         "uid": deployment.metadata.uid,
+                        "resourceVersion": getattr(deployment.metadata, "resource_version", None),
                     },
                     "spec": {"replicas": deployment.spec.replicas},
                     "status": {
@@ -5480,6 +5496,29 @@ def test_kubernetes_pod_wait_ignores_finished_pods(
     else:
         with pytest.raises(WorkerBackendError, match="did not stop"):
             backend._resources.wait_for_worker_pods_absent(("old-worker",), timeout_seconds=0)
+
+
+def test_kubernetes_retirement_never_stops_a_worker_an_ensure_replaced_meanwhile(tmp_path: Path) -> None:
+    """A Deployment ensure recreated after the retirement listing is left running instead of scaled to zero."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:legacy"), now=10.0)
+    _stamp_legacy_template(apps_api, handle.worker_id, "legacy", keep_marker=False)
+    list_deployments = backend._resources.list_deployments
+
+    def list_then_ensure(**kwargs: object) -> list[object]:
+        listed = list_deployments(**kwargs)
+        backend._invalidate_ready_worker(handle.worker_key)
+        backend.ensure_worker(WorkerSpec(handle.worker_key), now=20.0)
+        return listed
+
+    backend._resources.list_deployments = list_then_ensure  # type: ignore[method-assign]
+
+    assert backend._resources.stop_workers_mounting_state_roots(now=30.0) == ((), ())
+    assert apps_api.deployments[handle.worker_id].spec.replicas == 1
 
 
 def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
