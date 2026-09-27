@@ -2162,6 +2162,18 @@ def write_config_yaml(config: Config, config_path: Path) -> None:
     safe_replace(tmp_path, path)
 
 
+def plant_workspace_entry(path: Path, kind: str, victim: Path | None = None) -> None:
+    """Put what worker code could plant at ``path``: a ``link`` to ``victim`` or a ``fifo``."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        assert victim is not None
+        path.symlink_to(victim, target_is_directory=victim.is_dir())
+
+
 def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,

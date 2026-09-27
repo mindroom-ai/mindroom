@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from mindroom.scheduling import CronSchedule
@@ -14,28 +16,28 @@ class TestCronNaturalLanguage:
         """Test converting every minute cron to natural language."""
         schedule = CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "* * * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         assert "Every minute" in description
 
     def test_every_two_minutes(self) -> None:
         """Test converting every 2 minutes cron to natural language."""
         schedule = CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "*/2 * * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         assert "2 minutes" in description or "2 minute" in description
 
     def test_every_five_minutes(self) -> None:
         """Test converting every 5 minutes cron to natural language."""
         schedule = CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "*/5 * * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         assert "5 minutes" in description or "5 minute" in description
 
     def test_daily_at_9am(self) -> None:
         """Test converting daily at 9am cron to natural language."""
         schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "0 9 * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         # Could be "At 09:00" or "At 9:00 AM" depending on locale
         assert "09:00" in description or "9:00" in description
 
@@ -43,7 +45,7 @@ class TestCronNaturalLanguage:
         """Test converting weekly Monday at 9am cron to natural language."""
         schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="1")
         assert schedule.to_cron_string() == "0 9 * * 1"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         assert "Monday" in description
         assert "09:00" in description or "9:00" in description
 
@@ -51,7 +53,7 @@ class TestCronNaturalLanguage:
         """Test converting hourly cron to natural language."""
         schedule = CronSchedule(minute="0", hour="*", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "0 * * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         # Should contain "hour" in some form
         assert "hour" in description.lower()
 
@@ -59,14 +61,14 @@ class TestCronNaturalLanguage:
         """Test converting every 4 hours cron to natural language."""
         schedule = CronSchedule(minute="0", hour="*/4", day="*", month="*", weekday="*")
         assert schedule.to_cron_string() == "0 */4 * * *"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         assert "4 hour" in description
 
     def test_complex_schedule(self) -> None:
         """Test converting complex cron to natural language."""
         schedule = CronSchedule(minute="15,45", hour="9,17", day="*", month="*", weekday="1-5")
         assert schedule.to_cron_string() == "15,45 9,17 * * 1-5"
-        description = schedule.to_natural_language()
+        description = schedule.to_natural_language("UTC")
         # Should mention minutes 15 and 45
         assert "15" in description
         assert "45" in description
@@ -81,7 +83,29 @@ class TestCronNaturalLanguage:
 
         # On main, get_description is imported in mindroom.scheduling
         monkeypatch.setattr("mindroom.scheduling.get_description", boom)
-        assert schedule.to_natural_language().startswith("Cron: ")
+        assert schedule.to_natural_language("UTC").startswith("Cron: ")
+
+    def test_fixed_time_is_described_in_the_configured_timezone(self) -> None:
+        """A UTC cron reads as the user's own wall time, including across daylight saving time."""
+        schedule = CronSchedule(minute="0", hour="15", day="*", month="*", weekday="1-5")
+        summer = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+        winter = datetime(2026, 12, 6, 12, 0, tzinfo=UTC)
+        assert schedule.to_natural_language("America/Los_Angeles", summer) == "At 08:00, Monday through Friday"
+        assert schedule.to_natural_language("America/Los_Angeles", winter) == "At 07:00, Monday through Friday"
+
+    def test_weekdays_shift_when_the_local_time_crosses_midnight(self) -> None:
+        """Saturday 01:00 UTC is Friday evening on the US west coast."""
+        schedule = CronSchedule(minute="0", hour="1", day="*", month="*", weekday="6")
+        now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+        assert schedule.to_natural_language("America/Los_Angeles", now) == "At 18:00, only on Friday"
+
+    def test_unconvertible_hour_patterns_are_marked_utc(self) -> None:
+        """Hour lists and day-of-month schedules that cross midnight keep UTC and say so."""
+        now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+        assert CronSchedule(minute="0", hour="9,17").to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
+        monthly = CronSchedule(minute="0", hour="3", day="1")
+        assert monthly.to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
+        assert not CronSchedule(minute="*/5").to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
 
 
 if __name__ == "__main__":

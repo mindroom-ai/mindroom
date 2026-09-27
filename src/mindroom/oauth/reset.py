@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
-from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection_management
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -30,6 +30,7 @@ from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_targe
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 _BROWSER_OAUTH_RESET_KIND = "browser_oauth_reset"
 _BROWSER_OAUTH_RESET_TTL_SECONDS = 10 * 60
+_UNAUTHORIZED_RESET = "The current requester is not authorized to manage this agent's credentials."
 
 
 class OAuthResetTargetError(ValueError):
@@ -80,6 +82,7 @@ def resolve_oauth_reset_target(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
+    membership_index: AgentReplyMembershipIndex,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> _ResolvedOAuthResetTarget:
     """Resolve one configured provider to the exact credential target it may reset."""
@@ -87,14 +90,8 @@ def resolve_oauth_reset_target(
         msg = "OAuth reset is available only during an agent request."
         raise OAuthResetTargetError(msg)
     requester_id = execution_identity.requester_id
-    if requester_id is None or not is_sender_allowed_for_agent_oauth_connection_management(
-        requester_id,
-        agent_name=agent_name,
-        config=config,
-        runtime_paths=runtime_paths,
-    ):
-        msg = "The current requester is not authorized to manage this agent's credentials."
-        raise OAuthResetTargetError(msg)
+    if requester_id is None:
+        raise OAuthResetTargetError(_UNAUTHORIZED_RESET)
 
     tool_metadata = resolved_tool_metadata_for_runtime(
         runtime_paths,
@@ -141,6 +138,17 @@ def resolve_oauth_reset_target(
     if credential_target is None or credential_target.worker_scope is None or credential_target.worker_key is None:
         msg = "Agent-initiated OAuth reset refuses unscoped installation-level credentials; use the dashboard."
         raise OAuthResetTargetError(msg)
+    # A requester-owned target is only reset by that requester: the browser flow authenticates them
+    # for such bindings and rejects a link whose frozen binding no longer matches this target.
+    if not is_sender_allowed_for_agent_oauth_connection(
+        requester_id,
+        agent_name,
+        config,
+        runtime_paths,
+        membership_index,
+        requester_owned=oauth_credential_binding(provider, credential_target).requester_owned,
+    ):
+        raise OAuthResetTargetError(_UNAUTHORIZED_RESET)
     return _ResolvedOAuthResetTarget(
         agent_name=agent_name,
         credential_context=credential_context,

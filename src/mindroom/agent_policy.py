@@ -28,6 +28,7 @@ class AgentPolicySeed:
     worker_scope: WorkerScope | None
     default_worker_scope: WorkerScope | None
     private_knowledge_enabled: bool
+    private_root: str | None
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,8 @@ class ResolvedAgentPolicy:
     private_knowledge_base_id: str | None
     private_workspace_enabled: bool
     private_agent_knowledge_enabled: bool
+    private_root: str | None
+    """The authored ``private.root``; ``worker_routing.private_root_name`` applies its default."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ def _build_agent_policy_seed(
             private_knowledge_enabled=(
                 private_knowledge is not None and private_knowledge.enabled and private_knowledge.path is not None
             ),
+            private_root=private_config.root if private_config is not None else None,
         )
 
     raw_private = agent_data.get("private")
@@ -100,6 +104,7 @@ def _build_agent_policy_seed(
     private_knowledge_path = (
         raw_private_knowledge_mapping.get("path") if raw_private_knowledge_mapping is not None else None
     )
+    raw_private_root = raw_private_mapping.get("root") if raw_private_mapping is not None else None
     return AgentPolicySeed(
         agent_name=agent_name,
         delegate_to=delegate_to,
@@ -114,6 +119,7 @@ def _build_agent_policy_seed(
             and raw_private_knowledge_mapping.get("enabled") is not False
             and isinstance(private_knowledge_path, str)
         ),
+        private_root=raw_private_root.strip() if isinstance(raw_private_root, str) else None,
     )
 
 
@@ -175,6 +181,7 @@ def _resolve_agent_policy(
         private_knowledge_base_id=private_knowledge_base_id,
         private_workspace_enabled=private_workspace_enabled,
         private_agent_knowledge_enabled=private_agent_knowledge_enabled,
+        private_root=seed.private_root if seed.is_private else None,
     )
 
 
@@ -352,15 +359,6 @@ def resolve_agent_policy_index(
     )
 
 
-def user_scope_shared_agent_names(policies: Mapping[str, ResolvedAgentPolicy]) -> frozenset[str]:
-    """Return the non-private agents whose canonical state roots every `user` worker sees."""
-    return frozenset(
-        agent_name
-        for agent_name, policy in policies.items()
-        if policy.effective_execution_scope == "user" and not policy.is_private
-    )
-
-
 def resolve_private_knowledge_base_agent(
     base_id: str,
     seeds: Mapping[str, AgentPolicySeed],
@@ -395,5 +393,4 @@ __all__ = [
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
     "unsupported_team_agent_message",
-    "user_scope_shared_agent_names",
 ]

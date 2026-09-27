@@ -393,7 +393,14 @@ class _TrackingWorkerManager:
         self.touched.append(worker_key)
         return None
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        **_kwargs: object,
+    ) -> object:
         del now
         self.failures.append((worker_key, failure_reason))
         return None
@@ -2905,7 +2912,14 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
             events.append("touch")
             return worker_handle
 
-        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+        def record_failure(
+            self,
+            worker_key: str,
+            failure_reason: str,
+            *,
+            now: float | None = None,
+            **_kwargs: object,
+        ) -> WorkerHandle:
             _ = now
             msg = f"unexpected failure bookkeeping for {worker_key}: {failure_reason}"
             raise AssertionError(msg)
@@ -2996,7 +3010,14 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
             msg = f"unexpected touch bookkeeping for {worker_key}"
             raise AssertionError(msg)
 
-        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+        def record_failure(
+            self,
+            worker_key: str,
+            failure_reason: str,
+            *,
+            now: float | None = None,
+            **_kwargs: object,
+        ) -> WorkerHandle:
             nonlocal lease_active
             _ = now
             assert lease_active is True
@@ -3579,7 +3600,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
             response = httpx.Response(
                 400,
                 request=request,
-                json={"detail": "base_dir must stay inside the allowed state roots or worker root"},
+                json={"detail": "base_dir must stay inside a visible workspace or the worker root"},
             )
             message = "bad request"
             raise httpx.HTTPStatusError(message, request=request, response=response)
@@ -3614,7 +3635,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
-    with pytest.raises(RuntimeError, match="base_dir must stay inside the allowed state roots or worker root"):
+    with pytest.raises(RuntimeError, match="base_dir must stay inside a visible workspace or the worker root"):
         entrypoint(1, 2)
 
 
@@ -4605,7 +4626,14 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:
             raise NotImplementedError
 
-        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+        def record_failure(
+            self,
+            worker_key: str,
+            failure_reason: str,
+            *,
+            now: float | None = None,
+            **_kwargs: object,
+        ) -> object:
             raise NotImplementedError
 
         def shutdown(self) -> None:
@@ -4749,7 +4777,14 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:
             raise NotImplementedError
 
-        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+        def record_failure(
+            self,
+            worker_key: str,
+            failure_reason: str,
+            *,
+            now: float | None = None,
+            **_kwargs: object,
+        ) -> object:
             raise NotImplementedError
 
         def shutdown(self) -> None:

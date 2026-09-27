@@ -425,7 +425,10 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 record = await DelegationRecordOwner(original_config, paths).reopen(
                     DelegationRecordLocator.from_dict(child.record_locator),
                 )
-                assert json.loads((record.record_dir / "run.json").read_text())["status"] == expected_status
+                assert (
+                    json.loads((record.child_workspace / record.scoped_path / "run.json").read_text())["status"]
+                    == expected_status
+                )
                 assert side_effects == []
                 return
             if outcome == "revoke":

@@ -142,8 +142,16 @@ class StaticSandboxRunnerBackend:
                     cleaned_workers.append(self._to_handle(metadata, now=timestamp))
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
         """Persist one shared-runner worker failure."""
+        del startup_count  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         with self._lock:
             metadata = self._workers.get(worker_key) or self._new_metadata(worker_key, timestamp)

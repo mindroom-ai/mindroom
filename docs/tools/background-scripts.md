@@ -192,7 +192,7 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 ## Worker And Network Requirements
 
 The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
-New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from their configured worker-state root.
+New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from the agent workspace mounted into them.
 Existing Kubernetes script workers can keep their launch image across primary upgrades when the script protocol version and worker authority remain compatible.
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.

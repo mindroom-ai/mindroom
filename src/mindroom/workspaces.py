@@ -19,6 +19,7 @@ from mindroom.path_confinement import (
     resolve_path_within_root,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tool_system.worker_routing import private_root_name
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -284,37 +285,44 @@ def _build_workspace_knowledge_links(
 
 
 def _remove_stale_workspace_knowledge_links(
+    knowledge_fd: int,
     knowledge_root: Path,
     *,
     protected_paths: Collection[Path],
     workspace_root: Path,
     desired_links: Mapping[Path, Path],
 ) -> None:
-    for existing_path in knowledge_root.iterdir():
-        if (
-            existing_path.is_symlink()
-            and existing_path not in desired_links
-            and existing_path not in protected_paths
-            and existing_path.resolve().is_relative_to(workspace_root)
-        ):
-            existing_path.unlink()
-
-
-def _apply_workspace_knowledge_links(desired_links: Mapping[Path, Path]) -> None:
-    for link_path, resolved_target in desired_links.items():
-        if link_path.is_symlink():
-            if link_path.resolve() == resolved_target:
-                continue
-            link_path.unlink()
-        elif link_path.exists():
-            if link_path.resolve() == resolved_target:
-                continue
-            msg = f"Workspace knowledge link path already exists and is not a symlink: {link_path}"
-            raise ValueError(msg)
-        if resolved_target == link_path:
+    """Remove stale links into the workspace by reading, never following, each link."""
+    for entry in list(os.scandir(knowledge_fd)):
+        existing_path = knowledge_root / entry.name
+        if not entry.is_symlink() or existing_path in desired_links or existing_path in protected_paths:
             continue
-        link_path.parent.mkdir(parents=True, exist_ok=True)
-        link_path.symlink_to(resolved_target, target_is_directory=True)
+        target = Path(os.path.normpath(knowledge_root / os.readlink(entry.name, dir_fd=knowledge_fd)))
+        if target.is_relative_to(workspace_root):
+            os.unlink(entry.name, dir_fd=knowledge_fd)
+
+
+def _apply_workspace_knowledge_links(
+    knowledge_fd: int,
+    knowledge_root: Path,
+    desired_links: Mapping[Path, Path],
+) -> None:
+    """Point each desired link at its target through descriptors pinned below the knowledge root."""
+    for link_path, resolved_target in desired_links.items():
+        relative_link = link_path.relative_to(knowledge_root)
+        with open_directory_within_root(knowledge_fd, relative_link.parent, create=True) as parent_fd:
+            try:
+                existing = os.stat(relative_link.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and stat.S_ISLNK(existing.st_mode):
+                if os.readlink(relative_link.name, dir_fd=parent_fd) == str(resolved_target):
+                    continue
+                os.unlink(relative_link.name, dir_fd=parent_fd)
+            elif existing is not None:
+                msg = f"Workspace knowledge link path already exists and is not a symlink: {link_path}"
+                raise ValueError(msg)
+            os.symlink(resolved_target, relative_link.name, target_is_directory=True, dir_fd=parent_fd)
 
 
 def ensure_workspace_knowledge_links(
@@ -328,6 +336,7 @@ def ensure_workspace_knowledge_links(
     Each knowledge base becomes visible under ``<workspace>/knowledge/<base_id>``.
     Targets outside the workspace are intentionally excluded because the default
     file-aware tools enforce workspace containment after resolving symlinks.
+    The knowledge directory is pinned by a no-follow walk, and existing links are read, never followed.
     """
     workspace_path.mkdir(parents=True, exist_ok=True)
     workspace_root = workspace_path.resolve()
@@ -338,27 +347,27 @@ def ensure_workspace_knowledge_links(
     )
     if not knowledge_paths and not knowledge_root.exists():
         return
-    knowledge_root.mkdir(parents=True, exist_ok=True)
-    with _WORKSPACE_MUTATION_LOCK:
+    with (
+        _WORKSPACE_MUTATION_LOCK,
+        open_directory_within_root(
+            workspace_root,
+            knowledge_root.relative_to(workspace_root),
+            create=True,
+        ) as knowledge_fd,
+    ):
         desired_links = _build_workspace_knowledge_links(
             workspace_root=workspace_root,
             knowledge_root=knowledge_root,
             knowledge_paths=knowledge_paths,
         )
         _remove_stale_workspace_knowledge_links(
+            knowledge_fd,
             knowledge_root,
             protected_paths=protected_paths,
             workspace_root=workspace_root,
             desired_links=desired_links,
         )
-        _apply_workspace_knowledge_links(desired_links)
-
-
-def _private_root_name(agent_name: str, config: Config) -> str:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None or agent_config.private.root is None:
-        return f"{agent_name}_data"
-    return agent_config.private.root
+        _apply_workspace_knowledge_links(knowledge_fd, knowledge_root, desired_links)
 
 
 def _effective_workspace(
@@ -372,7 +381,7 @@ def _effective_workspace(
         return None
     private_config = agent_config.private
     return _EffectiveAgentWorkspace(
-        root_path=_private_root_name(agent_name, config),
+        root_path=private_root_name(agent_name, private_config.root),
         template_dir=(
             config_relative_path(private_config.template_dir, runtime_paths)
             if private_config.template_dir is not None
@@ -380,6 +389,13 @@ def _effective_workspace(
         ),
         context_files=tuple(private_config.context_files or ()),
         file_memory_path="." if config.resolve_entity(agent_name).memory_backend == "file" else None,
+    )
+
+
+def runs_in_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
+    """Return whether this process is a sandbox runner pinned to one dedicated worker."""
+    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
     )
 
 

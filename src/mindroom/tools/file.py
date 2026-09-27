@@ -26,8 +26,11 @@ from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
+    read_resolved_file,
+    remove_resolved_path,
     resolve_base_dir_path,
     split_search_pattern,
+    write_resolved_file,
 )
 
 if TYPE_CHECKING:
@@ -100,11 +103,9 @@ class _MindRoomFileTools(AgnoFileTools):
                 log_error(f"Attempted to save Git metadata: {file_name}")
                 return blocked_git_metadata_message("saving file", file_name)
             log_debug(f"Saving contents to {file_path}")
-            if not file_path.parent.exists():
-                file_path.parent.mkdir(parents=True, exist_ok=True)
             if file_path.exists() and not overwrite:
                 return f"File {file_name} already exists"
-            file_path.write_text(contents, encoding=encoding)
+            write_resolved_file(self.base_dir, file_path, contents.encode(encoding))
             log_debug(f"Saved: {file_path}")
             return str(file_name)
         except Exception as e:
@@ -119,7 +120,7 @@ class _MindRoomFileTools(AgnoFileTools):
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
-            contents = file_path.read_text(encoding=encoding)
+            contents = read_resolved_file(self.base_dir, file_path).decode(encoding)
             lines = contents.split(self.line_separator)
             return self.line_separator.join(lines[start_line : end_line + 1])
         except Exception as e:
@@ -141,7 +142,7 @@ class _MindRoomFileTools(AgnoFileTools):
             if not safe:
                 log_error(f"Attempted to replace file chunk: {file_name}")
                 return blocked_file_action_message("replacing file chunk", file_name, self.base_dir)
-            contents = file_path.read_text(encoding=encoding)
+            contents = read_resolved_file(self.base_dir, file_path).decode(encoding)
             lines = contents.split(self.line_separator)
             start = lines[0:start_line]
             end = lines[end_line + 1 :]
@@ -162,7 +163,7 @@ class _MindRoomFileTools(AgnoFileTools):
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
-            contents = file_path.read_text(encoding=encoding)
+            contents = read_resolved_file(self.base_dir, file_path).decode(encoding)
             if len(contents) > self.max_file_length:
                 return "Error reading file: file too long. Use read_file_chunk instead"
             if len(contents.split(self.line_separator)) > self.max_file_lines:
@@ -180,10 +181,7 @@ class _MindRoomFileTools(AgnoFileTools):
                 log_error(f"Attempted to remove Git metadata: {file_name}")
                 return blocked_git_metadata_message("removing file", file_name)
             if safe:
-                if path.is_dir():
-                    path.rmdir()
-                    return ""
-                path.unlink()
+                remove_resolved_path(self.base_dir, path)
                 return ""
             log_error(f"Attempt to delete file outside {self.base_dir}: {file_name}")
             return blocked_file_action_message("removing file", file_name, self.base_dir)

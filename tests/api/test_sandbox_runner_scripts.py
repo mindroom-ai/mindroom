@@ -28,7 +28,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shell_supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
-from mindroom.tool_system.worker_routing import _private_instance_state_root_path
+from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 from mindroom.workers.backends import local as local_workers_module
 
 if TYPE_CHECKING:
@@ -78,6 +78,7 @@ def runner_client(
         worker_key=_WORKER_KEY,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        agent_policies={},
         runner_token=_TOKEN,
     )
     supervisor = _ShellSupervisorManager()
@@ -403,17 +404,13 @@ router:
         worker_key=worker_key,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        agent_policies={},
         private_agent_names=frozenset({"watcher"}),
         runner_token=_TOKEN,
     )
     private_workspace = (
-        _private_instance_state_root_path(
-            shared_storage_root,
-            worker_key=state_scope_worker_key,
-            agent_name="watcher",
-        )
-        / "private-workspace"
-    )
+        private_instance_scope_root_path(shared_storage_root, state_scope_worker_key) / "watcher"
+    ) / "private-workspace"
     private_workspace.mkdir(parents=True)
     hook_path = private_workspace / ".mindroom" / "worker-env.sh"
     hook_path.parent.mkdir(parents=True)
@@ -526,6 +523,7 @@ router:
         worker_key=worker_key,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        agent_policies={},
         private_agent_names=frozenset(),
         runner_token=_TOKEN,
     )
@@ -904,3 +902,58 @@ def test_worker_script_endpoints_use_runner_authentication(
     )
 
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("layout", ["missing", "linked", "mounted"])
+def test_script_state_workspace_is_only_the_mounted_workspace(tmp_path: Path, layout: str) -> None:
+    """Script workers use the mounted workspace as is and never create a stand-in or follow a replacement."""
+    state_scope_worker_key = "v1:test:user_agent:@alice:localhost:watcher"
+    shared_storage_root = tmp_path / "storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  watcher:\n    display_name: Watcher\n    private:\n      per: user_agent\n"
+        "      root: private-workspace\nmodels:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+        "router:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "dedicated-worker",
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: state_scope_worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "dedicated-worker"),
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
+        },
+    )
+    app = FastAPI()
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=_TOKEN,
+    )
+    agent_root = private_instance_scope_root_path(shared_storage_root, state_scope_worker_key) / "watcher"
+    workspace = agent_root / "private-workspace"
+    if layout == "mounted":
+        workspace.mkdir(parents=True)
+    elif layout == "linked":
+        other = tmp_path / "other-instance"
+        other.mkdir()
+        agent_root.mkdir(parents=True)
+        workspace.symlink_to(other, target_is_directory=True)
+
+    def resolve() -> Path:
+        return sandbox_runner_module.resolve_script_state_workspace(
+            app,
+            state_scope_worker_key=state_scope_worker_key,
+            agent_name="watcher",
+            private_agent_names=frozenset({"watcher"}),
+        )
+
+    if layout == "mounted":
+        assert resolve() == workspace
+        return
+    with pytest.raises(ValueError, match="not mounted"):
+        resolve()
+    assert workspace.is_symlink() == (layout == "linked")
+    assert agent_root.exists() == (layout == "linked")

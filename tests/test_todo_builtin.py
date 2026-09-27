@@ -10,6 +10,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.team.team import Team as AgnoTeam
 
+import mindroom.custom_tools.todo as todo_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -27,6 +28,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    plant_workspace_entry,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -901,3 +903,37 @@ def test_todo_reassignment_keeps_title_author_bound_by_new_assignee_policy(tmp_p
         "secret",
         "@user:localhost",
     )
+
+
+@pytest.mark.parametrize("planted", ["link", "fifo"])
+def test_workspace_template_swapped_after_resolution_is_not_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planted: str,
+) -> None:
+    """A template replaced by a link or FIFO after it resolved is refused, never read into todos."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "swapped",
+        'name: swapped\nversion: "1"\ndescription: Own template.\ntodos:\n  - title: Own task\n',
+    )
+    victim = tmp_path / "victim.yaml.j2"
+    victim.write_text(
+        'name: swapped\nversion: "1"\ndescription: Victim.\ntodos:\n  - title: victim-only note\n',
+        encoding="utf-8",
+    )
+    resolve_template_path = todo_module._resolve_template_path
+
+    def resolve_then_swap(name: str, template_roots: object) -> object:
+        resolved = resolve_template_path(name, template_roots)
+        plant_workspace_entry(resolved[0], planted, victim)
+        return resolved
+
+    monkeypatch.setattr(todo_module, "_resolve_template_path", resolve_then_swap)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises((OSError, ValueError)):
+        tool.apply_template(agent=_agent(), name="swapped", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()

@@ -117,7 +117,8 @@ def _events(record_dir: Path) -> list[dict[str, object]]:
 
 async def _record_dir(child: DelegationChild, config: Config, runtime_paths: RuntimePaths) -> Path:
     locator = DelegationRecordLocator.from_dict(child.record_locator)
-    return (await DelegationRecordOwner(config, runtime_paths).reopen(locator)).record_dir
+    handle = await DelegationRecordOwner(config, runtime_paths).reopen(locator)
+    return handle.child_workspace / handle.scoped_path
 
 
 @pytest.mark.asyncio

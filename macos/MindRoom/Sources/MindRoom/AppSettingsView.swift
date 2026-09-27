@@ -75,7 +75,7 @@ struct AppSettingsView: View {
                     Button("Open Logs Folder") { runner.run(.openLogsFolder) }
                     Button("Open Config Folder") { runner.run(.openConfigFolder) }
                 }
-                Text("The app and command-line tools share ~/.mindroom. Command results appear below.")
+                Text("Local agents use the installed service's saved configuration, or ~/.mindroom for a new service. Command results appear below.")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }

@@ -33,24 +33,6 @@ enum DesktopAccessCapability: CaseIterable, Hashable {
     }
 }
 
-enum DesktopSetupProgress: Equatable {
-    case complete(String), needsAction(String), idle(String)
-
-    var detail: String {
-        switch self {
-        case let .complete(detail), let .needsAction(detail), let .idle(detail): detail
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .complete: "checkmark.circle.fill"
-        case .needsAction: "exclamationmark.circle"
-        case .idle: "circle"
-        }
-    }
-}
-
 enum DesktopStartBlocker {
     case starting, running, faulted, busy, setup, unsavedAccess, noAccess, permissions
 
@@ -272,7 +254,7 @@ extension DesktopStatus {
         return .session
     }
 
-    func accessProgress(for capability: DesktopAccessCapability, hasChanges: Bool) -> DesktopSetupProgress {
+    func accessProgress(for capability: DesktopAccessCapability, hasChanges: Bool) -> SetupStepProgress {
         if helper.state == "stopped" { return .idle("Checking…") }
         if hasChanges { return .needsAction("Unsaved changes") }
         switch capability {
@@ -284,7 +266,7 @@ extension DesktopStatus {
 
     func setupProgress(
         for section: DesktopControlSection, needsPairing: Bool, hasAccessChanges: Bool
-    ) -> DesktopSetupProgress {
+    ) -> SetupStepProgress {
         if helper.state == "stopped" { return .idle("Checking…") }
         switch section {
         case .setup:

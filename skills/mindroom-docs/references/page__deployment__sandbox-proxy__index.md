@@ -142,7 +142,7 @@ Key differences from the primary MindRoom runtime:
 > **Filesystem isolation depends on the worker backend.**
 > Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner.
 > Local in-process execution still shares the primary process filesystem.
-> Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes).
+> Dedicated Docker and Kubernetes workers mount only agent workspaces, so each runtime only sees its own agent's workspace (for `shared`, `user_agent`, and unscoped modes) and never the sessions, memory, or learning data stored beside it.
 > The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files.
 > Use `user_agent` for per-agent filesystem isolation.
 
@@ -224,6 +224,9 @@ This leaves same-worker token exposure as a local containment risk, while per-wo
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts, before it serves anything: Kubernetes scales their Deployments to zero and waits up to 60 seconds for their pods to exit, and Docker removes their containers, so the next use recreates them with workspace-only mounts.
+If any cannot be stopped, startup fails and the primary restarts until none remain.
+Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](https://docs.mindroom.chat/architecture/migrations/#workspace-only-worker-mounts) describes.
 
 Dedicated Kubernetes workers also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
 
@@ -648,7 +651,15 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - [Live config snapshots](#live-config-snapshots) carry no sensitive config keys or credential headers, and runners accept them only on requests authenticated with the sandbox token.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
+- With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
+  `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
+  `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces of `private.per: user` agents, since it shares one runtime across those agents, and never mounts agents on other scopes.
+  Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
+  A workspace is mounted only when it is a real directory reached from the storage root without links; the primary creates missing shared workspaces without following links before the worker starts, and a private workspace becomes visible once the primary has materialized that instance.
+  A `user` worker is recreated on its next use after another of the user's private agents materializes its workspace, which ends that worker's shells and sessions, and a missing or linked workspace is logged instead of mounted.
+  Assigned knowledge outside the workspace is planned from its configured path and used only when it is a real directory or file outside other agents' workspaces, private instances, and worker roots; Kubernetes mounts it read-only, and Docker copies it through no-follow descriptors into the worker's read-only projected config snapshot, refreshed when its contents change.
+  A refused, missing, or linked source is logged, and the worker sees an empty knowledge folder.
+  A worker asked to work in an agent workspace its pod does not mount answers with a request error, and the next ensure mounts the workspace.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints

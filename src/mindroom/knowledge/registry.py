@@ -137,7 +137,8 @@ def _published_index_key_from_binding(
     config: Config,
 ) -> PublishedIndexKey:
     storage_root = binding.storage_root.expanduser().resolve()
-    knowledge_path = binding.knowledge_path.resolve()
+    # The binding already resolved its path; resolving again would follow a link swapped onto it since.
+    knowledge_path = binding.knowledge_path
     return PublishedIndexKey(
         base_id=base_id,
         storage_root=str(storage_root),

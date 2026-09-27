@@ -33,7 +33,6 @@ from mindroom.agent_policy import (
     resolve_agent_policy_index,
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
-    user_scope_shared_agent_names,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
@@ -116,6 +115,7 @@ from mindroom.workspaces import control_plane_owns_private_templates, validate_w
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -1338,10 +1338,13 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
-    def get_user_scope_shared_agent_names(self) -> frozenset[str]:
-        """Return the non-private agents whose canonical state roots every `user` worker sees."""
+    def get_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
+        """Return the canonical execution policy of every configured agent."""
         seeds = build_agent_policy_seeds(self.agents, default_worker_scope=self.defaults.worker_scope)
-        return user_scope_shared_agent_names(resolve_agent_policy_index(seeds).policies)
+        return resolve_agent_policy_index(
+            seeds,
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        ).policies
 
     def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

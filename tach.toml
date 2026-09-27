@@ -791,6 +791,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.minimal_agent",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
@@ -1517,6 +1518,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.knowledge"
 depends_on = [
+    "mindroom.path_confinement",
+    "mindroom.runtime_resolution",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.knowledge.availability",
@@ -1865,7 +1868,6 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
-    "mindroom.private_storage_paths",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend",
@@ -2593,6 +2595,7 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
     "mindroom.thread_export.workspace_sync",
+    "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.workers.runtime",
     "mindroom.delegation.recovery",
 ]
@@ -3877,6 +3880,7 @@ path = "mindroom.matrix_rtc.transcript"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.memory",
+    "mindroom.path_confinement",
     "mindroom.runtime_resolution",
 ]
 
@@ -4609,6 +4613,7 @@ visibility = [
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
+    "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5141,6 +5146,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.chunking",
     "mindroom.constants",
     "mindroom.embedding_errors",
@@ -5347,7 +5353,6 @@ expose = [
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
-    "user_scope_shared_agent_names",
 ]
 from = ["mindroom.agent_policy"]
 
@@ -5362,6 +5367,7 @@ expose = [
     "resolve_agent_runtime",
     "resolve_agent_storage",
     "resolve_knowledge_binding",
+    "shared_knowledge_path",
 ]
 from = ["mindroom.runtime_resolution"]
 
@@ -5971,7 +5977,9 @@ expose = [
     "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
-    "visible_state_roots_for_worker_key",
+    "private_root_name",
+    "visible_workspace_roots",
+    "written_by_other_workers",
     "worker_dir_name",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",
@@ -6404,6 +6412,19 @@ depends_on = [
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 
 [[modules]]
+path = "mindroom.workers.backends.legacy_state_root_mounts"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends._lifecycle",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.kubernetes",
+    "mindroom.workers.backends.kubernetes_resources",
+    "mindroom.workers.runtime",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.workers.storage_preflight"
 depends_on = [
     "mindroom.runtime_env_policy",
@@ -6433,7 +6454,7 @@ depends_on = [
     "mindroom.legacy_private_storage_aliases",
     "mindroom.tool_system.worker_routing",
 ]
-visibility = ["mindroom.api.sandbox_worker_prep", "mindroom.workers.backends._dedicated_worker_common"]
+visibility = ["mindroom.workers.backends._dedicated_worker_common"]
 
 [[modules]]
 path = "mindroom.knowledge.read_protocol"
@@ -6578,6 +6599,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.records"
 depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
@@ -7416,7 +7439,7 @@ depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.
 
 [[modules]]
 path = "mindroom.path_confinement"
-depends_on = []
+depends_on = ["mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.file_access"
