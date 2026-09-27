@@ -2021,8 +2021,10 @@ class KubernetesResourceManager:
             if not isinstance(raw_path, str):
                 continue
             try:
-                relative_path = config_relative_path(raw_path, self.runtime_paths).relative_to(self.storage_root)
+                source_path = Path(os.path.normpath(config_relative_path(raw_path, self.runtime_paths)))
+                relative_path = source_path.relative_to(self.storage_root)
             except ValueError:
+                logger.warning("Not mounting knowledge outside the worker storage root", knowledge_base=base_id)
                 continue
             try:
                 with open_directory_within_root(self.storage_root, relative_path):

@@ -2419,6 +2419,29 @@ def test_kubernetes_backend_never_mounts_knowledge_another_worker_could_redirect
     assert any(entry["log_level"] in {"warning", "error"} and "knowledge" in entry["event"] for entry in logs)
 
 
+def test_kubernetes_backend_normalizes_knowledge_paths_and_logs_skipped_ones(tmp_path: Path) -> None:
+    """A configured path with ``..`` still mounts, and a source outside worker storage is skipped with a warning."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "knowledge" / "docs").mkdir(parents=True)
+    outside = tmp_path / "outside-docs"
+    outside.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  code:\n    display_name: Code\n    worker_scope: shared\n    knowledge_bases: [docs, outside]\n"
+        "knowledge_bases:\n  docs:\n    path: ./config-dir/../storage/knowledge/docs\n"
+        f"  outside:\n    path: {outside}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with capture_logs() as logs:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert _storage_mounts(apps_api.created_bodies[0])["/app/worker/knowledge/docs"]["subPath"] == "knowledge/docs"
+    assert any(entry.get("knowledge_base") == "outside" for entry in logs if entry["log_level"] == "warning")
+
+
 def test_kubernetes_backend_projects_shared_agent_for_narrower_user_agent_worker(tmp_path: Path) -> None:
     """A script-isolated worker should retain its shared agent's state and assigned knowledge."""
     storage_root = tmp_path / "storage"
