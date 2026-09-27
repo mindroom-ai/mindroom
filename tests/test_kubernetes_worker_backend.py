@@ -5517,7 +5517,9 @@ def test_kubernetes_retirement_never_stops_a_worker_an_ensure_replaced_meanwhile
 
     backend._resources.list_deployments = list_then_ensure  # type: ignore[method-assign]
 
-    assert backend._resources.stop_workers_mounting_state_roots(now=30.0) == ((), ())
+    stopped: set[str] = set()
+    assert backend._resources.stop_workers_mounting_state_roots(now=30.0, stopped=stopped) == ()
+    assert stopped == set()
     assert apps_api.deployments[handle.worker_id].spec.replicas == 1
 
 
@@ -5597,18 +5599,20 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
     monkeypatch.setattr(kubernetes_backend_module, "_standalone_resource_manager", lambda _paths: backend._resources)
 
     # One Deployment that cannot be patched never leaves the others running, and fails the pass so it is retried.
+    stopped: set[str] = set()
     with pytest.raises(WorkerBackendError, match=handles["broken"].worker_id):
-        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=stopped)
+    assert stopped == {handles["legacy"].worker_id, handles["downgraded"].worker_id}
     assert patch_timeouts
     assert all(timeout for timeout in patch_timeouts)
     assert apps_api.deployments[handles["broken"].worker_id].spec.replicas == 1
 
     broken_worker_id = handles["broken"].worker_id
     handles["broken"] = handles["idle"]
-    stopped = kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+    kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=stopped)
 
     # The retry stops what failed and waits for every old worker's pods, including those stopped earlier.
-    assert stopped == (broken_worker_id,)
+    assert broken_worker_id in stopped
     assert len(pod_selectors) == 3
     assert not any(worker_id in pod_selectors[0] for worker_id in stopped)
     for name in ("legacy", "downgraded"):
@@ -5626,5 +5630,5 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
         caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__),
         pytest.raises(WorkerBackendError, match="did not stop"),
     ):
-        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=set())
     assert handles["current"].worker_id in caplog.text

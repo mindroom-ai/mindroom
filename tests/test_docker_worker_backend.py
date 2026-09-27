@@ -876,7 +876,9 @@ def test_docker_startup_removes_workers_mounting_state_roots(
     sentinel = worker_root_path(tmp_path, "v1:default:shared:legacy") / "retained.bin"
     sentinel.write_bytes(b"retained worker bytes")
 
-    assert remove_docker_workers_mounting_state_roots(runtime_paths) == (legacy_container.id,)
+    stopped: set[str] = set()
+    remove_docker_workers_mounting_state_roots(runtime_paths, stopped=stopped)
+    assert stopped == {legacy_container.id}
 
     assert legacy_container.removed == 1
     assert fake_client.containers.get(current.worker_id).removed == 0
@@ -910,7 +912,7 @@ def test_docker_retirement_keeps_removing_old_containers_after_one_fails(
     monkeypatch.setattr(containers[0], "remove", refuse_removal)
 
     with pytest.raises(WorkerBackendError, match=containers[0].id):
-        remove_docker_workers_mounting_state_roots(runtime_paths)
+        remove_docker_workers_mounting_state_roots(runtime_paths, stopped=set())
 
     assert [container.removed for container in containers[1:]] == [1, 1]
 

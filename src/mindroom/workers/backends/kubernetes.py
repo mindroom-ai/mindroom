@@ -120,19 +120,17 @@ def check_kubernetes_workers_absent_for_storage_upgrade(
     )
 
 
-def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> tuple[str, ...]:
-    """Stop running workers whose pods still mount whole agent state roots, and wait for those pods to exit."""
+def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths, *, stopped: set[str]) -> None:
+    """Stop running workers whose pods still mount whole state roots, adding each to ``stopped``, and wait for them."""
     resource_manager = _standalone_resource_manager(runtime_paths)
-    stopped, legacy = resource_manager.stop_workers_mounting_state_roots(now=time.time())
+    legacy = resource_manager.stop_workers_mounting_state_roots(now=time.time(), stopped=stopped)
     if legacy:
         try:
             # Every old worker's pods must be gone, including ones an earlier attempt already scaled down.
             resource_manager.wait_for_worker_pods_absent(legacy, timeout_seconds=_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS)
         except Exception:
-            # The stopped list is still reported so the operator checks what these workers could write.
-            logger.warning("Stopped workers that mounted state roots did not stop in time: %s", ", ".join(stopped))
+            logger.warning("Old workers' pods did not stop in time: %s", ", ".join(legacy))
             raise
-    return stopped
 
 
 def _progress_event(

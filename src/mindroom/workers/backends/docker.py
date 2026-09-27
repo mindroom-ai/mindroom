@@ -477,8 +477,8 @@ def check_docker_workers_absent_for_storage_upgrade(
 # Handling: remove each such container, running or stopped, so the next ensure recreates it with workspace mounts;
 #   durable worker state and metadata stay untouched.
 # Coverage: tests/test_docker_worker_backend.py::test_docker_startup_removes_workers_mounting_state_roots.
-def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> tuple[str, ...]:
-    """Remove this runtime's containers created before workers mounted only workspaces."""
+def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths, *, stopped: set[str]) -> None:
+    """Remove this runtime's containers created before workers mounted only workspaces, adding each to ``stopped``."""
     workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
     client, docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths, ensure_dependencies=False)
     try:
@@ -489,7 +489,6 @@ def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> t
     except docker_errors.DockerException as exc:
         msg = f"Failed to list Docker workers: {exc}"
         raise WorkerBackendError(msg) from exc
-    removed: list[str] = []
     failed: list[str] = []
     for container in containers:
         config = container.attrs.get("Config")
@@ -507,11 +506,10 @@ def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> t
             # One failure must not leave the remaining old containers running.
             failed.append(f"{container.id} ({exc})")
             continue
-        removed.append(container.id)
+        stopped.add(container.id)
     if failed:
-        msg = f"Failed to remove Docker workers: {', '.join(failed)}; removed {removed}"
+        msg = f"Failed to remove Docker workers: {', '.join(failed)}"
         raise WorkerBackendError(msg)
-    return tuple(removed)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -54,7 +55,12 @@ async def test_startup_stops_old_workers_through_their_backend(
         if backend == "docker"
         else "mindroom.workers.backends.kubernetes.stop_kubernetes_workers_mounting_state_roots"
     )
-    monkeypatch.setattr(target, lambda paths: calls.append(paths) or ("old-worker",))
+
+    def stop_one(paths: RuntimePaths, *, stopped: set[str]) -> None:
+        calls.append(paths)
+        stopped.add("old-worker")
+
+    monkeypatch.setattr(target, stop_one)
 
     with capture_logs() as logs:
         await retire_state_root_worker_mounts(runtime_paths)
@@ -64,7 +70,7 @@ async def test_startup_stops_old_workers_through_their_backend(
     assert warning["workers"] == ["old-worker"]
     assert "links" in warning["event"]
 
-    monkeypatch.setattr(target, lambda paths: calls.append(paths) or ())
+    monkeypatch.setattr(target, lambda paths, **_kwargs: calls.append(paths))
     with capture_logs() as logs:
         await retire_state_root_worker_mounts(runtime_paths)
 
@@ -88,7 +94,7 @@ async def test_failing_kubernetes_api_never_blocks_startup(
     method: str,
     error: Exception,
 ) -> None:
-    """Any failure while stopping old workers is logged; ensure still recreates them later."""
+    """Any failure is logged and retried by a task the caller cancels at shutdown."""
 
     def fail(*_args: object, **_kwargs: object) -> None:
         raise error
@@ -96,10 +102,13 @@ async def test_failing_kubernetes_api_never_blocks_startup(
     monkeypatch.setattr(KubernetesResourceManager, method, fail)
 
     with capture_logs() as logs:
-        await retire_state_root_worker_mounts(_runtime_paths(tmp_path, "kubernetes"))
+        [retry] = await retire_state_root_worker_mounts(_runtime_paths(tmp_path, "kubernetes"))
 
     [entry] = [entry for entry in logs if entry["log_level"] == "error"]
     assert entry["backend"] == "kubernetes"
+    retry.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await retry
 
 
 @pytest.mark.asyncio
@@ -131,11 +140,11 @@ async def test_failed_retirement_keeps_retrying_in_the_background_until_it_succe
     """Startup continues, the failure stays visible as pending and logged, and a later retry clears it."""
     attempts: list[int] = []
 
-    def stop_on_second_attempt(_paths: RuntimePaths) -> tuple[str, ...]:
+    def stop_on_second_attempt(_paths: RuntimePaths, *, stopped: set[str]) -> None:
         attempts.append(len(attempts))
         if len(attempts) == 1:
             raise ApiException(status=503, reason="Service Unavailable")
-        return ("old-worker",)
+        stopped.add("old-worker")
 
     monkeypatch.setattr(
         "mindroom.workers.backends.kubernetes.stop_kubernetes_workers_mounting_state_roots",
@@ -151,3 +160,33 @@ async def test_failed_retirement_keeps_retrying_in_the_background_until_it_succe
     assert attempts == [0, 1]
     assert legacy_worker_retirement_pending() is None
     assert [entry["log_level"] for entry in logs if entry["log_level"] in {"error", "warning"}] == ["error", "warning"]
+
+
+@pytest.mark.asyncio
+async def test_link_check_warning_lists_workers_stopped_by_an_earlier_failed_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker stopped by a pass that then failed is still named when retirement finally completes."""
+    passes: list[int] = []
+
+    def stop_then_time_out(_paths: RuntimePaths, *, stopped: set[str]) -> None:
+        passes.append(len(passes))
+        if len(passes) == 1:
+            stopped.add("old-worker")
+            message = "Kubernetes worker pods did not stop within 60s: old-worker"
+            raise WorkerBackendError(message)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.stop_kubernetes_workers_mounting_state_roots",
+        stop_then_time_out,
+    )
+    monkeypatch.setattr(legacy_state_root_mounts, "_RETRY_DELAYS_SECONDS", (0.0,))
+
+    with capture_logs() as logs:
+        await retire_state_root_worker_mounts(_runtime_paths(tmp_path, "kubernetes"))
+        await wait_for_background_tasks(timeout=5)
+
+    assert passes == [0, 1]
+    [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warning["workers"] == ["old-worker"]

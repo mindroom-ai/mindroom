@@ -28,6 +28,8 @@ logger = get_logger(__name__)
 
 _RETRY_DELAYS_SECONDS = (10.0, 30.0, 120.0, 300.0)
 _pending: dict[str, str] = {}
+# Workers stopped by any pass, including ones that then failed, named once retirement completes.
+_stopped: set[str] = set()
 
 
 def legacy_worker_retirement_pending() -> str | None:
@@ -35,10 +37,11 @@ def legacy_worker_retirement_pending() -> str | None:
     return _pending.get("detail")
 
 
-async def retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> None:
-    """Stop workers that still mount state roots, retrying in the background until none remain."""
-    if not await run_blocking_until_complete(_retire_state_root_worker_mounts, runtime_paths):
-        create_background_task(_retry_retirement(runtime_paths), name="retire_state_root_worker_mounts")
+async def retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> tuple[asyncio.Task[None], ...]:
+    """Stop workers that still mount state roots, returning any retry task the caller cancels at shutdown."""
+    if await run_blocking_until_complete(_retire_state_root_worker_mounts, runtime_paths):
+        return ()
+    return (create_background_task(_retry_retirement(runtime_paths), name="retire_state_root_worker_mounts"),)
 
 
 async def _retry_retirement(runtime_paths: RuntimePaths) -> None:
@@ -59,21 +62,22 @@ def _retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> bool:
         if backend_name == "docker":
             from mindroom.workers.backends import docker  # noqa: PLC0415
 
-            stopped = docker.remove_docker_workers_mounting_state_roots(runtime_paths)
+            docker.remove_docker_workers_mounting_state_roots(runtime_paths, stopped=_stopped)
         else:
             from mindroom.workers.backends import kubernetes  # noqa: PLC0415
 
-            stopped = kubernetes.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+            kubernetes.stop_kubernetes_workers_mounting_state_roots(runtime_paths, stopped=_stopped)
     except Exception as exc:
         _pending["detail"] = f"Retrying retirement of sandbox workers that mount whole state roots: {exc}"
         logger.exception("Could not stop sandbox workers that mount whole state roots; retrying", backend=backend_name)
         return False
     _pending.pop("detail", None)
-    if stopped:
+    if _stopped:
         logger.warning(
             "Stopped sandbox workers that mounted whole agent state roots; "
             "check agent state roots for links they may have planted, as the migration guide describes",
             backend=backend_name,
-            workers=list(stopped),
+            workers=sorted(_stopped),
         )
+        _stopped.clear()
     return True

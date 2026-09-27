@@ -948,12 +948,11 @@ class KubernetesResourceManager:
     # Handling: scale each such running Deployment to zero, as idle cleanup does, and wait for its pods to exit; the
     #   next ensure or idle reconciliation recreates it from the current template. Scaled-down Deployments stay.
     # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots.
-    def stop_workers_mounting_state_roots(self, *, now: float) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    def stop_workers_mounting_state_roots(self, *, now: float, stopped: set[str]) -> tuple[str, ...]:
         """Scale to zero every running worker whose pod template this release did not write.
 
-        Returns the workers stopped now and every such worker, including ones already at zero.
+        Adds each worker it stops to ``stopped`` and returns every such worker, including ones already at zero.
         """
-        stopped: list[str] = []
         legacy: list[str] = []
         failed: list[str] = []
         for deployment in self.list_deployments(request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS):
@@ -990,11 +989,11 @@ class KubernetesResourceManager:
                 )
                 failed.append(deployment.metadata.name)
                 continue
-            stopped.append(deployment.metadata.name)
+            stopped.add(deployment.metadata.name)
         if failed:
-            msg = f"Could not stop workers that mount whole state roots: {', '.join(failed)}; stopped {stopped}"
+            msg = f"Could not stop workers that mount whole state roots: {', '.join(failed)}"
             raise WorkerBackendError(msg)
-        return tuple(stopped), tuple(legacy)
+        return tuple(legacy)
 
     def wait_for_worker_pods_absent(self, worker_ids: Collection[str], *, timeout_seconds: float) -> None:
         """Poll until no Pod of these workers remains, such as after scaling them to zero."""
