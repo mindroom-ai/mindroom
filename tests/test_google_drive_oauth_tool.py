@@ -178,7 +178,7 @@ def _google_drive_download_tool(
     download_dir: Path | None = None,
 ) -> tuple[GoogleDriveTools, _FakeDriveService]:
     monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path, storage_path=tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
@@ -200,7 +200,7 @@ def _google_drive_write_tool(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     tool = GoogleDriveTools(
-        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path, storage_path=tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
@@ -216,9 +216,10 @@ def _runtime_paths_with_google_drive_client(
     process_env: dict[str, str] | None = None,
     *,
     redirect_uri: str | None = None,
+    storage_path: Path | None = None,
 ) -> constants.RuntimePaths:
     runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
+        storage_path=storage_path or tmp_path / "mindroom_data",
         process_env=process_env or {},
     )
     credentials = {

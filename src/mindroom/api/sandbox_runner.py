@@ -1764,8 +1764,13 @@ async def view_file_in_worker(
 
 
 def _view_file_result_envelope(path: str, workspace: Path, file_access: FileAccess) -> dict[str, object]:
-    """Read, decode, and encode one image outside the runner event loop."""
-    return encode_media_result(view_agent_image(path, workspace=workspace, file_access=file_access))
+    """Read, decode, and encode one image outside the runner event loop.
+
+    A worker sees only its own mounts, so its workspace is its trusted root.
+    """
+    return encode_media_result(
+        view_agent_image(path, workspace=workspace, storage_root=workspace, file_access=file_access),
+    )
 
 
 async def _execute_worker_browser(

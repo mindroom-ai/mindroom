@@ -991,19 +991,36 @@ async def test_attachments_tool_register_attachment_resolves_relative_paths_from
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_register_attachment_accepts_workspace_below_linked_ancestor(tmp_path: Path) -> None:
-    """A configured workspace reached through a linked ancestor directory still registers relative files."""
+async def test_attachments_tool_register_attachment_accepts_workspace_below_linked_storage_root(tmp_path: Path) -> None:
+    """A storage root reached through a link still registers relative files from the workspace below it."""
     real_storage = tmp_path / "real"
     (real_storage / "workspace" / "scratch").mkdir(parents=True)
     (real_storage / "workspace" / "scratch" / "generated.txt").write_text("artifact", encoding="utf-8")
     (tmp_path / "linked").symlink_to(real_storage)
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path / "linked" / "workspace")
+    context = _tool_context(tmp_path / "linked")
+    assert context.runtime_paths.storage_root == real_storage
+    tool = AttachmentTools(tool_output_workspace_root=context.runtime_paths.storage_root / "workspace")
 
-    with tool_runtime_context(_tool_context(tmp_path)):
+    with tool_runtime_context(context):
         payload = json.loads(await tool.register_attachment("scratch/../scratch/generated.txt"))
 
     assert payload["status"] == "ok"
     assert Path(payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_refuses_workspace_below_a_link_in_storage(tmp_path: Path) -> None:
+    """A workspace reached through a link below the storage root is refused, since workers can plant such links."""
+    real_storage = tmp_path / "real"
+    (real_storage / "workspace").mkdir(parents=True)
+    (real_storage / "workspace" / "generated.txt").write_text("artifact", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(real_storage)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path / "linked" / "workspace")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment("generated.txt"))
+
+    assert payload["status"] == "error"
 
 
 @pytest.mark.asyncio

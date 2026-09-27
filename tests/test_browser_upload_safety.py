@@ -38,10 +38,11 @@ def _upload_tool(
     *,
     workspace_root: Path | None = None,
     file_access: FileAccess = "workspace",
+    storage_path: Path | None = None,
 ) -> tuple[BrowserTools, AsyncMock, Path]:
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
+        storage_path=storage_path or tmp_path / "storage",
         process_env={},
     )
     root = runtime_paths.storage_root / "browser"

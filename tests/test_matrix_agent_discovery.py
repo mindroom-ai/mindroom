@@ -14,6 +14,7 @@ from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.constants import runtime_paths_with_storage_root
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -39,7 +40,8 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.fixture
 def context(tmp_path: Path) -> ToolRuntimeContext:
     """Build an ad-hoc room with allowed, forbidden, and absent configured agents."""
-    paths = test_runtime_paths(tmp_path)
+    # Workspaces in these tests sit at the storage root, where the primary anchors path reads.
+    paths = runtime_paths_with_storage_root(test_runtime_paths(tmp_path), tmp_path)
     config = Config(
         agents={
             name: AgentConfig(

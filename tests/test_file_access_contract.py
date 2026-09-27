@@ -100,13 +100,18 @@ async def _send_attachment_path(
 
 
 async def _view_file(
-    _tmp_path: Path,
+    tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    result = media_delivery_module.view_agent_image(raw_path, workspace=workspace, file_access=file_access)
+    result = media_delivery_module.view_agent_image(
+        raw_path,
+        workspace=workspace,
+        storage_root=tmp_path,
+        file_access=file_access,
+    )
     return bool(result.images)
 
 
@@ -120,7 +125,13 @@ async def _stage_gmail_attachment(
     staging = tmp_path / "gmail-staging"
     staging.mkdir(exist_ok=True)
     try:
-        staged = gmail_module._stage_attachments(workspace, [raw_path], staging, file_access=file_access)
+        staged = gmail_module._stage_attachments(
+            workspace,
+            [raw_path],
+            staging,
+            storage_root=tmp_path,
+            file_access=file_access,
+        )
     except ValueError:
         return False
     return [Path(path).read_bytes() for path in staged] == [_PNG]
@@ -135,7 +146,7 @@ async def _upload_to_google_drive(
 ) -> bool:
     monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseUpload", _FakeMediaIoBaseUpload)
     tool = GoogleDriveTools(
-        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path, storage_path=tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
         tool_output_workspace_root=workspace,
@@ -157,7 +168,13 @@ async def _upload_in_browser(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace, file_access=file_access)
+    tool, consumer, _root = _upload_tool(
+        tmp_path,
+        monkeypatch,
+        workspace_root=workspace,
+        file_access=file_access,
+        storage_path=tmp_path,
+    )
     consumed = _capture_uploads(consumer)
     try:
         await _upload(tool, [raw_path])
@@ -169,14 +186,19 @@ async def _upload_in_browser(
 
 
 async def _upload_to_e2b(
-    _tmp_path: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
     monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
-    tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    tool = MindRoomE2BTools(
+        api_key="test",
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        tool_output_workspace_root=workspace,
+        file_access=file_access,
+    )
     assert isinstance(tool.sandbox, _FakeSandbox)
     tool.upload_file(raw_path, "upload.bin")
     return tool.sandbox.files.stored.get("upload.bin") == _PNG
@@ -319,3 +341,31 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
     monkeypatch.setattr(probe.resolver_module, "resolve_agent_file", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", _LINK_DEFENDING_PROBES, ids=_probe_id)
+async def test_workspace_ancestor_swapped_for_link_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: _ToolProbe,
+) -> None:
+    """Worker code that swaps a directory above its workspace for a link to another tenant's is never followed."""
+    agent_root = tmp_path / "agent"
+    victim_root = tmp_path / "victim"
+    for root in (agent_root, victim_root):
+        (root / "workspace").mkdir(parents=True)
+        (root / "workspace" / "doc.png").write_bytes(_PNG)
+        (root / "workspace" / "doc.txt").write_text(_TEXT)
+    assert probe.resolver_module is not None
+    resolve = probe.resolver_module.resolve_agent_file
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> object:
+        authorized = resolve(*args, **kwargs)
+        agent_root.rename(tmp_path / "agent-moved")
+        agent_root.symlink_to(victim_root, target_is_directory=True)
+        return authorized
+
+    monkeypatch.setattr(probe.resolver_module, "resolve_agent_file", resolve_then_swap)
+
+    assert not await probe.read(tmp_path, monkeypatch, agent_root / "workspace", "workspace", probe.filename)

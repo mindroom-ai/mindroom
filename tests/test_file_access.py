@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
-from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -21,8 +20,15 @@ def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp
     report = workspace / "docs" / "report.pdf"
     report.write_bytes(b"pdf")
     for raw in ("docs/report.pdf", str(report)):
-        authorized = resolve_agent_file(raw, workspace_root=workspace, file_access="workspace", field_name="attachment")
+        authorized = resolve_agent_file(
+            raw,
+            workspace_root=workspace,
+            storage_root=tmp_path,
+            file_access="workspace",
+            field_name="attachment",
+        )
         assert authorized == AuthorizedFile(
+            anchor=tmp_path,
             root=workspace,
             relative=Path("docs/report.pdf"),
             display_path=str(report.resolve()),
@@ -39,6 +45,7 @@ def test_workspace_mode_accepts_symlinks_that_stay_inside_workspace(tmp_path: Pa
     authorized = resolve_agent_file(
         "alias.txt",
         workspace_root=workspace,
+        storage_root=tmp_path,
         file_access="workspace",
         field_name="attachment",
     )
@@ -54,7 +61,13 @@ def test_workspace_mode_rejects_paths_outside_workspace_and_escaping_symlinks(tm
     (workspace / "link.txt").symlink_to(secret)
     for raw in (str(secret), "../secret.txt", "link.txt"):
         with pytest.raises(ValueError, match="attachment"):
-            resolve_agent_file(raw, workspace_root=workspace, file_access="workspace", field_name="attachment")
+            resolve_agent_file(
+                raw,
+                workspace_root=workspace,
+                storage_root=tmp_path,
+                file_access="workspace",
+                field_name="attachment",
+            )
 
 
 def test_workspace_mode_without_workspace_refuses_paths(tmp_path: Path) -> None:
@@ -62,7 +75,13 @@ def test_workspace_mode_without_workspace_refuses_paths(tmp_path: Path) -> None:
     target = tmp_path / "a.txt"
     target.write_text("a")
     with pytest.raises(ValueError, match="workspace"):
-        resolve_agent_file(str(target), workspace_root=None, file_access="workspace", field_name="attachment")
+        resolve_agent_file(
+            str(target),
+            workspace_root=None,
+            storage_root=tmp_path,
+            file_access="workspace",
+            field_name="attachment",
+        )
 
 
 def test_unrestricted_mode_accepts_any_existing_regular_file(tmp_path: Path) -> None:
@@ -74,6 +93,7 @@ def test_unrestricted_mode_accepts_any_existing_regular_file(tmp_path: Path) -> 
     authorized = resolve_agent_file(
         str(outside),
         workspace_root=workspace,
+        storage_root=tmp_path,
         file_access="unrestricted",
         field_name="attachment",
     )
@@ -82,6 +102,7 @@ def test_unrestricted_mode_accepts_any_existing_regular_file(tmp_path: Path) -> 
     no_workspace = resolve_agent_file(
         str(outside),
         workspace_root=None,
+        storage_root=tmp_path,
         file_access="unrestricted",
         field_name="attachment",
     )
@@ -96,6 +117,7 @@ def test_unrestricted_mode_resolves_relative_paths_against_workspace(tmp_path: P
     authorized = resolve_agent_file(
         "a.txt",
         workspace_root=workspace,
+        storage_root=tmp_path,
         file_access="unrestricted",
         field_name="attachment",
     )
@@ -109,6 +131,7 @@ def test_unrestricted_mode_expands_home(tmp_path: Path, monkeypatch: pytest.Monk
     authorized = resolve_agent_file(
         "~/notes.txt",
         workspace_root=None,
+        storage_root=tmp_path,
         file_access="unrestricted",
         field_name="attachment",
     )
@@ -122,7 +145,13 @@ def test_both_modes_reject_missing_files_and_directories(tmp_path: Path) -> None
     for mode in ("workspace", "unrestricted"):
         for raw in ("missing.txt", "dir"):
             with pytest.raises(ValueError, match="attachment"):
-                resolve_agent_file(raw, workspace_root=workspace, file_access=mode, field_name="attachment")
+                resolve_agent_file(
+                    raw,
+                    workspace_root=workspace,
+                    storage_root=tmp_path,
+                    file_access=mode,
+                    field_name="attachment",
+                )
 
 
 def test_both_modes_reject_unknown_home_directories_as_value_errors(tmp_path: Path) -> None:
@@ -132,6 +161,7 @@ def test_both_modes_reject_unknown_home_directories_as_value_errors(tmp_path: Pa
             resolve_agent_file(
                 "~mindroom-no-such-user/.env",
                 workspace_root=tmp_path,
+                storage_root=tmp_path,
                 file_access=mode,
                 field_name="attachment",
             )
@@ -144,21 +174,32 @@ def test_workspace_root_replaced_by_link_is_refused_at_open(tmp_path: Path) -> N
     (outside / "secret.txt").write_text("secret")
     workspace = tmp_path / "ws"
     workspace.symlink_to(outside, target_is_directory=True)
-    authorized = resolve_agent_file("secret.txt", workspace_root=workspace, file_access="workspace", field_name="f")
+    authorized = resolve_agent_file(
+        "secret.txt",
+        workspace_root=workspace,
+        storage_root=tmp_path,
+        file_access="workspace",
+        field_name="f",
+    )
     assert authorized.root == workspace
-    with pytest.raises(OSError, match=r"symbolic links|Not a directory"):  # noqa: SIM117
-        with open_regular_file_within_root(authorized.root, authorized.relative):
-            pass
+    with pytest.raises(OSError, match=r"symbolic links|Not a directory"), authorized.open():
+        pytest.fail("replaced workspace root admitted")
 
 
 def test_unrestricted_mode_opens_from_the_filesystem_anchor(tmp_path: Path) -> None:
     """Unrestricted files open through a no-follow walk from the anchor of their canonical path."""
     target = tmp_path / "notes.txt"
     target.write_text("n")
-    authorized = resolve_agent_file(str(target), workspace_root=None, file_access="unrestricted", field_name="f")
-    assert authorized.root == Path(target.resolve().anchor)
-    with open_regular_file_within_root(authorized.root, authorized.relative) as descriptor:
-        assert descriptor >= 0
+    authorized = resolve_agent_file(
+        str(target),
+        workspace_root=None,
+        storage_root=tmp_path,
+        file_access="unrestricted",
+        field_name="f",
+    )
+    assert authorized.root == authorized.anchor == Path(target.resolve().anchor)
+    with authorized.open() as file:
+        assert file.read() == b"n"
 
 
 @pytest.mark.parametrize("mode", ["workspace", "unrestricted"])
@@ -168,4 +209,50 @@ def test_symlink_loops_are_reported_as_value_errors(tmp_path: Path, mode: FileAc
     workspace.mkdir()
     (workspace / "loop").symlink_to(workspace / "loop")
     with pytest.raises(ValueError, match="attachment"):
-        resolve_agent_file("loop", workspace_root=workspace, file_access=mode, field_name="attachment")
+        resolve_agent_file(
+            "loop",
+            workspace_root=workspace,
+            storage_root=tmp_path,
+            file_access=mode,
+            field_name="attachment",
+        )
+
+
+@pytest.mark.parametrize("ancestor", ["agent", "workspace"])
+def test_workspace_ancestor_replaced_by_link_is_refused_at_open(tmp_path: Path, ancestor: str) -> None:
+    """A link swapped in for any directory between the storage root and the workspace is never followed."""
+    workspace = tmp_path / "private_instances" / "mallory" / "general" / "workspace"
+    victim = tmp_path / "private_instances" / "alice" / "general" / "workspace"
+    for root in (workspace, victim):
+        root.mkdir(parents=True)
+        (root / "notes.txt").write_text(f"{root.parts[-3]} notes")
+    authorized = resolve_agent_file(
+        "notes.txt",
+        workspace_root=workspace,
+        storage_root=tmp_path,
+        file_access="workspace",
+        field_name="f",
+    )
+    swapped = workspace.parent if ancestor == "agent" else workspace
+    swapped.rename(swapped.with_name(f"{swapped.name}-moved"))
+    swapped.symlink_to(victim.parent if ancestor == "agent" else victim, target_is_directory=True)
+
+    with pytest.raises(OSError, match=r"symbolic links|Not a directory"), authorized.open():
+        pytest.fail("replaced ancestor admitted")
+
+
+def test_workspace_outside_the_storage_root_is_refused(tmp_path: Path) -> None:
+    """A workspace that does not lie below its trusted storage root fails closed."""
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("n")
+    with pytest.raises(ValueError, match="trusted root"):
+        resolve_agent_file(
+            "notes.txt",
+            workspace_root=workspace,
+            storage_root=storage,
+            file_access="workspace",
+            field_name="f",
+        )

@@ -35,7 +35,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.path_confinement import (
-    open_directory_within_root,
+    open_directory_below_root,
     resolve_path_within_root,
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
@@ -274,6 +274,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         return resolve_agent_file(
             local_path,
             workspace_root=self._workspace_root,
+            storage_root=self._runtime_paths.storage_root,
             file_access=self._file_access,
             field_name="Google Drive local_path",
         )
@@ -541,7 +542,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                     {"error": "Google Drive download target escapes the download directory", "file": metadata},
                 )
             with (
-                open_directory_within_root(self._workspace_root, "google-drive-downloads", create=True) as directory_fd,
+                open_directory_below_root(
+                    self._runtime_paths.storage_root,
+                    path.parent,
+                    create=True,
+                ) as directory_fd,
                 atomic_write_file_at(directory_fd, path.name) as file_handle,
             ):
                 if target_mime:

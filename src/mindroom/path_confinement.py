@@ -3,6 +3,12 @@
 Resolution checks a pathname at one instant; it does not authorize a later open.
 Use the descriptor helpers for local I/O that must reject links swapped after
 validation. Roots are trusted caller inputs, not discovered or authorized here.
+
+The ``*_within_root`` helpers open their root by path, so they also trust every
+ancestor of that root. Sandbox workers can replace directories inside the
+storage they mount writable, which includes the ancestors of agent workspaces,
+so primary-process I/O there uses the ``*_below_root`` helpers anchored at the
+runtime storage root: they walk from that root without following any link.
 """
 
 from __future__ import annotations
@@ -146,3 +152,48 @@ def open_regular_file_within_root(
             yield descriptor
         finally:
             os.close(descriptor)
+
+
+def relative_to_trusted_root(root: Path, path: Path) -> Path:
+    """Return ``path`` relative to the trusted ``root``, refusing any path not lexically below it.
+
+    ``path`` must be absolute, spelled below ``root`` exactly as given, and free of
+    ``..``. Neither is resolved: callers pass a canonical root, and a link met
+    between it and ``path`` is left for the no-follow walk to refuse.
+    """
+    base = root.expanduser()
+    if path.is_absolute() and path.is_relative_to(base):
+        relative = path.relative_to(base)
+        if ".." not in relative.parts:
+            return relative
+    message = "Path must stay within its trusted root."
+    raise ValueError(message)
+
+
+@contextmanager
+def open_directory_below_root(
+    root: Path,
+    path: Path,
+    *,
+    create: bool = False,
+    mode: int = 0o777,
+) -> Iterator[int]:
+    """Pin ``path`` by a no-follow walk from the trusted ``root``, refusing any link at or below it.
+
+    Only the ancestors of ``root`` are trusted. With ``create``, a missing trusted
+    root is created by path and every directory below it relative to its pinned
+    parent, never through a path-based ``mkdir``.
+    """
+    relative = relative_to_trusted_root(root, path)
+    if create:
+        root.expanduser().mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(root.expanduser(), relative, create=create, mode=mode) as directory:
+        yield directory
+
+
+@contextmanager
+def open_regular_file_below_root(root: Path, path: Path) -> Iterator[int]:
+    """Open the regular file at ``path`` for reading by a no-follow walk from the trusted ``root``."""
+    relative = relative_to_trusted_root(root, path)
+    with open_regular_file_within_root(root.expanduser(), relative) as descriptor:
+        yield descriptor

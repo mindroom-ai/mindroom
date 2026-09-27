@@ -1955,9 +1955,11 @@ class BrowserTools(Toolkit):
         the rest of the runtime storage root with its credentials, keys, and state.
         """
         if self._worker_workspace is not None:
+            # A worker sees only its own mounts, so its workspace is its trusted root.
             return resolve_agent_file(
                 path,
                 workspace_root=self._worker_workspace,
+                storage_root=self._worker_workspace,
                 file_access=self._file_access,
                 field_name="upload path",
             )
@@ -1970,12 +1972,14 @@ class BrowserTools(Toolkit):
                 return resolve_agent_file(
                     path,
                     workspace_root=artifact_dir,
+                    storage_root=artifact_dir,
                     file_access="workspace",
                     field_name="upload path",
                 )
         return resolve_agent_file(
             path,
             workspace_root=self._workspace_root,
+            storage_root=self._runtime_paths.storage_root,
             file_access=self._file_access,
             field_name="upload path",
         )
@@ -1992,7 +1996,12 @@ class BrowserTools(Toolkit):
             raise ValueError(error or f"Attachment is unavailable: {attachment_id}")
         # Records store canonical paths, so walk every component without following links.
         anchor = Path(local_path.anchor)
-        return AuthorizedFile(root=anchor, relative=local_path.relative_to(anchor), display_path=str(local_path))
+        return AuthorizedFile(
+            anchor=anchor,
+            root=anchor,
+            relative=local_path.relative_to(anchor),
+            display_path=str(local_path),
+        )
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

@@ -94,6 +94,14 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workspaces import _copy_workspace_template
 from tests.identity_helpers import persist_entity_accounts
+from tests.storage_swap_support import (
+    PRIVATE_AGENT,
+    SHARED_AGENT,
+    VICTIM_NOTE,
+    SwappedAncestor,
+    private_layout,
+    replace_with_link,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2957,6 +2965,57 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
 
     assert len(loaded) == 1
     assert loaded[0].body == "config"
+
+
+@pytest.mark.parametrize("ancestor", ["agent", "workspace"])
+def test_load_context_files_refuses_a_replaced_private_ancestor(tmp_path: Path, ancestor: SwappedAncestor) -> None:
+    """A worker that swaps its agent or workspace directory cannot inject another requester's context file."""
+    layout = private_layout(tmp_path, victim_files={"SOUL.md": VICTIM_NOTE})
+    context_file = layout.attacker_workspace / "SOUL.md"
+    context_file.write_text("attacker soul\n", encoding="utf-8")
+    layout.swap(ancestor)
+
+    loaded = _load_context_files(
+        [context_file],
+        layout.runtime_paths,
+        agent_name=PRIVATE_AGENT,
+        storage_path=layout.runtime_paths.storage_root,
+    )
+
+    assert all(VICTIM_NOTE not in chunk.body for chunk in loaded)
+    assert loaded == []
+
+
+def test_load_context_files_refuses_a_replaced_shared_workspace(tmp_path: Path) -> None:
+    """A shared agent's worker cannot point its workspace at a private instance's context files."""
+    layout = private_layout(tmp_path, victim_files={"SOUL.md": VICTIM_NOTE})
+    storage_root = layout.runtime_paths.storage_root
+    shared_workspace = agent_workspace_root_path(storage_root, SHARED_AGENT)
+    shared_workspace.mkdir(parents=True)
+    replace_with_link(shared_workspace, layout.victim_workspace)
+
+    loaded = _load_context_files(["SOUL.md"], layout.runtime_paths, agent_name=SHARED_AGENT, storage_path=storage_root)
+
+    assert all(VICTIM_NOTE not in chunk.body for chunk in loaded)
+    assert loaded == []
+
+
+def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> None:
+    """Links that stay inside the workspace still load, under the workspace's own spelling."""
+    runtime_paths = _runtime_paths(tmp_path)
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "docs" / "soul.md").write_text("Linked soul.\n", encoding="utf-8")
+    (workspace / "SOUL.md").symlink_to("docs/soul.md")
+
+    loaded = _load_context_files(
+        ["SOUL.md"],
+        runtime_paths,
+        agent_name="general",
+        storage_path=runtime_paths.storage_root,
+    )
+
+    assert [(chunk.title, chunk.body) for chunk in loaded] == [(str(workspace / "docs" / "soul.md"), "Linked soul.")]
 
 
 @patch("mindroom.agent_storage._ConversationSqliteDb")

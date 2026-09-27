@@ -22,6 +22,7 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_VISIBLE_BODY_KEY,
+    runtime_paths_with_storage_root,
 )
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
@@ -104,7 +105,8 @@ def _make_context(
             bot_accounts=bot_accounts or [],
             mindroom_user=mindroom_user,
         ),
-        test_runtime_paths(runtime_root),
+        # Workspaces in these tests sit at the storage root, where the primary anchors path reads.
+        runtime_paths_with_storage_root(test_runtime_paths(runtime_root), runtime_root),
     )
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     room = nio.MatrixRoom(room_id, client.user_id)

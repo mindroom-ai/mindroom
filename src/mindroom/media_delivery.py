@@ -133,8 +133,11 @@ def _read_authorized_image(authorized: AuthorizedFile) -> bytes:
         return file.read(MAX_SOURCE_BYTES + 1)
 
 
-def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolResult:
-    """Read one regular image under the agent's file access, resolving relative paths from the workspace."""
+def view_agent_image(path: str, *, workspace: Path | None, storage_root: Path, file_access: FileAccess) -> ToolResult:
+    """Read one regular image under the agent's file access, resolving relative paths from the workspace.
+
+    ``storage_root`` is the trusted root above the workspace that the read walks from.
+    """
     metadata: dict[str, object] = {"path": path}
     if not isinstance(path, str) or not path.strip():
         return media_error("path must be a non-empty string.", metadata=metadata)
@@ -144,6 +147,7 @@ def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAcce
         authorized = resolve_agent_file(
             path,
             workspace_root=workspace,
+            storage_root=storage_root,
             file_access=file_access,
             field_name="Image path",
         )

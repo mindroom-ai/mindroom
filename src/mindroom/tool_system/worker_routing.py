@@ -785,11 +785,14 @@ def _resolve_agent_workspace_target(relative_path: Path, *, agent_root: Path) ->
     candidate = (agent_root / relative_path).resolve()
     resolved_root = agent_root.resolve()
     try:
-        candidate.relative_to(resolved_root)
+        canonical_relative = candidate.relative_to(resolved_root)
     except ValueError as exc:
         msg = f"Agent-owned paths must stay within {resolved_root}: {relative_path}"
         raise ValueError(msg) from exc
-    return candidate
+    # Keep the root's own spelling: sandbox workers can replace the workspace
+    # directory, and an anchored open then refuses the link instead of the
+    # returned path naming wherever it pointed.
+    return agent_root / canonical_relative
 
 
 def resolve_agent_owned_path(
@@ -805,7 +808,7 @@ def resolve_agent_owned_path(
     files are authoritative.
     """
     relative_target = agent_workspace_relative_path(path_text)
-    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
+    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name)
     return _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
 
 

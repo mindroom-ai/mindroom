@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -29,6 +30,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
+from mindroom.path_confinement import open_regular_file_below_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -237,11 +239,18 @@ def _load_context_files(
     agent_name: str | None = None,
     storage_path: Path | None = None,
 ) -> list[_AdditionalContextChunk]:
-    """Load configured context files."""
+    """Load configured context files.
+
+    Workspace files sit in storage that sandbox workers can write, so they are
+    read by a no-follow walk from the storage root; config-relative files are
+    operator-owned and read by path.
+    """
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
+        storage_root: Path | None = None
         if isinstance(raw_path, Path):
             resolved_path = raw_path
+            storage_root = runtime_paths.storage_root
         elif raw_path.startswith(_PROJECTED_WORKER_ASSET_PATH_PREFIXES):
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         elif agent_name is not None and storage_path is not None:
@@ -250,26 +259,42 @@ def _load_context_files(
                 agent_name=agent_name,
                 base_storage_path=storage_path,
             )
+            storage_root = storage_path
         else:
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
-        if resolved_path.is_file():
-            body = _read_context_file(resolved_path)
-            loaded_parts.append(
-                # The title is the full path so the rendered prompt tells the
-                # model exactly which file on disk each part came from.
-                _AdditionalContextChunk(
-                    title=str(resolved_path),
-                    body=body,
-                ),
-            )
-        else:
+        body = _read_context_file(resolved_path, storage_root=storage_root)
+        if body is None:
             logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
+            continue
+        loaded_parts.append(
+            # The title is the full path so the rendered prompt tells the
+            # model exactly which file on disk each part came from.
+            _AdditionalContextChunk(
+                title=str(resolved_path),
+                body=body,
+            ),
+        )
     return loaded_parts
 
 
 @timed("system_prompt_assembly.agent_create.context_file_read")
-def _read_context_file(resolved_path: Path) -> str:
-    return resolved_path.read_text(encoding="utf-8").strip()
+def _read_context_file(resolved_path: Path, *, storage_root: Path | None) -> str | None:
+    """Return one context file's text, or ``None`` when it is not a readable regular file."""
+    if storage_root is None:
+        return resolved_path.read_text(encoding="utf-8").strip() if resolved_path.is_file() else None
+    try:
+        with (
+            open_regular_file_below_root(storage_root, resolved_path) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as file,
+        ):
+            payload = file.read()
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        # A link or non-regular entry where a workspace file belongs is refused, never followed.
+        logger.warning("context_file_refused", path=str(resolved_path), error_type=type(exc).__name__)
+        return None
+    return payload.decode("utf-8").strip()
 
 
 def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:

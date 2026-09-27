@@ -14,6 +14,7 @@ from agno.agent import Agent
 from e2b_code_interpreter.models import Execution, Result
 
 import mindroom.custom_tools.e2b as e2b_module
+from mindroom.constants import runtime_paths_with_storage_root
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -94,7 +95,11 @@ def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
     def build(workspace_root: Path | None) -> MindRoomE2BTools:
-        return MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
+        return MindRoomE2BTools(
+            api_key="test",
+            runtime_paths=runtime_paths_with_storage_root(test_runtime_paths(tmp_path / "runtime"), tmp_path),
+            tool_output_workspace_root=workspace_root,
+        )
 
     return build
 
@@ -132,7 +137,7 @@ def test_registry_injects_workspace_into_model_entrypoints(
     (workspace / "report.csv").write_text("a,b\n", encoding="utf-8")
     tool = get_tool_by_name(
         "e2b",
-        test_runtime_paths(tmp_path / "runtime"),
+        runtime_paths_with_storage_root(test_runtime_paths(tmp_path / "runtime"), tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         credential_overrides={"api_key": "test"},
         disable_sandbox_proxy=True,
@@ -313,6 +318,24 @@ def test_download_rejects_parent_swapped_to_link_after_resolution(
 
     assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", "plugins/x.py"))  # noqa: S108
     assert not (outside / "x.py").exists()
+
+
+def test_download_rejects_workspace_ancestor_swapped_to_link(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    tmp_path: Path,
+) -> None:
+    """A directory above the workspace swapped for a link to another tenant's cannot redirect a download."""
+    agent_root = tmp_path / "agent"
+    victim_root = tmp_path / "victim"
+    (agent_root / "workspace").mkdir(parents=True)
+    (victim_root / "workspace").mkdir(parents=True)
+    tool = make_tool(agent_root / "workspace")
+    _files(tool).stored["/tmp/evil.py"] = b"import os"  # noqa: S108
+    agent_root.rename(tmp_path / "agent-moved")
+    agent_root.symlink_to(victim_root, target_is_directory=True)
+
+    assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", "x.py"))  # noqa: S108
+    assert not list((victim_root / "workspace").iterdir())
 
 
 def test_png_output_path_saves_inside_workspace(

@@ -159,8 +159,9 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
     client, _workspace = view_file_client
     release = threading.Event()
 
-    def blocking_view(_path: str, *, workspace: Path, file_access: FileAccess) -> ToolResult:
+    def blocking_view(_path: str, *, workspace: Path, storage_root: Path, file_access: FileAccess) -> ToolResult:
         assert workspace.name == "workspace"
+        assert storage_root == workspace
         assert file_access == "workspace"
         release.wait(timeout=1)
         return ToolResult(content="decoded")

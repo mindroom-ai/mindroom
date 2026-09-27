@@ -63,6 +63,7 @@ def _stage_attachments(
     attachments: object,
     staging_dir: Path,
     *,
+    storage_root: Path,
     file_access: FileAccess,
 ) -> list[str]:
     """Snapshot authorized attachments through no-follow descriptors to private paths Agno can reopen.
@@ -90,6 +91,7 @@ def _stage_attachments(
             authorized = resolve_agent_file(
                 attachment,
                 workspace_root=workspace_root,
+                storage_root=storage_root,
                 file_access=file_access,
                 field_name="Gmail attachment",
             )
@@ -192,6 +194,7 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
                             self._workspace_root,
                             attachments,
                             Path(staging_dir),
+                            storage_root=self._runtime_paths.storage_root,
                             file_access=self._file_access,
                         )
                     except ValueError as exc:

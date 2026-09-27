@@ -272,18 +272,18 @@ def _register_attachment_file_path(
     authorized, path_error = _resolve_attachment_file_path(
         file_path,
         workspace_root=workspace_root,
+        storage_root=context.runtime_paths.storage_root,
         file_access=file_access,
     )
     if path_error is not None or authorized is None:
         return None, path_error
-    source_root = authorized.root
     resolved_path = authorized.root / authorized.relative
     kind, filename, mime_type = _infer_local_attachment_metadata(resolved_path)
     attachment_record = register_local_attachment(
         context.storage_path,
         resolved_path,
         kind=kind,
-        source_root=source_root,
+        source_root=authorized.anchor,
         filename=filename,
         mime_type=mime_type,
         room_id=context.room_id,
@@ -301,6 +301,7 @@ def _resolve_attachment_file_path(
     file_path: str,
     *,
     workspace_root: Path | None,
+    storage_root: Path,
     file_access: FileAccess,
 ) -> tuple[AuthorizedFile | None, str | None]:
     """Resolve one model-requested attachment file path under the agent's file access.
@@ -308,12 +309,13 @@ def _resolve_attachment_file_path(
     The path is model-supplied and reaches an open in the primary process, so
     workspace access confines it to the workspace and fails closed without one;
     only already authorized ``att_*`` IDs then remain sendable. Registration
-    copies the file below the returned root without following links.
+    copies the file from the returned anchor without following links.
     """
     try:
         authorized = resolve_agent_file(
             file_path,
             workspace_root=workspace_root,
+            storage_root=storage_root,
             file_access=file_access,
             field_name="attachment file path",
         )
@@ -512,6 +514,7 @@ class AttachmentTools(Toolkit):
             view_agent_image,
             path,
             workspace=self._tool_output_workspace_root,
+            storage_root=runtime_paths.storage_root,
             file_access=self._file_access,
         )
 

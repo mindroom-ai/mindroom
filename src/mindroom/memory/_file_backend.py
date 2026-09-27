@@ -18,7 +18,11 @@ from mindroom.constants import resolve_config_relative_path
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
-from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
+from mindroom.path_confinement import (
+    open_directory_below_root,
+    open_directory_within_root,
+    open_regular_file_within_root,
+)
 from mindroom.timing import timed
 
 from ._policy import (
@@ -59,9 +63,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The file-memory scope directory is the agent's tool workspace, so code running
-# in a sandboxed shell/python tool can plant symlinks, FIFOs and huge files in it.
-# Every access below stays descriptor-relative, refuses non-regular entries, and
-# reads under a byte cap so the primary process never resolves a planted entry.
+# in a sandboxed shell/python tool can plant symlinks, FIFOs and huge files in it,
+# and replace any directory of the worker-writable storage above it with a link.
+# Every access below walks from the trusted storage root without following links,
+# stays descriptor-relative, refuses non-regular entries, and reads under a byte
+# cap so the primary process never resolves a planted entry.
 _MAX_MEMORY_FILE_BYTES = 1 << 20
 _MAX_MEMORY_SCAN_BYTES = 16 << 20
 _MAX_MEMORY_SCAN_ENTRIES = 4096
@@ -107,28 +113,24 @@ def _tag_keyword_mode(result: MemoryResult) -> None:
     )
 
 
-def _file_memory_root(
-    storage_path: Path,
-    resolution: FileMemoryResolution,
-    config: Config,
-    *,
-    use_configured_path: bool,
-) -> Path:
-    configured_path = config.memory.file.path if use_configured_path else None
-    if configured_path:
-        return resolve_config_relative_path(
-            configured_path,
-            runtime_paths=resolution.runtime_paths,
-        )
-    return (storage_path.expanduser().resolve() / FILE_MEMORY_DEFAULT_DIRNAME).resolve()
+@dataclass(frozen=True)
+class _MemoryScope:
+    """One scope directory and the trusted root every access to it walks from.
+
+    ``path`` was resolved when the agent runtime was built and is never resolved
+    again, so a directory swapped for a link afterwards is refused by the walk.
+    """
+
+    anchor: Path
+    path: Path
 
 
 def _scope_dir_name(scope_user_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_") or "default"
 
 
-def _scope_entrypoint_path(scope_path: Path) -> Path:
-    return scope_path / FILE_MEMORY_ENTRYPOINT
+def _scope_entrypoint_path(scope: _MemoryScope) -> Path:
+    return scope.path / FILE_MEMORY_ENTRYPOINT
 
 
 def _scope_relative_markdown_path(relative_path: str) -> Path | None:
@@ -141,28 +143,23 @@ def _scope_relative_markdown_path(relative_path: str) -> Path | None:
     return candidate
 
 
-def _scope_dir(
+def _memory_scope(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-    *,
-    create: bool,
-) -> Path:
+) -> _MemoryScope:
+    storage_root = resolution.runtime_paths.storage_root
     if resolution.agent_memory_scope_path is not None:
-        scope_path = resolution.agent_memory_scope_path
-        if create:
-            scope_path.mkdir(parents=True, exist_ok=True)
-        return scope_path
+        return _MemoryScope(anchor=storage_root, path=resolution.agent_memory_scope_path)
 
-    scope_path = _file_memory_root(
-        resolution.storage_path,
-        resolution,
-        config,
-        use_configured_path=resolution.use_configured_path,
-    ) / _scope_dir_name(scope_user_id)
-    if create:
-        scope_path.mkdir(parents=True, exist_ok=True)
-    return scope_path
+    configured_path = config.memory.file.path if resolution.use_configured_path else None
+    if not configured_path:
+        memory_root = resolution.storage_path.expanduser() / FILE_MEMORY_DEFAULT_DIRNAME
+        return _MemoryScope(anchor=storage_root, path=memory_root / _scope_dir_name(scope_user_id))
+    memory_root = resolve_config_relative_path(configured_path, runtime_paths=resolution.runtime_paths)
+    # An operator root outside the storage root is outside every worker mount.
+    anchor = storage_root if memory_root.is_relative_to(storage_root) else memory_root
+    return _MemoryScope(anchor=anchor, path=memory_root / _scope_dir_name(scope_user_id))
 
 
 def _is_regular_file_at(directory_fd: int, name: str) -> bool:
@@ -273,13 +270,13 @@ def _scope_memory_file(relative_path: str, payload: _CappedPayload) -> _ScopeMem
     )
 
 
-def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_ScopeMemoryFile]:
+def _read_scope_markdown_files_at(scope_fd: int, scope: _MemoryScope) -> list[_ScopeMemoryFile]:
     files: list[_ScopeMemoryFile] = []
     skipped: list[str] = []
     budget = _MAX_MEMORY_SCAN_BYTES
     for relative_path in _scope_markdown_relative_paths(scope_fd):
         if budget <= 0:
-            logger.warning("File memory scan stopped at its byte budget", scope_path=str(scope_path))
+            logger.warning("File memory scan stopped at its byte budget", scope_path=str(scope.path))
             break
         try:
             payload = _read_scope_file_at(scope_fd, relative_path, max_bytes=min(_MAX_MEMORY_FILE_BYTES, budget))
@@ -302,12 +299,12 @@ def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_Scop
     return files
 
 
-def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemoryFile | None:
+def _read_listed_memory_file(scope: _MemoryScope, relative_path: str) -> _ScopeMemoryFile | None:
     """Read one listed non-entrypoint memory file without reading the rest of the scope."""
     if relative_path == FILE_MEMORY_ENTRYPOINT:
         return None
     try:
-        with open_directory_within_root(scope_path) as scope_fd:
+        with open_directory_below_root(scope.anchor, scope.path) as scope_fd:
             if relative_path not in _scope_markdown_relative_paths(scope_fd):
                 return None
             payload = _read_scope_file_at(scope_fd, relative_path, max_bytes=_MAX_MEMORY_FILE_BYTES)
@@ -319,17 +316,17 @@ def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemo
     return _scope_memory_file(relative_path, payload) if payload is not None else None
 
 
-def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
+def _read_scope_markdown_files(scope: _MemoryScope) -> list[_ScopeMemoryFile]:
     """Read every in-scope memory file under the per-file and per-scan byte caps."""
     try:
-        with open_directory_within_root(scope_path) as scope_fd:
-            return _read_scope_markdown_files_at(scope_fd, scope_path)
+        with open_directory_below_root(scope.anchor, scope.path) as scope_fd:
+            return _read_scope_markdown_files_at(scope_fd, scope)
     except FileNotFoundError:
         return []
     except (OSError, ValueError) as exc:
         logger.warning(
             "Skipped file memory scope that is not a usable directory",
-            scope_path=str(scope_path),
+            scope_path=str(scope.path),
             error_type=type(exc).__name__,
         )
         return []
@@ -353,10 +350,10 @@ def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
         raise ValueError(msg)
 
 
-def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
+def _write_scope_markdown_file(scope: _MemoryScope, relative_path: Path, payload: bytes) -> None:
     """Publish one memory file descriptor-relative, never through a planted entry."""
     with (
-        open_directory_within_root(scope_path) as scope_fd,
+        open_directory_below_root(scope.anchor, scope.path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
         atomic_write_bytes_at(
@@ -367,10 +364,10 @@ def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: b
         )
 
 
-def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str, *, initial_text: bytes) -> None:
-    """Append one entry line through an append-only descriptor that follows no link."""
+def _append_scope_markdown_line(scope: _MemoryScope, relative_path: Path, line: str, *, initial_text: bytes) -> None:
+    """Append one entry line through an append-only descriptor that follows no link, creating the scope."""
     with (
-        open_directory_within_root(scope_path) as scope_fd,
+        open_directory_below_root(scope.anchor, scope.path, create=True) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
         # A new file gets 0o666 less the umask, like an ordinary file write.
@@ -417,11 +414,11 @@ def _load_scope_id_entries(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> tuple[list[MemoryResult], dict[str, _ScopeMemoryFile]]:
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
+    scope = _memory_scope(scope_user_id, resolution, config)
 
     results: list[MemoryResult] = []
     id_to_file: dict[str, _ScopeMemoryFile] = {}
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in _read_scope_markdown_files(scope):
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
             match = FILE_MEMORY_ENTRY_PATTERN.match(raw_line.strip())
             if not match:
@@ -442,9 +439,9 @@ def _load_scope_id_entries(
     return results, id_to_file
 
 
-def _iter_scope_unstructured_lines(scope_path: Path) -> Iterator[tuple[str, int, str]]:
+def _iter_scope_unstructured_lines(scope: _MemoryScope) -> Iterator[tuple[str, int, str]]:
     """Yield relative paths, line numbers, and eligible snippets in file order."""
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in _read_scope_markdown_files(scope):
         if memory_file.relative_path == FILE_MEMORY_ENTRYPOINT:
             continue
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
@@ -459,13 +456,13 @@ def _load_scope_unstructured_entries(
     config: Config,
     existing_memory_text: set[str],
 ) -> list[MemoryResult]:
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    if not scope_path.exists():
+    scope = _memory_scope(scope_user_id, resolution, config)
+    if not scope.path.exists():
         return []
 
     results: list[MemoryResult] = []
     seen_memory_text = set(existing_memory_text)
-    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope_path):
+    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope):
         normalized_snippet = _normalize_memory_text_for_dedup(snippet)
         if normalized_snippet in seen_memory_text:
             continue
@@ -522,7 +519,7 @@ def _schedule_agent_semantic_refresh(
         return
     schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
-        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        root=_memory_scope(scope_user_id, resolution, config).path,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
@@ -558,7 +555,7 @@ def _append_scope_memory_entry(
     memory_id: str | None = None,
     target_relative_path: str | None = None,
 ) -> MemoryResult:
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=True)
+    scope = _memory_scope(scope_user_id, resolution, config)
     if target_relative_path is None:
         target_path = Path(FILE_MEMORY_ENTRYPOINT)
         initial_text = b"# Memory\n\n"
@@ -575,7 +572,7 @@ def _append_scope_memory_entry(
     # Appending keeps the existing bytes untouched, so a planted entry can neither
     # redirect the write nor cost the file its content; it raises instead.
     _append_scope_markdown_line(
-        scope_path,
+        scope,
         target_path,
         _format_entry_line(memory_id, content),
         initial_text=initial_text,
@@ -619,8 +616,8 @@ def _search_scope_memory_entries(
     scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     scored_entries = scored_entries[:limit]
 
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    if not scope_path.exists() or limit <= len(scored_entries):
+    scope = _memory_scope(scope_user_id, resolution, config)
+    if not scope.path.exists() or limit <= len(scored_entries):
         return scored_entries
 
     remaining_limit = limit - len(scored_entries)
@@ -633,7 +630,7 @@ def _search_scope_memory_entries(
     snippet_results = _scan_scope_memory_snippets(
         scope_user_id,
         query_tokens,
-        scope_path,
+        scope,
         existing_memory_text,
     )
 
@@ -645,11 +642,11 @@ def _search_scope_memory_entries(
 def _scan_scope_memory_snippets(
     scope_user_id: str,
     query_tokens: set[str],
-    scope_path: Path,
+    scope: _MemoryScope,
     existing_memory_text: set[str],
 ) -> list[MemoryResult]:
     snippet_results: list[MemoryResult] = []
-    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope_path):
+    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope):
         normalized_snippet = _normalize_memory_text_for_dedup(snippet)
         if normalized_snippet in existing_memory_text:
             continue
@@ -681,8 +678,8 @@ def _load_scope_path_memory_line(
 
     line_no = int(match.group("line"))
     relative_path = match.group("path")
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    memory_file = _read_listed_memory_file(scope_path, relative_path)
+    scope = _memory_scope(scope_user_id, resolution, config)
+    memory_file = _read_listed_memory_file(scope, relative_path)
     if memory_file is None:
         return None
 
@@ -771,8 +768,8 @@ def _replace_scope_memory_entry(
         return False
 
     _require_rewritable(memory_file)
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
+    scope = _memory_scope(scope_user_id, resolution, config)
+    _write_scope_markdown_file(scope, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
     return True
 
 
@@ -797,9 +794,9 @@ def _replace_scope_path_memory_entry(
         lines[path_memory_line.line_no - 1] = (
             f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
         )
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
+    scope = _memory_scope(scope_user_id, resolution, config)
     _write_scope_markdown_file(
-        scope_path,
+        scope,
         Path(path_memory_line.memory_file.relative_path),
         _memory_lines_payload(lines),
     )
@@ -813,11 +810,11 @@ def _load_scope_entrypoint_context(
     config: Config,
 ) -> MemoryEntrypointContext:
     """Load the scoped `MEMORY.md` entrypoint text and what the cap withheld."""
-    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    payload = _read_scope_entrypoint_payload(scope_path)
+    scope = _memory_scope(scope_user_id, resolution, config)
+    payload = _read_scope_entrypoint_payload(scope)
     if payload is None:
         return MemoryEntrypointContext()
-    entrypoint_path = _scope_entrypoint_path(scope_path)
+    entrypoint_path = _scope_entrypoint_path(scope)
     max_lines = config.memory.file.max_entrypoint_lines
     lines = _decode_capped_text(payload).splitlines()
     # An oversized entrypoint still reports at least one withheld line, so the
@@ -839,17 +836,17 @@ def _load_scope_entrypoint_context(
     )
 
 
-def _read_scope_entrypoint_payload(scope_path: Path) -> _CappedPayload | None:
+def _read_scope_entrypoint_payload(scope: _MemoryScope) -> _CappedPayload | None:
     """Read `MEMORY.md` for the per-turn preload, degrading instead of raising."""
     try:
-        with open_directory_within_root(scope_path) as scope_fd:
+        with open_directory_below_root(scope.anchor, scope.path) as scope_fd:
             return _read_scope_file_at(scope_fd, FILE_MEMORY_ENTRYPOINT, max_bytes=_MAX_MEMORY_FILE_BYTES)
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
         logger.warning(
             "Skipped unreadable file memory entrypoint",
-            scope_path=str(scope_path),
+            scope_path=str(scope.path),
             error_type=type(exc).__name__,
         )
         return None
@@ -1171,7 +1168,7 @@ class FileMemoryBackend:
                 results = await search_semantic_file_memories(
                     query,
                     scope_user_id=scope_user_id,
-                    root=_scope_dir(scope_user_id, agent_resolution, config, create=False),
+                    root=_memory_scope(scope_user_id, agent_resolution, config).path,
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,

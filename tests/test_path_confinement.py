@@ -6,8 +6,11 @@ from pathlib import Path
 import pytest
 
 from mindroom.path_confinement import (
+    open_directory_below_root,
     open_directory_within_root,
+    open_regular_file_below_root,
     open_regular_file_within_root,
+    relative_to_trusted_root,
     resolve_path_within_root,
 )
 
@@ -179,3 +182,80 @@ def test_failed_walk_closes_owned_descriptors(tmp_path: Path, monkeypatch: pytes
     for descriptor in descriptors:
         with pytest.raises(OSError, match="Bad file descriptor"):
             os.fstat(descriptor)
+
+
+def _replace_with_link(directory: Path, target: Path) -> None:
+    """Swap a directory for a link, as sandboxed code sharing its parent could."""
+    directory.rename(directory.with_name(f"{directory.name}-moved"))
+    directory.symlink_to(target, target_is_directory=True)
+
+
+def _swapped_private_layout(storage: Path) -> tuple[Path, Path]:
+    """Return an attacker workspace whose agent directory now links to a victim's."""
+    attacker = storage / "private_instances" / "mallory" / "general" / "workspace"
+    victim = storage / "private_instances" / "alice" / "general" / "workspace"
+    attacker.mkdir(parents=True)
+    victim.mkdir(parents=True)
+    (victim / "MEMORY.md").write_text("victim secret")
+    _replace_with_link(attacker.parent, victim.parent)
+    return attacker, victim
+
+
+def test_below_root_walk_refuses_a_replaced_ancestor(tmp_path: Path) -> None:
+    """An ancestor swapped for a link cannot redirect reads, writes, or creation."""
+    storage = tmp_path / "storage"
+    attacker, victim = _swapped_private_layout(storage)
+    # The ancestor-trusting helper follows the swapped agent directory.
+    with open_regular_file_within_root(attacker, "MEMORY.md") as descriptor:
+        assert os.read(descriptor, 64) == b"victim secret"
+
+    with (
+        pytest.raises(OSError, match=r"Too many levels|Not a directory"),
+        open_regular_file_below_root(
+            storage,
+            attacker / "MEMORY.md",
+        ),
+    ):
+        pytest.fail("swapped ancestor admitted")
+    with (
+        pytest.raises(OSError, match=r"Too many levels|Not a directory"),
+        open_directory_below_root(
+            storage,
+            attacker / "memory",
+            create=True,
+        ),
+    ):
+        pytest.fail("swapped ancestor admitted")
+    assert sorted(path.name for path in victim.iterdir()) == ["MEMORY.md"]
+
+
+@pytest.mark.parametrize("path", ["relative/path", "{outside}/file", "{storage}/agents/../escape"])
+def test_below_root_refuses_paths_outside_the_root(tmp_path: Path, path: str) -> None:
+    """Relative, outside, and traversing paths fail closed before any creation."""
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    requested = Path(path.format(outside=tmp_path / "outside", storage=storage))
+    with pytest.raises(ValueError, match="trusted root"), open_directory_below_root(storage, requested, create=True):
+        pytest.fail("path outside the root admitted")
+    with pytest.raises(ValueError, match="trusted root"), open_regular_file_below_root(storage, requested):
+        pytest.fail("path outside the root admitted")
+    assert not list(storage.iterdir())
+    assert not (tmp_path / "outside").exists()
+
+
+def test_below_root_creates_directories_and_refuses_a_linked_root(tmp_path: Path) -> None:
+    """Missing directories are created below the root, and a root that is itself a link is refused."""
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    target = storage / "agents" / "general" / "workspace"
+    assert relative_to_trusted_root(storage, target) == Path("agents/general/workspace")
+    assert relative_to_trusted_root(storage, storage) == Path()
+    with open_directory_below_root(storage, target, create=True, mode=0o700) as fd:
+        assert os.fstat(fd).st_mode & 0o777 == 0o700
+    (target / "MEMORY.md").write_text("mine")
+    with open_regular_file_below_root(storage, target / "MEMORY.md") as descriptor:
+        assert os.read(descriptor, 64) == b"mine"
+    alias = tmp_path / "alias"
+    alias.symlink_to(storage, target_is_directory=True)
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"), open_directory_below_root(alias, alias):
+        pytest.fail("linked root admitted")

@@ -41,7 +41,7 @@ from .matrix.media import (
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
-from .path_confinement import open_directory_within_root, open_regular_file_within_root
+from .path_confinement import open_directory_within_root, open_regular_file_below_root
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -688,9 +688,10 @@ def register_local_attachment(
 ) -> AttachmentRecord | None:
     """Retain a local file in primary-owned media storage and persist its metadata.
 
-    The file is opened below ``source_root`` (default: its parent) without following
-    links. The record references only the retained copy, so later reads and sends
-    never reopen a caller path that sandboxed code may be able to replace.
+    The file is opened by a no-follow walk from ``source_root`` (default: its
+    parent), a trusted root above it. The record references only the retained
+    copy, so later reads and sends never reopen a caller path that sandboxed code
+    may be able to replace.
     """
     resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
     normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
@@ -703,7 +704,7 @@ def register_local_attachment(
     try:
         media_dir = _prepare_retained_media_dir(storage_path)
         with (
-            open_regular_file_within_root(source_directory, local_path.relative_to(source_directory)) as source_fd,
+            open_regular_file_below_root(source_directory, local_path) as source_fd,
             open_directory_within_root(media_dir) as media_fd,
         ):
             size_bytes, content_sha256 = _retain_media_copy(source_fd, media_fd, media_name)

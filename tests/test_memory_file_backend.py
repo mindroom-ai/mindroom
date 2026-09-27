@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+import mindroom.memory._file_backend as file_backend
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -28,7 +29,9 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
-from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.memory._policy import build_team_user_id, resolve_file_memory_resolution
+from mindroom.memory._shared import FileMemoryResolution, MemoryNotFoundError
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
@@ -42,6 +45,17 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
+from tests.storage_swap_support import (
+    ATTACKER,
+    LINK_REFUSED,
+    PRIVATE_AGENT,
+    SHARED_AGENT,
+    VICTIM_NOTE,
+    PrivateLayout,
+    SwappedAncestor,
+    private_layout,
+    replace_with_link,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2291,3 +2305,122 @@ async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_p
         await delete_agent_memory("file:memory/2026-06-13.md:1", "general", storage_path, config)
 
     assert daily_file.read_bytes() == original
+
+
+_VICTIM_MEMORY = f"# Memory\n\n- [id=m_victim] {VICTIM_NOTE}\n"
+
+
+def _scope_resolution(
+    layout: PrivateLayout,
+    agent_name: str,
+    requester: ToolExecutionIdentity | None,
+) -> FileMemoryResolution:
+    return resolve_file_memory_resolution(
+        layout.runtime_paths.storage_root,
+        layout.config,
+        layout.runtime_paths,
+        requester,
+        agent_name=agent_name,
+    )
+
+
+@pytest.mark.parametrize("ancestor", ["agent", "workspace"])
+def test_file_memory_refuses_a_replaced_private_ancestor(tmp_path: Path, ancestor: SwappedAncestor) -> None:
+    """A worker that swaps its own agent or workspace directory cannot reach another requester's memory."""
+    layout = private_layout(tmp_path, victim_files={"MEMORY.md": _VICTIM_MEMORY, "memory/day.md": "victim note\n"})
+    resolution = _scope_resolution(layout, PRIVATE_AGENT, ATTACKER)
+    scope_user_id = agent_scope_user_id(PRIVATE_AGENT)
+    victim_before = layout.victim_files()
+    layout.swap(ancestor)
+
+    entrypoint = file_backend._load_scope_entrypoint_context(scope_user_id, resolution, layout.config)
+    entries, _ = file_backend._load_scope_id_entries(scope_user_id, resolution, layout.config)
+    unstructured = file_backend._load_scope_unstructured_entries(scope_user_id, resolution, layout.config, set())
+    found = file_backend._search_scope_memory_entries(scope_user_id, "victim", resolution, layout.config, limit=5)
+    assert VICTIM_NOTE not in entrypoint.text
+    assert entries == unstructured == found == []
+    assert not file_backend._replace_scope_memory_entry(scope_user_id, "m_victim", "gone", resolution, layout.config)
+    for target in (None, "memory/day.md", "memory/new/day.md"):
+        with pytest.raises(OSError, match=LINK_REFUSED):
+            file_backend._append_scope_memory_entry(
+                scope_user_id,
+                "attacker note",
+                resolution,
+                layout.config,
+                target_relative_path=target,
+            )
+    assert layout.victim_files() == victim_before
+
+
+def test_file_memory_rewrite_refuses_an_ancestor_swapped_after_the_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rewrite prepared from the requester's own file cannot land in another requester's scope."""
+    layout = private_layout(tmp_path, victim_files={"MEMORY.md": _VICTIM_MEMORY})
+    (layout.attacker_workspace / "MEMORY.md").write_text("# Memory\n\n- [id=m_own] own note\n", encoding="utf-8")
+    resolution = _scope_resolution(layout, PRIVATE_AGENT, ATTACKER)
+    victim_before = layout.victim_files()
+    require_rewritable = file_backend._require_rewritable
+
+    def swap_before_write(memory_file: object) -> None:
+        require_rewritable(memory_file)
+        layout.swap("agent")
+
+    monkeypatch.setattr(file_backend, "_require_rewritable", swap_before_write)
+    with pytest.raises(OSError, match=LINK_REFUSED):
+        file_backend._replace_scope_memory_entry(
+            agent_scope_user_id(PRIVATE_AGENT),
+            "m_own",
+            "attacker rewrite",
+            resolution,
+            layout.config,
+        )
+    assert layout.victim_files() == victim_before
+
+
+def test_file_memory_refuses_a_replaced_shared_workspace(tmp_path: Path) -> None:
+    """A shared agent's worker cannot point its workspace at a private instance's memory."""
+    layout = private_layout(tmp_path, victim_files={"MEMORY.md": _VICTIM_MEMORY})
+    shared_workspace = agent_workspace_root_path(layout.runtime_paths.storage_root, SHARED_AGENT)
+    resolution = _scope_resolution(layout, SHARED_AGENT, None)
+    scope_user_id = agent_scope_user_id(SHARED_AGENT)
+    shared_workspace.mkdir(parents=True)
+    victim_before = layout.victim_files()
+    replace_with_link(shared_workspace, layout.victim_workspace)
+
+    entrypoint = file_backend._load_scope_entrypoint_context(scope_user_id, resolution, layout.config)
+    entries, _ = file_backend._load_scope_id_entries(scope_user_id, resolution, layout.config)
+    assert VICTIM_NOTE not in entrypoint.text
+    assert entries == []
+    with pytest.raises(OSError, match=LINK_REFUSED):
+        file_backend._append_scope_memory_entry(scope_user_id, "attacker note", resolution, layout.config)
+    assert layout.victim_files() == victim_before
+
+
+@pytest.mark.parametrize("ancestor", ["agent", "workspace"])
+def test_team_file_memory_refuses_a_replaced_member_ancestor(tmp_path: Path, ancestor: SwappedAncestor) -> None:
+    """Team scopes stored under a member's state root are walked from the storage root too."""
+    layout = private_layout(tmp_path, victim_files={})
+    team_id = build_team_user_id([PRIVATE_AGENT, SHARED_AGENT])
+    resolution = resolve_file_memory_resolution(
+        layout.attacker.state_root,
+        layout.config,
+        layout.runtime_paths,
+        ATTACKER,
+        original_storage_path=layout.runtime_paths.storage_root,
+    )
+    victim_team_dir = layout.victim.state_root / "memory_files" / team_id
+    victim_team_dir.mkdir(parents=True)
+    (victim_team_dir / "MEMORY.md").write_text(_VICTIM_MEMORY, encoding="utf-8")
+    if ancestor == "agent":
+        layout.swap("agent")
+    else:
+        (layout.attacker.state_root / "memory_files").mkdir()
+        replace_with_link(layout.attacker.state_root / "memory_files", layout.victim.state_root / "memory_files")
+
+    entries, _ = file_backend._load_scope_id_entries(team_id, resolution, layout.config)
+    assert entries == []
+    with pytest.raises(OSError, match=LINK_REFUSED):
+        file_backend._append_scope_memory_entry(team_id, "attacker note", resolution, layout.config)
+    assert (victim_team_dir / "MEMORY.md").read_text(encoding="utf-8") == _VICTIM_MEMORY

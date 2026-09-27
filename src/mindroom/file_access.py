@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_below_root, relative_to_trusted_root, resolve_path_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,14 +23,17 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AuthorizedFile:
-    """An existing regular file whose authorization only survives a no-follow open below ``root``.
+    """An existing regular file whose authorization only survives a no-follow open from ``anchor``.
 
-    ``root`` is the caller's workspace spelling, so a workspace root replaced by a link
-    is refused, or the filesystem anchor in unrestricted mode; ``relative`` is the
-    canonical path below it. Read the file through :meth:`open`. The object carries no
-    reopenable full path on purpose: ``display_path`` is for messages and receipts only.
+    ``root`` is the caller's workspace spelling and ``relative`` the canonical path
+    below it, or both name the filesystem anchor in unrestricted mode. ``anchor`` is
+    the trusted root above ``root`` that no sandboxed code can replace, normally the
+    runtime storage root, so a workspace root or any ancestor replaced by a link is
+    refused. Read the file through :meth:`open`. The object carries no reopenable
+    full path on purpose: ``display_path`` is for messages and receipts only.
     """
 
+    anchor: Path
     root: Path
     relative: Path
     display_path: str
@@ -42,9 +45,9 @@ class AuthorizedFile:
 
     @contextmanager
     def open(self) -> Iterator[BinaryIO]:
-        """Open the file below its authorizing root without following links or blocking on a FIFO."""
+        """Open the file from its anchor without following links or blocking on a FIFO."""
         with (
-            open_regular_file_within_root(self.root, self.relative) as descriptor,
+            open_regular_file_below_root(self.anchor, self.root / self.relative) as descriptor,
             os.fdopen(descriptor, "rb", closefd=False) as file,
         ):
             yield file
@@ -61,10 +64,15 @@ def resolve_agent_file(
     raw_path: str,
     *,
     workspace_root: Path | None,
+    storage_root: Path,
     file_access: FileAccess,
     field_name: str,
 ) -> AuthorizedFile:
-    """Return the authorized file for one model-supplied path, or raise ``ValueError``."""
+    """Return the authorized file for one model-supplied path, or raise ``ValueError``.
+
+    ``storage_root`` is the trusted root the workspace lies below; a workspace
+    outside it is refused in workspace mode.
+    """
     try:
         requested = Path(raw_path).expanduser()
     except RuntimeError as exc:
@@ -80,14 +88,16 @@ def resolve_agent_file(
             detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
             msg = f"{field_name} '{raw_path}' does not exist or cannot be read: {detail}"
             raise ValueError(msg) from exc
-        root = Path(resolved.anchor)
-        canonical_root = root
+        root = anchor = canonical_root = Path(resolved.anchor)
     else:
         if workspace_root is None:
             msg = f"{field_name} '{raw_path}' requires an agent workspace; file_access is 'workspace'."
             raise ValueError(msg)
-        root = workspace_root
+        root, anchor = workspace_root, storage_root
         try:
+            # Refuse a workspace outside the storage root; the anchored open refuses any link
+            # below that root, so a replaced ancestor the resolver followed is never read.
+            relative_to_trusted_root(anchor, workspace_root)
             canonical_root = workspace_root.resolve()
             resolved = resolve_path_within_root(canonical_root, requested, symlinks="internal", strict=True)
         except (ValueError, OSError, RuntimeError) as exc:
@@ -96,4 +106,9 @@ def resolve_agent_file(
     if not resolved.is_file():
         msg = f"{field_name} '{raw_path}' is not a regular file."
         raise ValueError(msg)
-    return AuthorizedFile(root=root, relative=resolved.relative_to(canonical_root), display_path=str(resolved))
+    return AuthorizedFile(
+        anchor=anchor,
+        root=root,
+        relative=resolved.relative_to(canonical_root),
+        display_path=str(resolved),
+    )

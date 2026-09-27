@@ -809,6 +809,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.model_loading",
     "mindroom.openai_tool_search",
+    "mindroom.path_confinement",
     "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",
