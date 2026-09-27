@@ -130,9 +130,17 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
 def _strict_frontmatter(text: str) -> Any:  # noqa: ANN401
     try:
         return yaml_io.safe_load(text) or {}
-    except ValueError as exc:
-        # PyYAML refuses impossible dates such as 2026-02-30 with ValueError instead of YAMLError.
+    except Exception as exc:
+        if isinstance(exc, YAMLError):
+            raise
+        # PyYAML constructors refuse values such as 2026-02-30, `!!int ""`, or `!!bool maybe` with ValueError,
+        # IndexError, KeyError, or AttributeError; like Agno's LocalSkills, any of them makes the YAML invalid.
         raise YAMLError(str(exc)) from exc
+
+
+def _normalized_newlines(text: str) -> str:
+    """Return text with the line endings Agno's LocalSkills reads, which ``Path.read_text`` normalizes."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str, Any], str]:
@@ -140,6 +148,7 @@ def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str
 
     Ownership and edit checks need strict YAML; ``loose`` loads a skill for the agent the way Agno does.
     """
+    content = _normalized_newlines(content)
     match = FRONTMATTER_PATTERN.match(content)
     if match is None:
         return {}, content
@@ -218,6 +227,9 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
+    if os.path.lexists(skills_root / SKILL_FILENAME):
+        # LocalSkills loaded such a file as the only skill of the root, hiding every skill directory beside it.
+        logger.warning("Ignoring SKILL.md directly in the workspace skills directory", path=str(skills_root))
     return _each_skill_directory(
         skills_root,
         lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
@@ -280,7 +292,7 @@ def read_support_file(skill_path: Path, directory: str, filename: str) -> str:
     if content is None:
         msg = f"{directory}/{filename} does not exist"
         raise FileNotFoundError(msg)
-    return content
+    return _normalized_newlines(content)
 
 
 def _usage_records(root_fd: int) -> dict[str, object] | None:

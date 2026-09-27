@@ -605,31 +605,54 @@ def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("frontmatter", "description"),
+    ("frontmatter", "description", "newline"),
     [
-        ("description: Use when: deploying the app to staging\n", "Use when: deploying the app to staging"),
-        ("description: Use when deploying\nupdated: 2026-02-30\n", "Use when deploying"),
+        ("description: Use when: deploying the app to staging\n", "Use when: deploying the app to staging", "\n"),
+        ("description: Use when deploying\nupdated: 2026-02-30\n", "Use when deploying", "\n"),
+        ('description: Use when deploying\nversion: !!int ""\n', "Use when deploying", "\n"),
+        ("description: Use when deploying\nflag: !!bool maybe\n", "Use when deploying", "\n"),
+        ("description: Use when deploying\nwhen: !!timestamp soon\n", "Use when deploying", "\n"),
+        ("description: Use when deploying\n", "Use when deploying", "\r\n"),
+        ("description: Use when deploying\n", "Use when deploying", "\r"),
     ],
-    ids=["colon in a value", "impossible date"],
+    ids=["colon in a value", "impossible date", "empty int", "unknown bool", "bad timestamp", "CRLF", "CR"],
 )
 def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
     tmp_path: Path,
     frontmatter: str,
     description: str,
+    newline: str,
 ) -> None:
-    """Frontmatter that is not strict YAML falls back to key: value lines, as Agno's LocalSkills does."""
+    """Frontmatter that strict YAML refuses falls back to key: value lines, and line endings read, as in LocalSkills."""
     storage = tmp_path / "storage"
-    skill_dir = _workspace_skills(storage) / "deploy-checks"
+    root = _workspace_skills(storage)
+    skill_dir = root / "deploy-checks"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        f"---\nname: deploy-checks\n{frontmatter}---\nRun the smoke test.\n",
-        encoding="utf-8",
-    )
+    content = f"---\nname: deploy-checks\n{frontmatter}---\nRun the smoke test.\nThen check logs.\n"
+    (skill_dir / "SKILL.md").write_bytes(content.replace("\n", newline).encode())
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "notes.md").write_bytes(f"one{newline}two{newline}".encode())
+    _write_skill(root, "good", "Good")
     skills = _load(tmp_path, storage)
-    assert _skill_names(skills) == ["deploy-checks"]
+    assert _skill_names(skills) == ["deploy-checks", "good"]
     skill = skills.get_skill("deploy-checks")
     assert skill is not None
     assert skill.description == description
+    assert skill.instructions == "Run the smoke test.\nThen check logs."
+    get_reference = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference").entrypoint
+    assert json.loads(get_reference(skill_name="deploy-checks", reference_path="notes.md"))["content"] == "one\ntwo\n"
+
+
+def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:
+    """Only skills/<name>/SKILL.md loads; LocalSkills loaded skills/SKILL.md alone and hid every skill beside it."""
+    storage = tmp_path / "storage"
+    root = _workspace_skills(storage)
+    (root / "SKILL.md").write_text("---\nname: rooted\ndescription: d\n---\nbody\n", encoding="utf-8")
+    _write_skill(root, "good", "Good")
+    with capture_logs() as logs:
+        skills = _load(tmp_path, storage)
+    assert _skill_names(skills) == ["good"]
+    assert any(log["event"] == "Ignoring SKILL.md directly in the workspace skills directory" for log in logs)
 
 
 def test_workspace_skill_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:

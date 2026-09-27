@@ -1306,6 +1306,7 @@ def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
     broken.symlink_to(tmp_path / "elsewhere.md")
     (root / "binary").mkdir()
     (root / "binary" / "SKILL.md").write_bytes(b"\xff\xfe")
+    _write_skill(root, "tagged", "---\nname: tagged\ndescription: Mine\nflag: !!bool maybe\n---\nBody\n")
     with open_skills_root(root) as root_fd:
         update_skill_usage(
             root_fd,
@@ -2145,6 +2146,12 @@ _UNMET = (
         ),
         ("deploy", "---\nname: deploy-checks\ndescription: Use when: deploying\n---\nRun it.\n", [], "deploy-checks"),
         ("dated", "---\nname: dated\ndescription: Use when checking\nupdated: 2026-02-30\n---\nRun it.\n", [], "dated"),
+        (
+            "tagged",
+            "---\nname: tagged\ndescription: Use when checking\nflag: !!bool maybe\n---\nRun it.\n",
+            [],
+            "tagged",
+        ),
     ],
     ids=[
         "unmet requirements",
@@ -2156,6 +2163,7 @@ _UNMET = (
         "adopted directory",
         "loose frontmatter in an adopted directory",
         "impossible date",
+        "unknown bool",
     ],
 )
 async def test_chat_skill_manage_finds_workspace_skills_by_their_directory(

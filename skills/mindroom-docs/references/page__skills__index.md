@@ -89,6 +89,7 @@ Workspace skills are read through no-follow descriptors because worker code can 
 Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
+Each workspace skill lives in its own directory, `skills/<name>/SKILL.md`; a `SKILL.md` placed directly in `skills/` is ignored with a warning.
 
 ## Authoring skills as an agent
 
