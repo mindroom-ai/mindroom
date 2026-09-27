@@ -10,9 +10,21 @@
 """Standalone local MindRoom provisioning service.
 
 This service is designed for hosted Matrix + chat deployments where users run
-MindRoom locally. Browser users authenticate with their Matrix access token.
-Paired local MindRoom installs receive client credentials that can request
-registration tokens for agent account creation.
+MindRoom locally. Paired local MindRoom installs receive client credentials
+that can request registration tokens for agent account creation.
+
+Authentication: browser users prove their identity with a Matrix OpenID token
+in the ``X-Matrix-OpenID-Token`` header. The chat client requests it from the
+user's homeserver (``/_matrix/client/v3/user/{userId}/openid/request_token``),
+and the service resolves it through its configured homeserver's
+``/_matrix/federation/v1/openid/userinfo`` endpoint, accepting only users on
+``MATRIX_SERVER_NAME``. An OpenID token grants no account access, so the
+service never needs Matrix access tokens. It is still a short-lived bearer
+credential: until it expires, any OpenID relying party that validates tokens
+with the same homeserver (for example the MatrixRTC lk-jwt-service or an
+identity server) accepts it as proof of the user's identity.
+Browser-initiated pairing and connection management still accept access
+tokens for the currently deployed chat client; device pairing does not.
 
 Pairing flows: the service supports device-initiated pairing (CLI starts at
 ``/v1/local-mindroom/pair/device/start``, browser user approves at
@@ -48,6 +60,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -78,6 +91,7 @@ DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
 DEFAULT_APPROVE_URL = "https://chat.mindroom.chat/connect"
+OPENID_TOKEN_HEADER = "X-Matrix-OpenID-Token"  # noqa: S105
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
 RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -633,12 +647,18 @@ def _expire_if_needed(session: PairSession, now: datetime) -> None:
         session.status = "expired"
 
 
-def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime) -> None:
-    """Remove expired sessions from state to prevent unbounded growth."""
+def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_code_ttl_seconds: int) -> None:
+    """Remove sessions expired for longer than one more code lifetime to prevent unbounded growth.
+
+    Recently expired sessions stay so that an old code or poll still reports
+    "expired" (410 / ``status="expired"``) instead of "not found" after the
+    CLI renews its code.
+    """
+    retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
     expired_ids = []
     for session_id, session in state.pair_sessions.items():
         _expire_if_needed(session, now)
-        if session.status == "expired":
+        if session.status == "expired" and session.expires_at <= retain_after:
             expired_ids.append(session_id)
 
     for session_id in expired_ids:
@@ -697,6 +717,39 @@ def _require_local_client(
     if connection.revoked_at:
         raise HTTPException(status_code=403, detail=CONNECTION_REVOKED_DETAIL)
     return connection
+
+
+async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
+    url = f"{config.matrix_homeserver}/_matrix/federation/v1/openid/userinfo"
+    try:
+        async with httpx.AsyncClient(timeout=8, verify=config.matrix_ssl_verify) as client:
+            response = await client.get(url, params={"access_token": openid_token})
+    except httpx.HTTPError as exc:
+        # The token is in the request URL, which httpx errors may include, so report only the error type.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach Matrix homeserver: {type(exc).__name__}",
+        ) from None
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    errcode = payload.get("errcode") if isinstance(payload, dict) else None
+    if response.status_code in {401, 403} or errcode == "M_UNKNOWN_TOKEN":
+        raise HTTPException(status_code=401, detail="Invalid Matrix OpenID token")
+    if not response.is_success:
+        raise HTTPException(status_code=502, detail="Matrix homeserver OpenID userinfo failed")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Matrix homeserver returned invalid OpenID userinfo response")
+
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str) or not user_id.startswith("@"):
+        raise HTTPException(status_code=401, detail="Matrix OpenID token has no valid user")
+    localpart, _, server_name = user_id[1:].partition(":")
+    if not localpart or server_name != config.matrix_server_name:
+        raise HTTPException(status_code=401, detail="Matrix OpenID token belongs to another server")
+    return user_id
 
 
 async def _matrix_whoami(config: ServiceConfig, access_token: str) -> str:
@@ -791,19 +844,36 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
+async def _verify_openid_user(
+    request: Request,
+    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
+) -> str:
+    token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    return await _matrix_openid_userinfo(_service_config_from_request(request), token)
+
+
 async def _verify_browser_user(
     request: Request,
+    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header()] = None,
     x_matrix_access_token: Annotated[str | None, Header(alias="X-Matrix-Access-Token")] = None,
 ) -> str:
+    if x_matrix_openid_token and x_matrix_openid_token.strip():
+        return await _verify_openid_user(request, x_matrix_openid_token)
+
+    # LEGACY_COMPAT: browser endpoints authenticated with the user's Matrix access token
+    # Legacy format: the deployed MindRoom Chat client sends its full Matrix access token as `Authorization: Bearer` or `X-Matrix-Access-Token` to pair/start, pair/status, GET /connections, and DELETE /connections/{id}.
+    # Last legacy release: unversioned external input; the deployed chat client is not a MindRoom release, and its replacement sends `X-Matrix-OpenID-Token` instead.
+    # Handling: when no OpenID token is sent, these endpoints still resolve the access token through the homeserver's whoami endpoint; the OpenID header wins when both are sent, and device inspect/approve never accept access tokens.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_browser_endpoints_still_accept_legacy_access_token_headers, tests/test_local_mindroom_provisioning_service.py::test_openid_token_wins_over_legacy_access_token, tests/test_local_mindroom_provisioning_service.py::test_device_endpoints_reject_access_tokens.
     token = _extract_bearer_token(authorization)
     if not token and x_matrix_access_token:
         token = x_matrix_access_token.strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Missing Matrix access token")
-
-    config = _service_config_from_request(request)
-    return await _matrix_whoami(config, token)
+        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    return await _matrix_whoami(_service_config_from_request(request), token)
 
 
 def _service_config_from_request(request: Request) -> ServiceConfig:
@@ -837,7 +907,7 @@ async def start_pair(
     session_id = secrets.token_urlsafe(18)
 
     async with state.lock:
-        _prune_pair_sessions_unlocked(state, now)
+        _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
         _enforce_rate_limit_unlocked(state, key=f"pair:start:{user_id}", limit=10, window_seconds=60)
         for session in state.pair_sessions.values():
             if session.user_id == user_id and session.status == "pending":
@@ -1000,7 +1070,7 @@ async def start_device_pair(
     remote = request.client.host if request.client else "unknown"
     device_secret = secrets.token_urlsafe(32)
     async with state.lock:
-        _prune_pair_sessions_unlocked(state, now)
+        _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
         _enforce_rate_limit_unlocked(state, key=f"pair:device:start:{remote}", limit=10, window_seconds=60)
         pair_code = _new_pair_code_unlocked(state)
         session = PairSession(
@@ -1030,7 +1100,7 @@ async def start_device_pair(
 @router.post("/v1/local-mindroom/pair/device/inspect", response_model=DevicePairSessionOut)
 async def inspect_device_pair(
     payload: DevicePairCodeRequest,
-    user_id: Annotated[str, Depends(_verify_browser_user)],
+    user_id: Annotated[str, Depends(_verify_openid_user)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> DevicePairSessionOut:
     """Describe the machine waiting behind a device code before the user approves it."""
@@ -1042,7 +1112,7 @@ async def inspect_device_pair(
 @router.post("/v1/local-mindroom/pair/device/approve", response_model=DevicePairSessionOut)
 async def approve_device_pair(
     payload: DevicePairCodeRequest,
-    user_id: Annotated[str, Depends(_verify_browser_user)],
+    user_id: Annotated[str, Depends(_verify_openid_user)],
     config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> DevicePairSessionOut:
@@ -1213,6 +1283,8 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
     """Create the standalone provisioning FastAPI app."""
     service_config = config or _load_service_config_from_env()
     runtime_state = _new_runtime_state()
+    # httpx logs full request URLs at INFO, and the OpenID userinfo URL carries the token in its query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -1228,7 +1300,13 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
         allow_origins=service_config.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token", PAIR_STATUS_SESSION_HEADER],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Matrix-Access-Token",
+            OPENID_TOKEN_HEADER,
+            PAIR_STATUS_SESSION_HEADER,
+        ],
     )
     app.include_router(router)
     return app
