@@ -16,10 +16,12 @@ import pytest
 
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
+import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.media_delivery as media_delivery_module
+import mindroom.tools.file as file_tool_module
 from mindroom.attachments import load_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -212,8 +214,8 @@ _PROBES = (
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
-    # `file` and `coding` run in a worker by default, where worker code shares their trust,
-    # so they are held to the confinement contract but not to the link-swap contract.
+    # `file` and `coding` resolve paths themselves and read through descriptors pinned
+    # from their base directory; their own link-swap test is below.
     _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),
     _ToolProbe("coding", "read_file", _read_with_coding_tool, None, "doc.txt"),
 )
@@ -317,5 +319,34 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
         return authorized
 
     monkeypatch.setattr(probe.resolver_module, "resolve_agent_file", resolve_then_swap)
+
+    assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe", "resolver_module"),
+    [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
+    ids=["file:read_file", "coding:read_file"],
+)
+async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+    probe: _ToolProbe,
+    resolver_module: ModuleType,
+) -> None:
+    """A file `file` or `coding` checked by resolution and then swapped for a link is never followed."""
+    resolve = resolver_module.resolve_base_dir_path
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> Path:
+        resolved = resolve(*args, **kwargs)
+        checked = workspace / probe.filename
+        checked.unlink()
+        checked.symlink_to(outside / probe.filename)
+        return resolved
+
+    monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from glob import has_magic
 from pathlib import Path
 
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    open_regular_file_within_root,
+    resolve_path_within_root,
+)
 
 _BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 
@@ -74,3 +80,69 @@ def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
     resolved_root = search_root.joinpath(*static_parts).resolve()
     resolved_pattern = str(Path(*glob_parts)) if glob_parts else "."
     return resolved_root, resolved_pattern
+
+
+def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
+    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path."""
+    canonical_base = base_dir.resolve()
+    return resolved.relative_to(canonical_base) if resolved.is_relative_to(canonical_base) else None
+
+
+def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
+    """Read one resolved file, by a no-follow walk from ``base_dir`` when it lies inside it.
+
+    Worker code can write the workspace, so a file checked by resolution and
+    then swapped for a link or FIFO is refused instead of followed. A path
+    outside ``base_dir`` only resolves under unrestricted file access, the
+    operator's full-trust choice, and is read by path.
+    """
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        return resolved.read_bytes()
+    with (
+        open_regular_file_within_root(base_dir.resolve(), relative) as descriptor,
+        os.fdopen(descriptor, "rb", closefd=False) as file,
+    ):
+        return file.read()
+
+
+def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
+    """Create or overwrite one resolved file in place without following a link below ``base_dir``.
+
+    Parents are created by the same no-follow walk, and an existing file keeps
+    its mode and inode like an ordinary write.
+    """
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_bytes(payload)
+        return
+    with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
+        descriptor = os.open(
+            relative.name,
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o666,
+            dir_fd=directory_fd,
+        )
+    with os.fdopen(descriptor, "wb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            msg = f"Not a regular file: {resolved}"
+            raise OSError(msg)
+        file.truncate(0)
+        file.write(payload)
+
+
+def remove_resolved_path(base_dir: Path, resolved: Path) -> None:
+    """Remove one resolved file or empty directory without following a link below ``base_dir``."""
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        if resolved.is_dir() and not resolved.is_symlink():
+            resolved.rmdir()
+        else:
+            resolved.unlink()
+        return
+    with open_directory_within_root(base_dir.resolve(), relative.parent) as directory_fd:
+        if stat.S_ISDIR(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
+            os.rmdir(relative.name, dir_fd=directory_fd)
+        else:
+            os.unlink(relative.name, dir_fd=directory_fd)

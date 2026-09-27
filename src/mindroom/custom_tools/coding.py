@@ -30,8 +30,10 @@ from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
+    read_resolved_file,
     resolve_base_dir_path,
     split_search_pattern,
+    write_resolved_file,
 )
 
 if TYPE_CHECKING:
@@ -531,8 +533,8 @@ def _resolve_and_read(
         return f"Error: Not a file: {path}"
 
     try:
-        return resolved, resolved.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
+        return resolved, read_resolved_file(base_dir, resolved).decode("utf-8", errors="replace")
+    except (OSError, ValueError) as e:
         return f"Error reading file: {e}"
 
 
@@ -617,7 +619,7 @@ class CodingTools(Toolkit):
         new_content = content[: match.start] + new_text + content[match.end :]
 
         try:
-            resolved.write_text(new_content, encoding="utf-8")
+            write_resolved_file(self.base_dir, resolved, new_content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"
 
@@ -645,8 +647,7 @@ class CodingTools(Toolkit):
             return blocked_git_metadata_message("writing file", path)
 
         try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
+            write_resolved_file(self.base_dir, resolved, content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"
 
