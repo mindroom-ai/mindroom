@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import suppress
 from glob import has_magic
 from pathlib import Path
 
-from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.path_confinement import (
     open_directory_within_root,
     read_regular_file_within_root,
@@ -98,7 +99,7 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
-    """Publish one resolved file by atomic replacement, keeping an existing file's mode.
+    """Publish one resolved file by atomic replacement, keeping an existing file's mode and, where permitted, owner.
 
     Replacing the entry never writes a hard-linked inode or leaves a partial file.
     """
@@ -112,8 +113,17 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
             existing = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
-        mode = stat.S_IMODE(existing.st_mode) if existing is not None and stat.S_ISREG(existing.st_mode) else 0o644
-        atomic_write_bytes_at(directory_fd, relative.name, payload, file_mode=mode)
+        if existing is None or not stat.S_ISREG(existing.st_mode):
+            atomic_write_bytes_at(directory_fd, relative.name, payload, file_mode=0o644)
+            return
+        with atomic_write_file_at(directory_fd, relative.name) as output:
+            os.fchmod(output.fileno(), stat.S_IMODE(existing.st_mode))
+            # A worker's file stays the worker's: keep its owner, or at least its group, where the primary may.
+            for uid in (existing.st_uid, -1):
+                with suppress(PermissionError):
+                    os.fchown(output.fileno(), uid, existing.st_gid)
+                    break
+            output.write(payload)
 
 
 def remove_resolved_path(base_dir: Path, resolved: Path) -> None:

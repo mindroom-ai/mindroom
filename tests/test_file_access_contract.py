@@ -394,3 +394,31 @@ def test_worker_path_tool_writes_replace_the_entry_instead_of_the_linked_inode(
         path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
         assert target.read_text(encoding="utf-8") == "new notes"
     assert outside.read_text(encoding="utf-8") == "primary-only state"
+
+
+@pytest.mark.parametrize("permitted", [True, False], ids=["owner-kept", "owner-refused"])
+def test_worker_path_tool_writes_keep_the_replaced_files_owner_where_permitted(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    permitted: bool,
+) -> None:
+    """A replacement keeps the worker's owner, or at least its group, and is still published when both are refused."""
+    target = workspace / "notes.md"
+    target.write_text("old notes", encoding="utf-8")
+    target.chmod(0o640)
+    original = target.stat()
+    chowned: list[tuple[int, int, int]] = []
+
+    def record_fchown(fd: int, uid: int, gid: int) -> None:
+        chowned.append((os.fstat(fd).st_ino, uid, gid))
+        if not permitted:
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchown", record_fchown)
+    path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+
+    replaced = target.stat()
+    assert target.read_text(encoding="utf-8") == "new notes"
+    assert replaced.st_mode & 0o777 == 0o640
+    kept_owner = (replaced.st_ino, original.st_uid, original.st_gid)
+    assert chowned == ([kept_owner] if permitted else [kept_owner, (replaced.st_ino, -1, original.st_gid)])
