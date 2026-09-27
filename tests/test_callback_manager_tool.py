@@ -258,3 +258,38 @@ def test_manager_requires_live_human_requester(tmp_path: Path) -> None:
     assert "live Matrix tool context" in no_context["message"]
     assert bot_requester["status"] == "error"
     assert "human Matrix requester" in bot_requester["message"]
+
+
+def _workspace(tmp_path: Path) -> Path:
+    return _runtime_paths(tmp_path).storage_root / "agents" / "coder" / "workspace"
+
+
+def test_mint_callback_refuses_a_replaced_workspace(tmp_path: Path) -> None:
+    """A workspace that worker code swapped for a link never receives the capability script."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    workspace = _workspace(tmp_path)
+    workspace.parent.mkdir(parents=True)
+    workspace.symlink_to(elsewhere, target_is_directory=True)
+
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "error"
+    assert not list(elsewhere.iterdir())
+    assert ExternalTriggerStore(_runtime_paths(tmp_path)).list_records() == []
+
+
+def test_mint_callback_does_not_write_through_a_planted_gitignore_link(tmp_path: Path) -> None:
+    """A dangling link planted as the callbacks .gitignore cannot make the primary create its target."""
+    callbacks_dir = _workspace(tmp_path) / ".mindroom" / "callbacks"
+    callbacks_dir.mkdir(parents=True)
+    target = tmp_path / "planted-target"
+    (callbacks_dir / ".gitignore").symlink_to(target)
+
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    assert not target.exists()
+    assert stat.S_IMODE(Path(payload["script_path"]).stat().st_mode) == 0o700

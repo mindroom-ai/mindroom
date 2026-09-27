@@ -19,8 +19,9 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import (
+    open_directory_below_root,
     open_directory_within_root,
-    open_regular_file_within_root,
+    open_regular_file_below_root,
     resolve_path_within_root,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -1201,13 +1202,16 @@ def _agent_workspace(context: ToolRuntimeContext) -> Path:
         if runtime.workspace is not None
         else agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
     )
-    workspace.mkdir(parents=True, exist_ok=True)
-    return workspace.resolve()
+    # Sandbox workers can replace directories above the workspace, so it is
+    # created by a no-follow walk and never re-resolved here.
+    with open_directory_below_root(context.runtime_paths.storage_root, workspace, create=True):
+        pass
+    return workspace
 
 
 def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
     """Resolve and read one script source while keeping workspace I/O off the request loop."""
-    return _read_workspace_source(_agent_workspace(context), relative_path)
+    return _read_workspace_source(context.runtime_paths.storage_root, _agent_workspace(context), relative_path)
 
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
@@ -1313,14 +1317,14 @@ def _snapshot_relative_dir(run_id: str) -> Path:
     return Path(".mindroom") / "script-runs" / run_id
 
 
-def _read_workspace_source(workspace: Path, relative_path: str) -> bytes:
-    """Read one bounded regular file through no-follow workspace descriptors."""
+def _read_workspace_source(storage_root: Path, workspace: Path, relative_path: str) -> bytes:
+    """Read one bounded regular file by a no-follow walk from the storage root."""
     relative = Path(relative_path)
     if relative.is_absolute() or relative == Path() or ".." in relative.parts:
         msg = "Script source path must stay within the workspace root."
         raise ValueError(msg)
     with (
-        open_regular_file_within_root(workspace, relative) as descriptor,
+        open_regular_file_below_root(storage_root, workspace / relative) as descriptor,
         os.fdopen(
             descriptor,
             "rb",

@@ -207,7 +207,8 @@ def _resolve_static_site_source(
         title=title,
         requested_by=context.requester_id,
         artifact_kind=ARTIFACT_KIND_STATIC_SITE,
-        artifact_root=workspace.root,
+        # Workers can replace directories above the workspace, so the copy walks from the storage root.
+        artifact_root=context.runtime_paths.storage_root,
     )
 
 

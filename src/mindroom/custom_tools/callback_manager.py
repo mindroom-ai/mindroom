@@ -97,6 +97,7 @@ class CallbackManagerTools(Toolkit):
             )
             callback_url = f"{_callback_base_url(context)}/api/triggers/{record.trigger_id}"
             script_path = write_callback_script(
+                context.runtime_paths.storage_root,
                 _workspace_callbacks_dir(context),
                 callback_id=record.trigger_id,
                 script_text=build_callback_script(

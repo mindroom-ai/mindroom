@@ -41,6 +41,7 @@ from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.storage_swap_support import ATTACKER, PRIVATE_AGENT, VICTIM_NOTE, private_layout
 
 if TYPE_CHECKING:
     import os
@@ -2812,3 +2813,36 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
     process_exited = True
     reconciled = await manager.reconcile_durable(run_id=starting.run_id)
     assert reconciled.state is ScriptRunState.CANCELLED
+
+
+def test_workspace_script_source_refuses_a_replaced_private_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private agent's worker that swaps its agent directory cannot launch another requester's script file."""
+    layout = private_layout(tmp_path, victim_files={"job.py": f"print({VICTIM_NOTE!r})\n"})
+    (layout.attacker_workspace / "job.py").write_text("print('own')\n", encoding="utf-8")
+    context = make_test_tool_runtime_context(
+        agent_name=PRIVATE_AGENT,
+        target=MessageTarget.resolve(room_id=ATTACKER.room_id, thread_id=None, reply_to_event_id=None),
+        requester_id=ATTACKER.requester_id,
+        client=AsyncMock(),
+        config=layout.config,
+        runtime_paths=layout.runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        storage_path=None,
+    )
+    resolve_agent_runtime = manager_module.resolve_agent_runtime
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> object:
+        runtime = resolve_agent_runtime(*args, **kwargs)
+        layout.swap("agent")
+        return runtime
+
+    monkeypatch.setattr(manager_module, "resolve_agent_runtime", resolve_then_swap)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        manager_module._resolve_and_read_workspace_source(context, "job.py")
+    assert sorted(layout.victim_files()) == ["job.py"]

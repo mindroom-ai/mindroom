@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import mindroom.custom_tools.report_publishing as report_publishing_tool
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -19,6 +20,7 @@ from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_stor
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.message_target import MessageTarget
+from mindroom.report_publishing import static_site
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -32,6 +34,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.storage_swap_support import ATTACKER, PRIVATE_AGENT, VICTIM_NOTE, private_layout
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -851,3 +854,40 @@ def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: 
 
     assert revoked["status"] == "error"
     assert "not available to the current requester" in revoked["message"]
+
+
+def test_static_site_source_refuses_a_private_ancestor_replaced_during_the_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private agent's worker that swaps its agent directory mid-copy cannot publish another requester's site."""
+    layout = private_layout(tmp_path, victim_files={"site/index.html": f"<!doctype html>{VICTIM_NOTE}"})
+    (layout.attacker_workspace / "site").mkdir()
+    (layout.attacker_workspace / "site" / "index.html").write_text("<!doctype html>own", encoding="utf-8")
+    context = make_test_tool_runtime_context(
+        agent_name=PRIVATE_AGENT,
+        target=MessageTarget.resolve(room_id=ATTACKER.room_id, thread_id=None, reply_to_event_id=None),
+        requester_id=ATTACKER.requester_id,
+        client=AsyncMock(),
+        config=layout.config,
+        runtime_paths=layout.runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        storage_path=None,
+    )
+    source = report_publishing_tool._resolve_static_site_source(context, {"path": "site", "title": "Site"})
+    relative_source_path = static_site._relative_source_path
+
+    def check_then_swap(source_root: Path, source_path: Path) -> Path:
+        relative = relative_source_path(source_root, source_path)
+        layout.swap("agent")
+        return relative
+
+    monkeypatch.setattr(static_site, "_relative_source_path", check_then_swap)
+    store = ReportPublishingStore(layout.runtime_paths.storage_root)
+
+    with pytest.raises(ReportPublishingError, match=r"symbolic links|symlinks|Not a directory"):
+        store.publish_report(source=source, published_by=ATTACKER.requester_id, base_url="https://example.test")
+    artifacts = layout.runtime_paths.storage_root / "report_publishing" / "artifacts"
+    assert all(VICTIM_NOTE not in path.read_text(encoding="utf-8") for path in artifacts.rglob("*.html"))

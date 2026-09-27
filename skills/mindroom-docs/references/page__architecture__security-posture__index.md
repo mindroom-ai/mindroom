@@ -24,6 +24,8 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+Workers mount agent state roots and private-instance roots writable, so worker code can replace any directory between its mount and a workspace with a link to another tenant's files.
+Primary-process reads and writes there therefore walk from the runtime storage root without following any link, through the `*_below_root` helpers in `mindroom.path_confinement`.
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
@@ -41,7 +43,7 @@ Every tool declares how its own file access relates to this setting.
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors walked from the runtime storage root, so a replaced workspace root, a replaced directory above it, and swapped files are refused |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access` with lexical path checks only; they run in a worker by default, and the known gap below covers routing them to the primary process |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
@@ -62,6 +64,8 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 - `file` and `coding` confine paths lexically but do not open through no-follow descriptors, so when an operator routes them to the primary process while worker code shares the workspace, a link swapped into the workspace can redirect them; they run in a worker by default, where worker code already shares their trust.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` are explicitly exempt from the link-swap scenarios until they read through descriptors.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
+- File memory, context files, tool output files, the path tools, report snapshots, callback scripts, and background-script sources walk from the storage root, but other primary-process state under worker-writable mounts is still opened by path: session and learning SQLite databases, Mem0 Chroma directories, the knowledge indexing of private knowledge bases and semantic file memory, workspace skills, todo templates, delegation records, scheduled-run receipts, call transcripts, JSON state files in agent state roots, and worker-scoped OAuth databases.
+- Agent runtime resolution checks each directory for links and then returns the resolved path, so a link swapped in between the check and the resolution is followed for that turn; it should return the checked lexical path instead.
 
 ## Intentional behaviors
 
@@ -76,6 +80,7 @@ Do not report or "fix" these; they are deliberate.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- A workspace reached through a link below the storage root is refused even when an operator created that link; point `MINDROOM_STORAGE_PATH` at the real directory instead, since a link above the storage root is resolved once and trusted.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
