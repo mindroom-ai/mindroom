@@ -18,6 +18,15 @@ The menu app launches it as a foreground child and communicates only through inh
 Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
 
+## Local agents
+
+Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.
+Executable detection is separate from launchd status, so an installed CLI is not presented as missing when only the service has not been installed.
+Existing configuration is reused. **Check Setup** runs `mindroom doctor`; its result is kept for the current session and invalidated when a refresh observes changes to the root config or adjacent `.env`.
+The app pins CLI configuration, pairing, checks, and service installation to `~/.mindroom/config.yaml` to match its config-folder and dashboard actions.
+Status refresh requests are coalesced and repeated when needed after an action, rather than dropping the newest request.
+The step navigation is shared with Computer access and supports clicking the whole button area.
+
 ## Chat and dashboard
 
 Chat opens inside the app and keeps its sign-in session between launches.

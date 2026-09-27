@@ -8,6 +8,7 @@ enum MindRoomCommand: Equatable {
     case stopService
     case restartService
     case serviceStatus
+    case checkSetup
     case initializeHostedConfig
     case initializeSelfHostedConfig
     case pairHosted(pairCode: String)
@@ -32,6 +33,8 @@ enum MindRoomCommand: Equatable {
             return "Restart Service"
         case .serviceStatus:
             return "Refresh Status"
+        case .checkSetup:
+            return "Check Setup"
         case .initializeHostedConfig:
             return "Prepare Configuration"
         case .initializeSelfHostedConfig:
@@ -52,7 +55,7 @@ enum MindRoomCommand: Equatable {
     var successMessage: String? {
         switch self {
         case .installRuntime:
-            return "The MindRoom runtime is installed. Continue setup in Local agents, or pair an agent in Computer access."
+            return "The command-line runtime is installed. The background service is a separate step. Continue to Configure, or use your existing configuration."
         case .updateRuntime:
             return "The runtime update finished. In Settings, use Apply Runtime to Service to start or restart local agents with this version."
         case .installService:
@@ -69,6 +72,8 @@ enum MindRoomCommand: Equatable {
             return "Configuration is ready in ~/.mindroom. Edit config.yaml and .env for your Matrix server and model provider, then install and start agents."
         case .pairHosted:
             return "The chat account was paired. Configure an AI provider, then install and start agents."
+        case .checkSetup:
+            return "Setup checks passed. Continue to Start to run your local agents. Warnings, if any, appear in the command output."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }
@@ -90,6 +95,8 @@ enum MindRoomCommand: Equatable {
             return .restartService
         case .serviceStatus:
             return .serviceStatus
+        case .checkSetup:
+            return .checkSetup
         case .initializeHostedConfig:
             return .initializeHostedConfig
         case .initializeSelfHostedConfig:

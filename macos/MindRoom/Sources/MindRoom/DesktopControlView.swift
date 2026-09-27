@@ -144,30 +144,13 @@ struct DesktopControlView: View {
     }
 
     private var stepNavigation: some View {
-        HStack(spacing: 8) {
-            ForEach(DesktopControlSection.allCases, id: \.self) { step in
-                let progress = store.status.setupProgress(
-                    for: step, needsPairing: store.needsPairing, hasAccessChanges: store.hasAccessChanges
-                )
-                Button { show(step) } label: {
-                    VStack(spacing: 4) {
-                        HStack(spacing: 5) {
-                            Image(systemName: progress.symbol)
-                                .foregroundStyle(progressColor(progress)).accessibilityHidden(true)
-                            Text("\(step.rawValue + 1). \(step.title)")
-                        }
-                        Text(progress.detail).font(.caption).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 7)
-                    .background(section == step ? Color.accentColor.opacity(0.18) : .clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(step.rawValue + 1). \(step.title): \(progress.detail)")
-                .accessibilityAddTraits(section == step ? .isSelected : [])
-            }
-        }
+        SetupStepNavigation(
+            steps: DesktopControlSection.allCases, selection: section,
+            title: { "\($0.rawValue + 1). \($0.title)" },
+            progress: { store.status.setupProgress(
+                for: $0, needsPairing: store.needsPairing, hasAccessChanges: store.hasAccessChanges
+            ) }, select: show
+        )
     }
 
     @ViewBuilder
@@ -180,7 +163,7 @@ struct DesktopControlView: View {
                         Label(capability.title, systemImage: capability.symbol)
                         HStack(spacing: 4) {
                             Image(systemName: progress.symbol)
-                                .foregroundStyle(progressColor(progress)).accessibilityHidden(true)
+                                .foregroundStyle(progress.color).accessibilityHidden(true)
                             Text(progress.detail).foregroundStyle(.secondary)
                         }.font(.caption)
                     }
@@ -206,14 +189,6 @@ struct DesktopControlView: View {
         if store.status.hasSavedConnection, !store.needsPairing, !store.hasAccessChanges, store.status.hasSavedAccess {
             let next: DesktopControlSection = store.status.needsGUIPermissions ? .permissions : .session
             Button("Continue to \(next.title)") { show(next) }.buttonStyle(.borderedProminent)
-        }
-    }
-
-    private func progressColor(_ progress: DesktopSetupProgress) -> Color {
-        switch progress {
-        case .complete: .green
-        case .needsAction: .orange
-        case .idle: .secondary
         }
     }
 

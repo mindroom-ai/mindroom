@@ -52,6 +52,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         let command = runtime.command(for: .installService)
         XCTAssertEqual(command.executableURL.path, "/usr/bin/env")
         XCTAssertEqual(command.arguments, ["mindroom", "service", "install", "--no-confirm"])
+        XCTAssertEqual(command.environment["MINDROOM_CONFIG_PATH"], "/Users/example/.mindroom/config.yaml")
     }
 
     func testHostedConfigCommandUsesPublicProfileWithoutPrompts() {

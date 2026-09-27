@@ -16,7 +16,8 @@ struct MindRoomServiceStatus: Equatable {
         let normalized = output.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = normalized.lowercased()
 
-        if lowercased.contains("no such file") || lowercased.contains("command not found") {
+        if lowercased.hasPrefix("env: mindroom:") &&
+            (lowercased.contains("no such file") || lowercased.contains("not found")) {
             return MindRoomServiceStatus(state: .runtimeMissing, message: "MindRoom runtime is not installed")
         }
         if lowercased.contains("service: running") {

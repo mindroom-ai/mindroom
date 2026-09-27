@@ -20,11 +20,15 @@ final class MindRoomCommandRunner: ObservableObject {
     @Published private(set) var runningCommandTitle: String?
     @Published private(set) var lastOutput = ""
     @Published private(set) var feedback: CommandFeedback?
+    @Published private(set) var localSetup = LocalAgentsSetupSnapshot()
+    @Published private(set) var setupCheck: CommandResult?
+    @Published private(set) var hasRefreshedStatus = false
+    @Published private(set) var isRefreshingStatus = false
 
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
 
-    private var isRefreshingStatus = false
+    private var refreshRequested = false
     private let runtime: MindRoomRuntime
     private let processRunner: MindRoomProcessRunner
     private let showSection: (AppSection) -> Void
@@ -46,15 +50,36 @@ final class MindRoomCommandRunner: ObservableObject {
     // Status refreshes run independently of user commands so a background
     // refresh never swallows a menu click.
     func refreshStatus() {
-        guard !isRefreshingStatus else { return }
+        guard !isRefreshingStatus else {
+            refreshRequested = true
+            return
+        }
         isRefreshingStatus = true
+        readStatus()
+    }
+
+    private func readStatus() {
         let invocation = runtime.command(for: .serviceStatus)
         let processRunner = processRunner
+        let runtime = runtime
         DispatchQueue.global(qos: .utility).async {
+            let setup = runtime.localSetupSnapshot()
             let result = processRunner(invocation)
             DispatchQueue.main.async {
+                if self.refreshRequested {
+                    self.refreshRequested = false
+                    self.readStatus()
+                    return
+                }
+                if setup.configurationStamp != self.localSetup.configurationStamp {
+                    self.setupCheck = nil
+                }
+                self.localSetup = setup
+                self.serviceStatus = result.isSuccess || result.exitCode == 127
+                    ? MindRoomServiceStatus.parse(result.output)
+                    : MindRoomServiceStatus(state: .unknown, message: "Could not check the background service. Refresh Status to retry.")
+                self.hasRefreshedStatus = true
                 self.isRefreshingStatus = false
-                self.serviceStatus = MindRoomServiceStatus.parse(result.output)
             }
         }
     }
@@ -80,18 +105,34 @@ final class MindRoomCommandRunner: ObservableObject {
     private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
         guard runningCommandTitle == nil else { return }
         feedback = nil
+        switch action {
+        case .installRuntime, .updateRuntime, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .checkSetup:
+            setupCheck = nil
+        default: break
+        }
         runningCommandTitle = command.title
         let invocation = runtime.command(for: action)
         let processRunner = processRunner
+        let runtime = runtime
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = processRunner(invocation)
+            let before = runtime.localSetupSnapshot()
+            var result = processRunner(invocation)
+            let after = runtime.localSetupSnapshot()
+            if action == .checkSetup && before.configurationStamp != after.configurationStamp {
+                result = CommandResult(exitCode: 1, output: "Configuration changed while checking. Run Check Setup again.")
+            }
+            let completedResult = result
             DispatchQueue.main.async {
+                if action == .checkSetup {
+                    self.localSetup = after
+                    self.setupCheck = completedResult
+                }
                 self.runningCommandTitle = nil
-                self.lastOutput = result.output
+                self.lastOutput = completedResult.output
                 self.feedback = CommandFeedback(
-                    title: command.title, successMessage: command.successMessage, result: result
+                    title: command.title, successMessage: command.successMessage, result: completedResult
                 )
-                self.onCommandFinished?(command, result)
+                self.onCommandFinished?(command, completedResult)
                 self.refreshStatus()
             }
         }

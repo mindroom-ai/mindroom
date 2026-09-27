@@ -39,16 +39,17 @@ Use **Open in Browser** if you prefer your existing browser session or a sign-in
 
 ## Set Up Local Agents
 
-Open **Local agents** and expand **Set up or reconnect local agents**.
+Open **Local agents** for four numbered steps. Each step shows its own status, and only the selected panel is displayed.
+The app detects the command-line runtime separately from the background service: **Runtime installed · Background service not installed** means step 1 is already done.
 
-1. **Install MindRoom** installs the command-line runtime using the bundled `uv`.
-2. **Prepare Configuration** creates missing `config.yaml` and `.env` files in `~/.mindroom`, preserves an existing config and env values, and appends missing hosted Matrix defaults to `.env`.
-   **Open MindRoom Chat**, sign in, and use **Local MindRoom** in the chat sidebar to generate a pair code.
-   Enter the code and choose **Pair Account**.
-3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
-4. **Install and Start Agents** installs and starts the launchd background service.
+1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location. If it is missing, **Install MindRoom** installs it using bundled `uv`. Installing the runtime does not install the background service.
+2. **Configure** detects `~/.mindroom/config.yaml`. **Prepare Configuration** creates missing files and keeps existing configuration and credentials. Expand **Connect or reconnect your chat account**, open MindRoom Chat, and use **Local MindRoom** in the chat sidebar to generate a pair code when pairing is needed. Add AI provider credentials to `.env`, or configure a local model in `config.yaml`, using **Open Config Folder**.
+3. **Check** runs `mindroom doctor` against the same configuration used by pairing and service installation. It checks configuration, providers, Matrix connectivity, and storage. **Files found** only confirms configuration exists; **Passed last check** records the latest successful check in this app session. Changes detected in `config.yaml` or `.env` clear that check. Run checks again after editing included files or changing external services.
+4. **Start** offers **Install and Start Agents** when the launchd service is missing, **Start Agents** when it is stopped, and stop/restart/chat/dashboard controls when running. A check is recommended, but existing working configuration can be started without rerunning Doctor.
 
-Commands show progress and their results in the window.
+An existing running or stopped service opens directly at **Start**. Existing configuration without a service opens at **Check**.
+Commands show progress and results directly above the selected panel. **Refresh Status** rereads the runtime, configuration, and service state, including changes made in a terminal.
+These controls manage this Mac's launchd service; they do not inspect systemd services on another computer.
 Once the service is running, **Open Dashboard** opens the local dashboard inside the app for agent and model configuration.
 The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
 It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.

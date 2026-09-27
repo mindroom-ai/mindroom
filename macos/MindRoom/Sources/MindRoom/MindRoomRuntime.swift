@@ -8,6 +8,7 @@ enum MindRoomRuntimeAction: Equatable {
     case stopService
     case restartService
     case serviceStatus
+    case checkSetup
     case initializeHostedConfig
     case initializeSelfHostedConfig
     case pairHosted(pairCode: String)
@@ -87,6 +88,8 @@ struct MindRoomRuntime {
             return mindroomCommand(arguments: ["service", "restart"])
         case .serviceStatus:
             return mindroomCommand(arguments: ["service", "status", "--logs", "0"])
+        case .checkSetup:
+            return mindroomCommand(arguments: ["doctor", "--config", configPathURL.path])
         case .initializeHostedConfig:
             // Pin --path so config init targets ~/.mindroom regardless of the app's
             // working directory; without it, a CWD-local config.yaml wins the search.
@@ -108,6 +111,20 @@ struct MindRoomRuntime {
         )
     }
 
+    func localSetupSnapshot() -> LocalAgentsSetupSnapshot {
+        let executable = commandEnvironment()["PATH"]?.split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("mindroom").path }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        let configuration = try? configPathURL.resourceValues(forKeys: [.isRegularFileKey])
+        let stamp = [configPathURL, envPathURL].map {
+            try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        }
+        return LocalAgentsSetupSnapshot(
+            runtimePath: executable, configurationExists: configuration?.isRegularFile == true,
+            configurationStamp: stamp
+        )
+    }
+
     private func uvCommand(arguments: [String]) -> MindRoomCommandInvocation {
         MindRoomCommandInvocation(
             executableURL: bundledUVURL,
@@ -117,10 +134,12 @@ struct MindRoomRuntime {
     }
 
     private func mindroomCommand(arguments: [String]) -> MindRoomCommandInvocation {
-        MindRoomCommandInvocation(
+        var environment = commandEnvironment()
+        environment["MINDROOM_CONFIG_PATH"] = configPathURL.path
+        return MindRoomCommandInvocation(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["mindroom"] + arguments,
-            environment: commandEnvironment()
+            environment: environment
         )
     }
 
