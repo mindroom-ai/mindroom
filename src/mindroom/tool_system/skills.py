@@ -39,6 +39,8 @@ _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 _MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
 _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
+# Descriptions reach every system prompt, not only the skills a model opens.
+_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -573,9 +575,13 @@ def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
     if parsed is None:
         return None
     frontmatter, instructions = parsed
+    description = frontmatter.get("description", "")
+    if isinstance(description, str) and len(description) > _MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
+        logger.warning("Truncated a workspace skill description", path=str(source_path / _SKILL_FILENAME))
+        description = description[:_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
     return Skill(
         name=frontmatter.get("name", source_path.name),
-        description=frontmatter.get("description", ""),
+        description=description,
         instructions=instructions,
         source_path=str(source_path),
         scripts=_workspace_skill_file_names(skill_fd, "scripts"),
@@ -627,7 +633,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                     continue
                 if skill is None:
                     continue
-                loaded_bytes += len(skill.instructions.encode("utf-8"))
+                loaded_bytes += len(f"{skill.description}{skill.instructions}{skill.metadata or ''}".encode())
                 if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
                     logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
                     break

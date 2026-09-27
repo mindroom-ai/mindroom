@@ -938,3 +938,17 @@ def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Pa
     warnings = [entry for entry in logs if entry["log_level"] == "warning"]
     assert any(str(entry.get("path", "")).endswith("huge/SKILL.md") for entry in warnings)
     assert any("budget" in entry["event"] for entry in warnings)
+
+
+def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp_path: Path) -> None:
+    """Descriptions reach every system prompt, so they are capped and counted with the rest of each skill."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    for index in range(20):
+        _write_skill(workspace_skills, f"skill-{index:02d}", "d" * (900 << 10))
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert skills is not None
+    assert len(skills.get_system_prompt_snippet()) < 1 << 20
+    assert any("description" in entry["event"] for entry in logs if entry["log_level"] == "warning")
