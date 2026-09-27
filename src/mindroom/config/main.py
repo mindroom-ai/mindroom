@@ -384,12 +384,14 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
 
 
 def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) -> bool:
-    """Return whether runtime-local workers should skip control-plane template validation."""
+    """Return whether sandbox runners should skip control-plane template validation.
+
+    The primary validates template paths against its own config directory; a
+    runner resolves them against its seed config location, where they need not exist.
+    """
     if runtime_paths is None:
         return False
-    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
-    )
+    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
 
 
 def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:

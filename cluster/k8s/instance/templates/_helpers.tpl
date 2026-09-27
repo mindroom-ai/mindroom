@@ -109,6 +109,7 @@ The runner executes agent tool code, so it must not see the tenant credential st
 the live config the primary hot-reloads, or the credentials encryption key.
 It mounts only agent state from the PVC over its own private storage root,
 and saved tool settings reach it as per-call leases from the primary.
+Its /app/config.yaml is only the seed; each request carries the primary's live config without secrets.
 */ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}

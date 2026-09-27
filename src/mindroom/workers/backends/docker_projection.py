@@ -19,7 +19,7 @@ import yaml
 from mindroom import yaml_io
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
-from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
+from mindroom.sensitivity import strip_sensitive_config_values
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     normalize_worker_key_part,
@@ -100,29 +100,6 @@ def _plugin_uses_filesystem_path(plugin_path: str, *, runtime_paths: RuntimePath
         return True
     unresolved = Path(plugin_path).expanduser()
     return unresolved.is_absolute() or plugin_path.startswith((".", "~")) or "/" in plugin_path or "\\" in plugin_path
-
-
-def _config_key_is_header_container(raw_key: str | None) -> bool:
-    if raw_key is None:
-        return False
-    normalized_key = normalize_config_key(raw_key)
-    return normalized_key == "headers" or normalized_key.endswith("_headers")
-
-
-def _strip_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
-    if isinstance(value, dict):
-        redacted: dict[object, object] = {}
-        inside_header_mapping = _config_key_is_header_container(parent_key)
-        for key, item in value.items():
-            if isinstance(key, str) and (
-                is_sensitive_header_key(key) if inside_header_mapping else is_sensitive_config_key(key)
-            ):
-                continue
-            redacted[key] = _strip_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
-        return redacted
-    if isinstance(value, list):
-        return [_strip_sensitive_config_values(item, parent_key=parent_key) for item in value]
-    return value
 
 
 def _mode_bits(st_mode: int) -> int:
@@ -579,7 +556,7 @@ class DockerProjectionManager:
         config_data["matrix_space"] = {}
         config_data["mindroom_user"] = None
 
-        redacted_data = _strip_sensitive_config_values(config_data)
+        redacted_data = strip_sensitive_config_values(config_data)
         config_data.clear()
         config_data.update(cast("dict[str, object]", redacted_data))
 

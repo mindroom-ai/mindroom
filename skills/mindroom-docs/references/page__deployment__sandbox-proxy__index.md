@@ -146,6 +146,11 @@ The sidecar gets:
   With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
 - The sandbox proxy token that authenticates requests from the primary runtime.
 
+The hosted instance chart mounts only the seed ConfigMap into the sidecar, not the live config that the primary hot-reloads and the dashboard edits.
+The primary therefore sends its live config with every execute, attachment-save, and file-view request, after removing sensitive keys and credential headers the same way the Docker worker projection does.
+The runner resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from that snapshot, so agents added or changed after the pod started work immediately and a stale seed cannot widen an agent's settings.
+Requests without a snapshot, such as those from runtimes without a tool context, fall back to the runner's startup config.
+
 The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
 It never receives the credentials-encryption key.
 The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
@@ -208,6 +213,9 @@ This leaves same-worker token exposure as a local containment risk, while per-wo
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+
+Dedicated Kubernetes workers receive the same per-request live config snapshot as the shared sidecar, because the hosted instance chart mounts only the seed ConfigMap into them.
+Docker workers get no request snapshot; they read their per-worker projection of the live config described below.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 

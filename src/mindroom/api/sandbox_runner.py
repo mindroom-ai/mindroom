@@ -251,11 +251,17 @@ def _dedicated_worker_runtime_config_or_empty(
 
     if not tool_validation_snapshot:
         return load_config(runtime_paths)
+    return _primary_validated_config(data, runtime_paths)
 
-    # Dedicated workers only need the authored config shape plus the subset of
-    # plugin entries that actually exist in that runtime filesystem. The primary
-    # runtime is authoritative for full authored tool validation; workers
-    # validate the requested tool at execution time with their local registry.
+
+def _primary_validated_config(data: object, runtime_paths: RuntimePaths) -> Config:
+    """Validate config data the primary runtime already validated, as seen from this runner.
+
+    Runners only need the authored config shape plus the subset of plugin
+    entries that actually exist in this runtime filesystem. The primary runtime
+    is authoritative for full authored tool validation; runners validate the
+    requested tool at execution time with their local registry.
+    """
     config = Config.model_validate(
         normalized_config_data(data),
         context={"runtime_paths": runtime_paths},
@@ -438,6 +444,8 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution after the lease has been resolved.
     ``execution_env`` is reserved for execution tools such as ``shell`` and
     sandboxed ``python`` that intentionally receive runtime env during execution.
+    ``config_snapshot`` is the primary's live config without secrets; when present
+    it replaces the runner's startup config for this request.
     """
 
     tool_name: str
@@ -455,6 +463,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
     extra_env_passthrough: str | None = None
+    config_snapshot: dict[str, Any] | None = None
 
 
 class PreparedSandboxRunnerExecuteRequest(BaseModel):
@@ -519,6 +528,7 @@ class SandboxRunnerSaveAttachmentRequest(BaseModel):
     mime_type: str | None = None
     filename: str | None = None
     bytes_b64: str
+    config_snapshot: dict[str, Any] | None = None
 
 
 class SandboxRunnerSaveAttachmentResponse(BaseModel):
@@ -541,6 +551,7 @@ class SandboxRunnerViewFileRequest(BaseModel):
     private_agent_names: list[str] | None = None
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     path: str
+    config_snapshot: dict[str, Any] | None = None
 
 
 class SandboxRunnerViewFileResponse(BaseModel):
@@ -605,6 +616,21 @@ def app_runtime_paths(app: FastAPI) -> RuntimePaths:
 def app_runtime_config(app: FastAPI) -> Config:
     """Return sandbox runner config stored on the FastAPI app."""
     return _app_context(app).config
+
+
+def _request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None) -> Config:
+    """Return the config one request runs under: the primary's live snapshot when sent, else the startup config.
+
+    The runner's own config file is only a seed, so agents added or edited after
+    seeding exist only in the snapshot the authenticated primary sends.
+    """
+    context = _app_context(app)
+    if config_snapshot is None:
+        return context.config
+    try:
+        return _primary_validated_config(config_snapshot, context.runtime_paths)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid config_snapshot: {exc}") from exc
 
 
 def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
@@ -1612,7 +1638,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
 ) -> SandboxRunnerSaveAttachmentResponse:
     """Save one context-authorized attachment into the prepared worker workspace."""
     runtime_paths = app_runtime_paths(request.app)
-    config = app_runtime_config(request.app)
+    config = _request_runtime_config(request.app, payload.config_snapshot)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1709,7 +1735,7 @@ async def view_file_in_worker(
 ) -> SandboxRunnerViewFileResponse:
     """View an image only after resolving its prepared worker workspace."""
     runtime_paths = app_runtime_paths(request.app)
-    config = app_runtime_config(request.app)
+    config = _request_runtime_config(request.app, payload.config_snapshot)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1920,7 +1946,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     """Execute a tool function locally and return the serialized result."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
-    config = context.config
+    config = _request_runtime_config(request.app, payload.config_snapshot)
     tool_metadata = context.tool_metadata
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
