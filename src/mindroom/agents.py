@@ -243,12 +243,7 @@ def _load_context_files(
     storage_path: Path | None = None,
     workspace_root: Path | None = None,
 ) -> list[_AdditionalContextChunk]:
-    """Load configured context files.
-
-    ``Path`` entries are files in ``workspace_root``; relative strings are agent-owned
-    workspace files, except projected worker assets and files outside any agent,
-    which are operator-owned config files.
-    """
+    """Load configured context files; ``Path`` entries and agent-owned strings are workspace files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
         owning_workspace: Path | None = None
@@ -287,10 +282,7 @@ def _load_context_files(
 
 @timed("system_prompt_assembly.agent_create.context_file_read")
 def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agent_name: str | None) -> str | None:
-    """Return one context file's text, or warn and return ``None`` when it is missing or refused.
-
-    Workspace files are read through a capped no-follow walk; preload truncation shortens them further.
-    """
+    """Return one context file's text, or warn and return ``None`` when it is missing or refused."""
     try:
         if workspace_root is None:
             payload = resolved_path.read_bytes()

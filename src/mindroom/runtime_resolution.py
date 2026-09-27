@@ -306,10 +306,7 @@ def resolve_agent_storage(
 
 
 def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
-    """Resolve one shared knowledge path, refusing links below an agent workspace that holds it.
-
-    Operator links elsewhere are followed as configured.
-    """
+    """Resolve one shared knowledge path, refusing links below an agent workspace; others follow links."""
     lexical = Path(os.path.normpath(config_relative_path(raw_path, runtime_paths)))
     storage_root = shared_storage_root(runtime_paths.storage_root)
     lexical_storage_root = Path(os.path.normpath(runtime_paths.storage_root.expanduser().absolute()))
@@ -321,11 +318,7 @@ def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
             continue
         workspace = agent_workspace_root_path(storage_root, parts[1])
         if storage_root.joinpath(*parts[:3]) == workspace:
-            return resolve_workspace_relative_path(
-                workspace,
-                Path(*parts[3:]),
-                field_name="shared knowledge base path",
-            )
+            return resolve_workspace_relative_path(workspace, Path(*parts[3:]), field_name="shared knowledge base path")
     return resolve_config_relative_path(raw_path, runtime_paths).resolve()
 
 

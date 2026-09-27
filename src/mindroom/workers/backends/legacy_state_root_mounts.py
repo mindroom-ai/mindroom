@@ -34,7 +34,15 @@ def _retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> None:
         backend_name = primary_worker_backend_name(runtime_paths)
         if backend_name not in {"docker", "kubernetes"}:
             return
-        stopped = _stop_state_root_workers(runtime_paths, backend_name)
+        # Keep Docker and Kubernetes dependencies off primary module import paths.
+        if backend_name == "docker":
+            from mindroom.workers.backends import docker  # noqa: PLC0415
+
+            stopped = docker.remove_docker_workers_mounting_state_roots(runtime_paths)
+        else:
+            from mindroom.workers.backends import kubernetes  # noqa: PLC0415
+
+            stopped = kubernetes.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
     except Exception:
         logger.exception("Could not stop sandbox workers that mount whole state roots", backend=backend_name)
         return
@@ -45,14 +53,3 @@ def _retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> None:
             backend=backend_name,
             workers=list(stopped),
         )
-
-
-def _stop_state_root_workers(runtime_paths: RuntimePaths, backend_name: str) -> tuple[str, ...]:
-    # Keep Docker and Kubernetes dependencies off primary module import paths.
-    if backend_name == "docker":
-        from mindroom.workers.backends.docker import remove_docker_workers_mounting_state_roots  # noqa: PLC0415
-
-        return remove_docker_workers_mounting_state_roots(runtime_paths)
-    from mindroom.workers.backends.kubernetes import stop_kubernetes_workers_mounting_state_roots  # noqa: PLC0415
-
-    return stop_kubernetes_workers_mounting_state_roots(runtime_paths)

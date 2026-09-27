@@ -90,11 +90,7 @@ def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
 
 
 def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
-    """Read one resolved file, through a capped no-follow walk when it lies below ``base_dir``.
-
-    Paths outside ``base_dir`` resolve only under unrestricted file access, the
-    operator's full-trust choice, and are read by path.
-    """
+    """Read one resolved file through a capped no-follow walk; outside paths need unrestricted access."""
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         return resolved.read_bytes()

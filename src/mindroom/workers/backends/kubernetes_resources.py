@@ -104,8 +104,7 @@ _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
-# Deployments whose pods mount only workspaces; earlier releases mounted whole state roots.
-# The template hash this release wrote, so a template an older release rewrote after a downgrade still reads as old.
+# The template hash this release wrote, so a template an older release rewrote after a downgrade reads as old.
 _ANNOTATION_WORKSPACE_TEMPLATE_HASH = "mindroom.ai/workspace-template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"

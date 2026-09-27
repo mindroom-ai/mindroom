@@ -261,15 +261,12 @@ def _scoped_workspaces(
             private_agent_names=private_agent_names,
             resolved_agent_policies=resolved_agent_policies,
         )
-    try:
-        workspaces = visible_workspace_roots(
-            storage_root,
-            worker_key,
-            resolved_agent_policies or {},
-            private_agent_names=private_agent_names or frozenset(),
-        )
-    except ValueError as exc:
-        raise WorkerBackendError(str(exc)) from exc
+    workspaces = visible_workspace_roots(
+        storage_root,
+        worker_key,
+        resolved_agent_policies or {},
+        private_agent_names=private_agent_names or frozenset(),
+    )
     if not workspaces and scope != "user":
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
         raise WorkerBackendError(msg)

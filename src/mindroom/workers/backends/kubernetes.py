@@ -970,9 +970,7 @@ class KubernetesWorkerBackend:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
         if entry is None:
             return None
-        # A workspace appears while a worker runs only for a user worker, when another of its requester's
-        # private agents materializes, or for a worker whose private workspace was missing; mounting it
-        # requires rebuilding the pod template, so only those workers re-plan on reuse.
+        # Only user workers and workers whose plan mounted nothing can gain a workspace while running.
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
         if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
