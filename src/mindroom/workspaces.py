@@ -11,6 +11,7 @@ from errno import EACCES, EINVAL, ENODATA, ENOTSUP, EPERM
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.agent_policy import private_root_name
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.constants import RuntimePaths, config_relative_path
 from mindroom.path_confinement import (
@@ -354,13 +355,6 @@ def ensure_workspace_knowledge_links(
         _apply_workspace_knowledge_links(desired_links)
 
 
-def _private_root_name(agent_name: str, config: Config) -> str:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None or agent_config.private.root is None:
-        return f"{agent_name}_data"
-    return agent_config.private.root
-
-
 def _effective_workspace(
     agent_name: str,
     config: Config,
@@ -372,7 +366,7 @@ def _effective_workspace(
         return None
     private_config = agent_config.private
     return _EffectiveAgentWorkspace(
-        root_path=_private_root_name(agent_name, config),
+        root_path=private_root_name(agent_name, private_config.root),
         template_dir=(
             config_relative_path(private_config.template_dir, runtime_paths)
             if private_config.template_dir is not None
@@ -383,13 +377,16 @@ def _effective_workspace(
     )
 
 
+def runs_in_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
+    """Return whether this process is a sandbox runner pinned to one dedicated worker."""
+    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
+    )
+
+
 def _template_unavailable_for_dedicated_worker(template_dir: Path, runtime_paths: RuntimePaths) -> bool:
     """Return whether a dedicated worker should rely on the control plane's existing scaffold."""
-    return (
-        runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
-        and bool(runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""))
-        and not template_dir.expanduser().is_dir()
-    )
+    return runs_in_dedicated_worker(runtime_paths) and not template_dir.expanduser().is_dir()
 
 
 def _resolve_workspace(

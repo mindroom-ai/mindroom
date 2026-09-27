@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom.api import sandbox_runner
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
@@ -21,7 +22,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
+    private_instance_scope_root_path,
     resolve_worker_target,
     worker_dir_name,
 )
@@ -32,7 +33,7 @@ from tests.test_attachments_tool import _tool_context
 
 @pytest.fixture
 def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, Path, Path]:
-    """Prepare real dedicated-worker paths without requiring agent config on the worker."""
+    """Prepare real dedicated-worker paths whose config names the private workspace the primary sends."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="writer",
@@ -46,14 +47,7 @@ def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, 
     assert target.worker_key is not None
     shared_root = tmp_path / "worker-storage"
     worker_root = shared_root / "workers" / worker_dir_name(target.worker_key)
-    workspace = (
-        _private_instance_state_root_path(
-            shared_root,
-            worker_key=target.worker_key,
-            agent_name="writer",
-        )
-        / "workspace"
-    )
+    workspace = private_instance_scope_root_path(shared_root, target.worker_key) / "writer" / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "sample.png").write_bytes(_png_bytes())
     # Path-only requests reuse an existing interpreter without bootstrapping packages.
@@ -73,7 +67,15 @@ def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, 
     app = FastAPI()
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
-        config=Config(agents={}, models={}),
+        config=Config(
+            agents={
+                "writer": AgentConfig(
+                    display_name="Writer",
+                    private=AgentPrivateConfig(per="user_agent", root="workspace"),
+                ),
+            },
+            models={},
+        ),
         tool_metadata={},
         runner_token=TOKEN,
     )
@@ -129,13 +131,8 @@ def test_view_file_rejects_unauthorized_workspace_override(
     )
     assert other.worker_key is not None
     forbidden = (
-        _private_instance_state_root_path(
-            shared_root,
-            worker_key=other.worker_key,
-            agent_name=other.routing_agent_name,
-        )
-        / "workspace"
-    )
+        private_instance_scope_root_path(shared_root, other.worker_key) / other.routing_agent_name
+    ) / "workspace"
     forbidden.mkdir(parents=True)
     (forbidden / "sample.png").write_bytes(_png_bytes())
     if foreign_root == "symlink":
@@ -154,7 +151,7 @@ def test_view_file_rejects_unauthorized_workspace_override(
     )
 
     assert response.status_code == 400
-    assert "allowed state roots" in response.json()["detail"]
+    assert "visible workspace" in response.json()["detail"]
 
 
 def test_view_file_without_override_keeps_worker_default(

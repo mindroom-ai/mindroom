@@ -30,6 +30,7 @@ from mindroom.workspaces import (
     resolve_agent_workspace_from_state_path,
     resolve_relative_path_within_root,
     resolve_workspace_relative_path,
+    runs_in_dedicated_worker,
 )
 
 if TYPE_CHECKING:
@@ -204,7 +205,9 @@ def resolve_agent_runtime(
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
 
-    if create and resolved_execution.policy.private_workspace_enabled:
+    # The identity record sits in the private scope above the workspace, which
+    # dedicated workers never mount; only the primary creates or locks it.
+    if create and resolved_execution.policy.private_workspace_enabled and not runs_in_dedicated_worker(runtime_paths):
         execution_identity = resolved_execution.execution_identity
         worker_key = resolved_execution.worker_key
         if execution_identity is None or worker_key is None or execution_identity.requester_id is None:

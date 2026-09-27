@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+import shutil
 import stat
 import tempfile
 from dataclasses import replace
@@ -78,7 +79,6 @@ from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_state_root_path,
     agent_workspace_root_path,
     private_instance_scope_root_path,
@@ -89,7 +89,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     shared_storage_root,
     tool_execution_identity,
-    visible_state_roots_for_worker_key,
+    visible_workspace_roots_for_worker_key,
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
@@ -1518,11 +1518,7 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     )
     worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert worker_key is not None
-    canonical_state_root = _private_instance_state_root_path(
-        runtime_paths.storage_root,
-        worker_key=worker_key,
-        agent_name="general",
-    )
+    canonical_state_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "general"
     canonical_state_root.parent.mkdir(parents=True, exist_ok=True)
     outside_root = tmp_path / "outside"
     outside_root.mkdir(parents=True, exist_ok=True)
@@ -1779,15 +1775,73 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert expected_worker_key is not None
     assert runtime.execution.is_private is True
     assert runtime.execution.worker_key == expected_worker_key
-    assert runtime.state_root == _private_instance_state_root_path(
-        tmp_path,
-        worker_key=expected_worker_key,
-        agent_name="general",
-    )
+    assert runtime.state_root == (private_instance_scope_root_path(tmp_path, expected_worker_key) / "general")
     assert runtime.workspace is not None
     assert runtime.workspace.root == runtime.state_root / "mind_data"
     assert runtime.tool_base_dir == runtime.workspace.root
     assert runtime.file_memory_root == runtime.workspace.root
+
+
+def test_dedicated_worker_runtime_resolution_never_writes_the_private_identity_record(tmp_path: Path) -> None:
+    """Workers do not mount the private scope, so only the primary creates or locks its identity record."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="s1",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+    assert worker_key is not None
+    primary_paths = _runtime_paths(tmp_path)
+    worker_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+        },
+    )
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user_agent", root="mind_data")
+    scope_root = private_instance_scope_root_path(tmp_path, worker_key)
+    # The worker sees only the private workspace the primary already materialized.
+    (scope_root / "general" / "mind_data").mkdir(parents=True)
+
+    runtime = resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, worker_paths),
+        worker_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == scope_root / "general" / "mind_data"
+    assert sorted(entry.name for entry in scope_root.iterdir()) == ["general"]
+
+    resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, primary_paths),
+        primary_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) is None
+    shutil.rmtree(scope_root)
+    resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, primary_paths),
+        primary_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="@alice:localhost",
+    )
 
 
 def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_workspace_local_shared_bases(
@@ -2788,11 +2842,13 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (agent_state_root_path(tmp_path, "general"),)
+    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == (
+        agent_workspace_root_path(tmp_path, "general"),
+    )
 
 
-def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
-    """User workers should see only user-scope agent roots plus their own private-instance namespace."""
+def test_visible_workspace_roots_for_user_worker_include_only_user_scope_workspaces(tmp_path: Path) -> None:
+    """User workers see user-scope shared workspaces and their own per-user private workspaces, never state roots."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -2806,18 +2862,19 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
     worker_key = resolve_worker_key("user", identity)
 
     assert worker_key is not None
-    assert visible_state_roots_for_worker_key(
+    scope_root = private_instance_scope_root_path(tmp_path, worker_key)
+    assert visible_workspace_roots_for_worker_key(
         tmp_path,
         worker_key,
+        private_agent_roots={"mind": "mind_data", "notes": "workspace/notes"},
         user_scope_agent_names=frozenset({"general", "coder"}),
     ) == (
-        agent_state_root_path(tmp_path, "coder"),
-        agent_state_root_path(tmp_path, "general"),
-        private_instance_scope_root_path(tmp_path, worker_key),
+        agent_workspace_root_path(tmp_path, "coder"),
+        agent_workspace_root_path(tmp_path, "general"),
+        scope_root / "mind" / "mind_data",
+        scope_root / "notes" / "workspace" / "notes",
     )
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
-        private_instance_scope_root_path(tmp_path, worker_key),
-    )
+    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == ()
 
 
 def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_agent_scope() -> None:
@@ -2829,10 +2886,10 @@ def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_
     assert not requires_explicit_private_agent_visibility("legacy-worker-key")
 
 
-def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(
+def test_visible_workspace_roots_for_private_user_agent_workers_hide_the_private_state_root(
     tmp_path: Path,
 ) -> None:
-    """Private requester-scoped workers should only see their addressed private state root."""
+    """Private requester-scoped workers see only their private workspace, not the state root above it."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -2846,11 +2903,21 @@ def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_ro
     worker_key = resolve_worker_key("user_agent", identity, agent_name="mind")
 
     assert worker_key is not None
-    assert visible_state_roots_for_worker_key(
+    assert visible_workspace_roots_for_worker_key(
         tmp_path,
         worker_key,
-        private_agent_names=frozenset({"mind"}),
-    ) == (_private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
+        private_agent_roots={"mind": "mind_data"},
+    ) == (private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data",)
+    assert visible_workspace_roots_for_worker_key(tmp_path, worker_key) == (
+        agent_workspace_root_path(tmp_path, "mind"),
+    )
+    for escaping_root in ("/etc", "../other", "."):
+        with pytest.raises(ValueError, match=r"private\.root must be a relative path"):
+            visible_workspace_roots_for_worker_key(
+                tmp_path,
+                worker_key,
+                private_agent_roots={"mind": escaping_root},
+            )
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
@@ -3339,14 +3406,7 @@ def test_resolve_agent_runtime_skips_missing_private_template_copy_for_dedicated
         create=True,
     )
 
-    expected_workspace = (
-        _private_instance_state_root_path(
-            shared_root,
-            worker_key=worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    expected_workspace = (private_instance_scope_root_path(shared_root, worker_key) / "general") / "mind_data"
     assert agent_runtime.workspace is not None
     assert agent_runtime.workspace.root == expected_workspace
     assert expected_workspace.is_dir()
@@ -3532,14 +3592,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
-    alice_workspace = (
-        _private_instance_state_root_path(
-            tmp_path,
-            worker_key=alice_worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    alice_workspace = (private_instance_scope_root_path(tmp_path, alice_worker_key) / "general") / "mind_data"
     assert (alice_workspace / "USER.md").exists()
     assert (alice_workspace / "MEMORY.md").exists()
     (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
@@ -3558,14 +3611,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
-    bob_workspace = (
-        _private_instance_state_root_path(
-            tmp_path,
-            worker_key=bob_worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    bob_workspace = (private_instance_scope_root_path(tmp_path, bob_worker_key) / "general") / "mind_data"
 
     assert alice_workspace != bob_workspace
     assert "Alice private root context." in alice_agent.role
@@ -4717,6 +4763,11 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("learning", "private.root must not use reserved runtime directory 'learning'"),
         ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
         ("chroma", "private.root must not use reserved runtime directory 'chroma'"),
+        ("memory_files", "private.root must not use reserved runtime directory 'memory_files'"),
+        ("calls/notes", "private.root must not use reserved runtime directory 'calls'"),
+        ("agent_modes.json", "private.root must not use reserved runtime directory 'agent_modes.json'"),
+        ("invited_rooms.json", "private.root must not use reserved runtime directory 'invited_rooms.json'"),
+        (".sessions-recovery.lock", "private.root must not use reserved runtime directory '.sessions-recovery.lock'"),
     ],
 )
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:

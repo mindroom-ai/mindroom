@@ -3576,7 +3576,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
             response = httpx.Response(
                 400,
                 request=request,
-                json={"detail": "base_dir must stay inside the allowed state roots or worker root"},
+                json={"detail": "base_dir must stay inside a visible workspace or the worker root"},
             )
             message = "bad request"
             raise httpx.HTTPStatusError(message, request=request, response=response)
@@ -3611,7 +3611,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
-    with pytest.raises(RuntimeError, match="base_dir must stay inside the allowed state roots or worker root"):
+    with pytest.raises(RuntimeError, match="base_dir must stay inside a visible workspace or the worker root"):
         entrypoint(1, 2)
 
 

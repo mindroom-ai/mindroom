@@ -32,6 +32,7 @@ from mindroom.constants import (
     write_startup_manifest,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -48,7 +49,8 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
-    plan_scoped_visible_state_roots,
+    plan_scoped_workspace_mounts,
+    prepare_workspace_mount_sources,
     resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
@@ -627,6 +629,13 @@ class DockerWorkerBackend:
             )
 
         with self._worker_lock(spec.worker_key):
+            # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
+            prepare_workspace_mount_sources(
+                worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
+                local_shared_storage_root=self._storage_path,
+                private_agent_names=spec.private_agent_names,
+                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+            )
             launch_config = self._resolve_launch_config()
             paths = self._worker_paths(spec.worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key) or self._default_metadata(
@@ -1592,13 +1601,13 @@ class DockerWorkerBackend:
             if ".." in relative_path.parts:
                 msg = f"Docker worker mount target escapes the worker storage root: {container_path}"
                 raise WorkerBackendError(msg)
-            current = paths.state.root
-            for segment in relative_path.parts:
-                current /= segment
-                if current.is_symlink() or (current.exists() and not current.is_dir()):
-                    msg = f"Docker worker mount target must be a real directory: {current}"
-                    raise WorkerBackendError(msg)
-                current.mkdir(exist_ok=True)
+            # The worker root is worker-writable, so the walk never follows a planted link.
+            try:
+                with open_directory_within_root(paths.state.root, Path(*relative_path.parts), create=True):
+                    pass
+            except OSError as exc:
+                msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
+                raise WorkerBackendError(msg) from exc
 
     def _scoped_storage_mount_specs(
         self,
@@ -1608,13 +1617,12 @@ class DockerWorkerBackend:
         state_scope_worker_key: str | None = None,
     ) -> list[tuple[Path, str, bool]]:
         mount_specs = [
-            (planned_root.local_path, str(planned_root.worker_visible_path), False)
-            for planned_root in plan_scoped_visible_state_roots(
+            (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
+            for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,
-                allow_unknown_worker_key=False,
                 resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
             )
         ]

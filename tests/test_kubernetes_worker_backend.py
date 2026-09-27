@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -1865,7 +1866,8 @@ def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
         "readOnly": True,
     }
     assert "/app/agent_data" not in mount_paths
-    assert mount_paths["/app/agent_data/agents/code"]["subPath"] == "agents/code"
+    assert "/app/agent_data/agents/code" not in mount_paths
+    assert mount_paths["/app/agent_data/agents/code/workspace"]["subPath"] == "agents/code/workspace"
     assert mount_paths[expected_worker_root]["subPath"] == f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
     assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
@@ -2286,9 +2288,13 @@ def test_kubernetes_backend_honors_custom_worker_port() -> None:
     assert container["livenessProbe"]["httpGet"]["port"] == "api"
 
 
-def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -> None:
-    """Shared-scope dedicated workers should mount only their agent root, not the whole agents tree."""
-    backend, apps_api, _core_api = _backend()
+def test_kubernetes_backend_mounts_only_the_workspace_for_shared_workers(tmp_path: Path) -> None:
+    """Shared-scope dedicated workers mount their agent workspace, never the agent state root above it."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = "v1:tenant-123:shared:code"
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
@@ -2298,7 +2304,16 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
 
-    assert mount_paths["/app/worker/agents/code"] == "agents/code"
+    assert {path: subpath for path, subpath in mount_paths.items() if subpath and subpath.startswith("agents")} == {
+        "/app/worker/agents/code/workspace": "agents/code/workspace",
+    }
+    assert next(mount for mount in volume_mounts if mount["mountPath"] == "/app/worker/agents/code/workspace") == {
+        "name": "worker-storage",
+        "mountPath": "/app/worker/agents/code/workspace",
+        "subPath": "agents/code/workspace",
+    }
+    # The primary creates the shared workspace before kubelet could create it as root.
+    assert (runtime_paths.storage_root / "agents" / "code" / "workspace").is_dir()
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/credentials" not in mount_paths
     assert "/app/worker/.shared_credentials" not in mount_paths
@@ -2396,7 +2411,8 @@ router:
     mount_paths = {
         mount["mountPath"] for mount in deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     }
-    assert "/app/worker/agents/watcher" in mount_paths
+    assert "/app/worker/agents/watcher/workspace" in mount_paths
+    assert "/app/worker/agents/watcher" not in mount_paths
     assert "/app/worker/knowledge/watcher-docs" in mount_paths
 
 
@@ -2512,9 +2528,99 @@ router:
     deployment = apps_api.created_bodies[0]
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = [mount["mountPath"] for mount in volume_mounts]
-    assert "/app/worker/agents/code" in mount_paths
+    assert "/app/worker/agents/code/workspace" in mount_paths
     assert "/app/worker/agents/code/workspace/knowledge" not in mount_paths
     assert "/app/worker/agents/code/workspace/knowledge/docs" not in mount_paths
+
+
+def _write_code_agent_knowledge_config(tmp_path: Path, knowledge_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [agent_docs]
+knowledge_bases:
+  agent_docs:
+    path: {knowledge_path}
+models:
+  default:
+    provider: openai
+    id: gpt-6-astra
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+
+
+def test_kubernetes_drift_check_never_creates_workspace_mount_sources(tmp_path: Path) -> None:
+    """Planning a pod template only reads storage; directories are created at ensure time alone."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:shared:code"
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    agent_root = runtime_paths.storage_root / "agents" / "code"
+    shutil.rmtree(agent_root)
+    before = sorted(runtime_paths.storage_root.rglob("*"))
+    deployment = backend._resources.read_deployment(handle.worker_id)
+    assert deployment is not None
+
+    assert backend._resources.deployment_template_drifted(
+        deployment,
+        worker_key=worker_key,
+        worker_id=handle.worker_id,
+        state_subpath=backend._state_subpath(worker_key),
+        private_agent_names=None,
+    )
+
+    assert not agent_root.exists()
+    assert sorted(runtime_paths.storage_root.rglob("*")) == before
+
+
+def test_kubernetes_backend_mounts_knowledge_beside_the_workspace_read_only(tmp_path: Path) -> None:
+    """Knowledge in the agent state root but outside the workspace stays visible, read-only."""
+    knowledge_root = tmp_path / "storage" / "agents" / "code" / "knowledge"
+    knowledge_root.mkdir(parents=True)
+    backend, apps_api, _core_api = _backend(runtime_paths=_write_code_agent_knowledge_config(tmp_path, knowledge_root))
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    volume_mounts = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    agent_mounts = [mount for mount in volume_mounts if str(mount.get("subPath", "")).startswith("agents/")]
+    assert agent_mounts == [
+        {
+            "name": "worker-storage",
+            "mountPath": "/app/worker/agents/code/workspace",
+            "subPath": "agents/code/workspace",
+        },
+        {
+            "name": "worker-storage",
+            "mountPath": "/app/worker/agents/code/knowledge",
+            "subPath": "agents/code/knowledge",
+            "readOnly": True,
+        },
+    ]
+
+
+def test_kubernetes_backend_rejects_knowledge_containing_the_workspace(tmp_path: Path) -> None:
+    """Knowledge rooted at the agent state root would re-expose it, so it fails closed."""
+    agent_root = tmp_path / "storage" / "agents" / "code"
+    agent_root.mkdir(parents=True)
+    backend, apps_api, _core_api = _backend(runtime_paths=_write_code_agent_knowledge_config(tmp_path, agent_root))
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.created_bodies == []
 
 
 def test_kubernetes_backend_rejects_knowledge_mount_containing_scoped_storage(tmp_path: Path) -> None:
@@ -2754,7 +2860,7 @@ router:
     mount_paths = {mount["mountPath"] for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
     assert mount_paths == {
-        "/app/worker/agents/code",
+        "/app/worker/agents/code/workspace",
         expected_worker_root,
         f"{expected_worker_root}/.shared_credentials",
         f"{expected_worker_root}/.runtime",
@@ -3012,7 +3118,7 @@ router:
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    worker_key = "v1:tenant-123:user:@alice:example.org"
+    worker_key = "v1:tenant-123:user:~@alice:example.org"
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
@@ -3027,11 +3133,34 @@ router:
         for path, sub_path in mount_paths.items()
         if path.startswith("/app/worker/agents") or (sub_path or "").startswith("agents")
     }
-    assert agent_mounts == {"/app/worker/agents/alpha": "agents/alpha"}
-    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key)}"
+    assert agent_mounts == {"/app/worker/agents/alpha/workspace": "agents/alpha/workspace"}
+    # The per-user private agent has no workspace yet, so nothing below its scope is mounted or created.
+    assert not any("private_instances" in (sub_path or "") for sub_path in mount_paths.values())
+    assert not (runtime_paths.storage_root / "private_instances").exists()
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/credentials" not in mount_paths
     assert "/app/worker/.shared_credentials" not in mount_paths
+
+    ensure_private_instance_identity(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        requester_id="@alice:example.org",
+    )
+    private_workspace = (
+        private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "epsilon" / "epsilon_data"
+    )
+    private_workspace.mkdir(parents=True)
+    backend.ensure_worker(WorkerSpec(worker_key), now=20.0)
+
+    volume_mounts = apps_api.created_bodies[-1]["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    private_mounts = {
+        mount["mountPath"]: mount["subPath"]
+        for mount in volume_mounts
+        if "private_instances" in str(mount.get("subPath"))
+    }
+    assert private_mounts == {
+        f"{expected_private_root}/epsilon/epsilon_data": f"private_instances/{worker_dir_name(worker_key)}/epsilon/epsilon_data",
+    }
 
 
 def test_kubernetes_backend_user_agent_mounts_require_explicit_private_visibility(tmp_path: Path) -> None:
@@ -3106,35 +3235,70 @@ router:
     assert apps_api.created_bodies == []
 
 
-def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() -> None:
-    """User-agent workers should mount their scope root so identity metadata remains accessible."""
-    backend, apps_api, _core_api = _backend()
-    worker_key = resolve_worker_key(
-        "user_agent",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-            tenant_id="tenant-123",
-        ),
-        agent_name="mind",
+def _storage_mounts(body: dict[str, object]) -> dict[str, dict[str, object]]:
+    volume_mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    return {mount["mountPath"]: mount for mount in volume_mounts if mount["name"] == "worker-storage"}
+
+
+def test_kubernetes_backend_user_agent_mounts_only_the_existing_private_workspace(tmp_path: Path) -> None:
+    """A private user-agent worker mounts its private workspace, never the scope or state root holding the identity."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
     )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset({"mind"}))
+    scope_root = private_instance_scope_root_path(backend.storage_root, worker_key)
+
+    backend.ensure_worker(spec, now=10.0)
+
+    # Before the primary materializes the workspace nothing private is mounted, and the
+    # scope stays absent so its identity record can still be written first.
+    assert not any(
+        "private_instances" in str(mount.get("subPath"))
+        for mount in _storage_mounts(apps_api.created_bodies[-1]).values()
+    )
+    assert "/app/worker/agents/mind/workspace" not in _storage_mounts(apps_api.created_bodies[-1])
+    assert not scope_root.exists()
+
+    ensure_private_instance_identity(backend.storage_root, worker_key=worker_key, requester_id="@alice:localhost")
+    (scope_root / "mind" / "mind_data").mkdir(parents=True)
+    backend.ensure_worker(spec, now=20.0)
+
+    private_mounts = {
+        path: mount
+        for path, mount in _storage_mounts(apps_api.created_bodies[-1]).items()
+        if "private_instances" in path
+    }
+    assert private_mounts == {
+        f"/app/worker/private_instances/{scope_root.name}/mind/mind_data": {
+            "name": "worker-storage",
+            "mountPath": f"/app/worker/private_instances/{scope_root.name}/mind/mind_data",
+            "subPath": f"private_instances/{scope_root.name}/mind/mind_data",
+        },
+    }
+
+
+def test_kubernetes_backend_never_mounts_a_linked_workspace(tmp_path: Path) -> None:
+    """A workspace, or a directory above it, replaced by a link is left unmounted instead of followed."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user_agent:~@mallory:localhost:mind"
+    victim_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
+    for key, requester in ((worker_key, "@mallory:localhost"), (victim_key, "@alice:localhost")):
+        ensure_private_instance_identity(backend.storage_root, worker_key=key, requester_id=requester)
+        (private_instance_scope_root_path(backend.storage_root, key) / "mind" / "mind_data").mkdir(parents=True)
+    attacker_agent_root = private_instance_scope_root_path(backend.storage_root, worker_key) / "mind"
+    attacker_agent_root.rename(attacker_agent_root.with_name("mind-moved"))
+    attacker_agent_root.symlink_to(private_instance_scope_root_path(backend.storage_root, victim_key) / "mind")
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
 
-    deployment = apps_api.created_bodies[0]
-    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
-    expected_private_subpath = f"private_instances/{worker_dir_name(worker_key)}"
-
-    assert mount_paths[expected_private_root] == expected_private_subpath
-    assert "/app/worker/agents/mind" not in mount_paths
-    assert f"{expected_private_root}/mind" not in mount_paths
+    assert not any("private_instances" in path for path in _storage_mounts(apps_api.created_bodies[-1]))
 
 
 def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path: Path) -> None:
@@ -3150,6 +3314,8 @@ def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path:
     legacy = private_instance_scope_root_path(backend.storage_root, "v1:default:user_agent:@alice:example.org:mind")
     legacy.symlink_to(canonical.name, target_is_directory=True)
 
+    (canonical / "mind" / "mind_data").mkdir(parents=True)
+
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
 
     deployment = apps_api.created_bodies[0]
@@ -3157,18 +3323,36 @@ def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path:
     assert {
         (mount["mountPath"], mount["subPath"]) for mount in mounts if "/private_instances/" in mount["mountPath"]
     } == {
-        (f"/app/worker/private_instances/{canonical.name}", f"private_instances/{canonical.name}"),
-        (f"/app/worker/private_instances/{legacy.name}", f"private_instances/{canonical.name}"),
+        (
+            f"/app/worker/private_instances/{canonical.name}/mind/mind_data",
+            f"private_instances/{canonical.name}/mind/mind_data",
+        ),
+        (
+            f"/app/worker/private_instances/{legacy.name}/mind/mind_data",
+            f"private_instances/{canonical.name}/mind/mind_data",
+        ),
     }
     assert all(mount["mountPath"] != "/app/worker/private_instances" for mount in mounts)
 
 
-def test_kubernetes_script_worker_mounts_the_owning_private_state_scope() -> None:
-    """A script worker should mount its owning scope root, including identity metadata."""
-    backend, apps_api, _core_api = _backend()
-    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+def test_kubernetes_script_worker_mounts_the_owning_private_workspace(tmp_path: Path) -> None:
+    """A script worker mounts only its owning scope's private workspace, not the scope or identity record."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
     run_id = f"script-{'a' * 32}"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
+    ensure_private_instance_identity(
+        backend.storage_root,
+        worker_key=state_scope_worker_key,
+        requester_id="@alice:localhost",
+    )
+    (private_instance_scope_root_path(backend.storage_root, state_scope_worker_key) / "mind" / "mind_data").mkdir(
+        parents=True,
+    )
 
     backend.ensure_worker(
         WorkerSpec(
@@ -3187,7 +3371,10 @@ def test_kubernetes_script_worker_mounts_the_owning_private_state_scope() -> Non
     expected_run_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
 
     assert deployment["metadata"]["annotations"][_ANNOTATION_STATE_SCOPE_WORKER_KEY] == state_scope_worker_key
-    assert mount_paths[expected_private_root] == expected_private_subpath
+    assert expected_private_root not in mount_paths
+    assert {path: subpath for path, subpath in mount_paths.items() if "private_instances" in path} == {
+        f"{expected_private_root}/mind/mind_data": f"{expected_private_subpath}/mind/mind_data",
+    }
     assert mount_paths[expected_run_root] == f"workers/{worker_dir_name(worker_key)}"
     assert f"private_instances/{worker_dir_name(worker_key)}/mind" not in set(mount_paths.values())
 
@@ -3211,9 +3398,20 @@ def test_kubernetes_script_worker_rejects_an_unrelated_state_scope() -> None:
     assert apps_api.created_bodies == []
 
 
-def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes() -> None:
+def _materialize_private_workspace(storage_root: Path, worker_key: str, requester_id: str) -> Path:
+    ensure_private_instance_identity(storage_root, worker_key=worker_key, requester_id=requester_id)
+    workspace = private_instance_scope_root_path(storage_root, worker_key) / "mind" / "mind_data"
+    workspace.mkdir(parents=True)
+    return workspace
+
+
+def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes(tmp_path: Path) -> None:
     """Changing private visibility should recreate the Deployment instead of relying on patch semantics."""
-    backend, apps_api, _core_api = _backend()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -3228,6 +3426,9 @@ def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibil
         ),
         agent_name="mind",
     )
+
+    assert worker_key is not None
+    private_workspace = _materialize_private_workspace(backend.storage_root, worker_key, "@alice:example.org")
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
@@ -3235,19 +3436,22 @@ def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibil
     assert len(apps_api.created_bodies) == 2
     recreated_worker_id = apps_api.created_bodies[-1]["metadata"]["name"]
     assert apps_api.deleted_names == [recreated_worker_id]
-    recreated = apps_api.created_bodies[-1]
-    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
-    expected_private_subpath = f"private_instances/{worker_dir_name(worker_key)}"
+    assert "/app/worker/agents/mind/workspace" in _storage_mounts(apps_api.created_bodies[0])
+    mount_paths = {path: mount["subPath"] for path, mount in _storage_mounts(apps_api.created_bodies[-1]).items()}
+    relative_workspace = private_workspace.relative_to(backend.storage_root).as_posix()
 
-    assert mount_paths[expected_private_root] == expected_private_subpath
-    assert "/app/worker/agents/mind" not in mount_paths
+    assert mount_paths[f"/app/worker/{relative_workspace}"] == relative_workspace
+    assert f"/app/worker/private_instances/{worker_dir_name(worker_key)}" not in mount_paths
+    assert not any(path.startswith("/app/worker/agents/") for path in mount_paths)
 
 
-def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate() -> None:
+def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate(tmp_path: Path) -> None:
     """Template-drift replacement should wait for actual deletion instead of patching a terminating Deployment."""
-    backend, apps_api, _core_api = _backend()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -3262,6 +3466,9 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate() -> N
         ),
         agent_name="mind",
     )
+
+    assert worker_key is not None
+    private_workspace = _materialize_private_workspace(backend.storage_root, worker_key, "@alice:example.org")
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
     worker_id = apps_api.created_bodies[0]["metadata"]["name"]
@@ -3271,16 +3478,15 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate() -> N
 
     assert apps_api.deleted_names == [worker_id]
     assert len(apps_api.created_bodies) == 2
-    recreated = apps_api.created_bodies[-1]
-    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
+    relative_workspace = private_workspace.relative_to(backend.storage_root).as_posix()
+    assert (
+        _storage_mounts(apps_api.created_bodies[-1])[f"/app/worker/{relative_workspace}"]["subPath"]
+        == relative_workspace
+    )
 
-    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key)}"
 
-
-def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:
-    """Unscoped dedicated workers should mount only the addressed agent root."""
+def test_kubernetes_backend_mounts_only_the_workspace_for_unscoped_workers() -> None:
+    """Unscoped dedicated workers mount only the addressed agent's workspace."""
     backend, apps_api, _core_api = _backend()
     worker_key = resolve_unscoped_worker_key(agent_name="general")
 
@@ -3291,7 +3497,8 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers()
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
 
-    assert mount_paths["/app/worker/agents/general"] == "agents/general"
+    assert mount_paths["/app/worker/agents/general/workspace"] == "agents/general/workspace"
+    assert "/app/worker/agents/general" not in mount_paths
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/agents" not in mount_paths
     assert "/app/worker/credentials" not in mount_paths
@@ -3796,7 +4003,7 @@ def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None
 
 
 def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path: Path) -> None:
-    """Reconciliation should rebuild the private scope-root mount from persisted visibility."""
+    """Reconciliation should rebuild the private workspace mount from persisted visibility."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -3816,6 +4023,8 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
         ),
         agent_name="mind",
     )
+    assert worker_key is not None
+    private_workspace = _materialize_private_workspace(backend.storage_root, worker_key, "@alice:example.org")
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=0.0)
     backend.cleanup_idle_workers(now=80.0)
 
@@ -3831,22 +4040,23 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
     assert [worker.worker_key for worker in reconciled] == [worker_key]
     recreated = apps_api.created_bodies[-1]
     assert recreated["metadata"]["annotations"][_ANNOTATION_PRIVATE_AGENT_NAMES] == '["mind"]'
-    mount_paths = {
-        mount["mountPath"] for mount in recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    }
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
-    assert expected_private_root in mount_paths
+    assert f"/app/worker/{private_workspace.relative_to(backend.storage_root).as_posix()}" in _storage_mounts(recreated)
 
 
 def test_kubernetes_backend_reconcile_uses_persisted_script_state_scope(tmp_path: Path) -> None:
-    """Template reconciliation must preserve a script worker's private scope-root mount."""
+    """Template reconciliation must preserve a script worker's private workspace mount."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
     )
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
-    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+    state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:example.org:mind"
     worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
+    private_workspace = _materialize_private_workspace(
+        backend.storage_root,
+        state_scope_worker_key,
+        "@alice:example.org",
+    )
     backend.ensure_worker(
         WorkerSpec(
             worker_key,
@@ -3865,11 +4075,7 @@ def test_kubernetes_backend_reconcile_uses_persisted_script_state_scope(tmp_path
     assert [worker.worker_key for worker in reconciled] == [worker_key]
     recreated = apps_api.created_bodies[-1]
     assert recreated["metadata"]["annotations"][_ANNOTATION_STATE_SCOPE_WORKER_KEY] == state_scope_worker_key
-    mount_paths = {
-        mount["mountPath"] for mount in recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    }
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}"
-    assert expected_private_root in mount_paths
+    assert f"/app/worker/{private_workspace.relative_to(backend.storage_root).as_posix()}" in _storage_mounts(recreated)
 
 
 def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(tmp_path: Path) -> None:

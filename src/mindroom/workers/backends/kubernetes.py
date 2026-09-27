@@ -81,6 +81,7 @@ class _ReadyWorkerCacheEntry:
     handle: WorkerHandle
     validated_at: float
     credentials_encryption_key_hash: str | None
+    workspace_mounts: tuple[tuple[str, str], ...]
 
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
@@ -533,6 +534,11 @@ class KubernetesWorkerBackend:
                     # kubelet resolves the read-only mirror subPath when the pod starts, so the
                     # primary validates and creates the worker's credential directories first.
                     get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
+                    self._resources.prepare_workspace_mount_sources(
+                        worker_key=worker_key,
+                        private_agent_names=spec.private_agent_names,
+                        state_scope_worker_key=spec.state_scope_worker_key,
+                    )
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
@@ -930,9 +936,21 @@ class KubernetesWorkerBackend:
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
+    def _workspace_mounts(self, spec: WorkerSpec) -> tuple[tuple[str, str], ...]:
+        return self._resources.workspace_mounts(
+            worker_key=spec.worker_key,
+            private_agent_names=spec.private_agent_names,
+            state_scope_worker_key=spec.state_scope_worker_key,
+        )
+
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
         if entry is None:
+            return None
+        # A workspace materialized after this pod started, such as a user worker's
+        # next private agent, is mounted only by rebuilding the pod template.
+        if self._workspace_mounts(spec) != entry.workspace_mounts:
+            self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
             handle = self._patch_cached_worker_usage(entry, now=now)
@@ -968,6 +986,7 @@ class KubernetesWorkerBackend:
             handle=handle,
             validated_at=validated_at,
             credentials_encryption_key_hash=self._current_credentials_encryption_key_hash(),
+            workspace_mounts=self._workspace_mounts(spec),
         )
         with self._ready_workers_lock:
             self._ready_workers[spec.worker_key] = entry

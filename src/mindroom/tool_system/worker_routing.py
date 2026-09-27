@@ -8,13 +8,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from mindroom.constants import RuntimePaths
 
@@ -688,16 +689,6 @@ def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -
     return resolved_base_path / _PRIVATE_INSTANCE_ROOT_DIRNAME / worker_dir_name(worker_key)
 
 
-def _private_instance_state_root_path(
-    base_storage_path: Path,
-    *,
-    worker_key: str,
-    agent_name: str,
-) -> Path:
-    """Return the canonical durable state root for one private agent instance."""
-    return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
-
-
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
     resolved_path = path.expanduser().resolve()
     return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
@@ -715,43 +706,72 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def visible_state_roots_for_worker_key(
+def _private_workspace_root_path(
+    base_storage_path: Path,
+    *,
+    worker_key: str,
+    agent_name: str,
+    private_root: str,
+) -> Path:
+    relative_root = Path(private_root)
+    if relative_root.is_absolute() or ".." in relative_root.parts or relative_root == Path():
+        msg = f"private.root must be a relative path below the private state root: {private_root}"
+        raise ValueError(msg)
+    return private_instance_scope_root_path(base_storage_path, worker_key) / agent_name / relative_root
+
+
+def visible_workspace_roots_for_worker_key(
     base_storage_path: Path,
     worker_key: str,
     *,
-    private_agent_names: frozenset[str] = frozenset(),
+    private_agent_roots: Mapping[str, str] = MappingProxyType({}),
     user_scope_agent_names: frozenset[str] = frozenset(),
 ) -> tuple[Path, ...]:
-    """Return the canonical durable state roots a worker key is allowed to see by default.
+    """Return the canonical workspace roots one worker key may mount and work in.
 
-    Shared agent roots remain canonical for normal agents.
-    Private-instance roots live under a separate shared-storage namespace keyed by
-    worker scope so they are durable without becoming worker-owned state.
-    `user` acts as a per-requester multi-agent workstation, so it sees the roots of
-    `user_scope_agent_names` (the non-private `worker_scope: user` agents) plus its
-    own private-instance namespace, never agents on other scopes.
+    Workers see only workspaces, never the agent state roots or private scopes
+    that hold them, so worker code can neither replace a directory above a
+    workspace nor reach the sessions, memory, and identity records beside it.
+    ``private_agent_roots`` maps each private agent visible to this key to its
+    ``private.root``; shared agents use their canonical ``agents/<name>/workspace``.
+    A ``user`` key is a per-requester multi-agent workstation, so it sees the
+    workspaces of ``user_scope_agent_names`` (the non-private ``worker_scope:
+    user`` agents) and of its own ``per: user`` private agents, never agents on
+    other scopes.
     """
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
         return ()
     if scope == "user":
         return (
-            *(agent_state_root_path(base_storage_path, agent_name) for agent_name in sorted(user_scope_agent_names)),
-            private_instance_scope_root_path(base_storage_path, worker_key),
+            *(
+                agent_workspace_root_path(base_storage_path, agent_name)
+                for agent_name in sorted(user_scope_agent_names)
+            ),
+            *(
+                _private_workspace_root_path(
+                    base_storage_path,
+                    worker_key=worker_key,
+                    agent_name=agent_name,
+                    private_root=private_root,
+                )
+                for agent_name, private_root in sorted(private_agent_roots.items())
+            ),
         )
 
     agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
-    if scope == "user_agent" and agent_name in private_agent_names:
+    if scope == "user_agent" and agent_name in private_agent_roots:
         return (
-            _private_instance_state_root_path(
+            _private_workspace_root_path(
                 base_storage_path,
                 worker_key=worker_key,
                 agent_name=agent_name,
+                private_root=private_agent_roots[agent_name],
             ),
         )
-    return (agent_state_root_path(base_storage_path, agent_name),)
+    return (agent_workspace_root_path(base_storage_path, agent_name),)
 
 
 def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:
