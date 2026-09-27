@@ -131,4 +131,13 @@ final class EmbeddedWebTabsTests: XCTestCase {
         XCTAssertEqual(policy.decide(URL(string: "http://evil.example.net")!, clicked: false), .cancel)
         XCTAssertEqual(policy.decide(URL(string: "about:blank")!, clicked: false), .cancel)
     }
+
+    func testCohostedMatrixSSOActivatesProviderFlow() {
+        let chat = URL(string: "https://chat.example.org")!
+        var policy = ChatSSONavigation(root: chat)
+        let start = URL(string: "https://chat.example.org/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fchat.example.org%2Flogin")!
+        XCTAssertEqual(policy.decide(start, clicked: true), .allow)
+        XCTAssertTrue(policy.isActive)
+        XCTAssertEqual(policy.decide(URL(string: "https://accounts.example.net/oauth")!, clicked: true), .allow)
+    }
 }

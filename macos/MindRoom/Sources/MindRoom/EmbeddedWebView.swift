@@ -50,12 +50,12 @@ struct ChatSSONavigation {
 
     mutating func decide(_ url: URL, clicked: Bool) -> WebNavigationDecision {
         guard WebNavigationPolicy.isWebURL(url) else { return .cancel }
-        if WebNavigationPolicy.sameOrigin(url, root) { return .allow }
         if clicked && Self.isStart(url, returningTo: root) {
             isActive = true
             localHomeserver = url.scheme == "http" ? url : nil
             return .allow
         }
+        if WebNavigationPolicy.sameOrigin(url, root) { return .allow }
         if isActive {
             if url.scheme == "https" { return .allow }
             if let localHomeserver, WebNavigationPolicy.sameOrigin(url, localHomeserver) { return .allow }
