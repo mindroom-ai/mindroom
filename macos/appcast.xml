@@ -5,6 +5,31 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.320</title>
+            <pubDate>Sun, 27 Sep 2026 01:44:43 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1637</sparkle:version>
+            <sparkle:shortVersionString>2026.9.320</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.320
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Seed hosted instances with the config init starter (#2363)](https://github.com/mindroom-ai/mindroom/commit/a233f1928) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.320/MindRoom.zip" length="123971463" type="application/octet-stream" sparkle:edSignature="sSSKF8od2iaTpcIoE/GPBOlTYkPwt3I/Vi2wTRHWBqqgwHhnim2YuwhKawXpv9OZQTzIoeF4RCMyHcXZBgpjBg=="/>
+        </item>
+        <item>
             <title>2026.9.220</title>
             <pubDate>Tue, 22 Sep 2026 00:11:08 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
