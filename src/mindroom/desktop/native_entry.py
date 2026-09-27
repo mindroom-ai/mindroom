@@ -22,9 +22,9 @@ def _main() -> None:
     if getattr(sys, "frozen", False) and not any(name in os.environ for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
         # Frozen OpenSSL may retain the build machine's absent CA path. Use the
         # shipped roots, preserving explicit trust configuration and verification.
-        import certifi  # noqa: PLC0415 - Only the packaged helper needs this fallback.
+        from certifi import where  # noqa: PLC0415 - Only the packaged helper needs this fallback.
 
-        os.environ["SSL_CERT_FILE"] = certifi.where()
+        os.environ["SSL_CERT_FILE"] = where()
     try:
         helper_version = version("mindroom")
     except PackageNotFoundError:

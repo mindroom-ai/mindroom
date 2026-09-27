@@ -7,7 +7,7 @@ import ssl
 import aiohttp
 
 from mindroom.desktop.native_protocol import NativeProtocolError
-from mindroom.desktop.session import DesktopSessionError
+from mindroom.desktop.session import DesktopSessionNotFoundError
 
 
 def desktop_startup_error(error: Exception) -> NativeProtocolError:
@@ -16,7 +16,7 @@ def desktop_startup_error(error: Exception) -> NativeProtocolError:
     cause: BaseException | None = error
     while cause is not None and cause not in causes:
         causes.append(cause)
-        cause = cause.__cause__
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     if any(isinstance(item, ssl.SSLCertVerificationError | aiohttp.ClientConnectorCertificateError) for item in causes):
         return NativeProtocolError(
             "tls_certificate_error",
@@ -36,7 +36,7 @@ def desktop_startup_error(error: Exception) -> NativeProtocolError:
             recovery="Check your network and server availability, then retry Start Access. Your saved connection has been kept.",
             retryable=True,
         )
-    if isinstance(error, DesktopSessionError):
+    if isinstance(error, DesktopSessionNotFoundError):
         return NativeProtocolError(
             "session_missing",
             str(error),
