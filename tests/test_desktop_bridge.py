@@ -838,8 +838,8 @@ async def test_stop_settles_shell_work_promptly_without_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["offline", "stalled", "sender_busy"])
-async def test_stop_preserves_undelivered_cancellation_when_network_fails(
+@pytest.mark.parametrize("failure", ["offline", "unexpected", "stalled", "sender_busy"])
+async def test_stop_preserves_undelivered_cancellation_when_delivery_fails(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -860,6 +860,9 @@ async def test_stop_preserves_undelivered_cancellation_when_network_fails(
         if failure == "offline":
             message = "Offline"
             raise OlmToDeviceError(message)
+        if failure == "unexpected":
+            message = "Unexpected encrypted delivery failure"
+            raise RuntimeError(message)
         await asyncio.Event().wait()
 
     transport.side_effect = failed_send

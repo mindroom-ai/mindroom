@@ -71,11 +71,14 @@ final class DesktopApprovalWindowTests: XCTestCase {
         try publish(request("expired", expiresIn: -1), through: helper)
         await settle()
         XCTAssertFalse(controller.window?.isVisible == true)
-        try publish(request("brief", expiresIn: 0.3), through: helper)
+        // The first SwiftUI window can take seconds to render on a cold CI runner.
+        try publish(request("brief"), through: helper)
         await settle()
         XCTAssertTrue(controller.window?.isVisible == true)
+        try publish(request("brief", expiresIn: 0.3), through: helper)
         // Even a stalled helper cannot leave an actionable expired popup on screen.
-        try await Task.sleep(for: .milliseconds(1200))
+        let deadline = Date().addingTimeInterval(5)
+        while controller.window?.isVisible == true && Date() < deadline { await settle() }
         XCTAssertFalse(controller.window?.isVisible == true)
     }
 

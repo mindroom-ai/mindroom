@@ -553,6 +553,9 @@ class DesktopBridge:
                     await self.deliver_pending()
             except TimeoutError:
                 logger.warning("desktop_stop_response_delivery_timed_out")
+            except Exception:
+                # Delivery is best effort here; its failure must not prevent callers releasing resources.
+                logger.exception("desktop_stop_response_delivery_failed")
             finally:
                 self._stopped.set()
 
