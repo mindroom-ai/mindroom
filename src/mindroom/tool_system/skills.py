@@ -37,6 +37,8 @@ logger = get_logger(__name__)
 _SKILL_FILENAME = "SKILL.md"
 _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
+_MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
+_MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -210,7 +212,12 @@ class _MindroomSkills(Skills):
             return None
         relative_path = Path(skill.source_path).relative_to(workspace_root) / kind / filename
         try:
-            return {"content": read_regular_file_within_root(workspace_root, relative_path).decode("utf-8")}
+            payload = read_regular_file_within_root(
+                workspace_root,
+                relative_path,
+                max_bytes=_MAX_WORKSPACE_SKILL_FILE_BYTES,
+            )
+            return {"content": payload.decode("utf-8")}
         except (OSError, ValueError) as exc:
             logger.warning("Refused a workspace skill file", path=str(workspace_root / relative_path), error=str(exc))
             return {"error": f"Error reading workspace skill file {filename}: {type(exc).__name__}"}
@@ -552,7 +559,11 @@ def _workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
 def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
     """Build one workspace skill from descriptor reads below its pinned directory."""
     try:
-        content = read_regular_file_within_root(skill_fd, _SKILL_FILENAME).decode("utf-8")
+        content = read_regular_file_within_root(
+            skill_fd,
+            _SKILL_FILENAME,
+            max_bytes=_MAX_WORKSPACE_SKILL_FILE_BYTES,
+        ).decode("utf-8")
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
@@ -602,6 +613,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                 )
                 skill_names = skill_names[:_MAX_WORKSPACE_SKILLS]
             skills: list[Skill] = []
+            loaded_bytes = 0
             for skill_name in skill_names:
                 try:
                     with open_directory_within_root(skills_fd, skill_name) as skill_fd:
@@ -613,8 +625,13 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                         error=type(exc).__name__,
                     )
                     continue
-                if skill is not None:
-                    skills.append(skill)
+                if skill is None:
+                    continue
+                loaded_bytes += len(skill.instructions.encode("utf-8"))
+                if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+                    logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
+                    break
+                skills.append(skill)
             return skills
     except FileNotFoundError:
         return []

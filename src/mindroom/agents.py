@@ -109,6 +109,7 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
+_MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 
 @dataclass
@@ -288,13 +289,20 @@ def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agen
             payload = resolved_path.read_bytes()
         else:
             relative_path = resolved_path.relative_to(workspace_root)
-            payload = read_regular_file_within_root(workspace_root, relative_path, truncate=True)
+            payload = read_regular_file_within_root(
+                workspace_root,
+                relative_path,
+                max_bytes=_MAX_WORKSPACE_CONTEXT_FILE_BYTES,
+                truncate=True,
+            )
     except FileNotFoundError:
         logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
         return None
     except (OSError, ValueError) as exc:
         logger.warning("context_file_refused", agent=agent_name, path=str(resolved_path), error_type=type(exc).__name__)
         return None
+    if len(payload) >= _MAX_WORKSPACE_CONTEXT_FILE_BYTES:
+        logger.warning("context_file_truncated", agent=agent_name, path=str(resolved_path))
     return payload.decode("utf-8", errors="replace").strip()
 
 

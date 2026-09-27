@@ -3035,6 +3035,25 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
     assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
 
 
+def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_path: Path) -> None:
+    """A context file above the 1 MiB read cap is truncated with a warning instead of read whole."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "SOUL.md").write_text("x" * ((1 << 20) + 10), encoding="utf-8")
+
+    with capture_logs() as logs:
+        [chunk] = _load_context_files(
+            ["SOUL.md"],
+            _runtime_paths(storage_path),
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert len(chunk.body) == 1 << 20
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_truncated"]
+
+
 def test_load_context_files_refuses_a_workspace_file_swapped_after_resolution(tmp_path: Path) -> None:
     """A private context file resolved at runtime resolution and then replaced by a link is not followed."""
     storage_path = tmp_path / "storage"

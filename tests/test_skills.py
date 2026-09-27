@@ -914,3 +914,27 @@ def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_pat
     assert any(
         entry["log_level"] == "warning" and entry.get("limit") == skills_module._MAX_WORKSPACE_SKILLS for entry in logs
     )
+
+
+def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Path) -> None:
+    """One oversized SKILL.md is refused, and skills beyond the total budget are skipped, each with a warning."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "huge", "Too big")
+    (workspace_skills / "huge" / "SKILL.md").write_text(
+        "---\nname: huge\ndescription: big\n---\n" + "x" * (2 << 20),
+        encoding="utf-8",
+    )
+    for index in range(10):
+        _write_skill(workspace_skills, f"skill-{index}", "Large skill")
+        with (workspace_skills / f"skill-{index}" / "SKILL.md").open("a", encoding="utf-8") as skill_file:
+            skill_file.write("x" * (900 << 10))
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    names = _skill_names(skills)
+    assert "huge" not in names
+    assert 0 < len(names) < 10
+    warnings = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert any(str(entry.get("path", "")).endswith("huge/SKILL.md") for entry in warnings)
+    assert any("budget" in entry["event"] for entry in warnings)
