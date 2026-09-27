@@ -27,8 +27,14 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.models import WorkerHandle
+from tests.access_schema_support import with_current_room_member_access
 from tests.api.test_view_file import HEADERS, TOKEN, _png_bytes
+from tests.conftest import bind_runtime_paths
 from tests.test_attachments_tool import _tool_context
+
+
+def _writer(root: str = "workspace") -> AgentConfig:
+    return AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user_agent", root=root))
 
 
 @pytest.fixture
@@ -67,15 +73,7 @@ def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, 
     app = FastAPI()
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
-        config=Config(
-            agents={
-                "writer": AgentConfig(
-                    display_name="Writer",
-                    private=AgentPrivateConfig(per="user_agent", root="workspace"),
-                ),
-            },
-            models={},
-        ),
+        config=Config(agents={"writer": _writer()}, models={}),
         tool_metadata={},
         runner_token=TOKEN,
     )
@@ -201,6 +199,16 @@ async def test_view_file_transports_workspace_between_storage_mounts(
     primary_workspace = primary_root / workspace.relative_to(shared_root)
     assert not primary_workspace.exists()
     context = _tool_context(primary_root, process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "all"})
+    # The primary routes the private writer, so its live config, which it sends to the runner, defines writer.
+    context = replace(
+        context,
+        config=bind_runtime_paths(
+            with_current_room_member_access(
+                Config(agents={**context.config.agents, "writer": _writer()}, authorization={}),
+            ),
+            context.runtime_paths,
+        ),
+    )
     manager = Mock()
     manager.ensure_worker.return_value = WorkerHandle(
         worker_id="test-worker",
@@ -250,3 +258,46 @@ async def test_view_file_transports_workspace_between_storage_mounts(
     assert reopened.images[0].content == _png_bytes()
     assert not primary_workspace.exists()
     assert not context.client.room_send.called
+
+
+@pytest.mark.parametrize(
+    ("snapshot_root", "base_dir_root", "status_code"),
+    [
+        ("notes", "notes", 200),
+        ("notes", "workspace", 400),
+        (None, "notes", 400),
+        (None, "workspace", 200),
+    ],
+)
+def test_view_file_authorizes_workspaces_from_the_primary_config_snapshot(
+    routed_workspace: tuple[TestClient, ResolvedWorkerTarget, Path, Path],
+    snapshot_root: str | None,
+    base_dir_root: str,
+    status_code: int,
+) -> None:
+    """The runner derives visible workspaces from the live config the primary sends, else its seed config."""
+    client, target, shared_root, workspace = routed_workspace
+    notes = workspace.parent / "notes"
+    notes.mkdir()
+    (notes / "sample.png").write_bytes(_png_bytes())
+    snapshot = (
+        {}
+        if snapshot_root is None
+        else {"config_snapshot": Config(agents={"writer": _writer(snapshot_root)}, models={}).authored_model_dump()}
+    )
+
+    response = client.post(
+        "/api/sandbox-runner/view-file",
+        headers=HEADERS,
+        json={
+            "worker_key": target.worker_key,
+            "routing_agent_name": "writer",
+            "private_agent_names": ["writer"],
+            "execution_identity": asdict(target.execution_identity),
+            "tool_init_overrides": {"base_dir": (workspace.parent / base_dir_root).relative_to(shared_root).as_posix()},
+            "path": "sample.png",
+            **snapshot,
+        },
+    )
+
+    assert response.status_code == status_code, response.text
