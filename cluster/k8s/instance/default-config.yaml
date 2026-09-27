@@ -372,11 +372,14 @@ memory:
   embedder:
     provider: openai
     config:
-      model: text-embedding-3-small
+      model: openai/text-embedding-3-small
+      host: https://openrouter.ai/api/v1
+      credentials_service: openrouter
+      dimensions: 1536
   llm:
-    provider: openai
+    provider: openrouter
     config:
-      model: gpt-5.6-luna
+      model: openai/gpt-5.6-luna
       temperature: 0.1
       top_p: 1
   search:
@@ -398,8 +401,8 @@ models:
     id: openai/gpt-5.6-terra
     context_window: 1050000
   gpt5luna:
-    provider: openai
-    id: gpt-5.6-luna
+    provider: openrouter
+    id: openai/gpt-5.6-luna
     context_window: 1050000
   fable:
     provider: openrouter
@@ -443,7 +446,7 @@ models:
     context_window: 1048576
   nemotron:
     provider: openrouter
-    id: nvidia/nemotron-3.5-lightning:free
+    id: nvidia/nemotron-3.5-lightning
     context_window: 1000000
 plugins: []
 room_models:

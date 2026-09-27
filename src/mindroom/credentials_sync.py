@@ -30,6 +30,10 @@ logger = get_logger(__name__)
 # Reverse view: env-var → provider (derived from the canonical mapping).
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
+# Provider API-key services that also accept a dashboard credential saved under
+# the env var name (for example ``OPENROUTER_API_KEY`` for ``openrouter``).
+_PROVIDER_SERVICE_ENV_ALIASES = {k: v for k, v in PROVIDER_ENV_KEYS.items() if k != "ollama"}
+
 # Dedicated credential service for the semantic-search embedder. Deliberately
 # not part of PROVIDER_ENV_KEYS: that map means "model provider" and feeds
 # model loading, while the embedder is a separate authentication concern.
@@ -407,7 +411,23 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     if provider == "gemini":
         provider = "google"
 
-    return get_api_key_for_service(provider, runtime_paths)
+    return _get_provider_service_api_key(provider, runtime_paths)
+
+
+def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> str | None:
+    """Get a provider key from its canonical service, else its env-var-named service.
+
+    Users following env-var docs often save provider keys in the dashboard under
+    the env var name (for example ``OPENROUTER_API_KEY``) instead of the canonical
+    service (``openrouter``). The canonical service always wins; the env-var-named
+    service is only a fallback for provider API-key services.
+    """
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    api_key = creds_manager.get_api_key(service)
+    env_named_service = _PROVIDER_SERVICE_ENV_ALIASES.get(service)
+    if (api_key and api_key.strip()) or env_named_service is None:
+        return api_key
+    return creds_manager.get_api_key(env_named_service) or api_key
 
 
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
@@ -426,7 +446,9 @@ def get_embedder_api_key(
     Resolution order:
     1. The explicit ``memory.embedder.config.api_key`` value from config.
     2. An explicitly configured credential service, when present. This is a
-       strict binding: a missing key does not fall through to another service.
+       strict binding: a missing key does not fall through to another service,
+       except that a provider service (for example ``openrouter``) also accepts
+       its env-var-named alias (``OPENROUTER_API_KEY``).
     3. Otherwise, the legacy dedicated ``embedder`` service (seeded from
        ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
     4. Otherwise, the shared ``openai`` provider key (backward-compat fallback).
@@ -443,7 +465,7 @@ def get_embedder_api_key(
         return explicit_api_key.strip()
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     if credentials_service is not None:
-        service_api_key = creds_manager.get_api_key(credentials_service)
+        service_api_key = _get_provider_service_api_key(credentials_service, runtime_paths)
         if service_api_key and service_api_key.strip():
             return service_api_key.strip()
         return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY

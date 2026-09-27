@@ -3976,7 +3976,7 @@
       "properties": {
         "provider": {
           "default": "ollama",
-          "description": "LLM provider (ollama, openai, anthropic)",
+          "description": "LLM provider (ollama, openai, openrouter, anthropic)",
           "title": "Provider",
           "type": "string"
         },

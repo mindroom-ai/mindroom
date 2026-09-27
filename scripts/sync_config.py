@@ -51,29 +51,31 @@ def main() -> int:
     if "agents" in config and "sleepy_paws" in config["agents"]:
         del config["agents"]["sleepy_paws"]
 
-    # Override memory configuration for SaaS
+    # Override memory configuration for SaaS. Hosted tenants may only have an
+    # OpenRouter key, so both the memory LLM and embedder go through OpenRouter.
     if "memory" in config:
-        # Override LLM to use OpenAI (mem0 doesn't support OpenRouter)
         if "llm" in config["memory"]:
             config["memory"]["llm"] = {
-                "provider": "openai",
+                "provider": "openrouter",
                 "config": {
-                    "model": model_defaults.OPENAI_GPT_LUNA,
+                    "model": model_defaults.OPENROUTER_OPENAI_LUNA,
                     "temperature": 0.1,
                     "top_p": 1,
                 },
             }
 
-        # Override embedder to use OpenAI's default embedding model.
         if "embedder" in config["memory"]:
             config["memory"]["embedder"] = {
                 "provider": "openai",
                 "config": {
-                    "model": model_defaults.OPENAI_EMBEDDING_SMALL,
+                    "model": model_defaults.OPENROUTER_OPENAI_EMBEDDING_SMALL,
+                    "host": model_defaults.OPENROUTER_BASE_URL_DEFAULT,
+                    "credentials_service": "openrouter",
+                    "dimensions": model_defaults.OPENAI_EMBEDDING_DIMENSIONS[model_defaults.OPENAI_EMBEDDING_SMALL],
                 },
             }
 
-    # Override router to use GPT-5.6 Luna for better structured output support.
+    # Override router to use GPT-5.6 Luna (via OpenRouter) for better structured output support.
     if "router" in config:
         config["router"]["model"] = "gpt5luna"
 

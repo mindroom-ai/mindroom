@@ -24,14 +24,13 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.matrix.voice_message import prepare_voice_audio_bytes
-from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
 _SpeechResponseFormat = Literal["aac", "flac", "mp3", "opus", "wav"]
 _ALLOWED_RESPONSE_FORMATS = frozenset(get_args(_SpeechResponseFormat))
-_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
 # OpenRouter's /audio/speech endpoint only returns mp3 or pcm; mp3 is the one we can turn into a Matrix voice message.
 _OPENROUTER_RESPONSE_FORMAT = "mp3"
 logger = get_logger(__name__)
@@ -152,7 +151,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 model=self._model,
                 reason="provider_prefixed_model_without_explicit_base_url",
             )
-            return _OPENROUTER_TTS_BASE_URL
+            return OPENROUTER_BASE_URL_DEFAULT
         return None
 
     def _api_key_for_context(self, context: ToolRuntimeContext, *, base_url: str | None) -> str | None:

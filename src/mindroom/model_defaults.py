@@ -54,6 +54,9 @@ __all__ = (
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
+    "OPENROUTER_BASE_URL_DEFAULT",
+    "OPENROUTER_OPENAI_EMBEDDING_SMALL",
+    "OPENROUTER_OPENAI_LUNA",
     "REPLICATE_VIDEO",
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
@@ -158,13 +161,17 @@ _OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
 _OPENROUTER_OPENAI_TERRA = "openai/gpt-5.6-terra"
-_OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-lightning:free"
+OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
+# Not the ":free" variant: guardrail/data-policy restricted keys (such as
+# platform-provisioned hosted keys) have no endpoints for free models.
+_OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-lightning"
 _OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash"
 _OPENROUTER_GLM = "z-ai/glm-5.3"
 _OPENROUTER_KIMI = "moonshotai/kimi-k3"
 _OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
 
 ZAI_BASE_URL_DEFAULT = "https://api.z.ai/api/paas/v4"
+OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
 
 OLLAMA_GEMMA = "gemma4"
 OLLAMA_QWEN = "qwen3.8:27b"
@@ -180,6 +187,7 @@ MEMORY_OLLAMA_LLM = OLLAMA_GEMMA
 
 OPENAI_EMBEDDING_SMALL = "text-embedding-3-small"
 OPENAI_EMBEDDING_LARGE = "text-embedding-3-large"
+OPENROUTER_OPENAI_EMBEDDING_SMALL = f"openai/{OPENAI_EMBEDDING_SMALL}"
 SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 
 OPENAI_TRANSCRIPTION = "gpt-transcribe"
@@ -232,6 +240,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
         "openrouter": (
             ("astra", ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000)),
             ("gpt5terra", ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000)),
+            ("gpt5luna", ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000)),
             ("fable", ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
@@ -256,7 +265,7 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
         "astra": ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000),
         "gpt5terra": ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000),
-        "gpt5luna": ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000),
+        "gpt5luna": ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000),
         "fable": ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000),
         "opus": ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000),
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),

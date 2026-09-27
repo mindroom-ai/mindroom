@@ -99,12 +99,31 @@ The memory system uses an LLM for extraction. Configure it with `memory.llm`:
 ```yaml
 memory:
   llm:
-    provider: ollama    # ollama, openai, or anthropic
+    provider: ollama    # ollama, openai, openrouter, or anthropic
     config:
       model: gemma4
 ```
 
-Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
+Supported LLM providers: `ollama` (default), `openai`, `openrouter`, `anthropic`.
+
+OpenRouter-only example, where both the memory LLM and the embeddings use the `openrouter` key:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: openai/text-embedding-3-small
+      host: https://openrouter.ai/api/v1
+      credentials_service: openrouter
+      dimensions: 1536
+  llm:
+    provider: openrouter
+    config:
+      model: openai/gpt-5.6-luna
+```
+
+Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to a dashboard credential saved under the env var name (for example `OPENROUTER_API_KEY`).
 
 ## Backend: `none`
 

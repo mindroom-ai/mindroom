@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from mindroom import model_defaults
+from mindroom.config.main import Config
 
 
 def test_default_model_strings_are_not_redeclared_in_source() -> None:
@@ -48,9 +49,27 @@ def test_saas_default_config_models_match_central_defaults() -> None:
     assert config["models"] == {
         name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()
     }
-    assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENAI_GPT_LUNA
-    assert config["memory"]["embedder"]["config"]["model"] == model_defaults.OPENAI_EMBEDDING_SMALL
+    assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENROUTER_OPENAI_LUNA
+    assert config["memory"]["embedder"]["config"]["model"] == model_defaults.OPENROUTER_OPENAI_EMBEDDING_SMALL
     assert config["voice"]["stt"]["model"] == model_defaults.OPENAI_TRANSCRIPTION
+
+
+def test_saas_default_config_works_with_only_an_openrouter_key() -> None:
+    """Hosted tenants may only have an OpenRouter key, so router and memory must not need other providers."""
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / "cluster" / "k8s" / "instance" / "default-config.yaml"
+    config = Config.model_validate(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+
+    assert config.models[config.router.model].provider == "openrouter"
+    assert config.memory.llm is not None
+    assert config.memory.llm.provider == "openrouter"
+    embedder = config.memory.embedder
+    assert embedder.provider == "openai"
+    assert embedder.config.host == model_defaults.OPENROUTER_BASE_URL_DEFAULT
+    assert embedder.config.credentials_service == "openrouter"
+    assert embedder.config.dimensions == 1536
+    # Platform-provisioned OpenRouter keys reject ":free" model variants.
+    assert not [name for name, model in config.models.items() if model.id.endswith(":free")]
 
 
 def test_saas_default_uses_current_gemini_flash() -> None:
@@ -206,8 +225,8 @@ def test_openai_presets_use_current_models() -> None:
         1_050_000,
     )
     assert model_defaults.SAAS_MODEL_PRESETS["gpt5luna"] == model_defaults.ModelPreset(
-        "openai",
-        "gpt-5.6-luna",
+        "openrouter",
+        "openai/gpt-5.6-luna",
         1_050_000,
     )
 

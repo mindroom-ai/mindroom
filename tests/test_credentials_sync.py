@@ -865,6 +865,27 @@ class TestCredentialsSync:
         # Test non-existent provider
         assert get_api_key_for_provider("anthropic", runtime_paths=runtime_paths) is None
 
+    def test_get_api_key_for_provider_accepts_env_var_named_service(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Dashboard keys saved under the env var name resolve, but the canonical service wins."""
+        credentials_manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "env-named-openrouter-key"})
+        credentials_manager.save_credentials("GOOGLE_API_KEY", {"api_key": "env-named-google-key"})
+        credentials_manager.save_credentials("OLLAMA_HOST", {"api_key": "not-a-provider-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_api_key_for_provider("openrouter", runtime_paths=runtime_paths) == "env-named-openrouter-key"
+        assert get_api_key_for_provider("gemini", runtime_paths=runtime_paths) == "env-named-google-key"
+        assert get_api_key_for_provider("ollama", runtime_paths=runtime_paths) is None
+        assert get_api_key_for_provider("openai", runtime_paths=runtime_paths) is None
+
+        credentials_manager.save_credentials("openrouter", {"api_key": "canonical-openrouter-key"})
+        assert get_api_key_for_provider("openrouter", runtime_paths=runtime_paths) == "canonical-openrouter-key"
+
     def test_get_api_key_for_service_is_strict(self, credentials_manager: CredentialsManager) -> None:
         """A named service resolves only that service's API key."""
         credentials_manager.save_credentials("openai", {"api_key": "shared-key"})
@@ -1062,6 +1083,24 @@ class TestCredentialsSync:
         )
 
         assert get_embedder_api_key(runtime_paths) == "openai-key"
+
+    def test_get_embedder_api_key_accepts_env_var_named_provider_services(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """The openai fallback and a provider credentials_service both accept env-var-named services."""
+        credentials_manager.save_credentials("OPENAI_API_KEY", {"api_key": "env-named-openai-key"})
+        credentials_manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "env-named-openrouter-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths) == "env-named-openai-key"
+        assert get_embedder_api_key(runtime_paths, credentials_service="openrouter") == "env-named-openrouter-key"
+
+        credentials_manager.save_credentials("openrouter", {"api_key": "canonical-openrouter-key"})
+        assert get_embedder_api_key(runtime_paths, credentials_service="openrouter") == "canonical-openrouter-key"
 
     def test_get_embedder_api_key_returns_placeholder_when_nothing_configured(
         self,

@@ -24,7 +24,7 @@ from mindroom.matrix.health import (
     response_advertises_sliding_sync,
     response_has_matrix_versions,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -206,7 +206,7 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "anthropic": "https://api.anthropic.com/v1/models",
     "openai": "https://api.openai.com/v1/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
-    "openrouter": "https://openrouter.ai/api/v1/models",
+    "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
     "deepseek": "https://api.deepseek.com/v1/models",
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
