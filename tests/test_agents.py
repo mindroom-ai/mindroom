@@ -3536,6 +3536,31 @@ def test_copy_workspace_template_rejects_destination_symlink_escape(tmp_path: Pa
         _copy_workspace_template(workspace_root, template_dir=template_dir)
 
 
+def test_planted_link_in_the_default_mind_workspace_never_breaks_agent_builds(tmp_path: Path) -> None:
+    """Worker code writes the workspace, so a planted template destination is logged and skipped, not fatal."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "mind")
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    (workspace / "SOUL.md").symlink_to(tmp_path / "missing.md")
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                context_files=list(agents_module._DEFAULT_MIND_CONTEXT_FILES),
+            ),
+        },
+    )
+
+    with capture_logs() as logs:
+        agents_module.ensure_default_agent_workspaces(config, storage_path)
+
+    assert any(entry["log_level"] == "warning" for entry in logs)
+    assert not (tmp_path / "missing.md").exists()
+
+
 def test_copy_workspace_template_does_not_follow_predictable_temporary_symlink(tmp_path: Path) -> None:
     """A worker-planted legacy temporary link must not redirect a primary-process scaffold write."""
     template_dir = tmp_path / "template"

@@ -205,7 +205,11 @@ def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentCo
 
 def _ensure_default_mind_workspace(storage_path: Path) -> None:
     workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
-    ensure_workspace_template(workspace_path, template="mind")
+    try:
+        ensure_workspace_template(workspace_path, template="mind")
+    except (OSError, ValueError) as exc:
+        # Worker code writes the workspace; a planted entry must not fail every agent build.
+        logger.warning("default_mind_workspace_scaffold_skipped", path=str(workspace_path), error=str(exc))
 
 
 def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
