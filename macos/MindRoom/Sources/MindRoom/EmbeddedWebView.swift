@@ -16,15 +16,81 @@ enum WebNavigationPolicy {
 
     static func chat(_ url: URL, clicked: Bool, root: URL) -> WebNavigationDecision {
         guard isWebURL(url) else { return .cancel }
-        let sameOrigin = url.scheme == root.scheme && url.host == root.host && url.port == root.port
-        if clicked && !sameOrigin { return .openBrowser }
+        let local = sameOrigin(url, root)
+        if clicked && !local { return .openBrowser }
         if url.scheme == "https" { return .allow }
-        return sameOrigin && root.scheme == "http" ? .allow : .cancel
+        return local && root.scheme == "http" ? .allow : .cancel
     }
 
     static func isWebURL(_ url: URL) -> Bool {
         (url.scheme == "https" || url.scheme == "http") && url.host != nil
             && url.user == nil && url.password == nil
+    }
+
+    static func sameOrigin(_ first: URL, _ second: URL) -> Bool {
+        first.scheme == second.scheme && first.host == second.host
+            && (first.port ?? defaultPort(first.scheme)) == (second.port ?? defaultPort(second.scheme))
+    }
+
+    private static func defaultPort(_ scheme: String?) -> Int? {
+        switch scheme {
+        case "https": return 443
+        case "http": return 80
+        default: return nil
+        }
+    }
+}
+
+struct ChatSSONavigation {
+    let root: URL
+    private(set) var isActive = false
+    private var localHomeserver: URL?
+
+    init(root: URL) { self.root = root }
+
+    mutating func decide(_ url: URL, clicked: Bool) -> WebNavigationDecision {
+        guard WebNavigationPolicy.isWebURL(url) else { return .cancel }
+        if WebNavigationPolicy.sameOrigin(url, root) { return .allow }
+        if clicked && Self.isStart(url, returningTo: root) {
+            isActive = true
+            localHomeserver = url.scheme == "http" ? url : nil
+            return .allow
+        }
+        if isActive {
+            if url.scheme == "https" { return .allow }
+            if let localHomeserver, WebNavigationPolicy.sameOrigin(url, localHomeserver) { return .allow }
+            return .cancel
+        }
+        return WebNavigationPolicy.chat(url, clicked: clicked, root: root)
+    }
+
+    mutating func finished(_ url: URL?) {
+        guard let url, WebNavigationPolicy.sameOrigin(url, root) else { return }
+        isActive = false
+        localHomeserver = nil
+    }
+
+    static func isStart(_ url: URL, returningTo root: URL) -> Bool {
+        guard WebNavigationPolicy.isWebURL(url),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.fragment == nil,
+              components.percentEncodedPath.range(
+                of: #"\A/_matrix/client/(?:v3|r0)/login/sso/redirect(?:/[^/]+)?\z"#,
+                options: .regularExpression
+              ) != nil else { return false }
+        if url.scheme == "http" {
+            guard root.scheme == "http", isLoopback(root.host), isLoopback(url.host) else { return false }
+        }
+        let callbacks = components.queryItems?.filter { $0.name == "redirectUrl" } ?? []
+        guard callbacks.count == 1,
+              let callback = callbacks[0].value.flatMap(URL.init(string:)),
+              WebNavigationPolicy.isWebURL(callback) else { return false }
+        return WebNavigationPolicy.sameOrigin(callback, root)
+    }
+
+    private static func isLoopback(_ host: String?) -> Bool {
+        guard let host else { return false }
+        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
     }
 }
 
@@ -41,6 +107,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
 
     private let desktop: DesktopControlStore
     private var dashboardConfiguration: LocalDashboardConfiguration?
+    private var chatSSO: ChatSSONavigation
     private var chatLoadedURL: URL?
     private var dashboardLoaded = false
     private var dashboardAttempt = 0
@@ -48,6 +115,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
     init(desktop: DesktopControlStore, preferences: ChatWebsitePreferences) {
         self.desktop = desktop
         self.preferences = preferences
+        chatSSO = ChatSSONavigation(root: preferences.url)
         let chatConfig = WKWebViewConfiguration()
         chatConfig.websiteDataStore = .default()
         chat = WKWebView(frame: .zero, configuration: chatConfig)
@@ -64,6 +132,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
     func openChat(force: Bool = false) {
         let url = preferences.url
         guard force || chatLoadedURL != url else { return }
+        chatSSO = ChatSSONavigation(root: url)
         chatLoadedURL = url
         chatError = nil
         chatLoading = true
@@ -117,7 +186,12 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
             guard let dashboardConfiguration else { decisionHandler(.cancel); return }
             decision = WebNavigationPolicy.dashboard(url, clicked: clicked, configuration: dashboardConfiguration)
         } else {
-            decision = WebNavigationPolicy.chat(url, clicked: clicked, root: preferences.url)
+            decision = chatSSO.decide(url, clicked: clicked)
+        }
+        if action.targetFrame == nil && decision != .cancel {
+            // Let the UI delegate route new-window requests exactly once.
+            decisionHandler(.allow)
+            return
         }
         if decision == .openBrowser { NSWorkspace.shared.open(url) }
         decisionHandler(decision == .allow ? .allow : .cancel)
@@ -125,8 +199,15 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard action.navigationType == .linkActivated,
-              let url = action.request.url, WebNavigationPolicy.isWebURL(url) else { return nil }
+        guard let url = action.request.url, WebNavigationPolicy.isWebURL(url) else { return nil }
+        let clicked = action.navigationType == .linkActivated
+        if !clicked {
+            // Some SSO buttons use window.open. Accept only a Matrix SSO start from Chat itself.
+            guard webView === chat, action.targetFrame == nil,
+                  let source = action.sourceFrame.request.url,
+                  WebNavigationPolicy.sameOrigin(source, preferences.url),
+                  ChatSSONavigation.isStart(url, returningTo: preferences.url) else { return nil }
+        }
         if webView === dashboard {
             guard let dashboardConfiguration else { return nil }
             switch WebNavigationPolicy.dashboard(url, clicked: true, configuration: dashboardConfiguration) {
@@ -135,7 +216,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
             case .cancel: break
             }
         } else {
-            switch WebNavigationPolicy.chat(url, clicked: true, root: preferences.url) {
+            switch chatSSO.decide(url, clicked: true) {
             case .allow: webView.load(URLRequest(url: url))
             case .openBrowser: NSWorkspace.shared.open(url)
             case .cancel: break
@@ -145,7 +226,11 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === chat { chatLoading = false; chatError = nil }
+        if webView === chat {
+            chatLoading = false
+            chatError = nil
+            chatSSO.finished(webView.url)
+        }
         else { dashboardLoading = false; dashboardError = nil }
     }
 
@@ -161,6 +246,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         if webView === chat {
             chatLoading = false
             chatError = "Cannot load Chat. Check your connection or Chat website, then retry."
+            chatSSO = ChatSSONavigation(root: preferences.url)
         } else {
             dashboardLoading = false
             dashboardError = LocalDashboardError.connectionFailed.localizedDescription

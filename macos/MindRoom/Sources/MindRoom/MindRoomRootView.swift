@@ -103,16 +103,19 @@ struct MindRoomRootView: View {
             HStack {
                 Text("Chat").font(.headline)
                 Spacer()
+                Button("Reload") { webTabs.openChat(force: true) }
                 Button("Open in Browser") { NSWorkspace.shared.open(webTabs.preferences.url) }
             }
             .padding(.horizontal, 16).padding(.vertical, 9)
             Divider()
             ZStack {
                 EmbeddedWebView(webView: webTabs.chat)
+                    .allowsHitTesting(webTabs.chatError == nil && !webTabs.chatLoading)
+                    .accessibilityHidden(webTabs.chatError != nil || webTabs.chatLoading)
                 if let error = webTabs.chatError {
                     webMessage(error, retry: { webTabs.openChat(force: true) })
                 } else if webTabs.chatLoading {
-                    ProgressView("Loading Chat…").padding().background(.regularMaterial)
+                    webLoading("Loading Chat…")
                 }
             }
         }
@@ -131,12 +134,23 @@ struct MindRoomRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ZStack {
-                EmbeddedWebView(webView: webTabs.dashboard)
-                if let error = webTabs.dashboardError {
-                    webMessage(error, retry: { webTabs.openDashboard(force: true) })
-                } else if webTabs.dashboardLoading {
-                    ProgressView("Opening Dashboard…").padding().background(.regularMaterial)
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Dashboard").font(.headline)
+                    Spacer()
+                    Button("Reload") { webTabs.openDashboard(force: true) }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 9)
+                Divider()
+                ZStack {
+                    EmbeddedWebView(webView: webTabs.dashboard)
+                        .allowsHitTesting(webTabs.dashboardError == nil && !webTabs.dashboardLoading)
+                        .accessibilityHidden(webTabs.dashboardError != nil || webTabs.dashboardLoading)
+                    if let error = webTabs.dashboardError {
+                        webMessage(error, retry: { webTabs.openDashboard(force: true) })
+                    } else if webTabs.dashboardLoading {
+                        webLoading("Opening Dashboard…")
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -152,7 +166,14 @@ struct MindRoomRootView: View {
             }
         }
         .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func webLoading(_ title: String) -> some View {
+        ProgressView(title)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder

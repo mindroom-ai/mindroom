@@ -90,4 +90,45 @@ final class EmbeddedWebTabsTests: XCTestCase {
         XCTAssertEqual(WebNavigationPolicy.chat(URL(string: "file:///etc/passwd")!,
                                                   clicked: false, root: root), .cancel)
     }
+
+    func testMatrixSSOStaysEmbeddedThroughProviderAndCallback() {
+        let chat = URL(string: "https://chat.example.org/app")!
+        var policy = ChatSSONavigation(root: chat)
+        let start = URL(string: "https://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fchat.example.org%2Flogin%2Fmatrix.example.net")!
+        XCTAssertEqual(policy.decide(start, clicked: true), .allow)
+        XCTAssertTrue(policy.isActive)
+        XCTAssertEqual(policy.decide(URL(string: "https://accounts.example.net/oauth/choose")!, clicked: true), .allow)
+        let callback = URL(string: "https://chat.example.org/login/matrix.example.net?loginToken=test")!
+        XCTAssertEqual(policy.decide(callback, clicked: false), .allow)
+        policy.finished(callback)
+        XCTAssertFalse(policy.isActive)
+        XCTAssertEqual(policy.decide(URL(string: "https://external.example.net/help")!, clicked: true), .openBrowser)
+    }
+
+    func testMatrixSSOEntryRequiresMatchingChatCallback() {
+        let chat = URL(string: "https://custom-chat.example.org")!
+        let wrong = [
+            "https://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fother.example.org%2Flogin",
+            "https://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fcustom-chat.example.org.evil.test%2Flogin",
+            "https://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fcustom-chat.example.org%2Flogin&redirectUrl=https%3A%2F%2Fevil.test",
+            "https://matrix.example.net/not-matrix/login?redirectUrl=https%3A%2F%2Fcustom-chat.example.org%2Flogin",
+            "http://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fcustom-chat.example.org%2Flogin",
+            "https://matrix.example.net/_matrix/client/v3/login/sso/redirect/google?redirectUrl=https%3A%2F%2Fuser%40custom-chat.example.org%2Flogin",
+        ]
+        for value in wrong {
+            var policy = ChatSSONavigation(root: chat)
+            XCTAssertEqual(policy.decide(URL(string: value)!, clicked: true), .openBrowser, value)
+            XCTAssertFalse(policy.isActive)
+        }
+    }
+
+    func testLoopbackChatCanUseLoopbackMatrixSSO() {
+        let chat = URL(string: "http://127.0.0.1:8878")!
+        var policy = ChatSSONavigation(root: chat)
+        let start = URL(string: "http://127.0.0.1:8008/_matrix/client/v3/login/sso/redirect?redirectUrl=http%3A%2F%2F127.0.0.1%3A8878%2Flogin")!
+        XCTAssertEqual(policy.decide(start, clicked: true), .allow)
+        XCTAssertEqual(policy.decide(URL(string: "http://127.0.0.1:8008/_synapse/client/oidc/callback")!, clicked: false), .allow)
+        XCTAssertEqual(policy.decide(URL(string: "http://evil.example.net")!, clicked: false), .cancel)
+        XCTAssertEqual(policy.decide(URL(string: "about:blank")!, clicked: false), .cancel)
+    }
 }
