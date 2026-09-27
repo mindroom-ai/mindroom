@@ -3110,6 +3110,8 @@ def test_docker_worker_health_accepts_matching_protocol() -> None:
     [
         {"status": "ok"},
         {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
+        # Workers from releases that mounted whole state roots write private identity records the new mounts forbid.
+        {"status": "ok", "mindroom_version": "2026.9.324", "worker_protocol": 1},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
     ],
