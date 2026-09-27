@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -30,6 +31,7 @@ from tests.authorization_helpers import (
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from agno.skills import Skills
@@ -655,6 +657,31 @@ def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path
     )
     _write_skill(root, "good", "Good")
     assert _skill_names(_load(tmp_path, storage)) == ["good", "nested"]
+
+
+def test_a_skill_removed_while_the_workspace_is_listed_hides_no_other(tmp_path: Path) -> None:
+    """An entry that disappears between listing and inspection is skipped, like LocalSkills skips it."""
+    storage = tmp_path / "storage"
+    root = _workspace_skills(storage)
+    for name in ("aaa", "bbb", "ccc"):
+        _write_skill(root, name, name)
+    real_scandir = os.scandir
+
+    @contextmanager
+    def scandir_removing_bbb(path: int | str) -> Iterator[Iterator[os.DirEntry[str]]]:
+        def entries(listing: Iterator[os.DirEntry[str]]) -> Iterator[os.DirEntry[str]]:
+            for entry in listing:
+                # Only the workspace listing scans a descriptor; configured roots scan by pathname.
+                if isinstance(path, int) and entry.name == "bbb":
+                    (root / "bbb" / "SKILL.md").unlink()
+                    (root / "bbb").rmdir()
+                yield entry
+
+        with real_scandir(path) as listing:
+            yield entries(listing)
+
+    with patch("mindroom.tool_system.workspace_skills.os.scandir", scandir_removing_bbb):
+        assert _skill_names(_load(tmp_path, storage)) == ["aaa", "ccc"]
 
 
 def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:

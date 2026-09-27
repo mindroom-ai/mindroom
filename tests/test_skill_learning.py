@@ -2269,7 +2269,35 @@ def test_deeply_nested_usage_telemetry_never_fails_skill_changes(tmp_path: Path)
     deep_field = {"deploy-checks": {"created_by": "learner", "x": json.loads("[" * 300 + "]" * 300)}}
     usage_file.write_text(json.dumps(deep_field))
     library.write_skill_file(root, "deploy-checks", "references/b.md", "B.", expected_digest=None, learner=False)
-    assert json.loads(usage_file.read_text())["deploy-checks"]["patch_count"] == 1
+    record = json.loads(usage_file.read_text())["deploy-checks"]
+    assert (record["created_by"], record["patch_count"]) == ("learner", 1)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"created_by": "learner", "patch_count": int("9" * 4300)}, {"created_by": "learner", "\ud800": 1}],
+    ids=["count at the integer limit", "key that is not valid Unicode"],
+)
+def test_hand_edited_usage_records_never_fail_skill_changes(tmp_path: Path, record: dict[str, object]) -> None:
+    """A usage record a person or worker code broke is repaired by the next change instead of failing it."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    _write_skill(root, "other", HANDWRITTEN.replace("handwritten", "other"))
+    (root / ".usage.json").write_text(json.dumps({"deploy-checks": record, "other": {"use_count": 2}}))
+    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+    library.write_skill_file(root, "deploy-checks", "references/a.md", "A.", expected_digest=None, learner=False)
+    records = json.loads((root / ".usage.json").read_text())
+    assert records["deploy-checks"]["patch_count"] == 1
+    assert records["other"] == {"use_count": 2}
+
+
+def test_a_usage_write_that_fails_never_fails_the_skill_change(tmp_path: Path) -> None:
+    """Telemetry is bookkeeping for a change that already landed, so a failed write is only logged."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    with patch("mindroom.tool_system.workspace_skills.atomic_write_bytes_at", side_effect=OSError("disk full")):
+        library.write_skill_file(root, "deploy-checks", "references/a.md", "A.", expected_digest=None, learner=False)
+    assert (root / "deploy-checks/references/a.md").read_text() == "A."
 
 
 @pytest.mark.asyncio

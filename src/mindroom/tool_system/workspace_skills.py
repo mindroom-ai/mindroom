@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import threading
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
@@ -17,7 +16,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
 from agno.skills.skill import Skill
-from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 from yaml import YAMLError
 
 from mindroom import yaml_io
@@ -34,6 +33,7 @@ logger = get_logger(__name__)
 SKILL_FILENAME = "SKILL.md"
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
+_MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
 
@@ -54,9 +54,10 @@ class SkillUsage(BaseModel):
 
     created_by: Literal["learner"] | None = None
     created_at: _UtcDatetime | None = None
-    use_count: int = 0
+    # A count out of range, which only a hand edit makes, starts over instead of growing past what JSON can write.
+    use_count: int = Field(default=0, ge=0, le=_MAX_COUNT)
     last_used_at: _UtcDatetime | None = None
-    patch_count: int = 0
+    patch_count: int = Field(default=0, ge=0, le=_MAX_COUNT)
     last_patched_at: _UtcDatetime | None = None
 
     def last_activity_at(self) -> datetime | None:
@@ -90,25 +91,32 @@ def read_text_at(directory_fd: int, relative_path: str) -> str | None:
 
 
 def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
-    """Return sorted visible real directories or regular files, never links."""
-    wanted = stat.S_ISDIR if directories else stat.S_ISREG
+    """Return sorted visible real directories or regular files, never links; an entry removed meanwhile is skipped."""
     with os.scandir(directory_fd) as entries:
         return sorted(
             entry.name
             for entry in entries
-            if not entry.name.startswith(".") and wanted(entry.stat(follow_symlinks=False).st_mode)
+            if not entry.name.startswith(".")
+            and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
         )
+
+
+def _readable_size(directory_fd: int, filename: str) -> bool:
+    try:
+        return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_size <= MAX_SKILL_FILE_BYTES
+    except FileNotFoundError:
+        return False
 
 
 def list_support_files(skill_fd: int, directory: str) -> list[str]:
     """Return the readable regular files directly inside one support directory; a linked directory has none."""
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
+            # A file too large to read is not offered.
             return [
                 filename
                 for filename in list_entries(support_fd, directories=False)
-                # A file too large to read is not offered.
-                if os.stat(filename, dir_fd=support_fd, follow_symlinks=False).st_size <= MAX_SKILL_FILE_BYTES
+                if _readable_size(support_fd, filename)
             ]
     except FileNotFoundError:
         return []
@@ -318,14 +326,17 @@ def _parse_usage(record: object) -> SkillUsage | None:
     try:
         usage = SkillUsage.model_validate(record)
     except ValidationError as exc:
-        invalid = {error["loc"][0] for error in exc.errors()}
+        errors = exc.errors()
+        if not all(error["loc"] for error in errors):
+            # An error outside every field, such as a key that is not valid Unicode, makes the whole record malformed.
+            return None
+        invalid = {error["loc"][0] for error in errors}
         usage = SkillUsage.model_validate({name: value for name, value in record.items() if name not in invalid})
     try:
         usage.model_dump(mode="json")
     except ValueError:
-        # A hand-added field nested too deeply to write back makes the record malformed, so its next update replaces
-        # it instead of failing after the skill change it records already landed.
-        return None
+        # Hand-added fields nested too deeply to write back are dropped, keeping ownership and the counts.
+        usage = SkillUsage.model_validate(usage.model_dump(include=set(SkillUsage.model_fields)))
     return usage
 
 
@@ -347,6 +358,7 @@ def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
     """Replace one skill's usage record atomically, leaving every other record as written.
 
+    Telemetry never fails its caller: a record that cannot be updated is logged and left as written.
     The lock is process-local on purpose: any lock inside the worker-shared workspace could be held by worker
     code to stall the primary, so concurrent primaries sharing one storage root may occasionally drop a count.
     """
@@ -356,8 +368,12 @@ def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsag
             # Rewriting an unreadable file would drop every record in it; a person can still repair it.
             return
         current = _parse_usage(records.get(directory)) or SkillUsage()
-        records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
-        _write_usage_records(root_fd, records)
+        try:
+            records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
+            _write_usage_records(root_fd, records)
+        except (OSError, ValueError, RecursionError) as exc:
+            # The file is worker-writable bookkeeping, and the change it records has already landed.
+            logger.warning("Could not update skill usage telemetry", directory=directory, error=str(exc))
 
 
 def forget_missing_skill_usage(root_fd: int) -> None:
