@@ -125,7 +125,11 @@ def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths) ->
     resource_manager = _standalone_resource_manager(runtime_paths)
     stopped = resource_manager.stop_workers_mounting_state_roots(now=time.time())
     if stopped:
-        resource_manager.wait_for_worker_pods_absent(stopped, timeout_seconds=_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS)
+        try:
+            resource_manager.wait_for_worker_pods_absent(stopped, timeout_seconds=_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS)
+        except Exception as exc:
+            # The stopped list is still reported so the operator checks what these workers could write.
+            logger.warning("Stopped workers that mounted state roots did not stop in time: %s", exc)
     return stopped
 
 

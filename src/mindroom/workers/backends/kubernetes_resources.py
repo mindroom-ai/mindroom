@@ -87,6 +87,7 @@ logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
+_RETIREMENT_REQUEST_TIMEOUT_SECONDS = 30.0
 _HOSTNAME_ENV = "HOSTNAME"
 
 ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
@@ -299,6 +300,7 @@ class _AppsApiProtocol(Protocol):
         name: str,
         namespace: str,
         body: dict[str, object],
+        _request_timeout: float | None = None,
     ) -> KubernetesDeployment: ...
 
     def delete_namespaced_deployment(
@@ -770,12 +772,13 @@ class KubernetesResourceManager:
         assert self.api_exception_cls is not None
         return self.api_exception_cls
 
-    def list_deployments(self) -> list[KubernetesDeployment]:
+    def list_deployments(self, *, request_timeout: float | None = None) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
             label_selector=_list_selector(extra_labels=self.config.extra_labels),
             _preload_content=False,
+            _request_timeout=request_timeout,
         )
         try:
             payload = json.loads(response.data)
@@ -935,7 +938,7 @@ class KubernetesResourceManager:
     def stop_workers_mounting_state_roots(self, *, now: float) -> tuple[str, ...]:
         """Scale to zero every running worker whose pod template this release did not write."""
         stopped: list[str] = []
-        for deployment in self.list_deployments():
+        for deployment in self.list_deployments(request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS):
             annotations = dict(deployment.metadata.annotations or {})
             template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
             if int(deployment.spec.replicas or 0) == 0 or (
@@ -943,29 +946,39 @@ class KubernetesResourceManager:
             ):
                 continue
             apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
-            self.patch_deployment(deployment.metadata.name, replicas=0, annotations=annotations)
-            self.delete_service(deployment.metadata.name)
-            self.delete_secret(deployment.metadata.name)
+            try:
+                self._apps.patch_namespaced_deployment(
+                    deployment.metadata.name,
+                    self.config.namespace,
+                    {"metadata": {"annotations": annotations}, "spec": {"replicas": 0}},
+                    _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                # One failure must not leave the remaining old workers running.
+                logger.exception(
+                    "Could not stop a worker that mounts whole state roots",
+                    worker=deployment.metadata.name,
+                )
+                continue
             stopped.append(deployment.metadata.name)
         return tuple(stopped)
 
     def wait_for_worker_pods_absent(self, worker_ids: Collection[str], *, timeout_seconds: float) -> None:
         """Poll until no Pod of these workers remains, such as after scaling them to zero."""
-        selector = f"{_LABEL_WORKER_ID} in ({','.join(sorted(worker_ids))})"
         deadline = time.monotonic() + timeout_seconds
         while True:
             response = self._core.list_namespaced_pod(
                 self.config.namespace,
-                label_selector=selector,
-                limit=1,
+                label_selector=_list_selector(extra_labels=self.config.extra_labels),
                 _preload_content=False,
-                _request_timeout=5.0,
+                _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
             )
             try:
-                items = json.loads(response.data).get("items")
+                items = json.loads(response.data).get("items") or []
             finally:
                 response.release_conn()
-            if not items:
+            running = {item.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID) for item in items}
+            if not running & set(worker_ids):
                 return
             if time.monotonic() >= deadline:
                 msg = f"Kubernetes worker pods did not stop within {timeout_seconds:.0f}s: {', '.join(worker_ids)}"
