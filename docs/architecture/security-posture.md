@@ -25,8 +25,12 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
 
-Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them.
-Sessions, memory, learning, Mem0 data, private-instance identity records, and every other agent's workspace stay out of the worker.
+Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
+Which workspaces a worker mounts follows its scope:
+
+- A `shared` or unscoped worker mounts only its agent's shared workspace.
+- A `user_agent` worker is isolated per requester and agent: it mounts one agent's workspace, and for a private agent only that requester's private workspace.
+- A `user` worker is isolated per requester, not per agent: it mounts the shared workspaces of every `worker_scope: user` agent and that requester's own private workspaces of those agents, so code in one of them can read and write the others.
 A workspace is mounted only when it is a real directory reached from the storage root without links.
 Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 The primary treats everything inside a mounted workspace as worker-controlled.
@@ -78,9 +82,9 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) confine paths lexically and then walk and read by path, so when an operator routes these tools to the primary process while worker code shares the workspace, a planted link can make them list or read another directory, and a planted FIFO can block them; they run in a worker by default, where worker code already shares their trust.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) confine paths lexically and then walk and read by path. This matters only when an operator routes these tools to the primary process while worker code writes the same workspace: a link that code plants can then make them list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall the call. They run in a worker by default, where they see only what the worker already mounts.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
-- Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path, so worker code that swaps the knowledge folder for a link in the window between that check and the Git command can still redirect one sync.
+- Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
