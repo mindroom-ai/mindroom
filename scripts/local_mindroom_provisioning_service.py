@@ -14,6 +14,14 @@ MindRoom locally. Browser users authenticate with their Matrix access token.
 Paired local MindRoom installs receive client credentials that can request
 registration tokens for agent account creation.
 
+Pairing flows: the service supports device-initiated pairing (CLI starts at
+``/v1/local-mindroom/pair/device/start``, browser user approves at
+``/v1/local-mindroom/pair/device/approve``, CLI polls at
+``/v1/local-mindroom/pair/device/poll`` for credentials). The legacy
+browser-initiated flow (``/v1/local-mindroom/pair/start``,
+``/v1/local-mindroom/pair/status``, ``/v1/local-mindroom/pair/complete``) is
+kept for one release to allow existing chat clients to migrate.
+
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
 ``mindroom_<entity>_<namespace>``. The operator's own installs are the
@@ -49,7 +57,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 import uvicorn
@@ -64,10 +72,12 @@ if TYPE_CHECKING:
 PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 DEFAULT_PAIR_CODE_TTL_SECONDS = 10 * 60
 DEFAULT_PAIR_POLL_INTERVAL_SECONDS = 3
+APPROVED_CLAIM_GRACE_SECONDS = 60
 DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.json"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
+DEFAULT_APPROVE_URL = "https://chat.mindroom.chat/connect"
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
 RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -75,9 +85,11 @@ NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
 MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
 # The local MindRoom client (src/mindroom/matrix/provisioning.py) classifies
-# errors by these exact strings; a contract test keeps the two sides in sync.
+# register-agent errors by these exact strings; a contract test keeps the two sides in sync.
 CONNECTION_REVOKED_DETAIL = "Connection revoked"
 NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
+# The CLI only shows this detail; it does not classify device poll errors by string.
+PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
@@ -97,20 +109,28 @@ class ServiceConfig:
     listen_port: int
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: str | None = None
+    approve_url: str = DEFAULT_APPROVE_URL
 
 
 @dataclass(slots=True)
 class PairSession:
-    """Pair code lifecycle state."""
+    """Pair code lifecycle state.
+
+    Browser-initiated sessions know their user at start; device sessions learn it on approval.
+    """
 
     id: str
-    user_id: str
+    user_id: str | None
     pair_code_hash: str
-    status: Literal["pending", "connected", "expired"]
+    status: Literal["pending", "approved", "connected", "expired"]
     created_at: datetime
     expires_at: datetime
     completed_at: datetime | None = None
     connection_id: str | None = None
+    device_secret_hash: str | None = None
+    client_name: str | None = None
+    fingerprint: str | None = None
+    approved_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -135,6 +155,7 @@ class ProvisioningState:
     lock: asyncio.Lock
     pair_sessions: dict[str, PairSession]
     pair_session_by_hash: dict[str, str]
+    pair_session_by_device_secret_hash: dict[str, str]
     connections: dict[str, LocalConnection]
     rate_limit_buckets: dict[str, list[float]]
     last_rate_limit_cleanup: float
@@ -223,11 +244,62 @@ class GoogleOAuthClientResponse(BaseModel):
     client_secret: str
 
 
+class DevicePairStartRequest(BaseModel):
+    """Local client request to begin device pairing."""
+
+    client_name: str = Field(min_length=1, max_length=120)
+    client_pubkey_or_fingerprint: str = Field(min_length=1, max_length=512)
+
+
+class DevicePairStartResponse(BaseModel):
+    """Pair code for the user and polling secret for the local client."""
+
+    pair_code: str
+    device_secret: str
+    approve_url: str
+    expires_at: datetime
+    poll_interval_seconds: int
+
+
+class DevicePairCodeRequest(BaseModel):
+    """Browser request naming a device pair code."""
+
+    pair_code: str = Field(min_length=9, max_length=9)
+
+
+class DevicePairSessionOut(BaseModel):
+    """What the approving browser user sees about the waiting machine."""
+
+    client_name: str
+    created_at: datetime
+    expires_at: datetime
+    status: Literal["pending", "approved"]
+
+
+class DevicePairPollRequest(BaseModel):
+    """Local client poll using its device secret."""
+
+    device_secret: str = Field(min_length=1, max_length=256)
+
+
+class DevicePairPollResponse(BaseModel):
+    """Poll result; credentials appear exactly once, with status connected."""
+
+    status: Literal["pending", "expired", "connected"]
+    expires_at: datetime | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    namespace: str | None = None
+    owner_user_id: str | None = None
+    connection: LocalConnectionOut | None = None
+
+
 def _new_runtime_state() -> ProvisioningState:
     return ProvisioningState(
         lock=asyncio.Lock(),
         pair_sessions={},
         pair_session_by_hash={},
+        pair_session_by_device_secret_hash={},
         connections={},
         rate_limit_buckets={},
         last_rate_limit_cleanup=0.0,
@@ -349,6 +421,10 @@ def _load_service_config_from_env() -> ServiceConfig:
         msg = "MINDROOM_GOOGLE_OAUTH_CLIENT_ID and its client secret must be configured together."
         raise ValueError(msg)
 
+    approve_url = (
+        os.getenv("MINDROOM_PROVISIONING_APPROVE_URL", DEFAULT_APPROVE_URL).strip().rstrip("/") or DEFAULT_APPROVE_URL
+    )
+
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
         matrix_server_name=matrix_server_name,
@@ -362,6 +438,7 @@ def _load_service_config_from_env() -> ServiceConfig:
         listen_port=_env_int("MINDROOM_PROVISIONING_PORT", default=DEFAULT_LISTEN_PORT, minimum=1),
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
+        approve_url=approve_url,
     )
 
 
@@ -388,6 +465,10 @@ def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | Non
             "expires_at": _as_utc_iso(session.expires_at),
             "completed_at": _as_utc_iso(session.completed_at),
             "connection_id": session.connection_id,
+            "device_secret_hash": session.device_secret_hash,
+            "client_name": session.client_name,
+            "fingerprint": session.fingerprint,
+            "approved_at": _as_utc_iso(session.approved_at),
         }
         for session in state.pair_sessions.values()
     ]
@@ -424,6 +505,7 @@ def _persist_state_unlocked(state: ProvisioningState, state_path: Path) -> None:
 def _clear_state_unlocked(state: ProvisioningState) -> None:
     state.pair_sessions.clear()
     state.pair_session_by_hash.clear()
+    state.pair_session_by_device_secret_hash.clear()
     state.connections.clear()
     state.rate_limit_buckets.clear()
 
@@ -436,6 +518,11 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
     payload = json.loads(state_path.read_text(encoding="utf-8"))
 
     for item in payload.get("pair_sessions", []):
+        # LEGACY_COMPAT: pair sessions persisted before device pairing lack device fields
+        # Legacy format: state written by the provisioning service before this change, which only supported browser-initiated pairing; device_secret_hash, client_name, fingerprint, and approved_at are missing.
+        # Last legacy release: unversioned service state; replaced by this change.
+        # Handling: missing fields load as None, i.e. a browser-initiated session.
+        # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_browser_sessions.
         session = PairSession(
             id=item["id"],
             user_id=item["user_id"],
@@ -445,9 +532,15 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             expires_at=_from_utc_iso(item["expires_at"]) or _now_utc(),
             completed_at=_from_utc_iso(item.get("completed_at")),
             connection_id=item.get("connection_id"),
+            device_secret_hash=item.get("device_secret_hash"),
+            client_name=item.get("client_name"),
+            fingerprint=item.get("fingerprint"),
+            approved_at=_from_utc_iso(item.get("approved_at")),
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
+        if session.device_secret_hash is not None:
+            state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
@@ -494,6 +587,14 @@ def _generate_pair_code() -> str:
     return f"{left}-{right}"
 
 
+def _new_pair_code_unlocked(state: ProvisioningState) -> str:
+    """Return a pair code no stored session already uses."""
+    while True:
+        pair_code = _generate_pair_code()
+        if _hash_token(pair_code) not in state.pair_session_by_hash:
+            return pair_code
+
+
 def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> PairSession | None:
     pair_hash = _hash_token(_normalize_pair_code(pair_code))
     session_id = state.pair_session_by_hash.get(pair_hash)
@@ -528,8 +629,23 @@ def _is_username_permitted_for_connection(username: str, namespace: str) -> bool
 
 
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
-    if session.status == "pending" and session.expires_at <= now:
+    if session.status in ("pending", "approved") and session.expires_at <= now:
         session.status = "expired"
+
+
+def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime) -> None:
+    """Remove expired sessions from state to prevent unbounded growth."""
+    expired_ids = []
+    for session_id, session in state.pair_sessions.items():
+        _expire_if_needed(session, now)
+        if session.status == "expired":
+            expired_ids.append(session_id)
+
+    for session_id in expired_ids:
+        session = state.pair_sessions.pop(session_id)
+        state.pair_session_by_hash.pop(session.pair_code_hash, None)
+        if session.device_secret_hash is not None:
+            state.pair_session_by_device_secret_hash.pop(session.device_secret_hash, None)
 
 
 def _cleanup_rate_limit_buckets_unlocked(
@@ -721,9 +837,9 @@ async def start_pair(
     session_id = secrets.token_urlsafe(18)
 
     async with state.lock:
+        _prune_pair_sessions_unlocked(state, now)
         _enforce_rate_limit_unlocked(state, key=f"pair:start:{user_id}", limit=10, window_seconds=60)
         for session in state.pair_sessions.values():
-            _expire_if_needed(session, now)
             if session.user_id == user_id and session.status == "pending":
                 session.status = "expired"
 
@@ -777,6 +893,30 @@ async def pair_status(
         return PairStatusResponse(status="pending", expires_at=session.expires_at)
 
 
+def _create_connection_unlocked(
+    state: ProvisioningState,
+    *,
+    user_id: str,
+    client_name: str,
+    fingerprint: str,
+    now: datetime,
+) -> tuple[LocalConnection, str]:
+    """Create a local connection and return it with its one-time plaintext secret."""
+    client_secret = secrets.token_urlsafe(32)
+    connection = LocalConnection(
+        id=secrets.token_urlsafe(18),
+        user_id=user_id,
+        client_name=client_name.strip(),
+        fingerprint=fingerprint.strip(),
+        namespace=_generate_connection_namespace(state),
+        client_secret_hash=_hash_token(client_secret),
+        created_at=now,
+        last_seen_at=now,
+    )
+    state.connections[connection.id] = connection
+    return connection, client_secret
+
+
 @router.post("/v1/local-mindroom/pair/complete", response_model=PairCompleteResponse)
 async def pair_complete(
     request: Request,
@@ -792,6 +932,8 @@ async def pair_complete(
         session = _find_pair_session_unlocked(state, payload.pair_code)
         if not session:
             raise HTTPException(status_code=404, detail="Pair code not found")
+        if session.device_secret_hash is not None or session.user_id is None:
+            raise HTTPException(status_code=404, detail="Pair code not found")
 
         _expire_if_needed(session, now)
         if session.status == "expired":
@@ -799,24 +941,17 @@ async def pair_complete(
         if session.status == "connected":
             raise HTTPException(status_code=409, detail="Pair code already used")
 
-        client_secret = secrets.token_urlsafe(32)
-        connection_id = secrets.token_urlsafe(18)
-        namespace = _generate_connection_namespace(state)
-        connection = LocalConnection(
-            id=connection_id,
+        connection, client_secret = _create_connection_unlocked(
+            state,
             user_id=session.user_id,
-            client_name=payload.client_name.strip(),
-            fingerprint=payload.client_pubkey_or_fingerprint.strip(),
-            namespace=namespace,
-            client_secret_hash=_hash_token(client_secret),
-            created_at=now,
-            last_seen_at=now,
+            client_name=payload.client_name,
+            fingerprint=payload.client_pubkey_or_fingerprint,
+            now=now,
         )
-        state.connections[connection_id] = connection
 
         session.status = "connected"
         session.completed_at = now
-        session.connection_id = connection_id
+        session.connection_id = connection.id
         _persist_state_unlocked(state, config.state_path)
 
     return PairCompleteResponse(
@@ -825,6 +960,153 @@ async def pair_complete(
         client_secret=client_secret,
         namespace=connection.namespace,
         owner_user_id=session.user_id,
+    )
+
+
+def _find_device_session_unlocked(state: ProvisioningState, pair_code: str, now: datetime) -> PairSession:
+    session = _find_pair_session_unlocked(state, pair_code)
+    if session is None or session.device_secret_hash is None:
+        raise HTTPException(status_code=404, detail="Pair code not found")
+    _expire_if_needed(session, now)
+    if session.status == "expired":
+        raise HTTPException(status_code=410, detail="Pair code expired")
+    if session.status == "connected":
+        raise HTTPException(status_code=409, detail="Pair code already used")
+    return session
+
+
+def _device_session_out(session: PairSession) -> DevicePairSessionOut:
+    if session.client_name is None:
+        raise HTTPException(status_code=500, detail="Corrupt pair session")
+    if session.status not in ("pending", "approved"):
+        raise HTTPException(status_code=500, detail="Corrupt pair session")
+    return DevicePairSessionOut(
+        client_name=session.client_name,
+        created_at=session.created_at,
+        expires_at=session.expires_at,
+        status=session.status,
+    )
+
+
+@router.post("/v1/local-mindroom/pair/device/start", response_model=DevicePairStartResponse)
+async def start_device_pair(
+    request: Request,
+    payload: DevicePairStartRequest,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> DevicePairStartResponse:
+    """Start pairing from a local client; a signed-in browser user approves it later."""
+    now = _now_utc()
+    remote = request.client.host if request.client else "unknown"
+    device_secret = secrets.token_urlsafe(32)
+    async with state.lock:
+        _prune_pair_sessions_unlocked(state, now)
+        _enforce_rate_limit_unlocked(state, key=f"pair:device:start:{remote}", limit=10, window_seconds=60)
+        pair_code = _new_pair_code_unlocked(state)
+        session = PairSession(
+            id=secrets.token_urlsafe(18),
+            user_id=None,
+            pair_code_hash=_hash_token(pair_code),
+            status="pending",
+            created_at=now,
+            expires_at=now + timedelta(seconds=config.pair_code_ttl_seconds),
+            device_secret_hash=_hash_token(device_secret),
+            client_name=payload.client_name.strip(),
+            fingerprint=payload.client_pubkey_or_fingerprint.strip(),
+        )
+        state.pair_sessions[session.id] = session
+        state.pair_session_by_hash[session.pair_code_hash] = session.id
+        state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
+        _persist_state_unlocked(state, config.state_path)
+    return DevicePairStartResponse(
+        pair_code=pair_code,
+        device_secret=device_secret,
+        approve_url=f"{config.approve_url}?{urlencode({'code': pair_code})}",
+        expires_at=session.expires_at,
+        poll_interval_seconds=config.pair_poll_interval_seconds,
+    )
+
+
+@router.post("/v1/local-mindroom/pair/device/inspect", response_model=DevicePairSessionOut)
+async def inspect_device_pair(
+    payload: DevicePairCodeRequest,
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> DevicePairSessionOut:
+    """Describe the machine waiting behind a device code before the user approves it."""
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:device:inspect:{user_id}", limit=20, window_seconds=60)
+        return _device_session_out(_find_device_session_unlocked(state, payload.pair_code, _now_utc()))
+
+
+@router.post("/v1/local-mindroom/pair/device/approve", response_model=DevicePairSessionOut)
+async def approve_device_pair(
+    payload: DevicePairCodeRequest,
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> DevicePairSessionOut:
+    """Bind a waiting device session to the approving Matrix user."""
+    now = _now_utc()
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:device:approve:{user_id}", limit=20, window_seconds=60)
+        session = _find_device_session_unlocked(state, payload.pair_code, now)
+        if session.status == "approved" and session.user_id != user_id:
+            raise HTTPException(status_code=409, detail="Pair code already approved")
+        if session.status == "pending":
+            session.status = "approved"
+            session.user_id = user_id
+            session.approved_at = now
+            session.expires_at = max(session.expires_at, now + timedelta(seconds=APPROVED_CLAIM_GRACE_SECONDS))
+            _persist_state_unlocked(state, config.state_path)
+        return _device_session_out(session)
+
+
+@router.post("/v1/local-mindroom/pair/device/poll", response_model=DevicePairPollResponse)
+async def poll_device_pair(
+    request: Request,
+    payload: DevicePairPollRequest,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> DevicePairPollResponse:
+    """Report device pairing progress and hand out credentials once after approval."""
+    now = _now_utc()
+    remote = request.client.host if request.client else "unknown"
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:device:poll:{remote}", limit=60, window_seconds=60)
+        session_id = state.pair_session_by_device_secret_hash.get(_hash_token(payload.device_secret))
+        session = state.pair_sessions.get(session_id) if session_id else None
+        if session is None:
+            raise HTTPException(status_code=404, detail="Pair session not found")
+        _expire_if_needed(session, now)
+        if session.status == "connected":
+            raise HTTPException(status_code=410, detail=PAIR_SESSION_ALREADY_CLAIMED_DETAIL)
+        if session.status in ("pending", "expired"):
+            return DevicePairPollResponse(status=session.status, expires_at=session.expires_at)
+        if session.user_id is None:
+            raise HTTPException(status_code=500, detail="Corrupt pair session")
+        if session.client_name is None:
+            raise HTTPException(status_code=500, detail="Corrupt pair session")
+        if session.fingerprint is None:
+            raise HTTPException(status_code=500, detail="Corrupt pair session")
+        connection, client_secret = _create_connection_unlocked(
+            state,
+            user_id=session.user_id,
+            client_name=session.client_name,
+            fingerprint=session.fingerprint,
+            now=now,
+        )
+        session.status = "connected"
+        session.completed_at = now
+        session.connection_id = connection.id
+        _persist_state_unlocked(state, config.state_path)
+    return DevicePairPollResponse(
+        status="connected",
+        client_id=connection.id,
+        client_secret=client_secret,
+        namespace=connection.namespace,
+        owner_user_id=session.user_id,
+        connection=_serialize_connection(connection),
     )
 
 
