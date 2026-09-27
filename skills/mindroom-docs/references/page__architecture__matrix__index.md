@@ -310,7 +310,7 @@ teams:
 
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
-When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and managed avatars are resolved from workspace overrides or bundled defaults if available.
+When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and it receives a managed avatar (see [Managed Avatars](https://docs.mindroom.chat/configuration/#managed-avatars)).
 
 ## Model Selection Protocol
 

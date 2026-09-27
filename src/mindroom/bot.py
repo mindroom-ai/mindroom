@@ -90,7 +90,7 @@ from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
-from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
+from .constants import ROUTER_AGENT_NAME, RuntimePaths
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
 from .conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from .delivery_gateway import (
@@ -117,7 +117,8 @@ from .journal_dispatch import (
 )
 from .knowledge.utils import KnowledgeAccessSupport
 from .logging_config import get_logger
-from .matrix.avatar import check_and_set_avatar
+from .managed_avatars import entity_avatar_path
+from .matrix.avatar import set_user_avatar_from_file, user_has_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
@@ -1324,22 +1325,23 @@ class AgentBot:
         raise PermanentMatrixStartupError(msg)
 
     async def _set_avatar_if_available(self) -> None:
-        """Set avatar for the agent if an avatar file exists."""
+        """Give the entity its avatar when its Matrix profile has none yet."""
         if not self.client:
             return
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        avatar_path = resolve_avatar_path(entity_type, self.agent_name, runtime_paths=self.runtime_paths)
-
-        if avatar_path.exists():
-            try:
-                success = await check_and_set_avatar(self.client, avatar_path)
-                if success:
-                    self.logger.info("avatar_set")
-                else:
-                    self.logger.warning("avatar_set_failed")
-            except Exception as e:
-                self.logger.warning("avatar_set_failed", error=str(e))
+        try:
+            if await user_has_avatar(self.client):
+                return
+            avatar_path = await entity_avatar_path(entity_type, self.agent_name, self.runtime_paths)
+            if avatar_path is None:
+                return
+            if await set_user_avatar_from_file(self.client, avatar_path):
+                self.logger.info("avatar_set")
+            else:
+                self.logger.warning("avatar_set_failed")
+        except Exception as e:
+            self.logger.warning("avatar_set_failed", error=str(e))
 
     async def _set_presence_with_model_info(self) -> None:
         """Set presence status with model information."""
