@@ -3981,6 +3981,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
             "leader": {
                 "agent_name": "leader",
@@ -3993,6 +3994,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
             "mind": {
                 "agent_name": "mind",
@@ -4005,6 +4007,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": True,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
         },
     }

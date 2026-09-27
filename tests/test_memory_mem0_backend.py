@@ -28,8 +28,8 @@ from mindroom.memory import (
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_state_root_path,
+    private_instance_scope_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
@@ -344,11 +344,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         )
         assert deleted is None
 
-    expected_private_path = _private_instance_state_root_path(
-        storage_path,
-        worker_key=worker_key,
-        agent_name="general",
-    )
+    expected_private_path = private_instance_scope_root_path(storage_path, worker_key) / "general"
     assert set(memories_by_path) == {expected_private_path}
     assert agent_state_root_path(storage_path, "general") not in memories_by_path
     assert any(result.get("memory") == "Private note" for result in search_results)

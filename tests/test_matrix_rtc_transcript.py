@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +12,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
+from mindroom.matrix_rtc import transcript as transcript_module
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
@@ -180,16 +182,17 @@ async def test_disabled_memory_keeps_transcript_without_memory_entry(
 async def test_failed_flush_preserves_pending_lines_for_retry(tmp_path: Path) -> None:
     """A filesystem failure cannot discard transcript turns before a later retry."""
     transcript = _transcript(tmp_path)
-    blocker = tmp_path / "not-a-directory"
+    blocker = transcript.reference_root / "not-a-directory"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
     blocker.write_text("block")
     transcript.path = blocker / "transcript.md"
     transcript._pending.append("- preserved\n")
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OSError, match="Not a directory"):
         await transcript._flush()
 
     assert transcript._pending == ["- preserved\n"]
-    transcript.path = tmp_path / "calls" / "retry.md"
+    transcript.path = transcript.reference_root / "calls" / "retry.md"
     await transcript._flush()
     assert "preserved" in transcript.path.read_text(encoding="utf-8")
     assert transcript._pending == []
@@ -198,7 +201,8 @@ async def test_failed_flush_preserves_pending_lines_for_retry(tmp_path: Path) ->
 def test_sync_record_contains_flush_failure(tmp_path: Path) -> None:
     """A synchronous media callback survives local transcript storage failure."""
     transcript = _transcript(tmp_path)
-    blocker = tmp_path / "not-a-directory"
+    blocker = transcript.reference_root / "not-a-directory"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
     blocker.write_text("block")
     transcript.path = blocker / "transcript.md"
 
@@ -236,7 +240,8 @@ async def test_background_flush_observes_and_logs_failure(
 async def test_finalize_contains_transcript_io_failure(tmp_path: Path) -> None:
     """Transcript storage errors remain local to call teardown."""
     transcript = _transcript(tmp_path)
-    blocker = tmp_path / "not-a-directory"
+    blocker = transcript.reference_root / "not-a-directory"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
     blocker.write_text("block")
     transcript.path = blocker / "transcript.md"
     transcript._turns = 1
@@ -326,3 +331,65 @@ async def test_private_transcripts_and_memory_are_requester_scoped(
     assert add_memory.await_args.kwargs["execution_identity"] is alice_identity
     assert add_memory.await_args.args[2] == runtime_paths.storage_root
     assert "Transcript: calls/" in add_memory.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_finalize_keeps_the_memory_of_a_transcript_above_the_read_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transcript longer than the read cap is stored truncated instead of losing the memory entry."""
+    add_memory = AsyncMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
+    read = transcript_module.read_regular_file_within_root
+    monkeypatch.setattr(
+        transcript_module,
+        "read_regular_file_within_root",
+        lambda *args, **kwargs: read(*args, **{**kwargs, "max_bytes": 32}),
+    )
+    transcript = _transcript(tmp_path)
+    transcript.record("user", "Ping " * 100)
+
+    await transcript.finalize(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
+
+    add_memory.assert_awaited_once()
+    assert "# Voice call in Lobby" in add_memory.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "planted",
+    ["linked_transcript", "linked_calls_dir", "fifo_transcript", "hard_linked_transcript"],
+)
+async def test_file_memory_transcript_never_follows_planted_workspace_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planted: str,
+) -> None:
+    """Appends and memory reads refuse links or FIFOs agent code plants in the workspace transcript path."""
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", AsyncMock())
+    config = _config(memory_backend="file")
+    transcript = _transcript(tmp_path, config)
+    victim = tmp_path / "victim-workspace"
+    victim.mkdir()
+    victim_memory = victim / "MEMORY.md"
+    victim_memory.write_text("victim-only note\n", encoding="utf-8")
+    calls_dir = transcript.path.parent
+    if planted == "linked_calls_dir":
+        calls_dir.parent.mkdir(parents=True, exist_ok=True)
+        calls_dir.symlink_to(victim, target_is_directory=True)
+    else:
+        calls_dir.mkdir(parents=True)
+        if planted == "linked_transcript":
+            transcript.path.symlink_to(victim_memory)
+        elif planted == "hard_linked_transcript":
+            os.link(victim_memory, transcript.path)
+        else:
+            os.mkfifo(transcript.path)
+    transcript._pending.append("- attacker-controlled line\n")
+
+    with pytest.raises((OSError, ValueError), match=r"Too many levels|Not a directory|No such device|hard link"):
+        await transcript._flush()
+
+    assert victim_memory.read_text(encoding="utf-8") == "victim-only note\n"
+    assert sorted(path.name for path in victim.iterdir()) == ["MEMORY.md"]

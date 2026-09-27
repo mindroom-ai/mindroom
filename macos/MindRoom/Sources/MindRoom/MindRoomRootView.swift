@@ -37,7 +37,9 @@ struct MindRoomRootView: View {
                                 case .chat, .dashboard:
                                     EmptyView()
                                 case .localAgents:
-                                    LocalAgentsView(runner: runner)
+                                    LocalAgentsView(runner: runner) {
+                                        withAnimation { proxy.scrollTo(AppSection.localAgents, anchor: .top) }
+                                    }.id(AppSection.localAgents)
                                 case .computerAccess:
                                     DesktopControlView(store: desktop) {
                                         withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
@@ -45,7 +47,7 @@ struct MindRoomRootView: View {
                                 case .settings:
                                     AppSettingsView(runner: runner, chatPreferences: webTabs.preferences)
                                 }
-                                if navigation.section != .computerAccess {
+                                if navigation.section != .computerAccess && navigation.section != .localAgents {
                                     CommandFeedbackView(runner: runner).id("command-feedback")
                                 }
                             }
@@ -192,8 +194,8 @@ struct MindRoomRootView: View {
         } else if let feedback = runner.feedback {
             Divider()
             HStack(spacing: 10) {
-                Image(systemName: feedback.result.isSuccess ? "checkmark.circle" : "exclamationmark.triangle")
-                Text(feedback.result.isSuccess ? "Action finished" : "Action failed")
+                Image(systemName: feedback.statusSymbol)
+                Text("Action \(feedback.statusLabel)")
                 Spacer()
                 Button("View Result", action: showDetails)
             }.padding(14)
@@ -308,6 +310,7 @@ struct AppSectionCard<Content: View>: View {
 
 struct CommandFeedbackView: View {
     @ObservedObject var runner: MindRoomCommandRunner
+    var compact = false
 
     var body: some View {
         if let title = runner.runningCommandTitle {
@@ -319,13 +322,18 @@ struct CommandFeedbackView: View {
         } else if let feedback = runner.feedback {
             AppSectionCard {
                 Label(
-                    "\(feedback.title) \(feedback.result.isSuccess ? "finished" : "failed")",
-                    systemImage: feedback.result.isSuccess ? "checkmark.circle" : "exclamationmark.triangle"
+                    "\(feedback.title) \(feedback.statusLabel)",
+                    systemImage: feedback.statusSymbol
                 ).font(.headline)
-                Text(feedback.result.isSuccess
-                     ? feedback.successMessage ?? feedback.result.condensedOutput
-                     : feedback.result.condensedOutput)
-                    .textSelection(.enabled)
+                if feedback.needsAttention {
+                    Text(feedback.result.setupCheckSummary ?? "Review the command output before continuing.")
+                        .foregroundStyle(.orange)
+                } else if !compact || !feedback.result.isSuccess {
+                    Text(feedback.result.isSuccess
+                         ? feedback.successMessage ?? feedback.result.condensedOutput
+                         : feedback.result.condensedOutput)
+                        .textSelection(.enabled)
+                }
                 if !feedback.result.isSuccess && feedback.result.output.contains("No such option") {
                     Text("Update the local runtime in Settings, then try again.").foregroundStyle(.secondary)
                 }
@@ -333,13 +341,18 @@ struct CommandFeedbackView: View {
                     DisclosureGroup("Command output") {
                         Text(runner.lastOutput).font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        if compact { copyOutput }
                     }
-                    Button("Copy Output") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(runner.lastOutput, forType: .string)
-                    }
+                    if !compact { copyOutput }
                 }
             }
+        }
+    }
+
+    private var copyOutput: some View {
+        Button("Copy Output") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(runner.lastOutput, forType: .string)
         }
     }
 }

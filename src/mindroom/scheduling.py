@@ -141,14 +141,47 @@ class CronSchedule(BaseModel):
         """Convert to standard cron format."""
         return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
 
-    def to_natural_language(self) -> str:
-        """Convert cron schedule to natural language description."""
+    def to_natural_language(self, timezone: str, current_time: datetime | None = None) -> str:
+        """Describe the schedule in the wall time of `timezone`; the cron fields themselves are UTC.
+
+        A fixed time of day is converted with the offset of the next run, so users see their own
+        clock ("At 08:00") instead of the stored UTC hour; other hour patterns are marked UTC.
+        """
+        local = self._in_timezone(ZoneInfo(timezone), current_time or datetime.now(UTC))
         try:
-            cron_str = self.to_cron_string()
             options = Options(use_24hour_time_format=True)
-            return str(get_description(cron_str, options))
+            description = str(get_description((local or self).to_cron_string(), options))
         except Exception:
             return f"Cron: {self.to_cron_string()}"
+        if local is None and self.hour != "*" and timezone != "UTC":
+            return f"{description} (UTC)"
+        return description
+
+    def _in_timezone(self, zone: ZoneInfo, current_time: datetime) -> CronSchedule | None:
+        """Return this schedule in `zone` wall time when it runs at one fixed UTC time of day."""
+        if not (self.minute.isdigit() and self.hour.isdigit()):
+            return None
+        try:
+            next_run = croniter(self.to_cron_string(), current_time).get_next(datetime)
+        except CroniterError:
+            return None
+        local = next_run.astimezone(zone)
+        shift = (local.date() - next_run.date()).days
+        weekday = self.weekday if shift == 0 or self.weekday == "*" else _shift_cron_weekdays(self.weekday, shift)
+        if weekday is None or (shift != 0 and self.day != "*"):
+            return None
+        return self.model_copy(update={"minute": str(local.minute), "hour": str(local.hour), "weekday": weekday})
+
+
+def _shift_cron_weekdays(field: str, shift: int) -> str | None:
+    """Move numeric cron weekdays (0 or 7 is Sunday) by whole days, or None for other syntax."""
+    days: list[int] = []
+    for part in field.split(","):
+        start, _, end = part.partition("-")
+        if not (start.isdigit() and (end == "" or end.isdigit())):
+            return None
+        days += range(int(start), int(end or start) + 1)
+    return ",".join(str(day) for day in sorted({(day + shift) % 7 for day in days}))
 
 
 # LEGACY_COMPAT: Scheduled workflows without an explicit new-thread setting.
@@ -284,12 +317,16 @@ def _cron_validation_error(cron_expression: str) -> str | None:
 
 def build_scheduled_task_read_model(
     task: ScheduledTaskRecord,
+    *,
+    timezone: str,
     current_time: datetime | None = None,
 ) -> ScheduledTaskReadModel:
-    """Build API/chat-neutral display fields for a scheduled task."""
+    """Build API/chat-neutral display fields for a scheduled task, described in `timezone` wall time."""
     workflow = task.workflow
     cron_expression = workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None
-    cron_description = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else None
+    cron_description = (
+        workflow.cron_schedule.to_natural_language(timezone, current_time) if workflow.cron_schedule else None
+    )
     next_run_at = workflow.execute_at if workflow.schedule_type == "once" else None
     if workflow.schedule_type == "cron" and cron_expression:
         try:
@@ -865,6 +902,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     room_id=room_id,
                     task_id=task_id,
                     workflow=current_task.workflow,
+                    timezone=config.timezone,
                     status="cancelled",
                     created_at=current_task.created_at,
                     matrix_admin=matrix_admin,
@@ -957,18 +995,23 @@ async def _persist_scheduled_task_state(
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
+    *,
+    timezone: str,
     status: str = "pending",
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> str:
-    """Persist scheduled task state to Matrix and return its unique revision."""
+    """Persist scheduled task state to Matrix and return its unique revision.
+
+    `timezone` is the wall time the stored `cron_description` is written in for clients.
+    """
     revision = str(uuid.uuid4())
     content = {
         "task_id": task_id,
         "revision": revision,
         "workflow": workflow.model_dump_json(),
         "cron_description": (
-            workflow.cron_schedule.to_natural_language()
+            workflow.cron_schedule.to_natural_language(timezone)
             if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
             else None
         ),
@@ -1005,6 +1048,7 @@ async def _save_pending_scheduled_task(
         room_id=room_id,
         task_id=task_id,
         workflow=workflow,
+        timezone=config.timezone,
         status="pending",
         created_at=created_at,
         matrix_admin=matrix_admin,
@@ -1025,6 +1069,8 @@ async def _save_one_time_task_status(
     client: nio.AsyncClient,
     task: ScheduledTaskRecord,
     status: str,
+    *,
+    timezone: str,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Persist the terminal status for a one-time task without restarting it."""
@@ -1033,6 +1079,7 @@ async def _save_one_time_task_status(
         room_id=task.room_id,
         task_id=task.task_id,
         workflow=task.workflow,
+        timezone=timezone,
         status=status,
         created_at=task.created_at,
         matrix_admin=matrix_admin,
@@ -1046,6 +1093,8 @@ async def save_edited_scheduled_task(
     workflow: ScheduledWorkflow,
     existing_task: ScheduledTaskRecord,
     runtime_paths: RuntimePaths,
+    *,
+    timezone: str,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
@@ -1069,6 +1118,7 @@ async def save_edited_scheduled_task(
             room_id=room_id,
             task_id=task_id,
             workflow=workflow,
+            timezone=timezone,
             status="pending",
             created_at=current_task.created_at,
             matrix_admin=matrix_admin,
@@ -1435,6 +1485,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 await _save_one_time_task_status(
                     client=client,
                     task=latest_pending_task,
+                    timezone=config.timezone,
                     status=final_status,
                     matrix_admin=matrix_admin,
                 )
@@ -1471,6 +1522,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     await _save_one_time_task_status(
                         client=client,
                         task=latest_pending_task,
+                        timezone=config.timezone,
                         status="failed",
                         matrix_admin=matrix_admin,
                     )
@@ -1587,10 +1639,10 @@ def _scheduled_task_response_text(
     if workflow.schedule_type == "once" and workflow.execute_at:
         response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, config.timezone)}\n"
     elif workflow.cron_schedule:
-        natural_desc = workflow.cron_schedule.to_natural_language()
+        natural_desc = workflow.cron_schedule.to_natural_language(config.timezone)
         cron_str = workflow.cron_schedule.to_cron_string()
         response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
-        response_text += f"   _(Cron: `{cron_str}`)_\n"
+        response_text += f"   _(Cron: `{cron_str}` UTC)_\n"
     else:
         response_text = "✅ Task scheduled\n"
 
@@ -1770,6 +1822,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
+                timezone=config.timezone,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
                 matrix_admin=runtime.matrix_admin,
@@ -1886,14 +1939,17 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     tasks.sort(key=_sort_key)
     new_thread_tasks.sort(key=_sort_key)
 
+    timezone = config.timezone if config else "UTC"
+
     def _append_task_lines(lines: list[str], records: list[ScheduledTaskRecord]) -> None:
         for record in records:
             workflow = record.workflow
             if workflow.schedule_type == "once" and workflow.execute_at:
-                timezone = config.timezone if config else "UTC"
                 time_str = _format_scheduled_time(workflow.execute_at, timezone)
             else:
-                time_str = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
+                time_str = (
+                    workflow.cron_schedule.to_natural_language(timezone) if workflow.cron_schedule else "recurring"
+                )
 
             msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
                 "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
@@ -2052,6 +2108,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
                             room_id=room_id,
                             task_id=task_id,
                             workflow=workflow,
+                            timezone=config.timezone,
                             status="failed",
                             created_at=task.created_at,
                             matrix_admin=matrix_admin,

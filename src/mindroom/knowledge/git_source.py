@@ -403,6 +403,13 @@ class GitSyncResult:
     updated: bool
 
 
+def _require_unlinked_worktree(source_path: Path) -> None:
+    """Refuse a checkout whose folder, or a directory above it, became a link since it was resolved."""
+    if os.path.realpath(source_path) != os.fspath(source_path):
+        msg = f"Refusing to run Git in knowledge folder {source_path}: its path now goes through a link"
+        raise RuntimeError(msg)
+
+
 @dataclass
 class GitKnowledgeSource:
     """Keep one knowledge base's Git checkout aligned with its configured remote."""
@@ -577,6 +584,7 @@ class GitKnowledgeSource:
         env: dict[str, str] | None = None,
         remote: bool = False,
     ) -> str:
+        _require_unlinked_worktree(self.source_path)
         capability = current_inherited_file_lock()
         inherited_lock_fd = None if capability is None else capability.fileno_for(self.source_path)
         owns_process_group = _git_process_group_is_owned_here()
@@ -721,6 +729,7 @@ class GitKnowledgeSource:
         """Make the MindRoom-owned repository exist; return whether it was just created."""
         expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
         initialized = False
+        _require_unlinked_worktree(self.source_path)
         if not await asyncio.to_thread(git_checkout_present, self.source_path, self.git_dir):
             if await asyncio.to_thread(adopt_in_tree_git_dir, self.base_id, self.source_path, self.git_dir):
                 logger.info(

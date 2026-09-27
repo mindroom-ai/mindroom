@@ -53,6 +53,7 @@ class OAuthConnectionTools(Toolkit):
                 config=config,
                 runtime_paths=self._runtime_paths,
                 execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+                membership_index=runtime_context.require_agent_reply_memberships(),
                 worker_target=self._worker_target,
             )
             reset_url = await issue_browser_oauth_reset_url(target)

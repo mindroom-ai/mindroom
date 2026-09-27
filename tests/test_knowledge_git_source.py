@@ -2431,3 +2431,35 @@ async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_
         await manager.git_source._run_git(["fetch", "origin", "main"])
 
     assert "bad address" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_git_refuses_a_knowledge_folder_swapped_for_a_link(tmp_path: Path) -> None:
+    """Git never runs in a checkout whose folder, or a directory above it, became a link after binding."""
+    remote_work, remote_bare = _committed_remote(tmp_path, "own content")
+    workspace = tmp_path / "workspace"
+    docs_path = workspace / "kb" / "docs"
+    docs_path.mkdir(parents=True)
+    victim = tmp_path / "victim" / "kb" / "docs"
+    victim.mkdir(parents=True)
+    (victim / "doc.md").write_text("victim-only note", encoding="utf-8")
+    config = _git_docs_config(tmp_path, docs_path, remote_bare)
+    runtime_paths = runtime_paths_for(config)
+    source = GitKnowledgeSource(
+        base_id="docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        source_path=docs_path.resolve(),
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
+        lfs_hydrated_head_path=tmp_path / "lfs-head.txt",
+    )
+    await source.sync()
+    _push_change(remote_work, remote_bare, "updated content")
+    (workspace / "kb").rename(workspace / "kb-moved")
+    (workspace / "kb").symlink_to(victim.parent, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="goes through a link"):
+        await source.sync()
+
+    assert (victim / "doc.md").read_text(encoding="utf-8") == "victim-only note"
+    assert sorted(path.name for path in victim.iterdir()) == ["doc.md"]

@@ -25,8 +25,8 @@ from mindroom.memory.auto_flush import _build_existing_memory_context, _load_age
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
@@ -1155,15 +1155,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
     worker_key = resolve_worker_key("user", alice_identity, agent_name="mind")
     assert worker_key is not None
     private_daily_files = list(
-        (
-            _private_instance_state_root_path(
-                tmp_path,
-                worker_key=worker_key,
-                agent_name="mind",
-            )
-            / "mind_data"
-            / "memory"
-        ).rglob("*.md"),
+        (private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data" / "memory").rglob("*.md"),
     )
     assert len(private_daily_files) == 1
     assert "important decision" in private_daily_files[0].read_text(encoding="utf-8")

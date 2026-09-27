@@ -38,7 +38,6 @@ from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.media_delivery import view_agent_image
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -78,12 +77,11 @@ from mindroom.tool_system.worker_routing import (
     build_worker_target_from_runtime_env,
     resolved_worker_key_scope,
     tool_execution_identity,
-    visible_state_roots_for_worker_key,
+    visible_workspace_roots,
 )
 from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -653,43 +651,31 @@ def resolve_script_state_workspace(
     agent_name: str,
     private_agent_names: frozenset[str],
 ) -> Path:
-    """Resolve the canonical agent workspace projected into one script worker."""
+    """Resolve the canonical agent workspace mounted into one script worker."""
     runtime_paths = app_runtime_paths(app)
     config = app_runtime_config(app)
     agent_config = config.agents.get(agent_name)
     if agent_config is None:
         msg = "Script state scope does not resolve an agent workspace."
         raise ValueError(msg)
-    is_private = agent_config.private is not None
-    if (agent_name in private_agent_names) != is_private:
+    if (agent_name in private_agent_names) != (agent_config.private is not None):
         msg = "Script state scope does not match private-agent visibility."
         raise ValueError(msg)
-    state_roots = visible_state_roots_for_worker_key(
+    workspaces = visible_workspace_roots(
         sandbox_exec.runner_storage_root(runtime_paths),
         state_scope_worker_key,
+        config.get_agent_policies(),
         private_agent_names=private_agent_names,
     )
-    if len(state_roots) != 1:
+    if len(workspaces) != 1:
         msg = "Script state scope does not resolve one agent workspace."
         raise ValueError(msg)
-    state_root = state_roots[0].resolve()
-    resolved_workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=state_root,
-        use_state_storage_path=is_private,
-    )
-    try:
-        workspace = resolve_path_within_root(
-            state_root,
-            resolved_workspace.root if resolved_workspace is not None else state_root / "workspace",
-            symlinks="internal",
-        )
-    except ValueError as exc:
-        msg = "Script workspace escapes its mounted state scope."
-        raise ValueError(msg) from exc
-    workspace.mkdir(parents=True, exist_ok=True)
+    # The workspace is the worker's mount; creating it here would hide script
+    # output in this container instead of the canonical workspace.
+    workspace = workspaces[0]
+    if not workspace.is_dir() or workspace.is_symlink():
+        msg = "Script workspace is not mounted in this worker."
+        raise ValueError(msg)
     return workspace
 
 
@@ -764,13 +750,18 @@ def _runner_tool_output_workspace_root(
 ) -> Path | None:
     """Return the runner-visible workspace root for redirected tool output."""
     if routing_agent_name is not None:
-        agent_runtime = resolve_agent_runtime(
-            routing_agent_name,
-            config,
-            _runtime_paths_for_runner_agent_paths(runtime_paths),
-            execution_identity=execution_identity,
-            create=True,
-        )
+        try:
+            agent_runtime = resolve_agent_runtime(
+                routing_agent_name,
+                config,
+                _runtime_paths_for_runner_agent_paths(runtime_paths),
+                execution_identity=execution_identity,
+                create=True,
+            )
+        except OSError as exc:
+            # A dedicated worker cannot create a workspace its pod does not mount; the next ensure mounts it.
+            msg = f"Agent workspace is not mounted in this worker yet; retry the call: {exc}"
+            raise sandbox_worker_prep.WorkerRequestPreparationError(msg) from exc
         return agent_runtime.tool_base_dir
 
     base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
@@ -779,6 +770,28 @@ def _runner_tool_output_workspace_root(
     if isinstance(base_dir, str):
         return Path(base_dir)
     return None
+
+
+def _mounted_output_workspace_root(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    runtime_overrides: dict[str, object] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    routing_agent_name: str | None,
+) -> Path | tuple[str, Literal["tool", "worker"]]:
+    """Return the output workspace, or an error that does not count against the worker when it is unmounted."""
+    try:
+        workspace_root = _runner_tool_output_workspace_root(
+            config=config,
+            runtime_paths=runtime_paths,
+            runtime_overrides=runtime_overrides,
+            execution_identity=execution_identity,
+            routing_agent_name=routing_agent_name,
+        )
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        return str(exc), "tool"
+    return workspace_root if workspace_root is not None else ("Worker output workspace is unavailable.", "worker")
 
 
 def _optional_runner_tool_output_workspace_root(
@@ -799,6 +812,8 @@ def _optional_runner_tool_output_workspace_root(
             execution_identity=execution_identity,
             routing_agent_name=routing_agent_name,
         )
+    except sandbox_worker_prep.WorkerRequestPreparationError:
+        raise
     except ValueError:
         if output_path is not None:
             raise
@@ -1036,16 +1051,17 @@ def _prepare_execute_request(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
+    config = config or _runtime_config_or_empty(runtime_paths)
     prepared = sandbox_worker_prep.resolve_prepared_worker_request(
         worker_key=request.worker_key,
         tool_init_overrides=request.tool_init_overrides,
         runtime_paths=runtime_paths,
+        agent_policies=config.get_agent_policies(),
         private_agent_names=_freeze_private_agent_names(request.private_agent_names),
         prepared_worker=prepared_worker,
         runner_token=runner_token,
     )
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
-    config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
@@ -1683,6 +1699,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
                 worker_key=payload.worker_key,
                 tool_init_overrides={},
                 runtime_paths=runtime_paths,
+                agent_policies=config.get_agent_policies(),
                 private_agent_names=(
                     frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
                 ),
@@ -1697,19 +1714,15 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
         prepared_worker.runtime_overrides if prepared_worker is not None else None,
     )
-    workspace_root = _runner_tool_output_workspace_root(
+    workspace_root = _mounted_output_workspace_root(
         config=config,
         runtime_paths=runtime_paths,
         runtime_overrides=runtime_overrides,
         execution_identity=execution_identity,
         routing_agent_name=payload.routing_agent_name,
     )
-    if workspace_root is None:
-        return SandboxRunnerSaveAttachmentResponse(
-            ok=False,
-            error="Worker output workspace is unavailable.",
-            failure_kind="worker",
-        )
+    if not isinstance(workspace_root, Path):
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=workspace_root[0], failure_kind=workspace_root[1])
 
     policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
     path_error = validate_output_path(policy, output_path)
@@ -1754,8 +1767,8 @@ async def view_file_in_worker(
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
+                agent_policies=config.get_agent_policies(),
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1767,26 +1780,22 @@ async def view_file_in_worker(
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
         prepared_worker.runtime_overrides if prepared_worker is not None else None,
     )
-    workspace_root: Path | None = None
+    workspace_root: Path | tuple[str, Literal["tool", "worker"]] | None = None
     prepared_base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
     if isinstance(prepared_base_dir, Path):
         workspace_root = prepared_base_dir
     elif isinstance(prepared_base_dir, str):
         workspace_root = Path(prepared_base_dir)
     if workspace_root is None:
-        workspace_root = _runner_tool_output_workspace_root(
+        workspace_root = _mounted_output_workspace_root(
             config=config,
             runtime_paths=runtime_paths,
             runtime_overrides=runtime_overrides,
             execution_identity=execution_identity,
             routing_agent_name=payload.routing_agent_name,
         )
-    if workspace_root is None:
-        return SandboxRunnerViewFileResponse(
-            ok=False,
-            error="Worker output workspace is unavailable.",
-            failure_kind="worker",
-        )
+    if isinstance(workspace_root, tuple):
+        return SandboxRunnerViewFileResponse(ok=False, error=workspace_root[0], failure_kind=workspace_root[1])
 
     result = await asyncio.to_thread(
         _view_file_result_envelope,
@@ -1975,8 +1984,8 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
+                agent_policies=config.get_agent_policies(),
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:

@@ -39,17 +39,35 @@ Use **Open in Browser** if you prefer your existing browser session or a sign-in
 
 ## Set Up Local Agents
 
-Open **Local agents** and expand **Set up or reconnect local agents**.
+Open **Local agents** for four numbered steps.
+Each step shows its own status, and only the selected panel is displayed.
+The app detects the command-line runtime separately from the background service: **Runtime installed · Background service not installed** means step 1 is already done.
 
-1. **Install MindRoom** installs the command-line runtime using the bundled `uv`.
-2. **Prepare Configuration** creates missing `config.yaml` and `.env` files in `~/.mindroom`, preserves an existing config and env values, and appends missing hosted Matrix defaults to `.env`.
-   Choose **Connect Account** to open your browser on MindRoom Chat.
+1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location.
+   If it is missing, **Install MindRoom** installs it using bundled `uv`.
+   Installing the runtime does not install the background service.
+2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
+   The configuration path is shown in the panel.
+   **Prepare Configuration** creates missing files and keeps existing configuration and credentials.
+   Expand **Connect or reconnect your chat account** and choose **Connect Account** to open your browser on MindRoom Chat.
    Sign in if needed and click **Approve**; this completes when you approve or after 10 minutes.
-3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
-4. **Install and Start Agents** installs and starts the launchd background service.
-   If the service starts before your account is connected, Local agents shows **Waiting for chat account** until you choose **Connect Account** and approve.
+   Add AI provider credentials to the adjacent `.env`, or configure a local model, using **Open Config Folder**.
+3. **Check** runs `mindroom doctor` against the displayed configuration and the installed service's saved storage path.
+   It checks configuration, providers, Matrix connectivity, and storage.
+   **Files found** only confirms configuration exists; **Passed last check** records a check with no failures or warnings in this app session.
+   Warnings stay on **Check** with **Needs attention** and a visible summary; expand **Command output** for details.
+   Changes detected in the root configuration or adjacent `.env` clear that check.
+   Run checks again after editing included files or changing external services.
+4. **Start** offers **Install and Start Agents** when the launchd service is missing, **Start Agents** when it is stopped, and stop/restart/chat/dashboard controls when running.
+   A check is recommended, but existing working configuration can be started without rerunning Doctor.
+   Already installed services use their saved configuration path, including a custom path chosen in the terminal.
+   If the service starts before your account is connected, Local agents shows **Waiting for your chat account** until you choose **Connect Account** and approve.
 
-Commands show progress and their results in the window.
+An existing running or stopped service opens directly at **Start**.
+Existing configuration without a service opens at **Check**.
+Commands show progress and results directly above the selected panel.
+**Refresh Status** rereads the runtime, configuration, and service state, including changes made in a terminal.
+These controls manage this Mac's launchd service; they do not inspect systemd services on another computer.
 Once the service is running, **Open Dashboard** opens the local dashboard inside the app for agent and model configuration.
 The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
 It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
@@ -67,7 +85,7 @@ Signing in to `chat.mindroom.chat` creates your hosted Matrix account; it does n
 
 Under **Use your own Matrix server**, choose **Prepare Self-Hosted Configuration**, then edit `config.yaml` and `.env` for that server and your model provider.
 Start and manage the Matrix server separately from this app.
-The initialization actions explicitly target `~/.mindroom`.
+The initialization actions target the installed service's saved configuration path, or `~/.mindroom` for a new service.
 
 ## Computer Access
 

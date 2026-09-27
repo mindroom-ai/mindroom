@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest
 import yaml
 
 from mindroom.thread_export import clear_thread_export_root
+from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
     _ROOT_MARKER_FILENAME,
@@ -483,3 +485,18 @@ def test_room_export_query_ignores_unrecognized_yaml(tmp_path: Path) -> None:
 
     (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
     assert room_has_thread_exports(output_dir, _room()) is True
+
+
+@pytest.mark.parametrize("filename", ["marker", "index"])
+def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
+    """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""
+    os.mkfifo(tmp_path / ("marker" if filename == "marker" else "index.yaml"))
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if filename == "marker":
+            (tmp_path / "marker").rename(tmp_path / thread_export_storage._ROOT_MARKER_FILENAME)
+            assert thread_export_storage._has_valid_export_root_marker(root_fd) is False
+        else:
+            assert thread_export_storage._read_text_at(root_fd, "index.yaml") is None
+    finally:
+        os.close(root_fd)

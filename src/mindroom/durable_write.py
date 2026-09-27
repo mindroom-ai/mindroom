@@ -63,7 +63,7 @@ def _apply_directory_mode(path: Path, mode: int) -> os.stat_result:
         os.close(directory_fd)
 
 
-def replace_file_durable(source: Path, target: Path) -> None:
+def _replace_file_durable(source: Path, target: Path) -> None:
     """Atomically replace one file and durably publish it when directory fsync is available."""
     source.replace(target)
     fsync_directory_durable(target.parent)
@@ -101,7 +101,7 @@ def write_json_file_durable(
             temp_file.flush()
             os.fsync(temp_file.fileno())
         if strict_atomic_replace:
-            replace_file_durable(temp_path, path)
+            _replace_file_durable(temp_path, path)
         else:
             safe_replace(temp_path, path)
             _fsync_directory(path.parent)

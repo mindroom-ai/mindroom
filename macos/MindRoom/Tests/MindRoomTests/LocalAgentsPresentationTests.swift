@@ -21,9 +21,6 @@ final class LocalAgentsPresentationTests: XCTestCase {
 
     func testPairingKeepsConnectAccountVisibleWithoutNeedingSetup() {
         XCTAssertFalse(MindRoomServiceState.pairing.needsSetup)
-        XCTAssertTrue(MindRoomServiceState.pairing.expandsSetup)
-        XCTAssertFalse(MindRoomServiceState.running.expandsSetup)
-        XCTAssertTrue(MindRoomServiceState.notInstalled.expandsSetup)
     }
 
     func testOnlyLoginItemLaunchStaysInMenuBar() {

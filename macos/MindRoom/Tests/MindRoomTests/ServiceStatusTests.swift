@@ -2,6 +2,11 @@ import XCTest
 @testable import MindRoom
 
 final class ServiceStatusTests: XCTestCase {
+    func testMissingConfigurationIsNotMistakenForMissingRuntime() {
+        let status = MindRoomServiceStatus.parse("Error reading config.yaml: No such file or directory")
+        XCTAssertEqual(status.state, .unknown)
+    }
+
     func testParsesRunningServiceStatus() {
         let status = MindRoomServiceStatus.parse("MindRoom service: running (pid 12345)")
 

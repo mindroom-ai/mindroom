@@ -26,7 +26,4 @@ extension MindRoomServiceState {
     }
 
     var needsSetup: Bool { self == .runtimeMissing || self == .notInstalled }
-
-    /// Opens the setup steps when they are needed, including Connect Account while the service waits for pairing.
-    var expandsSetup: Bool { needsSetup || self == .pairing }
 }

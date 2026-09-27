@@ -363,8 +363,16 @@ class _LocalWorkerBackend:
 
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
         """Persist one local worker failure."""
+        del startup_count  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
         worker_lock = self._worker_lock(paths)

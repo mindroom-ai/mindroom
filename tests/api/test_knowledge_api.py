@@ -504,6 +504,52 @@ def test_knowledge_files_under_symlinked_root_are_listed(tmp_path: Path) -> None
     assert status_response.json()["file_count"] == 1
 
 
+def test_knowledge_files_inside_an_agent_workspace_never_follow_a_planted_link(tmp_path: Path) -> None:
+    """A shared base inside an agent workspace is bound like the runtime binds it, never through a link there."""
+    client = _test_client(tmp_path)
+    victim = tmp_path / "mindroom_data" / "private_instances" / "victim-scope" / "mind" / "mind_data"
+    victim.mkdir(parents=True)
+    (victim / "secret.md").write_text("victim-only note", encoding="utf-8")
+    workspace = tmp_path / "mindroom_data" / "agents" / "helper" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "exports").symlink_to(victim, target_is_directory=True)
+    _publish_committed_runtime_config(client.app, _knowledge_config(workspace / "exports"))
+
+    files_response = client.get("/api/knowledge/bases/research/files")
+
+    assert files_response.status_code == 400
+    assert "victim-only" not in files_response.text
+
+
+def test_knowledge_files_use_the_checked_root_instead_of_resolving_it_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root swapped for a link after the binding check lists nothing instead of the link target."""
+    client = _test_client(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "secret.md").write_text("victim-only note", encoding="utf-8")
+    docs = tmp_path / "mindroom_data" / "agents" / "helper" / "workspace" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "own.md").write_text("own notes", encoding="utf-8")
+    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    checked = knowledge_api.shared_knowledge_path
+
+    def check_then_swap(raw_path: str, runtime_paths: RuntimePaths) -> Path:
+        root = checked(raw_path, runtime_paths)
+        if root.is_dir() and not root.is_symlink():
+            root.rename(root.with_name("docs-moved"))
+            root.symlink_to(victim, target_is_directory=True)
+        return root
+
+    monkeypatch.setattr(knowledge_api, "shared_knowledge_path", check_then_swap)
+
+    files_response = client.get("/api/knowledge/bases/research/files")
+
+    assert "secret.md" not in files_response.text
+
+
 def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> None:
     """Git-backed API file counts should match the tracked files the indexer can search."""
     client = _test_client(tmp_path)

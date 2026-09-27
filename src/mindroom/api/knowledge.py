@@ -32,6 +32,8 @@ from mindroom.knowledge.status import (
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import resolve_path_within_root
+from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -76,7 +78,10 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
+    try:
+        root = shared_knowledge_path(config.knowledge_bases[base_id].path, runtime_paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
@@ -87,13 +92,11 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
     if candidate.is_absolute() or ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    resolved_root = root.resolve()
-    resolved = (resolved_root / candidate).resolve()
     try:
-        resolved.relative_to(resolved_root)
+        # The root is the checked binding path; no link below it is followed.
+        return resolve_path_within_root(root, candidate, symlinks="reject")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Path is outside the knowledge folder") from exc
-    return resolved
 
 
 async def _list_file_info(
@@ -104,18 +107,16 @@ async def _list_file_info(
 ) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
-    resolved_root = root.resolve()
-
-    if not resolved_root.is_dir():
+    if not root.is_dir():
         return _FileListInfo(files=files, total_size=total_size)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, root, runtime_paths)
     if error is not None:
         return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
     for file_path in sorted(managed_paths):
         try:
             stat = file_path.stat()
-            relative_path = file_path.relative_to(resolved_root).as_posix()
+            relative_path = file_path.relative_to(root).as_posix()
         except (OSError, ValueError):
             continue
         total_size += stat.st_size
@@ -146,11 +147,10 @@ async def _count_managed_files(
     the corpus on every request; ``/bases/{base_id}/files`` still serves the full
     listing for callers that need it.
     """
-    resolved_root = root.resolve()
-    if not resolved_root.is_dir():
+    if not root.is_dir():
         return _FileCountInfo(count=0)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, root, runtime_paths)
     if error is not None:
         return _FileCountInfo(count=0, degraded=True, error=error)
     return _FileCountInfo(count=len(managed_paths))
@@ -220,12 +220,12 @@ def _same_source_base_ids(
     base_id: str,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
-    source_root = _knowledge_root(config, base_id, runtime_paths).resolve()
+    source_root = _knowledge_root(config, base_id, runtime_paths)
     base_ids = [base_id]
     for candidate_id in config.knowledge_bases:
         if candidate_id == base_id:
             continue
-        if _knowledge_root(config, candidate_id, runtime_paths).resolve() == source_root:
+        if _knowledge_root(config, candidate_id, runtime_paths) == source_root:
             base_ids.append(candidate_id)
     return tuple(base_ids)
 
@@ -562,7 +562,6 @@ async def _write_uploads(
     try:
         upload_targets: list[_UploadTarget] = []
         seen_relative_paths: set[str] = set()
-        resolved_root = root.resolve()
         for upload in files:
             filename = Path(upload.filename or "").name
             if not filename:
@@ -570,7 +569,7 @@ async def _write_uploads(
 
             destination = _resolve_within_root(root, filename)
             _reject_git_file_mutation(config, base_id, runtime_paths, destination)
-            relative_path = destination.relative_to(resolved_root).as_posix()
+            relative_path = destination.relative_to(root).as_posix()
             _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
             if relative_path in seen_relative_paths:
                 _reject_duplicate_upload_destination(relative_path)
@@ -742,7 +741,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-        relative_path = target.relative_to(root.resolve()).as_posix()
+        relative_path = target.relative_to(root).as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
         target.unlink()
         cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
