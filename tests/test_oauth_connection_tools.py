@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -34,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
@@ -88,6 +90,7 @@ def _tool_and_context(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        agent_reply_memberships=isolated_membership_index(),
     )
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity("research").execution_scope,
@@ -285,6 +288,7 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_shared_sco
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
 async def test_reset_oauth_connection_denies_unauthorized_requester(
     tmp_path: Path,
@@ -298,6 +302,26 @@ async def test_reset_oauth_connection_denies_unauthorized_requester(
         result = await tool.reset_oauth_connection("google_drive")
 
     assert "not authorized" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(("worker_scope", "issued"), [("user_agent", True), ("shared", False)])
+async def test_reset_oauth_connection_lets_agent_users_reset_only_their_own_account(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    issued: bool,
+) -> None:
+    """Agent access suffices for a requester-owned account; a shared account still needs a credential manager."""
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope=worker_scope)
+    context.config.agents["research"].credential_managers = []
+    context.config.agents["research"].access = ResponderAccessConfig(users=["@alice:example.org"])
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection("google_drive")
+
+    assert ("reset_url" in result) is issued
+    assert ("not authorized" in result) is not issued
 
 
 @pytest.mark.asyncio

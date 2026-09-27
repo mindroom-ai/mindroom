@@ -12173,8 +12173,8 @@ agents:
 | Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
 
 A shared connection belongs to the agent rather than to one MindRoom user.
-On a private agent, users can manage their own personal connections.
-On other agents, requesting a reset requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
+Anyone who can use the agent can reset their own personal connection, and on a private agent every connection is personal.
+Resetting a shared connection requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
 Some providers always use personal connections, regardless of the agent's configured scope.
 
 ### Reset A Connection
@@ -16383,9 +16383,12 @@ Conversation OAuth links use an additional opaque, time-limited, single-use conn
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
-MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
-For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
+MindRoom rechecks the conversation link requester's authority at authorization and callback, and rejects a link if its credential generation changed after issuance.
+A requester-owned connection, one stored in the requester's user or user-agent credential scope as requester-scoped providers always are, needs only room-independent access to the agent, as on the Connections portal and the dashboard.
+That access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply because a browser request has no current room or team.
+A shared-scope connection on a non-private agent requires an administrator or configured credential manager.
 The requester-private-agent exception still applies to its isolated connection.
+Agent-issued reset links apply the same rule.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
@@ -21515,6 +21518,7 @@ Do not report or "fix" these; they are deliberate.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
+- Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 
 ## Reviewing security findings
 
