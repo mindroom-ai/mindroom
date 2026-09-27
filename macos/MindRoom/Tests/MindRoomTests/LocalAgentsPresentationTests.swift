@@ -6,6 +6,7 @@ final class LocalAgentsPresentationTests: XCTestCase {
     func testOnlyAnInstalledStoppedServiceOffersStart() {
         XCTAssertEqual(MindRoomServiceState.stopped.primaryAction, .startService)
         XCTAssertEqual(MindRoomServiceState.running.primaryAction, .stopService)
+        XCTAssertEqual(MindRoomServiceState.pairing.primaryAction, .stopService)
         XCTAssertEqual(MindRoomServiceState.runtimeMissing.primaryAction, .installRuntime)
         XCTAssertEqual(MindRoomServiceState.notInstalled.primaryAction, .installService)
         XCTAssertNil(MindRoomServiceState.unknown.primaryAction)
@@ -13,9 +14,16 @@ final class LocalAgentsPresentationTests: XCTestCase {
 
     func testDashboardRequiresRunningService() {
         XCTAssertTrue(MindRoomServiceState.running.canOpenDashboard)
-        for state: MindRoomServiceState in [.stopped, .notInstalled, .runtimeMissing, .unknown] {
+        for state: MindRoomServiceState in [.pairing, .stopped, .notInstalled, .runtimeMissing, .unknown] {
             XCTAssertFalse(state.canOpenDashboard)
         }
+    }
+
+    func testPairingKeepsConnectAccountVisibleWithoutNeedingSetup() {
+        XCTAssertFalse(MindRoomServiceState.pairing.needsSetup)
+        XCTAssertTrue(MindRoomServiceState.pairing.expandsSetup)
+        XCTAssertFalse(MindRoomServiceState.running.expandsSetup)
+        XCTAssertTrue(MindRoomServiceState.notInstalled.expandsSetup)
     }
 
     func testOnlyLoginItemLaunchStaysInMenuBar() {

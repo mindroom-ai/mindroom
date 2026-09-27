@@ -1103,12 +1103,12 @@ def _env_template(
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
-            "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
+            "# Hosted provisioning API; lets `mindroom run` pair with your MindRoom Chat account\n"
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
             "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
             "MINDROOM_NAMESPACE=\n\n"
-            "# Required for homeservers that gate bot registration (recommended for mindroom.chat)\n"
-            "# Keep this secret; do not commit real values.\n"
+            "# Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat; pairing replaces it.\n"
+            "# Setting any token skips pairing. Keep real values secret; do not commit them.\n"
             "MATRIX_REGISTRATION_TOKEN="
         )
     else:

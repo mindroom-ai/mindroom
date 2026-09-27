@@ -43,6 +43,8 @@ struct LocalAgentsView: View {
                 }
                 Text(state.canOpenDashboard
                      ? "Agent and model settings open in the local web dashboard."
+                     : state == .pairing
+                     ? MindRoomServiceState.dashboardAfterPairingHint
                      : "Start the local service to open its configuration dashboard.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -50,8 +52,8 @@ struct LocalAgentsView: View {
             DisclosureGroup("Set up or reconnect local agents", isExpanded: $showSetup) {
                 setup.padding(.top, 12)
             }
-            .onAppear { if state.needsSetup { showSetup = true } }
-            .onChange(of: state) { _, newState in if newState.needsSetup { showSetup = true } }
+            .onAppear { if state.expandsSetup { showSetup = true } }
+            .onChange(of: state) { _, newState in if newState.expandsSetup { showSetup = true } }
 
             Text("The background service starts at login. Closing or quitting the app leaves it running.")
                 .font(.callout).foregroundStyle(.secondary)

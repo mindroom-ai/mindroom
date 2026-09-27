@@ -133,6 +133,7 @@ def run(
     """Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
+    - Pairs hosted installs with your MindRoom Chat account on first run
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
@@ -144,16 +145,25 @@ def run(
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
 
-    from mindroom.matrix.provisioning import local_pairing_required  # noqa: PLC0415
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    # Report a broken config or missing model keys before any pairing waits for a human.
+    check_env_keys(_load_active_config_or_exit(runtime_paths), runtime_paths=runtime_paths)
     try:
         if local_pairing_required(runtime_paths):
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
-            # Reject a broken config before the user approves the pairing.
-            _load_active_config_or_exit(runtime_paths)
-            cli_connect.pair_local_install(runtime_paths, console=console)
+            cli_connect.pair_local_install(
+                runtime_paths,
+                console=console,
+                # `mindroom connect` or the macOS app may pair this machine while the run waits.
+                stop_waiting=lambda: (
+                    not local_pairing_required(
+                        activate_cli_runtime(path=config_path, storage_path=storage_path),
+                    )
+                ),
+            )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -207,10 +217,8 @@ async def _run(
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
-
-    # Check for missing API keys
-    check_env_keys(config, runtime_paths=runtime_paths)
+    # Validate again: pairing may have rewritten owner placeholders in the config.
+    _load_active_config_or_exit(runtime_paths)
 
     console.print(make_banner())
     console.print()
@@ -592,8 +600,19 @@ def connect(
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
     try:
+        runtime_paths = activate_cli_runtime(path)
+        if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
+            "MINDROOM_LOCAL_CLIENT_SECRET",
+        ):
+            console.print(
+                "[yellow]Warning:[/yellow] This machine is already connected. "
+                "Pairing again creates a new connection and a new agent namespace: "
+                "existing agents keep working, and new agents get the new namespace.",
+            )
+            if _stdin_is_interactive():
+                typer.confirm("Pair again?", abort=True)
         cli_connect.pair_local_install(
-            activate_cli_runtime(path),
+            runtime_paths,
             console=console,
             provisioning_url=provisioning_url,
             client_name=client_name,
@@ -605,6 +624,11 @@ def connect(
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     console.print("\nNext step:\n  mindroom run")
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person can answer prompts; the macOS app and services run without a terminal."""
+    return sys.stdin.isatty()
 
 
 app.command("local-stack-setup")(local_stack_setup)

@@ -9,9 +9,10 @@ import socket
 import time
 import webbrowser
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import yaml
+from rich.markup import escape
 
 from mindroom import constants
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
@@ -43,6 +44,8 @@ __all__ = [
 
 _API_PATH = "/v1/local-mindroom/pair/device"
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
+_DEFAULT_POLL_INTERVAL_SECONDS = 3
+_MAX_START_RETRY_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,11 @@ class _ServiceError(ValueError):
             message = f"Pairing failed ({status_code}): {detail}"
         super().__init__(message)
         self.status_code = status_code
+
+    @property
+    def transient(self) -> bool:
+        """Whether retrying later may succeed: unreachable, rate limited, or a server error."""
+        return self.status_code in {0, 429} or self.status_code >= 500
 
 
 def _httpx_post(url: str, *, json: Mapping[str, object], timeout: float, verify: bool) -> httpx.Response:
@@ -138,11 +146,11 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
 
 
 def _validate_poll_interval(raw_value: object) -> int:
-    """Return a positive poll interval or 3 as fallback."""
+    """Return a positive poll interval or the default as fallback."""
     if isinstance(raw_value, bool) or not isinstance(raw_value, int):
-        return 3
+        return _DEFAULT_POLL_INTERVAL_SECONDS
     if raw_value <= 0:
-        return 3
+        return _DEFAULT_POLL_INTERVAL_SECONDS
     return raw_value
 
 
@@ -165,8 +173,44 @@ def _start_session(
         pair_code=_required_non_empty_string(started, "pair_code"),
         device_secret=_required_non_empty_string(started, "device_secret"),
         approve_url=_required_non_empty_string(started, "approve_url"),
-        poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds", 3)),
+        poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds")),
     )
+
+
+def _start_session_with_retry(
+    post_request: Callable[..., httpx.Response],
+    base_url: str,
+    *,
+    client_name: str,
+    client_fingerprint: str,
+    verify: bool,
+    sleep: Callable[[float], None],
+    report_retry: Callable[[str], None] | None,
+    stopped: Callable[[], bool],
+) -> DevicePairSession | None:
+    """Start a session, retrying transient failures with doubling backoff so unattended services survive boot.
+
+    Returns None when stopped() reports that pairing is no longer needed between retries.
+    """
+    delay = _DEFAULT_POLL_INTERVAL_SECONDS
+    while True:
+        try:
+            return _start_session(
+                post_request,
+                base_url,
+                client_name=client_name,
+                client_fingerprint=client_fingerprint,
+                verify=verify,
+            )
+        except _ServiceError as exc:
+            if not exc.transient:
+                raise
+            if report_retry is not None:
+                report_retry(f"{exc} (retrying in {delay}s)")
+        sleep(delay)
+        if stopped():
+            return None
+        delay = min(delay * 2, _MAX_START_RETRY_SECONDS)
 
 
 def _wait_for_approval(
@@ -176,10 +220,13 @@ def _wait_for_approval(
     *,
     verify: bool,
     sleep: Callable[[float], None],
-) -> PairCompleteResult | None:
-    """Poll until the session is approved, returning None once it has expired."""
+    stopped: Callable[[], bool],
+) -> PairCompleteResult | Literal["expired", "stopped"]:
+    """Poll until the session is approved, has expired, or stopped() reports that waiting is pointless."""
     while True:
         sleep(session.poll_interval_seconds)
+        if stopped():
+            return "stopped"
         try:
             polled = _post_json(
                 post_request,
@@ -190,8 +237,8 @@ def _wait_for_approval(
         except _ServiceError as exc:
             # The service prunes expired sessions, so an unknown device secret means expired.
             if exc.status_code == 404:
-                return None
-            if exc.status_code in {0, 429} or exc.status_code >= 500:
+                return "expired"
+            if exc.transient:
                 continue
             raise
 
@@ -199,7 +246,7 @@ def _wait_for_approval(
         if status == "connected":
             return _parse_pair_complete(polled)
         if status == "expired":
-            return None
+            return "expired"
         if status == "pending":
             continue
         if status is None:
@@ -219,26 +266,58 @@ def run_device_pairing(
     post_request: Callable[..., httpx.Response] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     renew_expired: bool = True,
-) -> PairCompleteResult:
+    stop_waiting: Callable[[], bool] | None = None,
+    report_retry: Callable[[str], None] | None = None,
+) -> PairCompleteResult | None:
     """Wait until a signed-in user approves this machine.
 
-    When renew_expired is True, expired sessions start a new code and announce it again.
-    When False, expiry raises ValueError (prevents indefinite waiting in interactive flows).
+    When renew_expired is True, expired sessions start a new code and announce it again, and transient failures to start a session are retried with backoff.
+    When False, expiry and start failures raise ValueError (prevents indefinite waiting in interactive flows).
+    Returns None when stop_waiting, checked before each session start, start retry, and poll, reports that pairing is no longer needed.
     """
     post = post_request or _httpx_post
     base_url = f"{provisioning_url.rstrip('/')}{_API_PATH}"
+
+    def stopped() -> bool:
+        return stop_waiting is not None and stop_waiting()
+
     while True:
-        session = _start_session(
+        if stopped():
+            return None
+        if renew_expired:
+            session = _start_session_with_retry(
+                post,
+                base_url,
+                client_name=client_name,
+                client_fingerprint=client_fingerprint,
+                verify=matrix_ssl_verify,
+                sleep=sleep,
+                report_retry=report_retry,
+                stopped=stopped,
+            )
+            if session is None:
+                return None
+        else:
+            session = _start_session(
+                post,
+                base_url,
+                client_name=client_name,
+                client_fingerprint=client_fingerprint,
+                verify=matrix_ssl_verify,
+            )
+        announce(session)
+        outcome = _wait_for_approval(
             post,
             base_url,
-            client_name=client_name,
-            client_fingerprint=client_fingerprint,
+            session,
             verify=matrix_ssl_verify,
+            sleep=sleep,
+            stopped=stopped,
         )
-        announce(session)
-        result = _wait_for_approval(post, base_url, session, verify=matrix_ssl_verify, sleep=sleep)
-        if result is not None:
-            return result
+        if outcome == "stopped":
+            return None
+        if isinstance(outcome, PairCompleteResult):
+            return outcome
         if not renew_expired:
             msg = "Approval timed out. Run the command again to get a new link."
             raise ValueError(msg)
@@ -306,8 +385,13 @@ def pair_local_install(
     post_request: Callable[..., httpx.Response] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     renew_expired: bool = True,
-) -> PairCompleteResult:
-    """Pair this install with the hosted provisioning service and save its credentials."""
+    stop_waiting: Callable[[], bool] | None = None,
+) -> PairCompleteResult | None:
+    """Pair this install with the hosted provisioning service and save its credentials.
+
+    Returns None without saving anything when stop_waiting reports that another process paired this machine.
+    Raises ValueError after printing the credentials when they cannot be saved, because the service issues them only once.
+    """
     resolved_url = (
         provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
     ).strip()
@@ -332,7 +416,12 @@ def pair_local_install(
         post_request=post_request,
         sleep=sleep,
         renew_expired=renew_expired,
+        stop_waiting=stop_waiting,
+        report_retry=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
     )
+    if result is None:
+        console.print("This machine was paired by another MindRoom process; continuing.")
+        return None
     if result.owner_user_id_invalid:
         console.print(
             "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
@@ -344,23 +433,44 @@ def pair_local_install(
     owner_text = f" as {result.owner_user_id}" if result.owner_user_id else ""
     console.print(f"[green]Connected{owner_text}.[/green]")
     if persist_env:
-        env_path = persist_local_provisioning_env(
-            provisioning_url=resolved_url,
-            client_id=result.client_id,
-            client_secret=result.client_secret,
-            namespace=result.namespace,
-            owner_user_id=result.owner_user_id,
-            config_path=runtime_paths.config_path,
-        )
+        try:
+            env_path = persist_local_provisioning_env(
+                provisioning_url=resolved_url,
+                client_id=result.client_id,
+                client_secret=result.client_secret,
+                namespace=result.namespace,
+                owner_user_id=result.owner_user_id,
+                config_path=runtime_paths.config_path,
+            )
+        except (OSError, ValueError) as exc:
+            # The service hands these credentials out once, so show them before failing.
+            # Under a service they land in its logs; the connection can be revoked in MindRoom Chat.
+            _print_exports(console, resolved_url, result)
+            msg = (
+                f"Could not save credentials to {env_path_for_config(runtime_paths.config_path)}: {exc}. "
+                "Save the exports above; they are not shown again."
+            )
+            raise ValueError(msg) from exc
         console.print(f"  Saved credentials to: {env_path}")
-        if result.owner_user_id and replace_owner_placeholders_in_config(
-            config_path=runtime_paths.config_path,
-            owner_user_id=result.owner_user_id,
-        ):
-            console.print(f"  Updated owner placeholder(s) in: {runtime_paths.config_path}")
+        if result.owner_user_id:
+            _replace_owner_placeholders_or_warn(console, runtime_paths.config_path, result.owner_user_id)
     else:
         _print_exports(console, resolved_url, result)
     return result
+
+
+def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, owner_user_id: str) -> None:
+    """Fill owner placeholders after credentials are saved; a failure here must not lose the pairing."""
+    try:
+        replaced = replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id)
+    except (OSError, ValueError) as exc:
+        console.print(
+            f"[yellow]Warning:[/yellow] Could not update owner placeholder(s) in {config_path}: {escape(str(exc))}",
+        )
+        console.print(f"  Replace them with {owner_user_id} manually.", markup=False)
+        return
+    if replaced:
+        console.print(f"  Updated owner placeholder(s) in: {config_path}")
 
 
 def persist_local_provisioning_env(

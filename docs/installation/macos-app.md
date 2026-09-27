@@ -47,6 +47,7 @@ Open **Local agents** and expand **Set up or reconnect local agents**.
    Sign in if needed and click **Approve**; this completes when you approve or after 10 minutes.
 3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
 4. **Install and Start Agents** installs and starts the launchd background service.
+   If the service starts before your account is connected, Local agents shows **Waiting for chat account** until you choose **Connect Account** and approve.
 
 Commands show progress and their results in the window.
 Once the service is running, **Open Dashboard** opens the local dashboard inside the app for agent and model configuration.
@@ -192,7 +193,7 @@ The service appends to its existing logs, so records written by older versions m
 Failed local-agent actions show their output in the window with a copy action.
 If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.
 After changing its URL or API key in `.env`, select **Reload** in Dashboard to read the updated values.
-If pairing expires, generate a new code in the relevant chat flow.
+Pairing codes expire after 10 minutes; the background service shows a new link in its logs automatically, or click **Connect Account** again.
 
 Homebrew users can also update the app with:
 

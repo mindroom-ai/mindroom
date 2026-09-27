@@ -503,6 +503,45 @@ def test_service_status_not_installed(mock_get_manager: MagicMock) -> None:
     assert "not installed" in result.output
 
 
+@pytest.mark.parametrize(("env_file", "pairing_line"), [("", True), ("MATRIX_REGISTRATION_TOKEN=t\n", False)])
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_status_reports_pending_pairing(
+    mock_get_manager: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_file: str,
+    pairing_line: bool,
+) -> None:
+    """A running service still waiting for pairing is reported so the macOS app does not call it ready."""
+    for name in (
+        "MINDROOM_PROVISIONING_URL",
+        "MATRIX_REGISTRATION_TOKEN",
+        "MATRIX_REGISTRATION_SHARED_SECRET",
+        "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
+        "MINDROOM_LOCAL_CLIENT_ID",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(f"MINDROOM_PROVISIONING_URL=https://mindroom.chat\n{env_file}", encoding="utf-8")
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=123)
+    mock_manager.get_recent_logs.return_value = []
+    mock_manager.get_log_command.return_value = "tail logs"
+    mock_get_manager.return_value = mock_manager
+
+    result = runner.invoke(
+        app,
+        ["service", "status"],
+        env={"MINDROOM_CONFIG_PATH": str(config_path), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "MindRoom service: running (pid 123)" in result.output
+    assert ("pairing: required" in result.output) is pairing_line
+
+
 @patch("mindroom.cli.service._get_service_manager")
 def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
     """Service install -y installs without interactive prompts."""

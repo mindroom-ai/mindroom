@@ -577,7 +577,7 @@ class TestConfigInit:
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
     def test_init_mindroom_chat_writes_hosted_matrix_defaults(self, tmp_path: Path) -> None:
-        """mindroom.chat should prefill hosted Matrix defaults and token placeholder."""
+        """mindroom.chat should prefill hosted Matrix defaults and explain that pairing replaces the token."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat"])
         assert result.exit_code == 0
@@ -588,7 +588,10 @@ class TestConfigInit:
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
-        assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+        assert "MATRIX_REGISTRATION_TOKEN=\n" in env_content
+        assert "lets `mindroom run` pair with your MindRoom Chat account" in env_content
+        assert "Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat" in env_content
+        assert "recommended for mindroom.chat" not in env_content
         assert "\n\n\n# AI provider API keys" not in env_content
 
         output = normalize_console_output(result.output)
@@ -3923,6 +3926,64 @@ class TestConnect:
         assert result.exit_code == 1
         assert "Approval timed out" in result.output
         assert "Run the command again to get a new link" in result.output
+
+    def test_connect_warns_before_repairing_a_connected_machine(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-interactive callers such as the macOS app are warned but not prompted."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        (tmp_path / ".env").write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "already connected" in output
+        assert "new agent namespace" in output
+        assert "Pair again?" not in output
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
+
+    def test_connect_asks_before_repairing_in_a_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Interactive users confirm before pairing again; declining leaves the connection untouched."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        env_path = tmp_path / ".env"
+        env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
+        posts: list[str] = []
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda url, **_kw: posts.append(url))
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+            input="n\n",
+        )
+
+        assert result.exit_code == 1
+        assert "Pair again?" in result.output
+        assert posts == []
+        assert "MINDROOM_LOCAL_CLIENT_ID=old-id" in env_path.read_text()
+
+    def test_connect_reports_runtime_resolution_errors(self, tmp_path: Path) -> None:
+        """A runtime that cannot be resolved prints an error instead of a traceback."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        with patch("mindroom.cli.main.activate_cli_runtime", side_effect=ValueError("bad runtime")):
+            result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 1
+        assert "Error: bad runtime" in result.output
 
 
 # ---------------------------------------------------------------------------

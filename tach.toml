@@ -2432,6 +2432,14 @@ depends_on = [
     "mindroom.constants",
     "mindroom.http_error_detail",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.provisioning_env",
+]
+
+[[modules]]
+path = "mindroom.matrix.provisioning_env"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_session",
 ]
 
 [[modules]]
@@ -2481,6 +2489,7 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.cross_signing",
     "mindroom.matrix.provisioning",
+    "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
@@ -3317,6 +3326,7 @@ visibility = [
     "mindroom.matrix._owned_session",
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
+    "mindroom.matrix.provisioning_env",
     "mindroom.matrix.rooms",
     "mindroom.matrix.typing",
     "mindroom.matrix.users",
@@ -4137,6 +4147,8 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.service"
 depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.provisioning_env",
     "mindroom.services.config",
     "mindroom.services.manager",
 ]
@@ -4174,7 +4186,7 @@ depends_on = [
     "mindroom.error_handling",
     "mindroom.event_journal_open",
     "mindroom.frontend_assets",
-    "mindroom.matrix.provisioning",
+    "mindroom.matrix.provisioning_env",
     "mindroom.orchestrator",
 ]
 

@@ -128,7 +128,10 @@ struct MindRoomRootView: View {
         if runner.serviceStatus.state != .running {
             VStack(spacing: 14) {
                 Text("Local dashboard unavailable").font(.title2)
-                Text("Start local agents to open the dashboard.").foregroundStyle(.secondary)
+                Text(runner.serviceStatus.state == .pairing
+                     ? MindRoomServiceState.dashboardAfterPairingHint
+                     : "Start local agents to open the dashboard.")
+                    .foregroundStyle(.secondary)
                 Button("Open Local Agents") { navigation.section = .localAgents }
                 Button("Refresh Status") { runner.refreshStatus() }
             }

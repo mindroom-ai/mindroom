@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 
 def _fake_transport(
     responses: list[httpx.Response],
@@ -120,7 +122,8 @@ def test_run_device_pairing_starts_a_new_code_after_expiry() -> None:
 
 
 def test_run_device_pairing_reports_service_errors() -> None:
-    """Service errors surface with their detail."""
+    """Interactive pairing fails fast and surfaces service errors with their detail."""
+    sleeps: list[float] = []
     post = _fake_transport([httpx.Response(429, json={"detail": "Rate limit exceeded"})], [])
 
     with pytest.raises(ValueError, match=r"Pairing failed \(429\): Rate limit exceeded"):
@@ -131,8 +134,163 @@ def test_run_device_pairing_reports_service_errors() -> None:
             matrix_ssl_verify=True,
             announce=lambda _session: None,
             post_request=post,
+            sleep=sleeps.append,
+            renew_expired=False,
+        )
+
+    assert sleeps == []
+
+
+def test_run_device_pairing_retries_transient_start_failures_when_renewing() -> None:
+    """Unattended runs retry an unreachable, rate-limited, or failing service with bounded backoff."""
+    sleeps: list[float] = []
+    retries: list[str] = []
+    calls: list[tuple[str, dict[str, object]]] = []
+    responses = [
+        httpx.Response(503, json={"detail": "Service unavailable"}),
+        httpx.Response(429, json={"detail": "Rate limit exceeded"}),
+        *[httpx.Response(502, json={"detail": "Bad gateway"}) for _ in range(4)],
+        httpx.Response(200, json=_START),
+        httpx.Response(200, json=_CONNECTED),
+    ]
+
+    def _post(url: str, *, json: dict[str, object], **_kwargs: object) -> httpx.Response:
+        calls.append((url, json))
+        if len(calls) == 1:
+            msg = "Network is unreachable"
+            raise httpx.ConnectError(msg)
+        return responses.pop(0)
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=_post,
+        sleep=sleeps.append,
+        report_retry=retries.append,
+    )
+
+    assert result is not None
+    assert result.client_id == "client-123"
+    assert sleeps == [3, 6, 12, 24, 30, 30, 30, 3]
+    assert len(retries) == 7
+    assert retries[0] == "Could not reach provisioning service: Network is unreachable (retrying in 3s)"
+
+
+def test_run_device_pairing_does_not_retry_permanent_start_failures() -> None:
+    """A non-transient start failure still exits even when renewing."""
+    post = _fake_transport([httpx.Response(400, json={"detail": "Bad request"})], [])
+
+    with pytest.raises(ValueError, match=r"Pairing failed \(400\): Bad request"):
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=post,
             sleep=lambda _seconds: None,
         )
+
+
+def test_run_device_pairing_fails_fast_on_unreachable_service_without_renewal() -> None:
+    """Interactive pairing does not retry an unreachable service."""
+
+    def _post(_url: str, **_kwargs: object) -> httpx.Response:
+        msg = "Network is unreachable"
+        raise httpx.ConnectError(msg)
+
+    with pytest.raises(ValueError, match="Could not reach provisioning service"):
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=_post,
+            sleep=lambda _seconds: None,
+            renew_expired=False,
+        )
+
+
+def test_run_device_pairing_stops_when_another_process_paired() -> None:
+    """A waiting run stops polling once credentials appear from elsewhere."""
+    calls: list[tuple[str, dict[str, object]]] = []
+    checks: list[bool] = []
+    post = _fake_transport(
+        [httpx.Response(200, json=_START), httpx.Response(200, json={"status": "pending"})],
+        calls,
+    )
+
+    def _stop_waiting() -> bool:
+        checks.append(True)
+        # Checked before the start, then before each poll: stop before the second poll.
+        return len(checks) > 2
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=post,
+        sleep=lambda _seconds: None,
+        stop_waiting=_stop_waiting,
+    )
+
+    assert result is None
+    assert len(calls) == 2
+    assert len(checks) == 3
+
+
+def test_run_device_pairing_does_not_announce_a_new_code_after_another_process_paired() -> None:
+    """An expired code is not renewed once credentials appeared from elsewhere."""
+    announced: list[cli_connect.DevicePairSession] = []
+    paired_elsewhere: list[bool] = [False]
+    responses = [httpx.Response(200, json=_START), httpx.Response(200, json={"status": "expired"})]
+
+    def _post(url: str, **_kwargs: object) -> httpx.Response:
+        # Another process pairs while this code expires.
+        paired_elsewhere[0] = url.endswith("/poll")
+        return responses.pop(0)
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=announced.append,
+        post_request=_post,
+        sleep=lambda _seconds: None,
+        stop_waiting=lambda: paired_elsewhere[0],
+    )
+
+    assert result is None
+    assert len(announced) == 1
+
+
+def test_run_device_pairing_stops_retrying_start_after_another_process_paired() -> None:
+    """Start retries end once credentials appeared from elsewhere."""
+    calls: list[tuple[str, dict[str, object]]] = []
+    sleeps: list[float] = []
+    post = _fake_transport([httpx.Response(503, json={"detail": "Service unavailable"})], calls)
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=post,
+        sleep=sleeps.append,
+        stop_waiting=lambda: bool(sleeps),
+    )
+
+    assert result is None
+    assert len(calls) == 1
+    assert sleeps == [3]
 
 
 def test_run_device_pairing_flags_malformed_owner_user_id() -> None:
@@ -630,3 +788,113 @@ def test_run_device_pairing_renews_when_allowed() -> None:
 
     assert [session.pair_code for session in announced] == ["ABCD-EFGH", "WXYZ-2345"]
     assert result.client_id == "client-123"
+
+
+def _runtime_with_config(tmp_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
+    return resolve_primary_runtime_paths(config_path=config_path, process_env={})
+
+
+def test_pair_local_install_continues_without_saving_when_paired_elsewhere(tmp_path: Path) -> None:
+    """Credentials written by another process end the wait without persisting anything."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START)], [])
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+        stop_waiting=lambda: True,
+    )
+
+    assert result is None
+    assert "This machine was paired by another MindRoom process; continuing." in out.getvalue()
+    assert not (tmp_path / ".env").exists()
+
+
+def test_pair_local_install_prints_credentials_when_env_cannot_be_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-time credentials are shown for manual saving when .env is not writable."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    def _read_only(*_args: object, **_kwargs: object) -> Path:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(cli_connect, "upsert_env_values", _read_only)
+
+    with pytest.raises(ValueError, match=r"Could not save credentials to .*\.env: \[Errno 30\] Read-only file system"):
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=200),
+            provisioning_url="https://provisioning.example",
+            post_request=post,
+            sleep=lambda _seconds: None,
+        )
+
+    output = out.getvalue()
+    assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in output
+    assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in output
+    assert "export MINDROOM_NAMESPACE=a1b2c3d4" in output
+
+
+def test_pair_local_install_prints_credentials_when_env_write_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused write such as a symlinked or undecodable .env also shows the one-time credentials."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    def _refuse(*_args: object, **_kwargs: object) -> Path:
+        msg = "Refusing to write .env through a symlink"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(cli_connect, "upsert_env_values", _refuse)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Could not save credentials to .*: Refusing to write \.env through a symlink",
+    ):
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=200),
+            provisioning_url="https://provisioning.example",
+            post_request=post,
+            sleep=lambda _seconds: None,
+        )
+
+    assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in out.getvalue()
+
+
+def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_path: Path) -> None:
+    """Saved credentials are kept and a read-only config only produces a warning."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    config_path.chmod(0o400)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result is not None
+    output = out.getvalue()
+    assert "Saved credentials to" in output
+    assert "Could not update owner placeholder(s)" in output
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
