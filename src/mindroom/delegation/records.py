@@ -64,6 +64,8 @@ _LOCK_FILENAME = ".record.lock"
 # Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real events stay far below these.
 _MAX_EVENT_LINE_BYTES = 4 << 20
 _MAX_EVENT_LOG_BYTES = 256 << 20
+# Other events stop this far short of the log cap, so the terminal event, four inline values at most, always fits.
+_FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 
@@ -383,7 +385,7 @@ class DelegationRecordOwner:
                 status=None,
                 event_id="delegation_finished",
             )
-            _append_jsonl(record_fd, event)
+            _append_jsonl(record_fd, event, terminal=True)
             run.update(
                 {
                     "status": status,
@@ -535,12 +537,13 @@ def _write_run(record_fd: int, run: Mapping[str, object]) -> None:
     atomic_write_bytes_at(record_fd, "run.json", _json_bytes(run))
 
 
-def _append_jsonl(record_fd: int, payload: Mapping[str, object]) -> None:
+def _append_jsonl(record_fd: int, payload: Mapping[str, object], *, terminal: bool = False) -> None:
     line = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    log_limit = _MAX_EVENT_LOG_BYTES if terminal else _MAX_EVENT_LOG_BYTES - _FINISH_EVENT_HEADROOM_BYTES
     descriptor = open_regular_file_at(record_fd, "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     try:
         committed = os.fstat(descriptor).st_size
-        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > _MAX_EVENT_LOG_BYTES:
+        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > log_limit:
             # Refused before writing, so the log never holds what its readers refuse.
             msg = "Delegation event exceeds its size limit"
             raise ValueError(msg)

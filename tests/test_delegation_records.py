@@ -107,6 +107,34 @@ async def test_event_log_refuses_an_oversized_event_line(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_a_record_whose_event_log_filled_up_can_still_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Events stop short of the log cap, so a long delegation's terminal event still fits and settles the record."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    monkeypatch.setattr(module, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + (4 << 10))
+
+    async def fill_the_log() -> None:
+        for _ in range(8):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "z" * 1024}))
+
+    with pytest.raises(ValueError, match="size limit"):
+        await fill_the_log()
+    await owner.finish(handle, status="completed", output="D" * 2048)
+
+    assert _read_json(_record_dir(handle) / "run.json")["status"] == "completed"
+    assert _read_events(event_path)[-1]["kind"] == "delegation_finished"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("limit", ["line", "log"])
 async def test_event_append_refuses_what_would_make_the_log_unreadable(
     tmp_path: Path,
