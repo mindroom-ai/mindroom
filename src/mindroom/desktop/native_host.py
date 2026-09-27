@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
+from mindroom.desktop.local_dashboard import local_dashboard_configuration
 from mindroom.desktop.native_config import (
     NativeConfigError,
     NativeDesktopConfig,
@@ -259,6 +260,9 @@ class NativeDesktopHost:
         if action == "status":
             _expect_keys(parameters, set())
             return {"status": self.status()}
+        if action == "dashboard_configuration":
+            _expect_keys(parameters, set())
+            return local_dashboard_configuration(self._runtime_paths)
         if action in {"configure", "set_allowed_apps", "set_browser_config", "set_local_access", "finish_setup"}:
             edited_keys = {
                 "configure": {"config"},

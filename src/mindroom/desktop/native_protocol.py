@@ -19,6 +19,7 @@ MAX_NATIVE_OUTPUT_BYTES = 262_144
 NATIVE_ACTIONS = frozenset(
     {
         "status",
+        "dashboard_configuration",
         "configure",
         "set_allowed_apps",
         "set_browser_config",
