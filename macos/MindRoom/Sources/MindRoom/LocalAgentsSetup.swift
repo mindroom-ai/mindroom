@@ -16,7 +16,8 @@ enum LocalAgentsSetupStep: Int, CaseIterable {
 struct LocalAgentsSetupSnapshot: Equatable {
     var runtimePath: String?
     var configurationExists = false
-    var configurationStamp: [Date?] = []
+    var configurationDisplayPath: String?
+    var configurationStamp: LocalAgentsConfigurationStamp?
 
     var runtimeInstalled: Bool { runtimePath != nil }
 
@@ -52,6 +53,12 @@ struct LocalAgentsSetupSnapshot: Equatable {
             }
         }
     }
+}
+
+struct LocalAgentsConfigurationStamp: Equatable {
+    let configurationURL: URL
+    let storagePath: String?
+    let modificationDates: [Date?]
 }
 
 extension CommandResult {

@@ -191,8 +191,8 @@ struct MindRoomRootView: View {
         } else if let feedback = runner.feedback {
             Divider()
             HStack(spacing: 10) {
-                Image(systemName: feedback.result.isSuccess ? "checkmark.circle" : "exclamationmark.triangle")
-                Text(feedback.result.isSuccess ? "Action finished" : "Action failed")
+                Image(systemName: feedback.statusSymbol)
+                Text("Action \(feedback.statusLabel)")
                 Spacer()
                 Button("View Result", action: showDetails)
             }.padding(14)
@@ -319,10 +319,13 @@ struct CommandFeedbackView: View {
         } else if let feedback = runner.feedback {
             AppSectionCard {
                 Label(
-                    "\(feedback.title) \(feedback.result.isSuccess ? "finished" : "failed")",
-                    systemImage: feedback.result.isSuccess ? "checkmark.circle" : "exclamationmark.triangle"
+                    "\(feedback.title) \(feedback.statusLabel)",
+                    systemImage: feedback.statusSymbol
                 ).font(.headline)
-                if !compact || !feedback.result.isSuccess {
+                if feedback.needsAttention {
+                    Text(feedback.result.setupCheckSummary ?? "Review the command output before continuing.")
+                        .foregroundStyle(.orange)
+                } else if !compact || !feedback.result.isSuccess {
                     Text(feedback.result.isSuccess
                          ? feedback.successMessage ?? feedback.result.condensedOutput
                          : feedback.result.condensedOutput)

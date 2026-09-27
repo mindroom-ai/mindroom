@@ -65,6 +65,23 @@ struct MindRoomRuntime {
         configDirectoryURL.appendingPathComponent(".env")
     }
 
+    // The CLI stores these paths at service installation. Keep local-agent
+    // setup aligned with that service without changing Computer access's home.
+    private var localAgentServiceEnvironment: [String: String] {
+        let plist = homeURL.appendingPathComponent("Library/LaunchAgents/chat.mindroom.local.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let contents = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              contents["Label"] as? String == "chat.mindroom.local",
+              let environment = contents["EnvironmentVariables"] as? [String: String] else { return [:] }
+        return environment.filter {
+            ["MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"].contains($0.key) && $0.value.hasPrefix("/")
+        }
+    }
+
+    var localAgentsConfigURL: URL {
+        localAgentServiceEnvironment["MINDROOM_CONFIG_PATH"].map { URL(fileURLWithPath: $0) } ?? configPathURL
+    }
+
     var logsDirectoryURL: URL {
         homeURL
             .appendingPathComponent("Library", isDirectory: true)
@@ -89,13 +106,11 @@ struct MindRoomRuntime {
         case .serviceStatus:
             return mindroomCommand(arguments: ["service", "status", "--logs", "0"])
         case .checkSetup:
-            return mindroomCommand(arguments: ["doctor", "--config", configPathURL.path])
+            return mindroomCommand(arguments: ["doctor", "--config", localAgentsConfigURL.path])
         case .initializeHostedConfig:
-            // Pin --path so config init targets ~/.mindroom regardless of the app's
-            // working directory; without it, a CWD-local config.yaml wins the search.
-            return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "mindroom.chat", "--no-input"])
+            return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "mindroom.chat", "--no-input"])
         case .initializeSelfHostedConfig:
-            return mindroomCommand(arguments: ["config", "init", "--path", configPathURL.path, "--matrix-server", "self-hosted", "--no-input"])
+            return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "self-hosted", "--no-input"])
         case let .pairHosted(pairCode):
             return mindroomCommand(arguments: ["connect", "--pair-code", pairCode])
         }
@@ -115,13 +130,19 @@ struct MindRoomRuntime {
         let executable = commandEnvironment()["PATH"]?.split(separator: ":")
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("mindroom").path }
             .first { FileManager.default.isExecutableFile(atPath: $0) }
-        let configuration = try? configPathURL.resourceValues(forKeys: [.isRegularFileKey])
-        let stamp = [configPathURL, envPathURL].map {
+        let serviceEnvironment = localAgentServiceEnvironment
+        let config = serviceEnvironment["MINDROOM_CONFIG_PATH"].map { URL(fileURLWithPath: $0) } ?? configPathURL
+        let configuration = try? config.resourceValues(forKeys: [.isRegularFileKey])
+        let dates = [config, config.deletingLastPathComponent().appendingPathComponent(".env")].map {
             try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         }
         return LocalAgentsSetupSnapshot(
             runtimePath: executable, configurationExists: configuration?.isRegularFile == true,
-            configurationStamp: stamp
+            configurationDisplayPath: config.path.hasPrefix(homeURL.path + "/")
+                ? "~" + config.path.dropFirst(homeURL.path.count) : config.path,
+            configurationStamp: LocalAgentsConfigurationStamp(
+                configurationURL: config, storagePath: serviceEnvironment["MINDROOM_STORAGE_PATH"], modificationDates: dates
+            )
         )
     }
 
@@ -135,7 +156,8 @@ struct MindRoomRuntime {
 
     private func mindroomCommand(arguments: [String]) -> MindRoomCommandInvocation {
         var environment = commandEnvironment()
-        environment["MINDROOM_CONFIG_PATH"] = configPathURL.path
+        environment["MINDROOM_CONFIG_PATH"] = localAgentsConfigURL.path
+        environment.merge(localAgentServiceEnvironment) { _, serviceValue in serviceValue }
         return MindRoomCommandInvocation(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["mindroom"] + arguments,

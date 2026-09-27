@@ -67,13 +67,13 @@ enum MindRoomCommand: Equatable {
         case .restartService:
             return "The MindRoom service was restarted."
         case .initializeHostedConfig:
-            return "Configuration is ready in ~/.mindroom. Existing files were kept. Open MindRoom Chat, sign in, and use Local MindRoom in the chat sidebar to generate a pair code."
+            return "Configuration is ready. Existing files were kept. Open MindRoom Chat, sign in, and use Local MindRoom in the chat sidebar to generate a pair code."
         case .initializeSelfHostedConfig:
-            return "Configuration is ready in ~/.mindroom. Edit config.yaml and .env for your Matrix server and model provider, then install and start agents."
+            return "Configuration is ready. Edit your configuration and .env for your Matrix server and model provider, then install and start agents."
         case .pairHosted:
             return "The chat account was paired. Configure an AI provider, then install and start agents."
         case .checkSetup:
-            return "Setup checks passed. Continue to Start to run your local agents. Warnings, if any, appear in the command output."
+            return "The setup check finished. Review the Check summary before continuing to Start."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }

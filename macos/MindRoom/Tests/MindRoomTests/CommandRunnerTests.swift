@@ -4,6 +4,40 @@ import Combine
 
 final class CommandRunnerTests: XCTestCase {
     @MainActor
+    func testWarningOnlyDoctorFeedbackNeedsAttentionWithoutProcessFailure() async {
+        let finished = expectation(description: "Doctor finished")
+        let runner = MindRoomCommandRunner(processRunner: { _ in
+            CommandResult(exitCode: 0, output: "! OPENAI_API_KEY not set\n6 passed, 0 failed, 1 warning")
+        })
+        runner.onCommandFinished = { _, _ in finished.fulfill() }
+        runner.run(.checkSetup)
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(runner.feedback?.result.isSuccess, true)
+        XCTAssertEqual(runner.feedback?.needsAttention, true)
+        XCTAssertEqual(runner.feedback?.statusLabel, "needs attention")
+        XCTAssertEqual(runner.feedback?.statusSymbol, "exclamationmark.triangle")
+    }
+
+    @MainActor
+    func testStatusRefreshObservesConfigurationEditsDuringProcess() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent(".mindroom/config.yaml")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("agents: {}\n".utf8).write(to: config)
+        let refreshed = expectation(description: "Status finished")
+        let runner = MindRoomCommandRunner(runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:]), processRunner: { _ in
+            try? FileManager.default.removeItem(at: config)
+            return CommandResult(exitCode: 0, output: "MindRoom service: not installed")
+        })
+        let observation = runner.$hasRefreshedStatus.filter { $0 }.sink { _ in refreshed.fulfill() }
+        runner.refreshStatus()
+        await fulfillment(of: [refreshed], timeout: 2)
+        XCTAssertFalse(runner.localSetup.configurationExists)
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
     func testFailedStatusCannotReportRunningFromIncidentalOutput() async {
         let refreshed = expectation(description: "Status refreshed")
         let runner = MindRoomCommandRunner(processRunner: { _ in

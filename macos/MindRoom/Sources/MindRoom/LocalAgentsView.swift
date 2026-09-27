@@ -120,8 +120,9 @@ struct LocalAgentsView: View {
                       systemImage: setup.configurationExists ? "checkmark.circle.fill" : "doc.badge.plus")
                     .font(.headline)
                 Text(setup.configurationExists
-                     ? "Your config.yaml is already present. Existing files are kept. Check Setup will verify configuration and connectivity."
+                     ? "Your configuration is already present. Existing files are kept. Check Setup will verify configuration and connectivity."
                      : "Prepare configuration, pair your chat account, and choose an AI provider.")
+                configurationLocation
                 if !setup.configurationExists {
                     Button("Prepare Configuration") { runner.run(.initializeHostedConfig) }
                         .buttonStyle(.borderedProminent).disabled(busy || !setup.runtimeInstalled)
@@ -163,10 +164,13 @@ struct LocalAgentsView: View {
         AppSectionCard {
             Label("Check your setup", systemImage: "checkmark.shield").font(.headline)
             Text("MindRoom Doctor checks your configuration, AI providers, Matrix server, and local storage. It contacts the services you configured; checks can take several minutes.")
+            configurationLocation
             if let result = runner.setupCheck {
                 Text(result.setupCheckPassed ? "The last setup check passed." : "The last check needs attention. Review the command output above, fix any issues, then check again.")
                 Text(result.setupCheckSummary ?? "No recognized check summary was returned. Review the command output.")
                     .font(.callout).foregroundStyle(result.setupCheckPassed ? Color.secondary : Color.orange)
+                Text("This records the last check. Run it again after editing included files or changing external services.")
+                    .font(.callout).foregroundStyle(.secondary)
             } else {
                 Text("Not checked in this session. Files found does not mean credentials or connections have been verified.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -224,6 +228,14 @@ struct LocalAgentsView: View {
         choseInitialStep = true
         step = target
         scrollToTop()
+    }
+
+    @ViewBuilder
+    private var configurationLocation: some View {
+        if let path = setup.configurationDisplayPath {
+            Text("Configuration: \(path)").font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary).textSelection(.enabled)
+        }
     }
 
     private func pair() {

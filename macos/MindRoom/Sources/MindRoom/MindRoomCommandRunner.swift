@@ -7,6 +7,10 @@ struct CommandFeedback {
     let title: String
     let successMessage: String?
     let result: CommandResult
+    let needsAttention: Bool
+
+    var statusLabel: String { needsAttention ? "needs attention" : result.isSuccess ? "finished" : "failed" }
+    var statusSymbol: String { needsAttention || !result.isSuccess ? "exclamationmark.triangle" : "checkmark.circle" }
 }
 
 @MainActor
@@ -63,8 +67,8 @@ final class MindRoomCommandRunner: ObservableObject {
         let processRunner = processRunner
         let runtime = runtime
         DispatchQueue.global(qos: .utility).async {
-            let setup = runtime.localSetupSnapshot()
             let result = processRunner(invocation)
+            let setup = runtime.localSetupSnapshot()
             DispatchQueue.main.async {
                 if self.refreshRequested {
                     self.refreshRequested = false
@@ -91,7 +95,7 @@ final class MindRoomCommandRunner: ObservableObject {
         case .openHostedChat:
             showSection(.chat)
         case .openConfigFolder:
-            NSWorkspace.shared.open(runtime.configDirectoryURL)
+            NSWorkspace.shared.open(runtime.localAgentsConfigURL.deletingLastPathComponent())
         case .openLogsFolder:
             NSWorkspace.shared.open(runtime.logsDirectoryURL)
         case .serviceStatus:
@@ -130,7 +134,8 @@ final class MindRoomCommandRunner: ObservableObject {
                 self.runningCommandTitle = nil
                 self.lastOutput = completedResult.output
                 self.feedback = CommandFeedback(
-                    title: command.title, successMessage: command.successMessage, result: completedResult
+                    title: command.title, successMessage: command.successMessage, result: completedResult,
+                    needsAttention: action == .checkSetup && completedResult.isSuccess && !completedResult.setupCheckPassed
                 )
                 self.onCommandFinished?(command, completedResult)
                 self.refreshStatus()
