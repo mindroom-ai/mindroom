@@ -61,6 +61,8 @@ __all__ = [
 ]
 
 _COLD_START_GRACE_SECONDS = 1.5
+# Covers the default 30s termination grace period of a stopped worker pod.
+_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS = 60.0
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
@@ -114,8 +116,12 @@ def check_kubernetes_workers_absent_for_storage_upgrade(
 
 
 def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> tuple[str, ...]:
-    """Stop running workers whose pods still mount whole agent state roots."""
-    return _standalone_resource_manager(runtime_paths).stop_workers_mounting_state_roots(now=time.time())
+    """Stop running workers whose pods still mount whole agent state roots, and wait for those pods to exit."""
+    resource_manager = _standalone_resource_manager(runtime_paths)
+    stopped = resource_manager.stop_workers_mounting_state_roots(now=time.time())
+    if stopped:
+        resource_manager.wait_for_worker_pods_absent(stopped, timeout_seconds=_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS)
+    return stopped
 
 
 def _progress_event(

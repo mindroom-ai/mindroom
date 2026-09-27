@@ -6409,13 +6409,8 @@ visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 [[modules]]
 path = "mindroom.workers.backends.legacy_state_root_mounts"
 depends_on = [
-    "mindroom.agent_policy",
     "mindroom.background_tasks",
-    "mindroom.config.yaml_includes",
     "mindroom.logging_config",
-    "mindroom.tool_system.worker_routing",
-    "mindroom.workers.backend",
-    "mindroom.workers.backends._dedicated_worker_common",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.kubernetes",
     "mindroom.workers.runtime",
