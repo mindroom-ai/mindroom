@@ -2,6 +2,11 @@ import XCTest
 @testable import MindRoom
 
 final class ServiceStatusTests: XCTestCase {
+    func testMissingConfigurationIsNotMistakenForMissingRuntime() {
+        let status = MindRoomServiceStatus.parse("Error reading config.yaml: No such file or directory")
+        XCTAssertEqual(status.state, .unknown)
+    }
+
     func testParsesRunningServiceStatus() {
         let status = MindRoomServiceStatus.parse("MindRoom service: running (pid 12345)")
 
@@ -57,7 +62,7 @@ final class MindRoomCommandTests: XCTestCase {
 
     func testMenuCommandsExposeTitles() {
         XCTAssertEqual(MindRoomCommand.installRuntime.title, "Install MindRoom Runtime")
-        XCTAssertEqual(MindRoomCommand.openDashboard.title, "Configure Agents")
+        XCTAssertEqual(MindRoomCommand.openDashboard.title, "Open Dashboard")
         XCTAssertEqual(MindRoomCommand.openConfigFolder.title, "Open Config Folder")
         XCTAssertEqual(MindRoomCommand.openLogsFolder.title, "Open Logs Folder")
     }

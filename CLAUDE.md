@@ -276,6 +276,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `desktop/native_config.py` | Validates and persists private native-helper configuration |
 | `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
 | `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/local_dashboard.py` | Validates the loopback dashboard URL and provides its credential through the private native-host pipe |
 | `desktop/startup_errors.py` | Translates desktop startup failures into actionable protocol errors and recovery advice |
 | `desktop/native_entry.py` | Starts the packaged native desktop helper |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |

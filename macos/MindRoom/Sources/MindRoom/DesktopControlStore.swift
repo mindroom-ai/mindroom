@@ -102,6 +102,22 @@ final class DesktopControlStore: ObservableObject {
         perform("status")
     }
 
+    func dashboardConfiguration() async throws -> LocalDashboardConfiguration {
+        let result: [String: Any]
+        do {
+            result = try await request("dashboard_configuration", [:], .seconds(35))
+        } catch let DesktopBridgeProcessError.helper(error) where error.code == "dashboard_configuration_invalid" {
+            throw LocalDashboardError.invalidConfiguration
+        } catch {
+            throw LocalDashboardError.connectionFailed
+        }
+        guard let url = result["url"] as? String,
+              result["api_key"] == nil || result["api_key"] is NSNull || result["api_key"] is String else {
+            throw LocalDashboardError.invalidConfiguration
+        }
+        return try LocalDashboardConfiguration(url: url, apiKey: result["api_key"] as? String)
+    }
+
     var savedSessionMatchesSetup: Bool {
         status.pairing.sessionState == .ready
             && status.pairing.homeserver?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

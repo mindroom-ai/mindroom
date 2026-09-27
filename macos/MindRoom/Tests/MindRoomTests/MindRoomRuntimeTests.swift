@@ -2,6 +2,29 @@ import XCTest
 @testable import MindRoom
 
 final class MindRoomRuntimeTests: XCTestCase {
+    func testDoctorAndPairingUseInstalledServiceConfiguration() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent("terminal-project/agents.yaml")
+        let storage = home.appendingPathComponent("agent-data")
+        let plist = home.appendingPathComponent("Library/LaunchAgents/chat.mindroom.local.plist")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("agents: {}\n".utf8).write(to: config)
+        let data = try PropertyListSerialization.data(fromPropertyList: [
+            "Label": "chat.mindroom.local",
+            "EnvironmentVariables": ["MINDROOM_CONFIG_PATH": config.path, "MINDROOM_STORAGE_PATH": storage.path],
+        ], format: .xml, options: 0)
+        try data.write(to: plist)
+        let runtime = MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:])
+        XCTAssertEqual(runtime.command(for: .checkSetup).arguments, ["mindroom", "doctor", "--config", config.path])
+        XCTAssertEqual(runtime.command(for: .checkSetup).environment["MINDROOM_STORAGE_PATH"], storage.path)
+        XCTAssertEqual(runtime.command(for: .pairHosted(pairCode: "TEST")).environment["MINDROOM_CONFIG_PATH"], config.path)
+        XCTAssertTrue(runtime.localSetupSnapshot().configurationExists)
+        // Computer access keeps its independent configuration binding.
+        XCTAssertEqual(runtime.desktopHelperInvocation().arguments, ["--config", home.appendingPathComponent(".mindroom/config.yaml").path])
+    }
+
     func testDefaultPathsUseHomeMindroom() {
         let runtime = MindRoomRuntime(
             homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
@@ -52,6 +75,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         let command = runtime.command(for: .installService)
         XCTAssertEqual(command.executableURL.path, "/usr/bin/env")
         XCTAssertEqual(command.arguments, ["mindroom", "service", "install", "--no-confirm"])
+        XCTAssertEqual(command.environment["MINDROOM_CONFIG_PATH"], "/Users/example/.mindroom/config.yaml")
     }
 
     func testHostedConfigCommandUsesPublicProfileWithoutPrompts() {

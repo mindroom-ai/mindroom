@@ -5,6 +5,31 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.325</title>
+            <pubDate>Sun, 27 Sep 2026 14:33:36 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1642</sparkle:version>
+            <sparkle:shortVersionString>2026.9.325</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.325
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Embed Chat and auto-authenticated local Dashboard in macOS app (#2371)](https://github.com/mindroom-ai/mindroom/commit/224299a5d) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.325/MindRoom.zip" length="124220803" type="application/octet-stream" sparkle:edSignature="9Z41aMWx7zrywttQ+K5V42sgUwvGSYR/Qdn6ultHKrFN1nPZFOjqKf7yt1DNRAmwoLa9phUyGWkcBdU/P9+sBg=="/>
+        </item>
+        <item>
             <title>2026.9.320</title>
             <pubDate>Sun, 27 Sep 2026 01:44:43 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>

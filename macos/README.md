@@ -2,7 +2,7 @@
 
 The native app and its desktop helper require macOS 14 or newer.
 
-The app has Overview, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
+The app has Overview, Chat, Dashboard, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
 Sidebar buttons support Tab and Space navigation; when you activate a section, keyboard focus follows that section instead of remaining on a previous button.
 The menu shows local-agent and computer-access status as clickable shortcuts to their sections, with start, stop, and revoke actions when available.
 Hover over Quit MindRoom for its effect on background work: computer access stops, while local agents keep running.
@@ -17,6 +17,37 @@ It runs the existing Python Accessibility, screen capture, input, browser, read-
 The menu app launches it as a foreground child and communicates only through inherited stdin, stdout, and stderr pipes.
 Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
+
+## Local agents
+
+Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.
+Executable detection is separate from launchd status, so an installed CLI is not presented as missing when only the service has not been installed.
+Existing configuration is reused.
+**Check Setup** runs `mindroom doctor`; its result is kept for the current session and invalidated when a refresh observes changes to the root config or adjacent `.env`.
+Doctor's zero exit code can include warnings.
+Only a recognized summary with no failures or warnings completes the Check step; other results keep attention visible.
+Local-agent commands and the config-folder action use the configuration and storage paths saved in the launchd service, falling back to `~/.mindroom/config.yaml` for a new service.
+Computer access retains its independent configuration binding.
+Status refresh requests are coalesced and repeated when needed after an action, rather than dropping the newest request.
+Periodic polling skips an in-flight read so slow checks still finish.
+Existing services start using their saved configuration path even when the app's config file is absent.
+The step navigation is shared with Computer access and supports clicking the whole button area.
+
+## Chat and dashboard
+
+Chat opens inside the app and keeps its sign-in session between launches.
+Set **Chat website** in Settings for a self-hosted client; the default is `https://chat.mindroom.chat`.
+HTTPS sites and HTTP loopback development sites are supported.
+Sign in once in the app: existing browser cookies are not imported.
+Use **Open in Browser** when you prefer your browser or a sign-in provider requires it.
+
+With the local-agent service running, **Open Dashboard** opens its dashboard inside the app.
+The private native-helper action `dashboard_configuration` rereads `MINDROOM_URL` and `MINDROOM_API_KEY` from the config-adjacent `.env`, preserving explicit process-environment overrides.
+The default dashboard URL is `http://127.0.0.1:8765`.
+Automatic sign-in supports HTTP loopback addresses with an explicit port; it never sends the key to a remote dashboard.
+The app exchanges the key through the existing `/api/auth/session` endpoint, refuses login redirects, and transfers only the validated HttpOnly cookie into a nonpersistent dashboard WebKit store.
+Chat uses a separate persistent store; dashboard credentials never enter Chat, page URLs, JavaScript, UserDefaults, or diagnostics.
+Switching sidebar sections keeps both pages alive, including chat drafts.
 
 ## Build
 
