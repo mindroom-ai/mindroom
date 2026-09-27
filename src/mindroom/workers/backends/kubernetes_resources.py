@@ -935,15 +935,21 @@ class KubernetesResourceManager:
     # Handling: scale each such running Deployment to zero, as idle cleanup does, and wait for its pods to exit; the
     #   next ensure or idle reconciliation recreates it from the current template. Scaled-down Deployments stay.
     # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots.
-    def stop_workers_mounting_state_roots(self, *, now: float) -> tuple[str, ...]:
-        """Scale to zero every running worker whose pod template this release did not write."""
+    def stop_workers_mounting_state_roots(self, *, now: float) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Scale to zero every running worker whose pod template this release did not write.
+
+        Returns the workers stopped now and every such worker, including ones already at zero.
+        """
         stopped: list[str] = []
+        legacy: list[str] = []
+        failed: list[str] = []
         for deployment in self.list_deployments(request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS):
             annotations = dict(deployment.metadata.annotations or {})
             template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
-            if int(deployment.spec.replicas or 0) == 0 or (
-                template_hash is not None and annotations.get(_ANNOTATION_WORKSPACE_TEMPLATE_HASH) == template_hash
-            ):
+            if template_hash is not None and annotations.get(_ANNOTATION_WORKSPACE_TEMPLATE_HASH) == template_hash:
+                continue
+            legacy.append(deployment.metadata.name)
+            if int(deployment.spec.replicas or 0) == 0:
                 continue
             apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
             try:
@@ -959,9 +965,13 @@ class KubernetesResourceManager:
                     "Could not stop a worker that mounts whole state roots",
                     worker=deployment.metadata.name,
                 )
+                failed.append(deployment.metadata.name)
                 continue
             stopped.append(deployment.metadata.name)
-        return tuple(stopped)
+        if failed:
+            msg = f"Could not stop workers that mount whole state roots: {', '.join(failed)}; stopped {stopped}"
+            raise WorkerBackendError(msg)
+        return tuple(stopped), tuple(legacy)
 
     def wait_for_worker_pods_absent(self, worker_ids: Collection[str], *, timeout_seconds: float) -> None:
         """Poll until no Pod of these workers remains, such as after scaling them to zero."""

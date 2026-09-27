@@ -9,10 +9,15 @@ from kubernetes.client.exceptions import ApiException
 from kubernetes.config import ConfigException
 from structlog.testing import capture_logs
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import legacy_state_root_mounts
 from mindroom.workers.backends.kubernetes_resources import KubernetesResourceManager
-from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
+from mindroom.workers.backends.legacy_state_root_mounts import (
+    legacy_worker_retirement_pending,
+    retire_state_root_worker_mounts,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -116,3 +121,33 @@ async def test_startup_skips_backends_without_dedicated_workers(
         await retire_state_root_worker_mounts(_runtime_paths(tmp_path, backend))
 
     assert logs == []
+
+
+@pytest.mark.asyncio
+async def test_failed_retirement_keeps_retrying_in_the_background_until_it_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup continues, the failure stays visible as pending and logged, and a later retry clears it."""
+    attempts: list[int] = []
+
+    def stop_on_second_attempt(_paths: RuntimePaths) -> tuple[str, ...]:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise ApiException(status=503, reason="Service Unavailable")
+        return ("old-worker",)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.stop_kubernetes_workers_mounting_state_roots",
+        stop_on_second_attempt,
+    )
+    monkeypatch.setattr(legacy_state_root_mounts, "_RETRY_DELAYS_SECONDS", (0.0,))
+
+    with capture_logs() as logs:
+        await retire_state_root_worker_mounts(_runtime_paths(tmp_path, "kubernetes"))
+        assert legacy_worker_retirement_pending() is not None
+        await wait_for_background_tasks(timeout=5)
+
+    assert attempts == [0, 1]
+    assert legacy_worker_retirement_pending() is None
+    assert [entry["log_level"] for entry in logs if entry["log_level"] in {"error", "warning"}] == ["error", "warning"]

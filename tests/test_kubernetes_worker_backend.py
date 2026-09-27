@@ -5460,6 +5460,39 @@ def _stamp_legacy_template(apps_api: _FakeAppsApi, worker_id: str, agent_name: s
     apps_api.create_namespaced_deployment("chat", body)
 
 
+def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Until an old-template Deployment is gone, ensure fails; once it can be replaced, only the new template serves."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:legacy"), now=10.0)
+    _stamp_legacy_template(apps_api, handle.worker_id, "legacy", keep_marker=False)
+    backend._invalidate_ready_worker(handle.worker_key)
+    delete_deployment = apps_api.delete_namespaced_deployment
+
+    def cluster_refuses_delete(*_args: object, **_kwargs: object) -> None:
+        raise _FakeApiError(500)
+
+    monkeypatch.setattr(apps_api, "delete_namespaced_deployment", cluster_refuses_delete)
+    with pytest.raises(WorkerBackendError):
+        backend.ensure_worker(WorkerSpec(handle.worker_key), now=20.0)
+
+    monkeypatch.setattr(apps_api, "delete_namespaced_deployment", delete_deployment)
+    backend.ensure_worker(WorkerSpec(handle.worker_key), now=30.0)
+
+    assert handle.worker_id in apps_api.deleted_names
+    served = apps_api.created_bodies[-1]
+    assert "/app/worker/agents/legacy/workspace" in _storage_mounts(served)
+    assert "/app/worker/agents/legacy" not in _storage_mounts(served)
+    annotations = apps_api.deployments[handle.worker_id].metadata.annotations
+    assert annotations["mindroom.ai/workspace-template-hash"] == annotations["mindroom.ai/template-hash"]
+
+
 def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5502,12 +5535,19 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
     monkeypatch.setattr(kubernetes_resources_module, "_DELETE_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(kubernetes_backend_module, "_standalone_resource_manager", lambda _paths: backend._resources)
 
-    stopped = kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+    # One Deployment that cannot be patched never leaves the others running, and fails the pass so it is retried.
+    with pytest.raises(WorkerBackendError, match=handles["broken"].worker_id):
+        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
     assert patch_timeouts
     assert all(timeout for timeout in patch_timeouts)
+    assert apps_api.deployments[handles["broken"].worker_id].spec.replicas == 1
 
-    # One Deployment that cannot be patched never leaves the others running with state-root mounts.
-    assert sorted(stopped) == sorted((handles["legacy"].worker_id, handles["downgraded"].worker_id))
+    broken_worker_id = handles["broken"].worker_id
+    handles["broken"] = handles["idle"]
+    stopped = kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+
+    # The retry stops what failed and waits for every old worker's pods, including those stopped earlier.
+    assert stopped == (broken_worker_id,)
     assert len(pod_selectors) == 3
     assert not any(worker_id in pod_selectors[0] for worker_id in stopped)
     for name in ("legacy", "downgraded"):
@@ -5516,23 +5556,14 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
         assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "idle"
     assert apps_api.deployments[handles["current"].worker_id].spec.replicas == 1
 
-    # The next ensure rebuilds the stopped worker from the current workspace-only template.
-    backend._invalidate_ready_worker(handles["legacy"].worker_key)
-    backend.ensure_worker(WorkerSpec(handles["legacy"].worker_key), now=30.0)
-    rebuilt = apps_api.created_bodies[-1]
-    assert rebuilt["metadata"]["name"] == handles["legacy"].worker_id
-    assert "/app/worker/agents/legacy/workspace" in _storage_mounts(rebuilt)
-    assert "/app/worker/agents/legacy" not in _storage_mounts(rebuilt)
-    annotations = apps_api.deployments[handles["legacy"].worker_id].metadata.annotations
-    assert annotations["mindroom.ai/workspace-template-hash"] == annotations["mindroom.ai/template-hash"]
-
-    # Pods that never exit end the bounded wait with a warning, and the stopped workers are still reported.
+    # Pods that never exit fail the bounded wait, so it is retried, and the stopped workers are still reported.
     _stamp_legacy_template(apps_api, handles["current"].worker_id, "current", keep_marker=False)
     monkeypatch.setattr(kubernetes_backend_module, "_LEGACY_WORKER_EXIT_TIMEOUT_SECONDS", 0)
     handles["legacy"] = handles["current"]
     pod_selectors.clear()
-    with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
-        assert kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths) == (
-            handles["current"].worker_id,
-        )
-    assert "did not stop" in caplog.text
+    with (
+        caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__),
+        pytest.raises(WorkerBackendError, match="did not stop"),
+    ):
+        kubernetes_backend_module.stop_kubernetes_workers_mounting_state_roots(runtime_paths)
+    assert handles["current"].worker_id in caplog.text

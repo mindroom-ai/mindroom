@@ -64,6 +64,7 @@ from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matri
 from mindroom.runtime_state import get_runtime_state
 from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
+from mindroom.workers.backends.legacy_state_root_mounts import legacy_worker_retirement_pending
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -791,6 +792,9 @@ async def health_check(request: Request) -> JSONResponse:
     }
     if sync_health.stale_entities:
         response["stale_sync_entities"] = list(sync_health.stale_entities)
+
+    if (legacy_workers := legacy_worker_retirement_pending()) is not None:
+        response["legacy_workers"] = {"status": "retiring", "detail": legacy_workers}
 
     embedder_failure = get_embedder_failure()
     if embedder_failure is not None:

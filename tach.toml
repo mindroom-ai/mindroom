@@ -1638,6 +1638,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
@@ -6420,7 +6421,7 @@ depends_on = [
     "mindroom.workers.backends.kubernetes",
     "mindroom.workers.runtime",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 
 [[modules]]
 path = "mindroom.workers.storage_preflight"
