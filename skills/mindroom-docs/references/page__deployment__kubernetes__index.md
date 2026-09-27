@@ -240,6 +240,7 @@ MindRoom does not copy or clone the source per agent.
 
 If the source already lies inside a workspace the worker mounts, that writable workspace mount provides access and MindRoom does not add a nested duplicate mount.
 Sources outside the shared worker-storage root are ignored so existing configurations continue to work without granting access to host-only paths.
+MindRoom plans each mount from the configured path, not its link target: a source that is missing or reached through a link is skipped with a warning, and a source inside another agent's workspace, a private instance, or a worker root is refused with an error, because kubelet follows links inside the volume when it mounts and those directories are written by other workers.
 Mount plans that would overlap another knowledge source or contain an existing scoped mount fail closed before a Deployment is created.
 The final knowledge mount list is part of the worker pod-template hash, so reconciliation recreates workers whose mounted assignments are stale.
 

@@ -228,8 +228,9 @@ This leaves same-worker token exposure as a local containment risk, while per-wo
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
-Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts: Kubernetes scales their Deployments to zero and Docker removes their containers, so the next use recreates them with workspace-only mounts.
-Startup then logs warnings, without changing anything, for symlinks above a workspace and hard links leaving one, which code in those older workers could have planted; review and remove the listed paths by hand.
+Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts: Kubernetes scales their Deployments to zero and waits up to 60 seconds for their pods to exit, and Docker removes their containers, so the next use recreates them with workspace-only mounts.
+A failure to reach the backend is logged and never blocks startup.
+Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](../architecture/migrations.md#workspace-only-worker-mounts) describes.
 
 Dedicated Kubernetes workers also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
 
@@ -659,6 +660,9 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces, since it shares one runtime across those agents, and never mounts agents on other scopes.
   Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
   A workspace is mounted only when it is a real directory reached from the storage root without links; the primary creates missing shared workspaces without following links before the worker starts, and a private workspace becomes visible once the primary has materialized that instance.
+  A `user` worker is recreated on its next use after another of the user's private agents materializes its workspace, which ends that worker's shells and sessions, and a missing or linked workspace is logged instead of mounted.
+  Kubernetes mounts assigned knowledge outside the workspace read-only only when it is a real directory outside other agents' workspaces, private instances, and worker roots; Docker copies such knowledge into the worker's read-only projected config snapshot instead, refreshed when its contents change.
+  A worker asked to work in an agent workspace its pod does not mount answers with a request error, and the next ensure mounts the workspace.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints

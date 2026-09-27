@@ -68,7 +68,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
-| [`src/mindroom/workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts], with [`docker.py`][docker-worker-backend] and [`kubernetes_resources.py`][kubernetes-worker-resources] | Primary startup finds a running Kubernetes worker Deployment without the `mindroom.ai/storage-layout` annotation or a Docker worker container without that label, created when workers mounted whole agent state roots. | Kubernetes scales such Deployments to zero and Docker removes such containers, addressed only by the runtime's ownership labels, so the next ensure recreates them with workspace-only mounts; a failing backend API is logged and never blocks startup. A bounded scan then warns, without following or changing anything, about symlinks above workspaces and hard links leaving them. |
+| [`src/mindroom/workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts], with [`docker.py`][docker-worker-backend] and [`kubernetes_resources.py`][kubernetes-worker-resources] | Primary startup finds a running Kubernetes worker Deployment whose template hash differs from the `mindroom.ai/workspace-template-hash` this release records, including a template an older release rewrote after a downgrade, or a Docker worker container without the `mindroom.ai/storage-layout` label, created when workers mounted whole agent state roots. | Kubernetes scales such Deployments to zero and waits up to 60 seconds for their pods to exit, and Docker removes such containers, addressed only by the runtime's ownership labels, so the next ensure recreates them with workspace-only mounts; any failure is logged and never blocks startup. One warning asks the operator to check agent state roots for links those workers may have planted. |
 
 ## Python provenance and regression coverage
 
@@ -105,7 +105,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
-| [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, logged API failures, and link and hard-link reports that leave storage unchanged; [Docker worker tests][docker-worker-tests] and [Kubernetes worker tests][kubernetes-worker-tests] stop only unmarked running workers. |
+| [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch and logged Kubernetes configuration, API, and transport failures; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -246,6 +246,23 @@ Private storage moves require stopped primaries and absent managed workers, as d
 Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](../deployment/nio-upgrade.md).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
+
+### Workspace-only worker mounts
+
+Releases after v2026.9.324 mount only agent workspaces into dedicated Docker and Kubernetes workers.
+Drain worker activity before upgrading, because primary startup stops every worker from an older release, which ends its tool calls, shells, background scripts, and CLI sessions.
+Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
+Rolling back to v2026.9.324 is safe; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
+
+Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted:
+
+```bash
+find "$STORAGE/agents" -mindepth 2 -path "$STORAGE/agents/*/workspace" -prune -o -type l -print
+find "$STORAGE/private_instances" -mindepth 2 -type l -print
+find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
+```
+
+Links inside a private workspace (`private_instances/<scope>/<agent>/<private.root>`) are the worker's own, and verified legacy aliases sit directly below `private_instances`; remove any other link, and inspect hard-linked files for data copied out of another instance.
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
