@@ -474,7 +474,7 @@ def check_docker_workers_absent_for_storage_upgrade(
 # LEGACY_COMPAT: Docker worker containers that mount whole agent state roots.
 # Legacy format: containers in this runtime namespace without the mindroom.ai/storage-layout label, created by
 #   releases that bind-mounted agents/<agent> and private_instances/<scope> writable.
-# Last legacy release: v2026.9.320; the next release mounts only workspaces and labels its containers.
+# Last legacy release: v2026.9.321; the next release mounts only workspaces and labels its containers.
 # Handling: remove each such container, running or stopped, so the next ensure recreates it with workspace mounts;
 #   durable worker state and metadata stay untouched.
 # Coverage: tests/test_docker_worker_backend.py::test_docker_startup_removes_workers_mounting_state_roots.

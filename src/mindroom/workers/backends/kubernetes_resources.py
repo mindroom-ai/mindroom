@@ -947,7 +947,7 @@ class KubernetesResourceManager:
     # LEGACY_COMPAT: Running worker Deployments whose pods mount whole agent state roots.
     # Legacy format: Deployments without the mindroom.ai/storage-layout annotation, created by releases whose worker
     #   pods mounted agents/<agent> and private_instances/<scope> writable.
-    # Last legacy release: v2026.9.320; the next release mounts only workspaces and stamps the annotation.
+    # Last legacy release: v2026.9.321; the next release mounts only workspaces and stamps the annotation.
     # Handling: scale each such running Deployment to zero, as idle cleanup does, so its old pod stops; the next ensure
     #   or idle reconciliation recreates it from the current template. Scaled-down Deployments are left alone.
     # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_mounting_state_roots.

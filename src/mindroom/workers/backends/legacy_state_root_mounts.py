@@ -3,7 +3,7 @@
 # LEGACY_COMPAT: Sandbox workers that mounted whole agent state roots writable.
 # Legacy format: Kubernetes worker pods and Docker worker containers started by releases that mounted
 #   agents/<agent> and private_instances/<scope> writable instead of only the workspaces below them.
-# Last legacy release: v2026.9.320; the next release mounts only workspaces.
+# Last legacy release: v2026.9.321; the next release mounts only workspaces.
 # Handling: at primary startup, stop every such running worker through its backend so the next ensure recreates it
 #   with workspace mounts, then warn, without following or changing anything, about links above workspaces and hard
 #   links under state roots that those workers could have planted. The primary never repairs them automatically.
