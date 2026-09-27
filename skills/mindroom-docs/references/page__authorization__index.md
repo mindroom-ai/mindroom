@@ -130,6 +130,8 @@ A team's `access` authorizes requests to the team as a whole: a requester the te
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+Each bot syncs on its own, so an agent can receive a new member's first message before the router has applied the join.
+When the answering bot has already seen that sender join a room whose grant covers it, the denial waits up to 15 seconds for the router to catch up instead of dropping the message.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 Inbound invitation policy is independent from responder access.

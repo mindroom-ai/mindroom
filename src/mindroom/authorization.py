@@ -91,8 +91,14 @@ def _responder_reply_authorization(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> _ReplyAuthorizationDecision:
-    """Allow any proven grant before considering unresolved relevant membership."""
+    """Allow any proven grant before considering unresolved relevant membership.
+
+    ``observed_room`` is the answering bot's own synced view of ``room_id``. Its roster never grants
+    access; it only lets a same-room denial wait briefly for the router to apply a join.
+    """
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
@@ -120,6 +126,22 @@ def _responder_reply_authorization(
         current_room_id=room_id if access.current_room_members else None,
     ):
         return _ReplyAuthorizationDecision.PENDING
+    if (
+        room_id is not None
+        and observed_room is not None
+        and observed_room.room_id == room_id
+        and membership_index.awaits_router_join(
+            resolved_sender,
+            room_id,
+            cached_joined_member_ids(observed_room),
+            room_keys=access.members_of_rooms,
+            current_room=access.current_room_members,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    ):
+        logger.info("reply_authorization_awaits_router_join", room_id=room_id, entity_name=entity_name)
+        return _ReplyAuthorizationDecision.PENDING
     return _ReplyAuthorizationDecision.DENIED
 
 
@@ -132,11 +154,13 @@ def is_sender_allowed_for_agent_reply_in_room(
     membership_index: AgentReplyMembershipIndex,
     *,
     require_resolved_membership: bool = False,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> bool:
     """Require conversation access to one agent, evaluated for one current room.
 
     ``room_id`` is the conversation the sender is already part of, not a target
     room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    ``observed_room`` is the answering bot's own synced view of that room.
     """
     return is_sender_allowed_for_entity_replies_in_room(
         sender_id,
@@ -146,6 +170,7 @@ def is_sender_allowed_for_agent_reply_in_room(
         runtime_paths,
         membership_index,
         require_resolved_membership=require_resolved_membership,
+        observed_room=observed_room,
     )
 
 
@@ -158,11 +183,13 @@ def is_sender_allowed_for_entity_replies_in_room(
     membership_index: AgentReplyMembershipIndex,
     *,
     require_resolved_membership: bool = False,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> bool:
     """Require conversation access to every execution entity for one current room.
 
     ``room_id`` is the conversation the sender is already part of, not a target
     room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    ``observed_room`` is the answering bot's own synced view of that room.
     """
     decisions = {
         _responder_reply_authorization(
@@ -172,6 +199,7 @@ def is_sender_allowed_for_entity_replies_in_room(
             config,
             runtime_paths,
             membership_index,
+            observed_room=observed_room,
         )
         for entity_name in entity_names
     }

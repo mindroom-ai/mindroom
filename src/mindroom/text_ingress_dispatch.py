@@ -110,7 +110,7 @@ async def dispatch_text_message(
         ):
             if not controller.deps.turn_policy.can_reply_to_sender_in_room(
                 turn.requester_user_id,
-                turn.room.room_id,
+                turn.room,
             ):
                 await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
                 return

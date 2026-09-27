@@ -193,7 +193,7 @@ class ReactionDispatcher:
             ):
                 if not self.deps.turn_policy.can_reply_to_sender_in_room(
                     requester_user_id,
-                    room.room_id,
+                    room,
                 ):
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
                     await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
@@ -277,7 +277,7 @@ class ReactionDispatcher:
                 ):
                     if not self.deps.turn_policy.can_reply_to_sender_in_room(
                         requester_user_id,
-                        room.room_id,
+                        room,
                     ):
                         self.deps.logger.debug("Ignoring reaction due to current authorization", sender=event.sender)
                         await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
@@ -323,7 +323,7 @@ class ReactionDispatcher:
             self.deps.runtime.response_admission_gate,
             self.deps.wait_for_admission_or_shutdown,
         ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room):
                 self.deps.logger.debug(
                     "Ignoring reaction hook due to current authorization",
                     sender=event.sender,

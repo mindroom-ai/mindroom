@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 class _SenderReplyPolicy(Protocol):
     """Minimal reply-permission surface needed at the ingress boundary."""
 
-    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+    def can_reply_to_sender_in_room(self, sender_id: str, room: nio.MatrixRoom) -> bool:
         """Return whether this agent may reply to one requester in a room."""
         ...
 
@@ -295,7 +295,7 @@ class IngressValidator:
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
-        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 

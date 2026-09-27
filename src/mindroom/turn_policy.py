@@ -301,16 +301,20 @@ class TurnPolicy:
 
     deps: TurnPolicyDeps
 
-    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
-        """Decide durable turn access, retrying unresolved membership before settlement."""
+    def can_reply_to_sender_in_room(self, sender_id: str, room: nio.MatrixRoom) -> bool:
+        """Decide durable turn access, retrying unresolved membership before settlement.
+
+        This bot's own roster for the room only lets a denial wait briefly for the router to apply a join.
+        """
         return is_sender_allowed_for_agent_reply_in_room(
             sender_id,
             self.deps.agent_name,
             self.deps.runtime.config,
-            room_id,
+            room.room_id,
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
             require_resolved_membership=True,
+            observed_room=room,
         )
 
     def _adaptive_thread_participation(
@@ -684,7 +688,7 @@ class TurnPolicy:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         ):
-            if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            if not self.can_reply_to_sender_in_room(requester_user_id, room):
                 return _DispatchPlan(kind="ignore", ignore_reason="router")
             plan = _DispatchPlan(
                 kind="respond",
@@ -699,7 +703,7 @@ class TurnPolicy:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            if not self.can_reply_to_sender_in_room(requester_user_id, room):
                 return _DispatchPlan(kind="ignore", ignore_reason="router")
             available_responders = await self.responder_candidates_for_room(room, requester_user_id)
             if context.is_thread and thread_requires_explicit_agent_targeting(

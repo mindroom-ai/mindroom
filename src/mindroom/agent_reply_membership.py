@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -15,12 +16,19 @@ from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+# Every bot syncs on its own, so the bot answering a message can see its sender join before the
+# router's sync applies that join here. A denial then waits this long for the router to catch up.
+_JOIN_LAG_GRACE_SECONDS = 15.0
+# A finished wait is remembered this long, so each wait stays bounded and a later join gets a fresh one.
+_JOIN_LAG_RETENTION_SECONDS = 4 * _JOIN_LAG_GRACE_SECONDS
+_JOIN_LAG_MAX_TRACKED = 4096
 
 type _ResponderMembershipPolicySignature = tuple[str, bool, tuple[str, ...]]
 type _AgentReplyMembershipPolicySignature = tuple[_ResponderMembershipPolicySignature, ...]
@@ -88,11 +96,14 @@ class _AgentReplyMembershipSnapshot:
 class AgentReplyMembershipIndex:
     """Own the process-local membership state used by reply authorization."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._snapshot = _AgentReplyMembershipSnapshot()
         self._desired_signature: _AgentReplyMembershipPolicySignature | None = None
         self._epoch = 0
         self._refresh_lock = asyncio.Lock()
+        # (room ID, requester) to when a denial first waited for the router's view of that join.
+        self._join_lag_started: dict[tuple[str, str], float] = {}
+        self._clock = clock
 
     @property
     def snapshot(self) -> _AgentReplyMembershipSnapshot:
@@ -144,6 +155,50 @@ class AgentReplyMembershipIndex:
             and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config, runtime_paths)
             for room in snapshot.rooms
         )
+
+    def awaits_router_join(
+        self,
+        sender_id: str,
+        room_id: str,
+        observed_joined_user_ids: frozenset[str],
+        *,
+        room_keys: Sequence[str],
+        current_room: bool,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether a denial in this room should wait briefly for the router to apply a join.
+
+        ``observed_joined_user_ids`` is the answering bot's own roster for the room. It never grants
+        access: the snapshot stays the only grant, and this only defers settling a denial while a
+        ready snapshot of the same room lacks a sender that bot has already seen join. The wait is
+        bounded per room and requester, so a sender whose join never arrives cannot stall the room.
+        """
+        snapshot = self._snapshot
+        if snapshot.policy_signature != _agent_reply_membership_policy_signature(config):
+            return False
+        grant_room_keys = frozenset(room_keys)
+        if not any(
+            room.ready and room.room_id == room_id and (current_room or room.room_key in grant_room_keys)
+            for room in snapshot.rooms
+        ):
+            return False
+        key = (room_id, sender_id)
+        if not _raw_membership_matches_sender(observed_joined_user_ids, sender_id, config, runtime_paths):
+            self._join_lag_started.pop(key, None)  # this bot saw them leave, so a later join waits afresh
+            return False
+        now = self._clock()
+        started = self._join_lag_started.get(key)
+        if started is None or now - started >= _JOIN_LAG_RETENTION_SECONDS:
+            self._join_lag_started = {
+                tracked: first
+                for tracked, first in self._join_lag_started.items()
+                if now - first < _JOIN_LAG_RETENTION_SECONDS
+            }
+            if len(self._join_lag_started) >= _JOIN_LAG_MAX_TRACKED:
+                return False
+            self._join_lag_started[key] = started = now
+        return now - started < _JOIN_LAG_GRACE_SECONDS
 
     def grants_pending(
         self,

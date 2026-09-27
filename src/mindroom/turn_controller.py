@@ -784,7 +784,7 @@ class TurnController:
         ):
             if not self.deps.turn_policy.can_reply_to_sender_in_room(
                 prechecked_event.requester_user_id,
-                room.room_id,
+                room,
             ):
                 return None
             return await self.deps.edit_regenerator.handle_message_edit(
@@ -829,7 +829,7 @@ class TurnController:
                 self.deps.runtime.response_admission_gate,
                 self.deps.response_runner.wait_for_admission_or_shutdown,
             ):
-                if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+                if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room):
                     return True
                 target = self.deps.resolver.build_message_target(
                     room_id=room.room_id,
@@ -1129,7 +1129,7 @@ class TurnController:
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(envelope.requester_id, room.room_id):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(envelope.requester_id, room):
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
                 return True
             suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
@@ -1579,7 +1579,7 @@ class TurnController:
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room):
                 await self.deps.settle_dispatch_sources((source_event_id,))
                 return False
             return await self._execute_admitted_interactive_selection(
