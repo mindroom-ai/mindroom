@@ -7176,11 +7176,11 @@ expose = ["TOOL_SEARCH_ITEMS_KEY", "RESPONSE_OUTPUT_KEY", "record_tool_search_it
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat"]
+visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
-expose = ["ClaudeProviderSDKCompat"]
+expose = ["ClaudeProviderSDKCompat", "request_kwargs_without_replayed_citations"]
 
 
 [[modules]]
