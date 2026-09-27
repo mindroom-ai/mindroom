@@ -12,8 +12,7 @@ from mindroom.api import config_lifecycle
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
-    is_sender_allowed_for_agent_oauth_connection_management,
-    is_sender_allowed_for_responder,
+    is_sender_allowed_for_agent_oauth_connection,
 )
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -267,26 +266,13 @@ def require_agent_oauth_connection_authorized(
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id
-    if requester_id is None or not (
-        is_sender_allowed_for_agent_oauth_connection_management(
-            requester_id,
-            agent_name=agent_name,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        or (
-            requester_owned
-            and try_parse_historical_matrix_user_id(requester_id) is not None
-            and agent_name in config.agents
-            and is_sender_allowed_for_responder(
-                requester_id,
-                agent_name,
-                None,
-                config,
-                runtime_paths,
-                config_lifecycle.app_state(request.app).agent_reply_memberships,
-            )
-        )
+    if requester_id is None or not is_sender_allowed_for_agent_oauth_connection(
+        requester_id,
+        agent_name,
+        config,
+        runtime_paths,
+        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        requester_owned=requester_owned,
     ):
         raise HTTPException(
             status_code=403,

@@ -541,7 +541,7 @@ def _record_worker_save_failure(
 ) -> None:
     """Record a worker save protocol/integrity failure against worker health."""
     if worker_handle is not None:
-        worker_manager.record_failure(worker_handle.worker_key, error)
+        worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
 
 def _validated_worker_save_receipt(

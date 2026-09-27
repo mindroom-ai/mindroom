@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import stat
+from contextlib import suppress
 from glob import has_magic
 from pathlib import Path
 
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    read_regular_file_within_root,
+    resolve_path_within_root,
+)
 
 _BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 
@@ -74,3 +82,61 @@ def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
     resolved_root = search_root.joinpath(*static_parts).resolve()
     resolved_pattern = str(Path(*glob_parts)) if glob_parts else "."
     return resolved_root, resolved_pattern
+
+
+def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
+    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path."""
+    canonical_base = base_dir.resolve()
+    return resolved.relative_to(canonical_base) if resolved.is_relative_to(canonical_base) else None
+
+
+def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
+    """Read one resolved file through a capped no-follow walk; outside paths need unrestricted access."""
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        return resolved.read_bytes()
+    return read_regular_file_within_root(base_dir.resolve(), relative)
+
+
+def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
+    """Publish one resolved file by atomic replacement, keeping its permission bits (not setuid/setgid) and owner where permitted.
+
+    Replacing the entry never writes a hard-linked inode or leaves a partial file.
+    """
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_bytes(payload)
+        return
+    with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
+        try:
+            existing = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is None or not stat.S_ISREG(existing.st_mode):
+            atomic_write_bytes_at(directory_fd, relative.name, payload, file_mode=0o644)
+            return
+        with atomic_write_file_at(directory_fd, relative.name) as output:
+            os.fchmod(output.fileno(), stat.S_IMODE(existing.st_mode))
+            # A worker's file stays the worker's: keep its owner, or at least its group, where the primary may.
+            for uid in (existing.st_uid, -1):
+                with suppress(OSError):
+                    os.fchown(output.fileno(), uid, existing.st_gid)
+                    break
+            output.write(payload)
+
+
+def remove_resolved_path(base_dir: Path, resolved: Path) -> None:
+    """Remove one resolved file or empty directory without following a link below ``base_dir``."""
+    relative = _relative_below(base_dir, resolved)
+    if relative is None:
+        if resolved.is_dir() and not resolved.is_symlink():
+            resolved.rmdir()
+        else:
+            resolved.unlink()
+        return
+    with open_directory_within_root(base_dir.resolve(), relative.parent) as directory_fd:
+        if stat.S_ISDIR(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
+            os.rmdir(relative.name, dir_fd=directory_fd)
+        else:
+            os.unlink(relative.name, dir_fd=directory_fd)

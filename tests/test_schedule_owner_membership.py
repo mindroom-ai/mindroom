@@ -318,6 +318,7 @@ async def test_edit_during_membership_lookup_survives_stale_departure(
                 updated,
                 existing,
                 runtime_paths,
+                timezone="UTC",
             )
             resume_lookup.set()
 
@@ -368,6 +369,7 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
                 workflow.model_copy(update={"message": "Late edit"}),
                 existing,
                 owner_membership_runtime_paths,
+                timezone="UTC",
             )
 
     async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
@@ -416,6 +418,7 @@ async def test_edit_during_cancellation_retry_invalidates_old_departure(
             updated,
             existing,
             owner_membership_runtime_paths,
+            timezone="UTC",
         )
 
     with patch("mindroom.scheduling.asyncio.sleep", side_effect=edit_on_retry):
@@ -451,6 +454,7 @@ async def test_stale_edit_cannot_overwrite_a_newer_workflow(owner_membership_run
         updated,
         existing,
         owner_membership_runtime_paths,
+        timezone="UTC",
     )
 
     with pytest.raises(ValueError, match="changed"):
@@ -461,6 +465,7 @@ async def test_stale_edit_cannot_overwrite_a_newer_workflow(owner_membership_run
             workflow,
             existing,
             owner_membership_runtime_paths,
+            timezone="UTC",
         )
 
     assert state["workflow"] == updated.model_dump_json()

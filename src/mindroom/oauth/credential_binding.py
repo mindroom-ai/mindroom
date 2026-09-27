@@ -22,6 +22,11 @@ class OAuthCredentialBinding:
     worker_scope: ResolvedWorkerKeyScope
     worker_key: str
 
+    @property
+    def requester_owned(self) -> bool:
+        """Return whether the workflow stores only its requester's own credentials."""
+        return self.worker_scope in {"user", "user_agent"}
+
 
 class OAuthCredentialBindingParseError(ValueError):
     """A serialized OAuth workflow binding does not match its expected target."""

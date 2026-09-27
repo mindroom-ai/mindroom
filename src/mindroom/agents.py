@@ -29,6 +29,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
+from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -108,6 +109,7 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
+_MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 
 @dataclass
@@ -204,7 +206,11 @@ def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentCo
 
 def _ensure_default_mind_workspace(storage_path: Path) -> None:
     workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
-    ensure_workspace_template(workspace_path, template="mind")
+    try:
+        ensure_workspace_template(workspace_path, template="mind")
+    except (OSError, ValueError) as exc:
+        # Worker code writes the workspace; a planted entry must not fail every agent build.
+        logger.warning("default_mind_workspace_scaffold_skipped", path=str(workspace_path), error=str(exc))
 
 
 def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
@@ -236,40 +242,68 @@ def _load_context_files(
     runtime_paths: constants.RuntimePaths,
     agent_name: str | None = None,
     storage_path: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> list[_AdditionalContextChunk]:
-    """Load configured context files."""
+    """Load configured context files; ``Path`` entries and agent-owned strings are workspace files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
+        owning_workspace: Path | None = None
         if isinstance(raw_path, Path):
             resolved_path = raw_path
+            owning_workspace = workspace_root
         elif raw_path.startswith(_PROJECTED_WORKER_ASSET_PATH_PREFIXES):
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         elif agent_name is not None and storage_path is not None:
-            resolved_path = resolve_agent_owned_path(
-                raw_path,
-                agent_name=agent_name,
-                base_storage_path=storage_path,
-            )
+            try:
+                resolved_path = resolve_agent_owned_path(
+                    raw_path,
+                    agent_name=agent_name,
+                    base_storage_path=storage_path,
+                )
+            except ValueError:
+                # A link agent code planted out of the workspace is refused, not an agent-build failure.
+                logger.warning("context_file_refused", agent=agent_name, path=raw_path, error_type="ValueError")
+                continue
+            owning_workspace = agent_workspace_root_path(storage_path, agent_name).resolve()
         else:
             resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
-        if resolved_path.is_file():
-            body = _read_context_file(resolved_path)
-            loaded_parts.append(
-                # The title is the full path so the rendered prompt tells the
-                # model exactly which file on disk each part came from.
-                _AdditionalContextChunk(
-                    title=str(resolved_path),
-                    body=body,
-                ),
-            )
-        else:
-            logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
+        body = _read_context_file(resolved_path, workspace_root=owning_workspace, agent_name=agent_name)
+        if body is None:
+            continue
+        loaded_parts.append(
+            # The title is the full path so the rendered prompt tells the
+            # model exactly which file on disk each part came from.
+            _AdditionalContextChunk(
+                title=str(resolved_path),
+                body=body,
+            ),
+        )
     return loaded_parts
 
 
 @timed("system_prompt_assembly.agent_create.context_file_read")
-def _read_context_file(resolved_path: Path) -> str:
-    return resolved_path.read_text(encoding="utf-8").strip()
+def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agent_name: str | None) -> str | None:
+    """Return one context file's text, or warn and return ``None`` when it is missing or refused."""
+    try:
+        if workspace_root is None:
+            payload = resolved_path.read_bytes()
+        else:
+            relative_path = resolved_path.relative_to(workspace_root)
+            payload = read_regular_file_within_root(
+                workspace_root,
+                relative_path,
+                max_bytes=_MAX_WORKSPACE_CONTEXT_FILE_BYTES,
+                truncate=True,
+            )
+    except FileNotFoundError:
+        logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("context_file_refused", agent=agent_name, path=str(resolved_path), error_type=type(exc).__name__)
+        return None
+    if len(payload) >= _MAX_WORKSPACE_CONTEXT_FILE_BYTES:
+        logger.warning("context_file_truncated", agent=agent_name, path=str(resolved_path))
+    return payload.decode("utf-8", errors="replace").strip()
 
 
 def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:
@@ -425,6 +459,7 @@ def _build_additional_context(
     truncation_marker_template: str,
     chunk_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
+    workspace_root: Path | None = None,
     context_documents: list[_AdditionalContextChunk],
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
@@ -444,6 +479,7 @@ def _build_additional_context(
             runtime_paths,
             agent_name,
             storage_path,
+            workspace_root,
         )
 
     # Preload truncation mutates chunks; keep complete files for CLI reads.
@@ -1401,14 +1437,14 @@ def _load_agent_skills(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     *,
-    workspace_skills_root: Path | None = None,
+    workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
         config,
         runtime_paths,
-        workspace_skills_root=workspace_skills_root,
+        workspace_root=workspace_root,
         output_file_policy=output_file_policy,
     )
 
@@ -1726,6 +1762,7 @@ def _build_agent_role_context(
             truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
             chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
             workspace_context_files=workspace.context_files if workspace is not None else (),
+            workspace_root=workspace.root if workspace is not None else None,
             context_documents=context_documents,
             storage_path=runtime_paths.storage_root,
             runtime_paths=runtime_paths,
@@ -2006,7 +2043,7 @@ def create_agent(
             agent_name,
             config,
             runtime_paths,
-            workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+            workspace_root=workspace.root if workspace is not None else None,
             output_file_policy=_agent_tool_output_file_policy(
                 agent_runtime,
                 runtime_paths,

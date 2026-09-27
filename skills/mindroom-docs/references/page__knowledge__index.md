@@ -315,7 +315,7 @@ If a checkout already holds a credential-bearing remote from before this check e
 #### Checkout layout
 
 The knowledge folder holds the checked-out files only.
-Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every state root a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every workspace a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
 Git runs programs that repository metadata names (`core.fsmonitor`, hooks, filters, credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file.
 Knowledge Git commands also disable those programs, read no system or global Git configuration, and receive a minimal environment without MindRoom secrets; configure proxies, CA bundles and SSH through environment variables or `~/.ssh/config`, and credentials through `credentials_service`.
 

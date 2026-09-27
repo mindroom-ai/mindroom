@@ -18,12 +18,13 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.matrix.room_membership import (
     cached_joined_member_ids,
     ensure_room_membership_synced,
     room_membership_is_complete,
 )
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -207,25 +208,39 @@ def is_sender_allowed_for_agent_credential_management(
     return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
 
 
-def is_sender_allowed_for_agent_oauth_connection_management(
+def is_sender_allowed_for_agent_oauth_connection(
     sender_id: str,
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    *,
+    requester_owned: bool,
 ) -> bool:
-    """Check whether a requester may manage their OAuth connection for one agent.
+    """Check whether a requester may connect or reset one of an agent's OAuth accounts.
 
-    Callers granting the private-agent exception must resolve credentials to the
-    authenticated requester's isolated user or user-agent target.
+    Administrators and credential managers may manage any of the agent's connections, and every
+    requester may manage their own connection to a private agent. A requester-owned connection
+    holds only the requester's own credentials, so anyone who may use the agent may manage it,
+    as on the Connections portal. Callers must resolve the credentials to the authenticated
+    requester's own user or user-agent target before relying on either requester rule.
     """
-    if not sender_id:
-        return False
     agent = config.agents.get(agent_name)
-    if agent is None:
+    if not sender_id or agent is None:
         return False
-    if agent.private is not None:
+    if agent.private is not None or is_sender_allowed_for_agent_credential_management(
+        sender_id,
+        agent_name,
+        config,
+        runtime_paths,
+    ):
         return True
-    return is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config, runtime_paths)
+    return (
+        requester_owned
+        and try_parse_historical_matrix_user_id(sender_id) is not None
+        and is_human_requester_id(sender_id, config, runtime_paths)
+        and is_sender_allowed_for_responder(sender_id, agent_name, None, config, runtime_paths, membership_index)
+    )
 
 
 def is_platform_administrator(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:

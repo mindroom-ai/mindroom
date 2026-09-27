@@ -140,7 +140,7 @@ async def list_schedules(
                 runtime_paths=runtime_paths,
                 include_non_pending=include_cancelled,
             )
-            tasks.extend(build_scheduled_task_read_model(task) for task in room_tasks)
+            tasks.extend(build_scheduled_task_read_model(task, timezone=runtime_config.timezone) for task in room_tasks)
     finally:
         await client.close()
 
@@ -158,7 +158,7 @@ async def update_schedule(
     api_request: Request,
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
-    _, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
+    runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
@@ -190,11 +190,15 @@ async def update_schedule(
                 workflow=updated_workflow,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
+                timezone=runtime_config.timezone,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
-        return _to_response_task(build_scheduled_task_read_model(updated_task), runtime_paths)
+        return _to_response_task(
+            build_scheduled_task_read_model(updated_task, timezone=runtime_config.timezone),
+            runtime_paths,
+        )
     finally:
         await client.close()
 
