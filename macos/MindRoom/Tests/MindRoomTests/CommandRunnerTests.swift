@@ -30,18 +30,35 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
-    func testPairHostedInvokesConnectWithOpenBrowser() async throws {
+    func testPairHostedInvokesConnectWithOpenBrowser() async {
         let completed = expectation(description: "Pairing finished")
-        var capturedInvocation: MindRoomCommandInvocation?
+        // The runner also refreshes service status on background queues, so record every invocation.
+        let recorder = InvocationRecorder()
         let runner = MindRoomCommandRunner(processRunner: { invocation in
-            capturedInvocation = invocation
+            recorder.record(invocation.arguments)
             return CommandResult(exitCode: 0, output: "Paired")
         })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
-        let invocation = try XCTUnwrap(capturedInvocation)
-        XCTAssertEqual(invocation.arguments, ["mindroom", "connect", "--open-browser"])
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--open-browser"]))
         XCTAssertEqual(runner.feedback?.title, "Pair Chat Account")
+    }
+}
+
+private final class InvocationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+
+    func record(_ arguments: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(arguments)
+    }
+
+    var arguments: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
     }
 }
