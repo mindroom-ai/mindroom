@@ -27,6 +27,7 @@ from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
+import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
 from mindroom import prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
@@ -1925,6 +1926,33 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
     assert knowledge_link.resolve() == (runtime.workspace.root / "kb_repo").resolve()
+
+
+def test_workspace_knowledge_links_never_follow_a_swapped_knowledge_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A knowledge directory swapped for a link after resolution never receives the primary's links."""
+    workspace = tmp_path / "agents" / "general" / "workspace"
+    research = workspace / "research"
+    research.mkdir(parents=True)
+    (workspace / "knowledge").mkdir()
+    victim_knowledge = tmp_path / "victim-workspace" / "knowledge"
+    victim_knowledge.mkdir(parents=True)
+    resolve_workspace_relative_path = workspaces_module.resolve_workspace_relative_path
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> Path:
+        resolved = resolve_workspace_relative_path(*args, **kwargs)
+        (workspace / "knowledge").rename(workspace / "knowledge-moved")
+        (workspace / "knowledge").symlink_to(victim_knowledge, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(workspaces_module, "resolve_workspace_relative_path", resolve_then_swap)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        workspaces_module.ensure_workspace_knowledge_links(workspace, knowledge_paths={"research": research.resolve()})
+
+    assert list(victim_knowledge.iterdir()) == []
 
 
 def test_resolve_agent_runtime_removes_stale_workspace_knowledge_links(tmp_path: Path) -> None:

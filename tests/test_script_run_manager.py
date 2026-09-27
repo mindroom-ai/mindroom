@@ -2188,18 +2188,18 @@ async def test_partial_snapshot_cleanup_preserves_original_launch_error(
 ) -> None:
     """A token-write failure remains the launch error after partial snapshot cleanup."""
     manager, _backend, _client = _manager(tmp_path)
-    original_write = manager_module._write_private_file
+    original_write = manager_module.atomic_write_bytes_at
     calls = 0
 
-    def fail_token_write(path: Path, content: bytes) -> None:
+    def fail_token_write(directory_fd: int, filename: str, payload: bytes, **kwargs: object) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             message = "token write denied"
             raise PermissionError(message)
-        original_write(path, content)
+        original_write(directory_fd, filename, payload, **kwargs)
 
-    monkeypatch.setattr(manager_module, "_write_private_file", fail_token_write)
+    monkeypatch.setattr(manager_module, "atomic_write_bytes_at", fail_token_write)
 
     with pytest.raises(PermissionError, match="token write denied"):
         await manager.run(_context(tmp_path), source="print('ok')\n")
@@ -2812,3 +2812,22 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
     process_exited = True
     reconciled = await manager.reconcile_durable(run_id=starting.run_id)
     assert reconciled.state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.parametrize("planted", ["linked_mindroom_dir", "linked_script_runs_dir"])
+def test_snapshot_write_refuses_linked_workspace_directories(tmp_path: Path, planted: str) -> None:
+    """A run snapshot and its capability never land where a planted workspace link points."""
+    workspace = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    workspace.mkdir()
+    if planted == "linked_mindroom_dir":
+        (workspace / ".mindroom").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (workspace / ".mindroom").mkdir()
+        (workspace / ".mindroom" / "script-runs").symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        manager_module._write_snapshot(workspace, f"script-{'a' * 32}", source=b"print('ok')\n", token="secret")  # noqa: S106
+
+    assert list(elsewhere.iterdir()) == []

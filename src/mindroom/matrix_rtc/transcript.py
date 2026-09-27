@@ -8,7 +8,9 @@ call ends, recoverable context is stored through the configured memory backend.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -16,10 +18,12 @@ from uuid import uuid4
 
 from mindroom.logging_config import get_logger
 from mindroom.memory import add_agent_memory
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import TextIO
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -28,6 +32,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TRANSCRIPT_DIRNAME = "calls"
+# File-memory transcripts live in a workspace agent code writes, so they are
+# appended and reread through no-follow descriptors from the reference root.
+_MAX_TRANSCRIPT_MEMORY_BYTES = 8 << 20
 
 
 def _new_call_transcript_path(base: Path, *, room_id: str, started_at: datetime) -> Path:
@@ -35,6 +42,23 @@ def _new_call_transcript_path(base: Path, *, room_id: str, started_at: datetime)
     safe_room = re.sub(r"[^A-Za-z0-9_.-]", "_", room_id)
     stamp = started_at.strftime("%Y-%m-%d_%H-%M-%S")
     return base / f"{stamp}_{uuid4().hex}_{safe_room}.md"
+
+
+def _open_transcript_for_append(reference_root: Path, relative_path: Path) -> TextIO:
+    """Open one transcript for appending without following a link or blocking on a FIFO."""
+    reference_root.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(reference_root, relative_path.parent, create=True) as directory_fd:
+        descriptor = os.open(
+            relative_path.name,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory_fd,
+        )
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        msg = f"Call transcript is not a regular file: {relative_path}"
+        raise OSError(msg)
+    return os.fdopen(descriptor, "a", encoding="utf-8")
 
 
 def _call_transcript_roots(
@@ -169,8 +193,7 @@ class CallTranscript:
         lines = list(self._pending)
         if not lines:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
+        with _open_transcript_for_append(self.reference_root, self.path.relative_to(self.reference_root)) as handle:
             if not self._header_written:
                 started = self.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
                 handle.write(
@@ -209,8 +232,13 @@ class CallTranscript:
         try:
             memory_content = summary
             if memory_backend == "mem0":
-                transcript = await asyncio.to_thread(self.path.read_text, encoding="utf-8")
-                memory_content = f"{summary}\n\n{transcript}"
+                transcript = await asyncio.to_thread(
+                    read_regular_file_within_root,
+                    self.reference_root,
+                    self.path.relative_to(self.reference_root),
+                    max_bytes=_MAX_TRANSCRIPT_MEMORY_BYTES,
+                )
+                memory_content = f"{summary}\n\n{transcript.decode('utf-8', errors='replace')}"
             await add_agent_memory(
                 memory_content,
                 self.agent_name,

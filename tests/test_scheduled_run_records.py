@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from threading import Event
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -331,3 +332,51 @@ async def test_started_receipt_write_finishes_before_cancellation_propagates(tmp
         ),
     )
     assert len(receipts) == 1
+
+
+@pytest.mark.parametrize("planted", ["linked_runs_dir", "linked_receipt", "fifo_receipt"])
+async def test_silent_run_receipts_never_follow_planted_workspace_entries(tmp_path: Path, planted: str) -> None:
+    """Receipt reads and writes refuse links or FIFOs agent code plants instead of following or blocking on them."""
+    config = _config(agents={"watcher": AgentConfig(display_name="Watcher")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    envelope = request_envelope(
+        room_id="!room:localhost",
+        reply_to_event_id="$planted-run",
+        prompt="Check for changes",
+        agent_name="watcher",
+        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+    )
+    runs_dir = runtime_paths.storage_root / "agents" / "watcher" / "workspace" / ".mindroom" / "scheduled_runs"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim_file = victim / "notes.json"
+    victim_file.write_text('{"victim": "victim-only note"}', encoding="utf-8")
+    receipt_name = scheduled_run_records._receipt_relative_path(envelope.source_event_id).name
+    if planted == "linked_runs_dir":
+        runs_dir.parent.mkdir(parents=True)
+        runs_dir.symlink_to(victim, target_is_directory=True)
+    else:
+        runs_dir.mkdir(parents=True)
+        if planted == "linked_receipt":
+            (runs_dir / receipt_name).symlink_to(victim_file)
+        else:
+            os.mkfifo(runs_dir / receipt_name)
+
+    started = record_silent_schedule_started_if_needed(
+        entity_name="watcher",
+        agent_names=("watcher",),
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if planted == "linked_runs_dir":
+        with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+            await asyncio.wait_for(started, timeout=5)
+    else:
+        await asyncio.wait_for(started, timeout=5)
+        receipt = runs_dir / receipt_name
+        assert not receipt.is_symlink()
+        assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == "started"
+
+    assert victim_file.read_text(encoding="utf-8") == '{"victim": "victim-only note"}'
+    assert sorted(path.name for path in victim.iterdir()) == ["notes.json"]

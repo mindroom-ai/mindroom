@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
@@ -61,7 +62,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.worker_retirement import remove_directory_tree_at
-from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     import builtins
@@ -1344,30 +1344,21 @@ def _snapshot_locator(storage_root: Path, workspace: Path, run_id: str) -> str:
 
 
 def _write_snapshot(workspace: Path, run_id: str, *, source: bytes, token: str) -> tuple[Path, Path]:
-    run_dir = resolve_workspace_relative_path(
-        workspace,
-        _snapshot_relative_dir(run_id),
-        field_name="Script run directory",
-    )
-    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    run_dir.chmod(0o700)
-    source_path = run_dir / "source.py"
-    token_path = run_dir / "capability"
-    _write_private_file(source_path, source)
-    _write_private_file(token_path, token.encode("utf-8"))
-    return source_path, token_path
+    """Publish one run's source and capability in a fresh directory pinned from the workspace.
 
-
-def _write_private_file(path: Path, content: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as output:
-            output.write(content)
-            output.flush()
-            os.fsync(output.fileno())
-    finally:
-        os.close(descriptor)
-    path.chmod(0o600)
+    Worker code can write the workspace, so the run directory is created by a
+    no-follow walk and both files are published only under new names.
+    """
+    relative_dir = _snapshot_relative_dir(run_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(workspace, relative_dir.parent, create=True, mode=0o700) as parent_fd:
+        os.mkdir(relative_dir.name, mode=0o700, dir_fd=parent_fd)
+        with open_directory_within_root(parent_fd, relative_dir.name) as run_fd:
+            os.fchmod(run_fd, 0o700)
+            atomic_write_bytes_at(run_fd, "source.py", source, file_mode=0o600, exclusive=True)
+            atomic_write_bytes_at(run_fd, "capability", token.encode("utf-8"), file_mode=0o600, exclusive=True)
+    run_dir = workspace / relative_dir
+    return run_dir / "source.py", run_dir / "capability"
 
 
 def _remove_snapshot(storage_root: Path, locator: str) -> bool:

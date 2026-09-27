@@ -19,7 +19,7 @@ import yaml
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -31,6 +31,8 @@ _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
 _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
+# Exports live in workspaces agent code writes; reads never block on a FIFO or buffer past this.
+_MAX_EXPORT_FILE_BYTES = 64 << 20
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -295,16 +297,14 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
 def _has_valid_export_root_marker(root_fd: int) -> bool:
     """Return whether the marker contains the exact supported ownership text."""
     try:
-        marker_fd = os.open(_ROOT_MARKER_FILENAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
-    except FileNotFoundError:
+        marker = read_regular_file_within_root(
+            root_fd,
+            _ROOT_MARKER_FILENAME,
+            max_bytes=len(_ROOT_MARKER_TEXT.encode("utf-8")),
+        )
+    except (FileNotFoundError, ValueError):
         return False
-    try:
-        with os.fdopen(marker_fd, encoding="utf-8") as marker_file:
-            marker_fd = -1
-            return marker_file.read(len(_ROOT_MARKER_TEXT) + 1) == _ROOT_MARKER_TEXT
-    finally:
-        if marker_fd >= 0:
-            os.close(marker_fd)
+    return marker == _ROOT_MARKER_TEXT.encode("utf-8")
 
 
 def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
@@ -412,22 +412,11 @@ def _fsync_directory_fd(directory_fd: int) -> None:
 
 
 def _read_text_at(directory_fd: int, filename: str) -> str | None:
-    """Read a regular file relative to a pinned directory without following symlinks."""
+    """Read a bounded regular file relative to a pinned directory without following links or waiting on a FIFO."""
     try:
-        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-    except OSError:
+        return read_regular_file_within_root(directory_fd, filename, max_bytes=_MAX_EXPORT_FILE_BYTES).decode("utf-8")
+    except (OSError, ValueError):
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            return None
-        with os.fdopen(file_fd, encoding="utf-8") as file:
-            file_fd = -1
-            return file.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-    finally:
-        if file_fd >= 0:
-            os.close(file_fd)
 
 
 def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:

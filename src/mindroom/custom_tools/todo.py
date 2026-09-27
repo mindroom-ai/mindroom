@@ -32,7 +32,7 @@ from mindroom.custom_tools.todo_state import (
     state_root,
     todos_path,
 )
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import read_regular_file_within_root, resolve_path_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -52,6 +52,7 @@ _PRIORITY_EMOJI: dict[str, str] = {
 }
 _TEMPLATE_RECURSION_LIMIT = 3
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
+_MAX_WORKSPACE_TEMPLATE_BYTES = 1 << 20
 _JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
 
 
@@ -142,10 +143,26 @@ _PARAMS_SCHEMAS: dict[str, type[BaseModel]] = {
 
 @dataclass(frozen=True, slots=True)
 class _TemplateRoot:
-    """One visible source of todo templates."""
+    """One visible source of todo templates.
+
+    Workspace templates are written by agent code, so they are read through a
+    bounded no-follow walk from ``workspace_root``; built-in templates are read by path.
+    """
 
     path: Path
     source: str
+    workspace_root: Path | None = None
+
+    def read_text(self, path: Path) -> str:
+        """Return one template's text from this root."""
+        if self.workspace_root is None:
+            return path.read_text(encoding="utf-8")
+        payload = read_regular_file_within_root(
+            self.workspace_root,
+            path.relative_to(self.workspace_root),
+            max_bytes=_MAX_WORKSPACE_TEMPLATE_BYTES,
+        )
+        return payload.decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +296,9 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
         except ValueError:
             msg = "Workspace todo template directory escapes workspace"
             raise ValueError(msg) from None
-        roots.append(_TemplateRoot(path=workspace_template_root, source="workspace"))
+        roots.append(
+            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root.resolve()),
+        )
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)
 
@@ -363,8 +382,8 @@ def _validate_dependency_cycle(template_name: str, todos: list[dict[str, Any]]) 
         visit(node_id)
 
 
-def _load_template_metadata(path: Path) -> dict[str, str]:
-    template = _load_template_document(path, path.read_text(encoding="utf-8"))
+def _load_template_metadata(path: Path, template_root: _TemplateRoot) -> dict[str, str]:
+    template = _load_template_document(path, template_root.read_text(path))
     expected_name = path.name.removesuffix(".yaml.j2")
     name = template.get("name")
     version = template.get("version")
@@ -416,7 +435,7 @@ def _render_template_definition(
         raise ValueError(msg)
 
     path, template_root = _resolve_template_path(name, template_roots)
-    raw_text = path.read_text(encoding="utf-8")
+    raw_text = template_root.read_text(path)
     raw_template = _load_template_document(path, raw_text)
     _validate_template_document(raw_template, path)
     schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
@@ -997,7 +1016,7 @@ class TodoTools(Toolkit):
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
                     raise ValueError(msg) from None
                 try:
-                    metadata = _load_template_metadata(path)
+                    metadata = _load_template_metadata(path, template_root)
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue

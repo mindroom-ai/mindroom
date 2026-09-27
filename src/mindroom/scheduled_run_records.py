@@ -10,15 +10,15 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_tool_execution_identity,
 )
-from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION = 1
 _RUN_DIRECTORY = ".mindroom/scheduled_runs"
+# Receipts live in workspaces agent code writes, so they are read and published
+# through no-follow descriptors walked from the workspace root.
+_MAX_RECEIPT_BYTES = 4 << 20
 
 
 @dataclass(frozen=True)
@@ -78,26 +81,16 @@ def _utc_timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _receipt_path(workspace: Path, source_event_id: str) -> Path:
+def _receipt_relative_path(source_event_id: str) -> Path:
     source_digest = hashlib.sha256(source_event_id.encode("utf-8")).hexdigest()
-    return resolve_workspace_relative_path(
-        workspace,
-        Path(_RUN_DIRECTORY) / f"{source_digest}.json",
-        field_name="Silent schedule receipt",
-    )
+    return Path(_RUN_DIRECTORY) / f"{source_digest}.json"
 
 
-def _atomic_write_receipt(path: Path, receipt: _ScheduledRunReceipt) -> None:
-    create_directory_durable(path.parent.parent, mode=0o700)
-    create_directory_durable(path.parent, mode=0o700)
-    write_json_file_durable(
-        path,
-        asdict(receipt),
-        strict_atomic_replace=True,
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
+def _atomic_write_receipt(workspace: Path, relative_path: Path, receipt: _ScheduledRunReceipt) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with open_directory_within_root(workspace, relative_path.parent, create=True, mode=0o700) as directory_fd:
+        atomic_write_bytes_at(directory_fd, relative_path.name, payload)
 
 
 def _workspace_for_agent(
@@ -161,10 +154,14 @@ def _receipt_state_is_valid(payload: dict[object, object], *, started_at: dateti
     )
 
 
-def _existing_receipt_state(path: Path, expected: _ScheduledRunReceipt) -> _ExistingReceiptState | None:
+def _existing_receipt_state(
+    workspace: Path,
+    relative_path: Path,
+    expected: _ScheduledRunReceipt,
+) -> _ExistingReceiptState | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        payload = json.loads(read_regular_file_within_root(workspace, relative_path, max_bytes=_MAX_RECEIPT_BYTES))
+    except (OSError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.keys() != _RECEIPT_FIELDS:
         return None
@@ -219,7 +216,7 @@ def _write_started_receipts(
             config=config,
             runtime_paths=runtime_paths,
         )
-        path = _receipt_path(workspace, envelope.source_event_id)
+        relative_path = _receipt_relative_path(envelope.source_event_id)
         receipt = _ScheduledRunReceipt(
             schema_version=_SCHEMA_VERSION,
             source_event_id=envelope.source_event_id,
@@ -234,11 +231,11 @@ def _write_started_receipts(
             started_at=started_at,
             completed_at=None,
         )
-        if existing := _existing_receipt_state(path, receipt):
+        if existing := _existing_receipt_state(workspace, relative_path, receipt):
             receipt = replace(receipt, started_at=existing.started_at)
             if existing.status == "started":
                 continue
-        _atomic_write_receipt(path, receipt)
+        _atomic_write_receipt(workspace, relative_path, receipt)
 
 
 def _write_completed_receipts(
@@ -260,7 +257,7 @@ def _write_completed_receipts(
             config=config,
             runtime_paths=runtime_paths,
         )
-        path = _receipt_path(workspace, envelope.source_event_id)
+        relative_path = _receipt_relative_path(envelope.source_event_id)
         receipt = _ScheduledRunReceipt(
             schema_version=_SCHEMA_VERSION,
             source_event_id=envelope.source_event_id,
@@ -275,9 +272,9 @@ def _write_completed_receipts(
             started_at=completed_at,
             completed_at=completed_at,
         )
-        if existing := _existing_receipt_state(path, receipt):
+        if existing := _existing_receipt_state(workspace, relative_path, receipt):
             receipt = replace(receipt, started_at=existing.started_at)
-        _atomic_write_receipt(path, receipt)
+        _atomic_write_receipt(workspace, relative_path, receipt)
 
 
 async def record_silent_schedule_result_if_needed(
