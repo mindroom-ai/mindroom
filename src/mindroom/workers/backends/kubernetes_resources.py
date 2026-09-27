@@ -23,6 +23,7 @@ import os
 import posixpath
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -805,10 +806,16 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+    def read_deployment(
+        self,
+        deployment_name: str,
+        *,
+        request_timeout: float | None = None,
+    ) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
+        kwargs = {} if request_timeout is None else {"_request_timeout": request_timeout}
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace, **kwargs)
         except self._api_exception as exc:
             if exc.status == 404:
                 return None
@@ -976,9 +983,13 @@ class KubernetesResourceManager:
                     _request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
-                current = (
-                    self.read_deployment(deployment.metadata.name) if getattr(exc, "status", None) == 409 else None
-                )
+                current = None
+                if getattr(exc, "status", None) == 409:
+                    with suppress(Exception):
+                        current = self.read_deployment(
+                            deployment.metadata.name,
+                            request_timeout=_RETIREMENT_REQUEST_TIMEOUT_SECONDS,
+                        )
                 if current is not None and not _written_by_older_release(dict(current.metadata.annotations or {})):
                     legacy.remove(deployment.metadata.name)
                     continue

@@ -192,6 +192,7 @@ class _FakeAppsApi:
         self.deployments: dict[str, object] = {}
         self.replica_sets: dict[str, object] = {}
         self.read_names: list[str] = []
+        self.read_request_timeouts: list[object] = []
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
@@ -202,9 +203,10 @@ class _FakeAppsApi:
         self._active_delete_read_lag_by_name: dict[str, int] = {}
         self._resource_versions = itertools.count(1)
 
-    def read_namespaced_deployment(self, name: str, namespace: str) -> object:
+    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> object:
         _ = namespace
         self.read_names.append(name)
+        self.read_request_timeouts.append(kwargs.get("_request_timeout"))
         deployment = self.deployments.get(name)
         if deployment is None:
             raise _FakeApiError(404)
@@ -5521,6 +5523,42 @@ def test_kubernetes_retirement_never_stops_a_worker_an_ensure_replaced_meanwhile
     assert backend._resources.stop_workers_mounting_state_roots(now=30.0, stopped=stopped) == ()
     assert stopped == set()
     assert apps_api.deployments[handle.worker_id].spec.replicas == 1
+
+
+def test_kubernetes_retirement_keeps_stopping_old_workers_when_a_conflict_reread_fails(tmp_path: Path) -> None:
+    """A failed, time-limited re-read after a conflict counts as one failure; the other old workers still stop."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    first = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:first"), now=10.0)
+    second = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:second"), now=10.0)
+    for handle in (first, second):
+        _stamp_legacy_template(apps_api, handle.worker_id, handle.worker_key.rsplit(":", 1)[-1], keep_marker=False)
+    list_deployments = backend._resources.list_deployments
+    read_deployment = apps_api.read_namespaced_deployment
+
+    def list_then_race(**kwargs: object) -> list[object]:
+        listed = list_deployments(**kwargs)
+        apps_api.deployments[first.worker_id].metadata.resource_version = "changed-after-listing"
+        return listed
+
+    def reread_fails(name: str, namespace: str, **kwargs: object) -> object:
+        if name == first.worker_id:
+            apps_api.read_request_timeouts.append(kwargs.get("_request_timeout"))
+            raise _FakeApiError(503)
+        return read_deployment(name, namespace, **kwargs)
+
+    backend._resources.list_deployments = list_then_race  # type: ignore[method-assign]
+    apps_api.read_namespaced_deployment = reread_fails  # type: ignore[method-assign]
+
+    stopped: set[str] = set()
+    with pytest.raises(WorkerBackendError, match=first.worker_id):
+        backend._resources.stop_workers_mounting_state_roots(now=30.0, stopped=stopped)
+    assert stopped == {second.worker_id}
+    assert apps_api.deployments[second.worker_id].spec.replicas == 0
+    assert apps_api.read_request_timeouts[-1] is not None
 
 
 def test_kubernetes_ensure_never_serves_a_live_old_template_worker(
