@@ -67,7 +67,7 @@ class TestHelmArgsAssembly:
         assert "matrixOidc.clientId=mindroom-synapse" in set_pairs
         assert "roomDefaults.joinPolicy=public" in set_pairs
         assert "roomDefaults.listed=false" in set_pairs
-        assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=analysis"
+        assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=personal"
         assert len(set_string_pairs) == len(provisioner_service._HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS)
 
     def test_matrix_oidc_helm_args_normalize_enabled_flag_for_chart(self):

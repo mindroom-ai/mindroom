@@ -723,8 +723,8 @@ class TestProvisionerEndpoints:
         set_string_args = _helm_set_string_args(helm_args)
         assert set_args["roomDefaults.joinPolicy"] == "public"
         assert set_args["roomDefaults.listed"] == "false"
-        assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "analysis"
-        assert set_string_args["matrixAutoJoinRoomKeys[9]"] == "lobby"
+        assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "personal"
+        assert "matrixAutoJoinRoomKeys[1]" not in set_string_args
         assert set_string_args["administrators[0]"] == "@owner.user+test:123.mindroom.test"
         assert set_string_args["roomDefaults.inviteUsers[0]"] == "@owner.user+test:123.mindroom.test"
         assert set_string_args["roomDefaults.admins[0]"] == "@owner.user+test:123.mindroom.test"

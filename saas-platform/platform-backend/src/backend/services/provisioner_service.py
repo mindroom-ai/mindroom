@@ -80,24 +80,8 @@ from backend.services.instances_data import create_instance, list_instances, upd
 from fastapi import BackgroundTasks, HTTPException
 
 _MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
-_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = (
-    "analysis",
-    "automation",
-    "business",
-    "communication",
-    "dev",
-    "docs",
-    "finance",
-    "help",
-    "home",
-    "lobby",
-    "news",
-    "ops",
-    "personal",
-    "productivity",
-    "research",
-    "science",
-)
+# Rooms created by the seeded instance config (cluster/k8s/instance/default-config.yaml).
+_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = ("personal",)
 
 _RESOURCE_PROFILE_HELM_VALUES = {
     "pro": {

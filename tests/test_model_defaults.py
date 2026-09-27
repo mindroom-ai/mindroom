@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import yaml
@@ -49,9 +50,7 @@ def test_saas_default_config_models_match_central_defaults() -> None:
     assert config["models"] == {
         name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()
     }
-    assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENROUTER_OPENAI_LUNA
     assert config["memory"]["embedder"]["config"]["model"] == model_defaults.OPENROUTER_OPENAI_EMBEDDING_SMALL
-    assert config["voice"]["stt"]["model"] == model_defaults.OPENAI_TRANSCRIPTION
 
 
 def test_saas_default_config_works_with_only_an_openrouter_key() -> None:
@@ -61,8 +60,11 @@ def test_saas_default_config_works_with_only_an_openrouter_key() -> None:
     config = Config.model_validate(yaml.safe_load(config_path.read_text(encoding="utf-8")))
 
     assert config.models[config.router.model].provider == "openrouter"
-    assert config.memory.llm is not None
-    assert config.memory.llm.provider == "openrouter"
+    assert {agent.model for agent in config.agents.values()} <= config.models.keys()
+    assert {config.models[agent.model].provider for agent in config.agents.values()} == {"openrouter"}
+    # File memory extracts with the agent's own model, so no separate memory LLM is needed.
+    assert config.memory.backend == "file"
+    assert config.voice.enabled is False
     embedder = config.memory.embedder
     assert embedder.provider == "openai"
     assert embedder.config.host == model_defaults.OPENROUTER_BASE_URL_DEFAULT
@@ -70,6 +72,24 @@ def test_saas_default_config_works_with_only_an_openrouter_key() -> None:
     assert embedder.config.dimensions == 1536
     # Platform-provisioned OpenRouter keys reject ":free" model variants.
     assert not [name for name, model in config.models.items() if model.id.endswith(":free")]
+
+
+def test_saas_default_config_is_generated_from_config_init() -> None:
+    """The committed Helm seed config must match what scripts/sync_config.py renders from the config init starter."""
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / "cluster" / "k8s" / "instance" / "default-config.yaml"
+    spec = importlib.util.spec_from_file_location("_sync_config", repo_root / "scripts" / "sync_config.py")
+    assert spec is not None
+    assert spec.loader is not None
+    sync_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync_config)
+
+    generated = sync_config.saas_config()
+
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == generated
+    assert list(generated["agents"]) == ["mind"]
+    # An explicit worker_tools list would override the chart's sandbox routing for execution tools.
+    assert "worker_tools" not in generated["defaults"]
 
 
 def test_saas_default_uses_current_gemini_flash() -> None:
