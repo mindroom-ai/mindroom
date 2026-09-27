@@ -4,12 +4,9 @@ This module decides which files belong to a knowledge base, in three composable 
 include patterns derive listing targets that bound where traversal looks, traversal
 walks directory descriptors pinned from the knowledge root without following links, and
 per-file rules run cheap relative-path checks before filesystem safety checks.
-Knowledge roots can sit in workspaces that agent code writes, so callers pass the
-canonical root their binding resolved; a root that no longer resolves to itself, because
-a directory on its path was swapped for a link, lists nothing.
-Every path returned by the listing functions is a regular file, not a symlink, with no
-symlinked ancestors and no ".." traversal, so it always stays inside the knowledge root.
-Read listed files through ``open_knowledge_file``, which refuses a swap made after listing.
+Callers pass the canonical root their binding resolved; a root that no longer resolves
+to itself lists nothing. Every listed path is a regular file within the read cap, reached
+without links, and ``open_knowledge_file`` refuses a swap made after listing.
 """
 
 from __future__ import annotations
@@ -24,7 +21,13 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, open_regular_file_within_root
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import (
+    MAX_READ_BYTES,
+    is_git_metadata_path,
+    open_directory_within_root,
+    open_regular_file_within_root,
+)
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
@@ -87,6 +90,9 @@ _TEXT_LIKE_EXTENSIONS = {
     ".svelte",
     ".proto",
 }
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -218,46 +224,23 @@ def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
             status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
     except (OSError, ValueError):
         return False
+    if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
+        logger.warning("Skipping a knowledge file above the read cap", path=str(relative_path), size=status.st_size)
+        return False
     return stat.S_ISREG(status.st_mode)
 
 
 def _walk_relative_files(root_fd: int, base: Path) -> list[Path]:
     """Return files below ``base`` by a descriptor walk that never enters a linked directory."""
-    files: list[Path] = []
     try:
         with open_directory_within_root(root_fd, base) as base_fd:
-            pending: list[tuple[int, Path]] = [(os.dup(base_fd), base)]
+            files: list[Path] = []
+            for dirpath, dirnames, filenames, _dirfd in os.fwalk(".", dir_fd=base_fd):
+                dirnames[:] = [name for name in dirnames if name.casefold() != ".git"]
+                files.extend(base / dirpath / name for name in filenames)
+            return files
     except (OSError, ValueError):
-        return files
-    try:
-        while pending:
-            directory_fd, relative_dir = pending.pop()
-            try:
-                entries = list(os.scandir(directory_fd))
-                for entry in entries:
-                    if not entry.is_dir(follow_symlinks=False):
-                        if not entry.is_symlink():
-                            files.append(relative_dir / entry.name)
-                        continue
-                    if entry.name.casefold() == ".git":
-                        continue
-                    try:
-                        child_fd = os.open(
-                            entry.name,
-                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                            dir_fd=directory_fd,
-                        )
-                    except OSError:
-                        continue
-                    pending.append((child_fd, relative_dir / entry.name))
-            except OSError:
-                continue
-            finally:
-                os.close(directory_fd)
-    finally:
-        for directory_fd, _relative_dir in pending:
-            os.close(directory_fd)
-    return files
+        return []
 
 
 def _iter_target_files(root_fd: int, target: _ListingTarget, root: Path) -> Iterator[Path]:
@@ -289,6 +272,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     """List managed files without constructing a knowledge manager."""
     root = _canonical_root(knowledge_root)
     if root is None:
+        logger.warning("Knowledge root no longer resolves to itself; listing nothing", base_id=base_id)
         return []
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
@@ -300,7 +284,10 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
                         continue
                     if _is_regular_file_at(root_fd, relative_path):
                         files.add(root / relative_path)
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot list knowledge files", base_id=base_id, root=str(root), error=str(exc))
         return []
     return sorted(files)
 

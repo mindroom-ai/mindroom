@@ -336,8 +336,7 @@ def ensure_workspace_knowledge_links(
     Each knowledge base becomes visible under ``<workspace>/knowledge/<base_id>``.
     Targets outside the workspace are intentionally excluded because the default
     file-aware tools enforce workspace containment after resolving symlinks.
-    Agent code writes the workspace, so the knowledge directory is pinned by a
-    no-follow walk and existing links are read, never followed.
+    The knowledge directory is pinned by a no-follow walk, and existing links are read, never followed.
     """
     workspace_path.mkdir(parents=True, exist_ok=True)
     workspace_root = workspace_path.resolve()

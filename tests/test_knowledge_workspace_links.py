@@ -6,6 +6,7 @@ import os
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -13,7 +14,9 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge import manager as knowledge_manager_module
 from mindroom.knowledge.file_listing import knowledge_files_from_relative_paths, list_knowledge_files
-from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.registry import _published_index_key_from_binding
+from mindroom.runtime_resolution import ResolvedKnowledgeBinding, resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,3 +118,80 @@ def test_knowledge_reads_refuse_a_file_swapped_after_listing(tmp_path: Path, pla
         knowledge_manager_module._file_signature(listed_path)
     with pytest.raises((OSError, ValueError)), knowledge_manager_module._knowledge_source_snapshot(listed_path):
         pytest.fail("a swapped knowledge file was copied")
+
+
+def test_manager_and_index_key_never_re_resolve_a_bound_root(tmp_path: Path) -> None:
+    """A bound root swapped for a link before the manager is built is refused, never indexed at its target."""
+    storage = tmp_path / "storage"
+    root = (tmp_path / "workspace" / "kb").resolve()
+    root.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "secret.md").write_text(_VICTIM_NOTE, encoding="utf-8")
+    config = Config(knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root))})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    binding = ResolvedKnowledgeBinding(
+        base_id="kb",
+        storage_root=storage,
+        knowledge_path=root,
+        incremental_sync_on_access=False,
+    )
+    root.rename(root.with_name("kb-moved"))
+    root.symlink_to(victim, target_is_directory=True)
+
+    assert _published_index_key_from_binding("kb", binding, config=config).knowledge_path == str(root)
+    with pytest.raises(ValueError, match="link"):
+        KnowledgeManager("kb", config=config, runtime_paths=runtime_paths, knowledge_path=root)
+
+
+def test_listing_warns_instead_of_silently_listing_nothing(tmp_path: Path) -> None:
+    """A knowledge root that became a link is reported, and a missing one stays quiet."""
+    root = tmp_path / "kb"
+    config = Config(knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root))})
+    with capture_logs() as logs:
+        assert list_knowledge_files(config, "kb", root) == []
+    assert logs == []
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    root.symlink_to(victim, target_is_directory=True)
+    with capture_logs() as logs:
+        assert list_knowledge_files(config, "kb", root) == []
+    assert [entry["log_level"] for entry in logs] == ["warning"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_listing_walks_through_search_only_ancestors(tmp_path: Path) -> None:
+    """Ancestors that grant this process only search permission, like another user's 0711 home, still work."""
+    home = tmp_path / "home"
+    root = home / "kb"
+    root.mkdir(parents=True)
+    (root / "own.md").write_text("own notes", encoding="utf-8")
+    config = Config(knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root))})
+    home.chmod(0o111)
+    try:
+        listed = list_knowledge_files(config, "kb", root)
+    finally:
+        home.chmod(0o755)
+
+    assert [path.name for path in listed] == ["own.md"]
+
+
+def test_knowledge_files_above_the_read_cap_are_skipped(tmp_path: Path) -> None:
+    """A sparse or huge file is left out with a warning, and one that grows after listing is never copied."""
+    root = (tmp_path / "kb").resolve()
+    root.mkdir()
+    (root / "grows.md").write_text("small for now", encoding="utf-8")
+    with (root / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = Config(knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root))})
+
+    with capture_logs() as logs:
+        [listed] = list_knowledge_files(config, "kb", root)
+    assert listed.name == "grows.md"
+    assert [entry["log_level"] for entry in logs] == ["warning"]
+
+    with (root / "grows.md").open("r+b") as grows:
+        grows.truncate(65 << 20)
+    with pytest.raises(ValueError, match="size limit"), knowledge_manager_module._knowledge_source_snapshot(listed):
+        pytest.fail("an oversized knowledge file was copied")

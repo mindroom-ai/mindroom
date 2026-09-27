@@ -6,10 +6,11 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager, suppress
+from contextlib import closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -97,6 +98,7 @@ from mindroom.knowledge.indexing_config import (
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
@@ -397,41 +399,27 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _file_signature(file_path: Path) -> FileSignature:
-    """Stat and hash one listed file through the same no-follow descriptor."""
+def _file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
+    """Stat and hash one listed file through one no-follow descriptor, copying it to ``snapshot`` when given."""
     digest = hashlib.sha256()
-    with open_knowledge_file(file_path) as descriptor:
+    with open_knowledge_file(file_path) as descriptor, snapshot.open("xb") if snapshot else nullcontext() as output:
         status = os.fstat(descriptor)
+        if status.st_size > MAX_READ_BYTES:
+            msg = f"Knowledge file exceeds its size limit: {file_path}"
+            raise ValueError(msg)
         while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
+            if output is not None:
+                output.write(chunk)
     return status.st_mtime_ns, status.st_size, digest.hexdigest()
-
-
-def _insert_snapshot(
-    knowledge: Knowledge,
-    file_path: Path,
-    metadata: dict[str, str | int],
-    upsert: bool,
-    reader: Reader,
-) -> None:
-    with _knowledge_source_snapshot(file_path) as snapshot:
-        knowledge.insert(path=str(snapshot), metadata=metadata, upsert=upsert, reader=reader)
 
 
 @contextmanager
 def _knowledge_source_snapshot(file_path: Path) -> Iterator[Path]:
-    """Copy one listed file through a no-follow descriptor into a private directory readers open by path.
-
-    Agno readers reopen their source by path, and knowledge files can sit in
-    workspaces agent code writes. Readers get this primary-private copy with the
-    same name, so a link swapped onto the listed path after listing is refused
-    instead of followed into another workspace or primary-owned state.
-    """
+    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path."""
     with tempfile.TemporaryDirectory(prefix="mindroom-knowledge-") as snapshot_dir:
         snapshot = Path(snapshot_dir) / file_path.name
-        with open_knowledge_file(file_path) as source_fd, snapshot.open("xb") as output:
-            while chunk := os.read(source_fd, 1024 * 1024):
-                output.write(chunk)
+        _file_signature(file_path, snapshot)
         yield snapshot
 
 
@@ -545,7 +533,6 @@ class KnowledgeManager:
             msg = f"Knowledge manager '{self.base_id}' requires storage_path and knowledge_path"
             raise ValueError(msg)
         self.storage_path = self.storage_path.resolve()
-        self.knowledge_path = self.knowledge_path.resolve()
         _ensure_knowledge_directory_ready(self.knowledge_path)
         self._set_settings(self.config, self.runtime_paths, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
@@ -602,7 +589,11 @@ class KnowledgeManager:
         self.config = config
         self.runtime_paths = runtime_paths
         self.storage_path = storage_path
-        self.knowledge_path = knowledge_path.resolve()
+        # The binding resolved this path; resolving it again would follow a link swapped onto it since.
+        if knowledge_path.resolve() != knowledge_path:
+            msg = f"Knowledge path must be canonical and not go through a link: {knowledge_path}"
+            raise ValueError(msg)
+        self.knowledge_path = knowledge_path
         self._indexing_settings = indexing_settings_key(
             config,
             storage_path,
@@ -677,9 +668,6 @@ class KnowledgeManager:
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
-
-    def _file_signature(self, file_path: Path) -> FileSignature:
-        return _file_signature(file_path)
 
     def _has_vectors_for_source_path(
         self,
@@ -838,9 +826,30 @@ class KnowledgeManager:
         knowledge: Knowledge,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
-        """Index one file while the caller owns the operation lock."""
+        """Index one file while the caller owns the operation lock, reading it once into a private snapshot."""
+        snapshot_dir = Path(cast("str", await asyncio.to_thread(tempfile.mkdtemp, prefix="mindroom-knowledge-")))
+        try:
+            return await self._index_snapshot_locked(
+                resolved_path,
+                snapshot_dir / resolved_path.name,
+                upsert=upsert,
+                knowledge=knowledge,
+                indexed_signatures=indexed_signatures,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, snapshot_dir, ignore_errors=True)
+
+    async def _index_snapshot_locked(
+        self,
+        resolved_path: Path,
+        snapshot: Path,
+        *,
+        upsert: bool,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+    ) -> bool:
         relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
+        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(_file_signature, resolved_path, snapshot)
         metadata = {
             SOURCE_PATH_KEY: relative_path,
             SOURCE_MTIME_NS_KEY: source_mtime_ns,
@@ -869,7 +878,13 @@ class KnowledgeManager:
             # API via asyncio.to_thread so reading, embedding, and the vector
             # database write all run on a worker thread and the loop stays
             # responsive to Matrix sync, tool calls, and cache writes.
-            await asyncio.to_thread(_insert_snapshot, knowledge, resolved_path, metadata, upsert, selected_reader)
+            await asyncio.to_thread(
+                knowledge.insert,
+                path=str(snapshot),
+                metadata=metadata,
+                upsert=upsert,
+                reader=selected_reader,
+            )
 
         try:
             # Remove-then-insert is idempotent, so a transient embedding fault
@@ -1142,10 +1157,10 @@ class KnowledgeManager:
                 knowledge=knowledge,
                 indexed_signatures=indexed_signatures,
             )
-        except FileNotFoundError:
-            # Live source folders (e.g. thread exports) delete files while
-            # a refresh runs; a file vanishing between listing and indexing
-            # is not an indexing failure. Record it so the caller can drop
+        except (FileNotFoundError, ValueError):
+            # Live source folders (e.g. thread exports) delete or replace files while
+            # a refresh runs; a file vanishing or turning into a link between listing
+            # and indexing is not an indexing failure. Record it so the caller can drop
             # it from its completeness accounting: the trailing
             # source-signature comparison then decides whether the
             # surviving corpus is publishable or another refresh is needed.
@@ -1692,8 +1707,8 @@ class KnowledgeManager:
             for file_path in batch:
                 relative_path = self._relative_path(file_path)
                 try:
-                    signature = self._file_signature(file_path)
-                except OSError:
+                    signature = _file_signature(file_path)
+                except (OSError, ValueError):
                     continue
                 scanned.append((relative_path, signature, file_path))
             return scanned

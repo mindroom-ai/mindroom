@@ -305,12 +305,10 @@ def resolve_agent_storage(
     )
 
 
-def _shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
-    """Resolve one shared knowledge path, refusing links below the agent workspace that holds it.
+def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
+    """Resolve one shared knowledge path, refusing links below an agent workspace that holds it.
 
-    Operator links elsewhere are followed as configured, but agent code writes
-    ``agents/<name>/workspace``, so a base inside one is reached without any
-    link below that workspace, never into another workspace or private instance.
+    Operator links elsewhere are followed as configured.
     """
     lexical = Path(os.path.normpath(config_relative_path(raw_path, runtime_paths)))
     storage_root = shared_storage_root(runtime_paths.storage_root)
@@ -355,7 +353,7 @@ def resolve_knowledge_binding(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     if effective_agent_name is None:
-        knowledge_path = _shared_knowledge_path(base_config.path, runtime_paths)
+        knowledge_path = shared_knowledge_path(base_config.path, runtime_paths)
         return ResolvedKnowledgeBinding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
@@ -399,4 +397,5 @@ __all__ = [
     "resolve_agent_storage",
     "resolve_knowledge_binding",
     "resolve_private_requester_scope_root",
+    "shared_knowledge_path",
 ]

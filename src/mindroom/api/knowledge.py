@@ -32,6 +32,7 @@ from mindroom.knowledge.status import (
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -76,7 +77,10 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
+    try:
+        root = shared_knowledge_path(config.knowledge_bases[base_id].path, runtime_paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root

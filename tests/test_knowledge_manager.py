@@ -1957,14 +1957,14 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    original_signature = KnowledgeManager._file_signature
+    original_signature = knowledge_manager_module._file_signature
 
-    def vanishing_signature(self: KnowledgeManager, file_path: Path) -> object:
+    def vanishing_signature(file_path: Path, snapshot: Path | None = None) -> object:
         if file_path == doomed:
             doomed.unlink(missing_ok=True)
-        return original_signature(self, file_path)
+        return original_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", vanishing_signature)
 
     assert await manager.reindex_all() == RefreshOutcome(indexed_count=1, published=True, error=None)
     assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
@@ -8684,16 +8684,16 @@ async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
     )
     _install_git_revisions(monkeypatch, ["rev-a"])
 
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
     remaining_failures = {"flaky.md": 1}
 
-    def _flaky_signature(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _flaky_signature(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         if remaining_failures.get(file_path.name):
             remaining_failures[file_path.name] -= 1
             raise OSError(116, "Stale file handle")
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _flaky_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _flaky_signature)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -9383,13 +9383,13 @@ async def test_candidate_indexing_hashes_content_off_event_loop(
     runtime_paths = runtime_paths_for(config)
     event_loop_thread = get_ident()
     signature_threads: list[int] = []
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
 
-    def _record_signature_thread(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _record_signature_thread(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         signature_threads.append(get_ident())
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _record_signature_thread)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _record_signature_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 

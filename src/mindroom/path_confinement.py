@@ -23,6 +23,10 @@ from mindroom.atomic_file import atomic_write_bytes_at
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+MAX_READ_BYTES = 64 << 20
+# Directories a walk only passes through need search permission, not read permission.
+_WALK_ONLY = getattr(os, "O_PATH", 0)
+
 
 def is_git_metadata_path(path: Path) -> bool:
     """Return whether a path is a ``.git`` entry or lies beneath one.
@@ -112,9 +116,10 @@ def open_directory_within_root(
     """
     parts = _relative_parts(relative_path)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    directory = os.dup(root) if isinstance(root, int) else os.open(root, flags)
+    walk_flags = flags if create else flags | _WALK_ONLY
+    directory = os.dup(root) if isinstance(root, int) else os.open(root, walk_flags if parts else flags)
     try:
-        for part in parts:
+        for index, part in enumerate(parts, start=1):
             if create:
                 try:
                     os.mkdir(part, mode=mode, dir_fd=directory)
@@ -123,7 +128,7 @@ def open_directory_within_root(
                 else:
                     with suppress(OSError):
                         os.fsync(directory)
-            child = os.open(part, flags, dir_fd=directory)
+            child = os.open(part, flags if index == len(parts) else walk_flags, dir_fd=directory)
             os.close(directory)
             directory = child
         yield directory
@@ -167,7 +172,7 @@ def read_regular_file_within_root(
     root: Path | int,
     relative_path: str | Path,
     *,
-    max_bytes: int = 64 << 20,
+    max_bytes: int = MAX_READ_BYTES,
     truncate: bool = False,
 ) -> bytes:
     """Read one regular file through a no-follow walk; a file above ``max_bytes`` is refused, or cut when ``truncate``."""

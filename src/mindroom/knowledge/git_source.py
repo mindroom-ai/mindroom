@@ -404,11 +404,7 @@ class GitSyncResult:
 
 
 def _require_unlinked_worktree(source_path: Path) -> None:
-    """Refuse a checkout whose folder, or a directory above it, became a link since it was resolved.
-
-    Private knowledge checkouts sit in workspaces agent code writes, and Git
-    writes into whatever folder its work tree path reaches.
-    """
+    """Refuse a checkout whose folder, or a directory above it, became a link since it was resolved."""
     if os.path.realpath(source_path) != os.fspath(source_path):
         msg = f"Refusing to run Git in knowledge folder {source_path}: its path now goes through a link"
         raise RuntimeError(msg)

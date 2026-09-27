@@ -1518,6 +1518,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.knowledge"
 depends_on = [
+    "mindroom.runtime_resolution",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.knowledge.availability",
@@ -5144,6 +5145,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.chunking",
     "mindroom.constants",
     "mindroom.embedding_errors",
@@ -5364,6 +5366,7 @@ expose = [
     "resolve_agent_runtime",
     "resolve_agent_storage",
     "resolve_knowledge_binding",
+    "shared_knowledge_path",
 ]
 from = ["mindroom.runtime_resolution"]
 
