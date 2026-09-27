@@ -2372,6 +2372,49 @@ router:
     }
 
 
+@pytest.mark.parametrize(
+    ("source", "planted"),
+    [
+        ("agents/other/workspace/docs", "link"),
+        ("agents/other/workspace/docs", "directory"),
+        ("workers/other/docs", "directory"),
+        ("knowledge/docs", "link"),
+    ],
+)
+def test_kubernetes_backend_never_mounts_knowledge_another_worker_could_redirect(
+    tmp_path: Path,
+    source: str,
+    planted: str,
+) -> None:
+    """Knowledge is planned from its configured path: never through a link, never inside what other workers write."""
+    storage_root = tmp_path / "storage"
+    victim = storage_root / "private_instances" / "someone" / "data"
+    victim.mkdir(parents=True)
+    docs = storage_root / source
+    docs.parent.mkdir(parents=True)
+    if planted == "link":
+        docs.symlink_to(victim, target_is_directory=True)
+    else:
+        docs.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n"
+        "  code:\n    display_name: Code\n    worker_scope: shared\n    knowledge_bases: [docs]\n"
+        "  other:\n    display_name: Other\n    worker_scope: shared\n"
+        f"knowledge_bases:\n  docs:\n    path: ${{MINDROOM_STORAGE_PATH}}/{source}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with capture_logs() as logs:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    subpaths = {str(mount["subPath"]) for mount in _storage_mounts(apps_api.created_bodies[0]).values()}
+    assert not any(subpath.startswith(("private_instances", "agents/other", source)) for subpath in subpaths)
+    assert any(entry["log_level"] in {"warning", "error"} and "knowledge" in entry["event"] for entry in logs)
+
+
 def test_kubernetes_backend_projects_shared_agent_for_narrower_user_agent_worker(tmp_path: Path) -> None:
     """A script-isolated worker should retain its shared agent's state and assigned knowledge."""
     storage_root = tmp_path / "storage"

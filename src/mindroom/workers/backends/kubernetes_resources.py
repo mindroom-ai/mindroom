@@ -29,7 +29,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import RuntimePaths, config_relative_path
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -79,6 +81,8 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
+
+logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
@@ -629,12 +633,23 @@ def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | 
     )
 
 
+def _written_by_other_workers(relative_path: Path, worker_roots: Path) -> bool:
+    """Return whether workers other than one being planned can write below this storage path."""
+    parts = relative_path.parts
+    return (
+        relative_path.is_relative_to(worker_roots)
+        or parts[:1] == ("private_instances",)
+        or (parts[:1] == ("agents",) and parts[2:3] == ("workspace",))
+    )
+
+
 def _plan_knowledge_storage_mounts(
     relative_paths: tuple[Path, ...],
     *,
     mounted_storage_root: Path,
     existing_mounts: tuple[dict[str, object], ...],
     worker_key: str,
+    worker_roots: Path,
 ) -> tuple[_KnowledgeStorageMountPlan, ...]:
     storage_mount_paths = tuple(
         Path(cast("str", mount["mountPath"]))
@@ -656,6 +671,14 @@ def _plan_knowledge_storage_mounts(
             )
             raise WorkerBackendError(msg)
         if any(mount_path.is_relative_to(existing_path) for existing_path in storage_mount_paths):
+            continue
+        if _written_by_other_workers(relative_path, worker_roots):
+            # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
+            logger.error(
+                "Refusing to mount knowledge inside a directory other sandbox workers write",
+                worker_key=worker_key,
+                path=str(relative_path),
+            )
             continue
         if collision := _first_overlapping_path(mount_path, storage_mount_paths):
             msg = (
@@ -1970,6 +1993,7 @@ class KubernetesResourceManager:
             mounted_storage_root=mounted_storage_root,
             existing_mounts=existing_mounts,
             worker_key=worker_key,
+            worker_roots=Path(self.config.storage_subpath_prefix),
         )
         return [
             {
@@ -2006,11 +2030,19 @@ class KubernetesResourceManager:
             raw_path = cast("Mapping[str, object]", raw_base).get("path")
             if not isinstance(raw_path, str):
                 continue
-            source_path = resolve_config_relative_path(raw_path, self.runtime_paths)
             try:
-                relative_paths.add(source_path.relative_to(self.storage_root))
+                relative_path = config_relative_path(raw_path, self.runtime_paths).relative_to(self.storage_root)
             except ValueError:
                 continue
+            try:
+                with open_directory_within_root(self.storage_root, relative_path):
+                    relative_paths.add(relative_path)
+            except (OSError, ValueError):
+                logger.warning(
+                    "Not mounting knowledge that is missing or reached through a link",
+                    knowledge_base=base_id,
+                    path=str(relative_path),
+                )
         ordered_paths = list(relative_paths)
         ordered_paths.sort(key=lambda path: path.as_posix())
         return tuple(ordered_paths)
