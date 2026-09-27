@@ -28,6 +28,7 @@ from agno.models.response import ModelResponse
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 from fastapi.testclient import TestClient
+from PIL import Image as PILImage
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
@@ -1016,44 +1017,6 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
     assert response.ok is True
     assert response.worker_path == "inputs/static.bin"
     assert (workspace_root / "inputs" / "static.bin").read_bytes() == payload_bytes
-
-
-@pytest.mark.asyncio
-async def test_sandbox_runner_save_attachment_resolves_agent_from_primary_config_snapshot(tmp_path: Path) -> None:
-    """Attachment saves for agents added after the runner's config was seeded use the primary's snapshot."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TEST_AUTH_TOKEN},
-    )
-    app = SimpleNamespace(
-        state=SimpleNamespace(
-            sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
-                runtime_paths=runtime_paths,
-                config=Config(models={}),
-                tool_metadata=TOOL_METADATA.copy(),
-                runner_token=_TEST_AUTH_TOKEN,
-            ),
-        ),
-    )
-    payload_bytes = b"live-agent"
-
-    response = await sandbox_runner_module.save_attachment_to_worker(
-        SimpleNamespace(app=app),
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
-            routing_agent_name="mind",
-            attachment_id="att_sample",
-            mindroom_output_path="inputs/live.bin",
-            sha256=hashlib.sha256(payload_bytes).hexdigest(),
-            size_bytes=len(payload_bytes),
-            bytes_b64=base64.b64encode(payload_bytes).decode("ascii"),
-            config_snapshot={"models": {}, "agents": {"mind": {"display_name": "Mind", "memory_backend": "file"}}},
-        ),
-    )
-
-    assert response.ok is True
-    workspace_root = agent_workspace_root_path(runtime_paths.storage_root, "mind")
-    assert (workspace_root / "inputs" / "live.bin").read_bytes() == payload_bytes
 
 
 @pytest.mark.asyncio
@@ -5128,12 +5091,11 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
         assert snapshot["models"]["default"] == {"provider": "openai", "id": "gpt-6-astra"}
 
 
-@pytest.mark.asyncio
-async def test_static_runner_runs_shell_for_agent_added_after_seeding(
+def _forward_proxy_to_seeded_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
-    """A proxied shell call for an agent missing from the runner's seed config runs in that agent's workspace."""
+) -> tuple[RuntimePaths, Path, list[dict[str, Any]]]:
+    """Forward the primary's proxy calls to a real runner app whose seed config lacks the live `mind` agent."""
     storage_root = tmp_path / "storage"
     seed_config_path = tmp_path / "seed" / "config.yaml"
     seed_config_path.parent.mkdir()
@@ -5152,10 +5114,6 @@ async def test_static_runner_runs_shell_for_agent_added_after_seeding(
         execution_mode="selective",
         proxy_tools={"shell"},
     )
-    live_config = _live_primary_config(primary_paths)
-    workspace = agent_workspace_root_path(storage_root, "mind")
-    (workspace / ".mindroom").mkdir(parents=True)
-    (workspace / ".mindroom" / "worker-env.sh").write_text("export MIND_HOOK=from-mind-workspace\n", encoding="utf-8")
     sent_payloads: list[dict[str, Any]] = []
 
     def forward_to_runner(url: str, payload: dict[str, Any]) -> object:
@@ -5171,21 +5129,36 @@ async def test_static_runner_runs_shell_for_agent_added_after_seeding(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(responder=forward_to_runner),
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-1",
-    )
+    return primary_paths, agent_workspace_root_path(storage_root, "mind"), sent_payloads
+
+
+_MIND_EXECUTION_IDENTITY = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="mind",
+    requester_id="@alice:example.org",
+    room_id="!room:example.org",
+    thread_id=None,
+    resolved_thread_id=None,
+    session_id="session-1",
+)
+
+
+@pytest.mark.asyncio
+async def test_static_runner_runs_shell_for_agent_added_after_seeding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A proxied shell call for an agent missing from the runner's seed config runs in that agent's workspace."""
+    primary_paths, workspace, sent_payloads = _forward_proxy_to_seeded_runner(monkeypatch, tmp_path)
+    live_config = _live_primary_config(primary_paths)
+    (workspace / ".mindroom").mkdir(parents=True)
+    (workspace / ".mindroom" / "worker-env.sh").write_text("export MIND_HOOK=from-mind-workspace\n", encoding="utf-8")
     tool = get_tool_by_name(
         "shell",
         primary_paths,
         runtime_config=live_config,
         tool_init_overrides={"base_dir": str(workspace)},
-        worker_target=_worker_target(primary_paths, None, "mind", identity),
+        worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
@@ -5195,6 +5168,56 @@ async def test_static_runner_runs_shell_for_agent_added_after_seeding(
 
     assert isinstance(result, str)
     assert result.endswith("from-mind-workspace")
+    assert "sk-live-model-key" not in json.dumps(sent_payloads)
+
+
+def test_static_runner_saves_attachment_for_agent_added_after_seeding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An attachment save for an agent missing from the runner's seed config lands in that agent's workspace."""
+    primary_paths, workspace, sent_payloads = _forward_proxy_to_seeded_runner(monkeypatch, tmp_path)
+    live_config = _live_primary_config(primary_paths)
+    payload_bytes = b"live-agent"
+
+    with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
+        receipt = sandbox_proxy_module.save_attachment_to_worker(
+            runtime_paths=primary_paths,
+            worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+            attachment_id="att_sample",
+            mindroom_output_path="inputs/live.bin",
+            payload_bytes=payload_bytes,
+            mime_type=None,
+            filename=None,
+        )
+
+    assert receipt is not None
+    assert (workspace / "inputs" / "live.bin").read_bytes() == payload_bytes
+    assert "config_snapshot" in sent_payloads[0]
+    assert "sk-live-model-key" not in json.dumps(sent_payloads)
+
+
+def test_static_runner_views_file_for_agent_added_after_seeding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file view for an agent missing from the runner's seed config reads from that agent's workspace."""
+    primary_paths, workspace, sent_payloads = _forward_proxy_to_seeded_runner(monkeypatch, tmp_path)
+    live_config = _live_primary_config(primary_paths)
+    workspace.mkdir(parents=True)
+    PILImage.new("RGB", (8, 6), "red").save(workspace / "plot.png", format="PNG")
+
+    with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
+        result = sandbox_proxy_module.view_file_from_worker(
+            runtime_paths=primary_paths,
+            worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+            path="plot.png",
+        )
+
+    assert result is not None
+    assert result.images is not None
+    assert result.images[0].mime_type == "image/png"
+    assert "config_snapshot" in sent_payloads[0]
     assert "sk-live-model-key" not in json.dumps(sent_payloads)
 
 

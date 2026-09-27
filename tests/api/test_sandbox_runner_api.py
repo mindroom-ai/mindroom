@@ -22,6 +22,7 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -2949,6 +2950,90 @@ def test_sandbox_runner_rejects_invalid_config_snapshot(
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every request carries the snapshot, so plugins missing from the runner are dropped without a log line per call."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = {**_primary_config_snapshot(), "plugins": ["./plugins/primary-only"]}
+
+    with capture_logs() as logs:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "routing_agent_name": "mind",
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_static_runner_relies_on_primary_private_template_from_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private template that exists only beside the primary's config does not fail the shared runner's calls."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="mind")
+    assert worker_key is not None
+    private_workspace_relative = f"private_instances/{worker_dir_name(worker_key)}/mind/mind_data"
+    snapshot = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "tools": ["shell"],
+                "private": {"per": "user", "template_dir": "./primary-only-template"},
+            },
+        },
+    }
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", "printf ok"]],
+            "execution_env": {"PATH": os.environ["PATH"]},
+            "worker_key": worker_key,
+            "worker_scope": "user",
+            "routing_agent_name": "mind",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["mind"],
+            "tool_init_overrides": {"base_dir": private_workspace_relative},
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=runtime_paths.storage_root / private_workspace_relative) == "ok"
 
 
 def test_sandbox_runner_applies_tool_init_overrides(

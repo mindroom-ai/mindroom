@@ -37,6 +37,19 @@ MindRoom currently ships three worker backend shapes:
 - `docker`: dedicated worker containers created on demand from the primary runtime, with one logical worker per worker key.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
 
+## Live config snapshots
+
+A runner's own config file holds only what it loaded at startup, and hosted deployments mount a seed config that never follows the live config the primary hot-reloads and the dashboard edits.
+With the `static_runner` and `kubernetes` backends, the primary therefore sends its live config with every execute, attachment-save, and file-view request.
+Before sending, it removes sensitive keys such as `api_key`, `password`, and names ending in `_token` or `_secret`, plus credential headers, with the same redaction the Docker worker projection applies.
+The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately and a stale startup config cannot widen an agent's settings.
+The runner rejects an invalid snapshot with HTTP 400 instead of falling back to its startup config.
+Requests without a snapshot, such as those from runtimes without a tool context, use the runner's startup config.
+Config-relative paths in the snapshot, such as knowledge base and plugin paths, still resolve against the runner's own config directory, and the runner skips plugins it cannot find there.
+Private `template_dir` paths belong to the primary, which validates them and seeds requester workspaces from them, so runners skip templates they cannot find.
+Plugin tool registration still uses the runner's startup config, so proxied plugin tools still need that config mounted into the runner.
+Docker workers get no request snapshot; they read a per-worker projection of the live config whose config-relative paths are rewritten for the container, as described in [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
+
 ## Where Agent Data Lives
 
 Each agent stores all its persistent data (context files, workspace files, memory, sessions, learning) in one directory: `agents/<name>/`.
@@ -151,9 +164,7 @@ The sidecar gets:
 - The sandbox proxy token that authenticates requests from the primary runtime.
 
 The hosted instance chart mounts only the seed ConfigMap into the sidecar, not the live config that the primary hot-reloads and the dashboard edits.
-The primary therefore sends its live config with every execute, attachment-save, and file-view request, after removing sensitive keys and credential headers the same way the Docker worker projection does.
-The runner resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from that snapshot, so agents added or changed after the pod started work immediately and a stale seed cannot widen an agent's settings.
-Requests without a snapshot, such as those from runtimes without a tool context, fall back to the runner's startup config.
+The sidecar resolves agents and their settings from the [live config snapshot](#live-config-snapshots) that the primary sends with each request, so agents added or changed after the pod started work immediately.
 
 The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
 It never receives the credentials-encryption key.
@@ -218,8 +229,7 @@ The sandbox-runner startup manifest lives in `.runtime` inside the worker's stat
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
 
-Dedicated Kubernetes workers receive the same per-request live config snapshot as the shared sidecar, because the hosted instance chart mounts only the seed ConfigMap into them.
-Docker workers get no request snapshot; they read their per-worker projection of the live config described below.
+Dedicated Kubernetes workers also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
 
@@ -640,6 +650,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
+- [Live config snapshots](#live-config-snapshots) carry no sensitive config keys or credential headers, and runners accept them only on requests authenticated with the sandbox token.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.

@@ -251,10 +251,10 @@ def _dedicated_worker_runtime_config_or_empty(
 
     if not tool_validation_snapshot:
         return load_config(runtime_paths)
-    return _primary_validated_config(data, runtime_paths)
+    return _primary_validated_config(data, runtime_paths, log_skipped_plugins=True)
 
 
-def _primary_validated_config(data: object, runtime_paths: RuntimePaths) -> Config:
+def _primary_validated_config(data: object, runtime_paths: RuntimePaths, *, log_skipped_plugins: bool) -> Config:
     """Validate config data the primary runtime already validated, as seen from this runner.
 
     Runners only need the authored config shape plus the subset of plugin
@@ -266,10 +266,15 @@ def _primary_validated_config(data: object, runtime_paths: RuntimePaths) -> Conf
         normalized_config_data(data),
         context={"runtime_paths": runtime_paths},
     )
-    return _config_with_available_plugins(config, runtime_paths)
+    return _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=log_skipped_plugins)
 
 
-def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) -> Config:
+def _config_with_available_plugins(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    log_skipped_plugins: bool,
+) -> Config:
     """Return one config snapshot filtered to plugin entries visible in this runtime."""
     if not config.plugins:
         return config
@@ -297,10 +302,11 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
     if not skipped_plugin_paths:
         return config
 
-    logger.info(
-        "sandbox_runner_skipping_unavailable_plugins",
-        plugin_paths=sorted(skipped_plugin_paths),
-    )
+    if log_skipped_plugins:
+        logger.info(
+            "sandbox_runner_skipping_unavailable_plugins",
+            plugin_paths=sorted(skipped_plugin_paths),
+        )
     return config.model_copy(update={"plugins": available_plugins})
 
 
@@ -623,12 +629,14 @@ def _request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None
 
     The runner's own config file is only a seed, so agents added or edited after
     seeding exist only in the snapshot the authenticated primary sends.
+    Plugins missing from this runner are skipped silently here, because every
+    request carries the snapshot and would otherwise repeat the same log line.
     """
     context = _app_context(app)
     if config_snapshot is None:
         return context.config
     try:
-        return _primary_validated_config(config_snapshot, context.runtime_paths)
+        return _primary_validated_config(config_snapshot, context.runtime_paths, log_skipped_plugins=False)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid config_snapshot: {exc}") from exc
 
@@ -1497,7 +1505,7 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
         )
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
-        config = _config_with_available_plugins(config, runtime_paths)
+        config = _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=True)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker in the returned response text.
