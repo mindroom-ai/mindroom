@@ -40,7 +40,7 @@ Reads through those descriptors are capped per surface.
 | Surface | Cap | Above the cap |
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
-| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; descriptions 1024 characters; 8 MiB of descriptions, instructions, and metadata and 256 skills per workspace | The file is refused, a longer description is truncated, and skills beyond the budget or count are skipped, each with a warning |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Delegation event logs | 4 MiB per event, 256 MiB per log | An event that would exceed either cap is refused before it is written, and a planted log above them makes the record unreadable; values above 64 KiB already move to artifacts |

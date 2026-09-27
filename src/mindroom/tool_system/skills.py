@@ -39,8 +39,10 @@ _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 _MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
 _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
-# Descriptions reach every system prompt, not only the skills a model opens.
+# Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
+_MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 _MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
+_MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -546,7 +548,7 @@ def _workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     """Return the regular files one workspace skill lists in ``dirname``, never following links."""
     try:
         with open_directory_within_root(skill_fd, dirname) as listing_fd:
-            return sorted(
+            names = sorted(
                 entry.name
                 for entry in os.scandir(listing_fd)
                 if not entry.name.startswith(".") and entry.is_file(follow_symlinks=False)
@@ -556,6 +558,9 @@ def _workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     except OSError as exc:
         logger.warning("Refused a linked workspace skill directory", dirname=dirname, error=type(exc).__name__)
         return []
+    if len(names) > _MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+        logger.warning("Listing only the first workspace skill files", dirname=dirname, found=len(names))
+    return names[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
 
 
 def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
@@ -575,12 +580,16 @@ def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
     if parsed is None:
         return None
     frontmatter, instructions = parsed
+    name = frontmatter.get("name", source_path.name)
+    if isinstance(name, str) and len(name) > _MAX_WORKSPACE_SKILL_NAME_CHARS:
+        logger.warning("Refused a workspace skill whose name is too long", path=str(source_path / _SKILL_FILENAME))
+        return None
     description = frontmatter.get("description", "")
     if isinstance(description, str) and len(description) > _MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
         logger.warning("Truncated a workspace skill description", path=str(source_path / _SKILL_FILENAME))
         description = description[:_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
     return Skill(
-        name=frontmatter.get("name", source_path.name),
+        name=name,
         description=description,
         instructions=instructions,
         source_path=str(source_path),
@@ -633,7 +642,8 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                     continue
                 if skill is None:
                     continue
-                loaded_bytes += len(f"{skill.description}{skill.instructions}{skill.metadata or ''}".encode())
+                prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
+                loaded_bytes += len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
                 if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
                     logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
                     break

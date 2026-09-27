@@ -952,3 +952,28 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
     assert skills is not None
     assert len(skills.get_system_prompt_snippet()) < 1 << 20
     assert any("description" in entry["event"] for entry in logs if entry["log_level"] == "warning")
+
+
+@pytest.mark.parametrize("oversized", ["names", "scripts"])
+def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Path, oversized: str) -> None:
+    """Names and script or reference listings reach every system prompt, so they are capped with a warning."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    if oversized == "names":
+        for index in range(20):
+            skill_dir = workspace_skills / f"skill-{index:02d}"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {'n' * (900 << 10)}{index}\ndescription: Named skill\n---\nbody\n",
+                encoding="utf-8",
+            )
+    else:
+        skill_dir = _write_skill(workspace_skills, "many-scripts", "Scripted skill").parent
+        (skill_dir / "scripts").mkdir()
+        for index in range(20_000):
+            (skill_dir / "scripts" / f"script-{index:05d}-{'s' * 150}.sh").touch()
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert skills is None or len(skills.get_system_prompt_snippet()) < 1 << 20
+    assert any(entry["log_level"] == "warning" for entry in logs)
