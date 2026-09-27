@@ -19,16 +19,22 @@ import yaml
 from mindroom import yaml_io
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, open_regular_file_within_root
 from mindroom.sensitivity import strip_sensitive_config_values
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     normalize_worker_key_part,
     resolve_agent_owned_path,
     resolved_worker_key_scope,
+    shared_storage_root,
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
+from mindroom.workers.backends._dedicated_worker_common import (
+    resolved_agent_policies_from_config_data,
+    written_by_other_workers,
+)
 from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -44,6 +50,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
+
+logger = get_logger(__name__)
 
 _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
@@ -201,21 +209,30 @@ def _remove_path(path: Path) -> None:
     path.unlink()
 
 
-def _copy_directory_tree(source_dir: Path, destination_dir: Path) -> None:
-    entries = iter_local_copy_source_entries(source_dir)
-    for source_path, relative_path in entries:
-        destination_path = destination_dir.joinpath(*relative_path.parts)
-        if source_path.is_dir():
-            destination_path.mkdir(parents=True, exist_ok=True)
-            continue
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
+def _copy_file_from(source_fd: int, destination: Path) -> None:
+    status = os.fstat(source_fd)
+    with os.fdopen(os.dup(source_fd), "rb") as source, destination.open("wb") as output:
+        shutil.copyfileobj(source, output)
+        os.fchmod(output.fileno(), _mode_bits(status.st_mode))
+        os.utime(output.fileno(), ns=(status.st_atime_ns, status.st_mtime_ns))
 
-    for source_path, relative_path in reversed(entries):
-        if not source_path.is_dir():
-            continue
-        destination_dir.joinpath(*relative_path.parts).chmod(_mode_bits(source_path.stat().st_mode))
-    destination_dir.chmod(_mode_bits(source_dir.stat().st_mode))
+
+def _copy_directory_tree(source_dir: Path, destination_dir: Path) -> None:
+    """Copy a validated tree through no-follow descriptors, so an entry swapped for a link is refused."""
+    directory_modes: list[tuple[Path, int]] = []
+    with open_directory_within_root(Path(source_dir.anchor), source_dir.relative_to(source_dir.anchor)) as root_fd:
+        for dirpath, _dirnames, filenames, dir_fd in os.fwalk(".", dir_fd=root_fd):
+            target = destination_dir / dirpath
+            target.mkdir(parents=True, exist_ok=True)
+            directory_modes.append((target, _mode_bits(os.fstat(dir_fd).st_mode)))
+            for name in sorted(filenames):
+                source_fd = open_regular_file_at(dir_fd, name)
+                try:
+                    _copy_file_from(source_fd, target / name)
+                finally:
+                    os.close(source_fd)
+    for target, mode in reversed(directory_modes):
+        target.chmod(mode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,13 +438,12 @@ class DockerProjectionManager:
                     _copy_directory_tree(resolved_asset_dir, placeholder_path)
                     continue
                 placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(
-                    validate_local_copy_source_path(
-                        asset.host_path,
-                        field_name="Docker worker asset",
-                    ),
-                    placeholder_path,
-                )
+                source_path = validate_local_copy_source_path(asset.host_path, field_name="Docker worker asset")
+                with open_regular_file_within_root(
+                    Path(source_path.anchor),
+                    source_path.relative_to(source_path.anchor),
+                ) as source_fd:
+                    _copy_file_from(source_fd, placeholder_path)
             (temp_root / _PROJECTION_READY_FILENAME).write_text("ready\n", encoding="utf-8")
             temp_root.replace(projection.root)
         except Exception:
@@ -728,14 +744,46 @@ class DockerProjectionManager:
             if not isinstance(raw_path, str) or not raw_path.strip():
                 continue
             host_path = config_relative_path(raw_path, self._runtime_paths)
+            projected_path = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id))
+            if not self._knowledge_source_projectable(base_id, host_path, storage_mounts):
+                # The worker sees an empty knowledge folder, as a Kubernetes worker without the mount does.
+                knowledge_base["path"] = _projected_config_value(projected_path)
+                continue
             knowledge_base["path"] = self._projected_path_value(
                 host_path,
-                PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
+                projected_path,
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
                 storage_mounts=storage_mounts,
             )
+
+    def _knowledge_source_projectable(
+        self,
+        base_id: str,
+        host_path: Path,
+        storage_mounts: Sequence[tuple[Path, str, bool]],
+    ) -> bool:
+        """Plan one knowledge source from its configured path, refusing what other workers could redirect."""
+        storage_root = shared_storage_root(self._runtime_paths.storage_root)
+        lexical_path = Path(os.path.normpath(host_path))
+        if not lexical_path.is_relative_to(storage_root) or any(
+            lexical_path.is_relative_to(local_root) for local_root, _worker_root, _read_only in storage_mounts
+        ):
+            return True
+        relative_path = lexical_path.relative_to(storage_root)
+        if written_by_other_workers(relative_path, Path("workers")):
+            logger.error("Refusing to project knowledge other sandbox workers write", knowledge_base=base_id)
+            return False
+        try:
+            with open_directory_within_root(storage_root, relative_path.parent) as parent_fd:
+                mode = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        except (OSError, ValueError):
+            mode = 0
+        if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+            return True
+        logger.warning("Not projecting knowledge that is missing or reached through a link", knowledge_base=base_id)
+        return False
 
     def _rewrite_projected_agent_paths(
         self,

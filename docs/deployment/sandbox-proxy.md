@@ -661,7 +661,8 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
   A workspace is mounted only when it is a real directory reached from the storage root without links; the primary creates missing shared workspaces without following links before the worker starts, and a private workspace becomes visible once the primary has materialized that instance.
   A `user` worker is recreated on its next use after another of the user's private agents materializes its workspace, which ends that worker's shells and sessions, and a missing or linked workspace is logged instead of mounted.
-  Kubernetes mounts assigned knowledge outside the workspace read-only only when it is a real directory outside other agents' workspaces, private instances, and worker roots; Docker copies such knowledge into the worker's read-only projected config snapshot instead, refreshed when its contents change.
+  Assigned knowledge outside the workspace is planned from its configured path and used only when it is a real directory or file outside other agents' workspaces, private instances, and worker roots; Kubernetes mounts it read-only, and Docker copies it through no-follow descriptors into the worker's read-only projected config snapshot, refreshed when its contents change.
+  A refused, missing, or linked source is logged, and the worker sees an empty knowledge folder.
   A worker asked to work in an agent workspace its pod does not mount answers with a request error, and the next ensure mounts the workspace.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 

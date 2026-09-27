@@ -28,7 +28,7 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them.
 Sessions, memory, learning, Mem0 data, private-instance identity records, and every other agent's workspace stay out of the worker.
 A workspace is mounted only when it is a real directory reached from the storage root without links.
-On Kubernetes, assigned knowledge outside the workspace is mounted read-only only when it is a real directory outside every directory other workers write, because kubelet follows links inside the volume when it mounts.
+Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 The primary treats everything inside a mounted workspace as worker-controlled.
 Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files atomically or create them exclusively without hard links.
 Reads through those descriptors stop at 64 MiB, and each surface handles a larger file as follows.
@@ -80,7 +80,6 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) confine paths lexically and then walk and read by path, so when an operator routes these tools to the primary process while worker code shares the workspace, a planted link can make them list or read another directory, and a planted FIFO can block them; they run in a worker by default, where worker code already shares their trust.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path, so worker code that swaps the knowledge folder for a link in the window between that check and the Git command can still redirect one sync.
-- The Docker backend hashes and copies knowledge and other config-relative assets into each worker's projected snapshot by path, so a source inside another agent's workspace can be replaced with a link that the copy follows; Kubernetes refuses such sources.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors

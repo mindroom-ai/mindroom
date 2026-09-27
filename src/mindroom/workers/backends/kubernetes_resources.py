@@ -56,6 +56,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
+    written_by_other_workers,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState, mark_worker_idle
 from mindroom.workers.backends.kubernetes_config import (
@@ -632,16 +633,6 @@ def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | 
     )
 
 
-def _written_by_other_workers(relative_path: Path, worker_roots: Path) -> bool:
-    """Return whether workers other than one being planned can write below this storage path."""
-    parts = relative_path.parts
-    return (
-        relative_path.is_relative_to(worker_roots)
-        or parts[:1] == ("private_instances",)
-        or (parts[:1] == ("agents",) and parts[2:3] == ("workspace",))
-    )
-
-
 def _plan_knowledge_storage_mounts(
     relative_paths: tuple[Path, ...],
     *,
@@ -671,7 +662,7 @@ def _plan_knowledge_storage_mounts(
             raise WorkerBackendError(msg)
         if any(mount_path.is_relative_to(existing_path) for existing_path in storage_mount_paths):
             continue
-        if _written_by_other_workers(relative_path, worker_roots):
+        if written_by_other_workers(relative_path, worker_roots):
             # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
             logger.error(
                 "Refusing to mount knowledge inside a directory other sandbox workers write",

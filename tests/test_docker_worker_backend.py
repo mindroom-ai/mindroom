@@ -19,6 +19,7 @@ from uuid import UUID
 import httpx
 import pytest
 import yaml
+from structlog.testing import capture_logs
 
 from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH
 from mindroom.agents import _load_context_files
@@ -50,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import runtime as worker_runtime
 from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import docker_projection as docker_projection_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     _WORKER_CONTROL_DIRNAME,
@@ -1872,6 +1874,101 @@ models:
     ) == "# Runtime Guide\n"
     assert volumes[str(runtime_storage / "agents/code/workspace")]["bind"] == "/app/worker/agents/code/workspace"
     assert context_file.read_text(encoding="utf-8") == "# Runtime Context\n"
+
+
+_KNOWLEDGE_CONFIG = """
+knowledge_bases:
+  docs:
+    path: ${{MINDROOM_STORAGE_PATH}}/{source}
+agents:
+  code:
+    display_name: Code
+    knowledge_bases: [docs]
+  other:
+    display_name: Other
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "planted"),
+    [
+        ("agents/other/workspace/docs", "link"),
+        ("agents/other/workspace/docs", "directory"),
+        ("private_instances/someone/docs", "directory"),
+        ("workers/other/docs", "directory"),
+        ("knowledge/docs", "link"),
+    ],
+)
+def test_docker_projection_never_copies_knowledge_another_worker_could_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    planted: str,
+) -> None:
+    """Knowledge is projected from its configured path: never through a link, never from what other workers write."""
+    storage = tmp_path / "storage"
+    victim = storage / "private_instances" / "victim" / "data"
+    victim.mkdir(parents=True)
+    (victim / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    docs = storage / source
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    if planted == "link":
+        docs.symlink_to(victim, target_is_directory=True)
+    else:
+        docs.mkdir()
+        (docs / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_KNOWLEDGE_CONFIG.format(source=source),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+
+    with capture_logs() as logs:
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    projection_root = _projection_root(_volumes_by_source(fake_client.containers.run_calls[0]["volumes"]))
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in (projection_root / "config.yaml").read_text()
+    assert not any("victim-only" in path.read_text() for path in projection_root.rglob("*.md"))
+    assert any(entry["log_level"] in {"warning", "error"} and "knowledge" in entry["event"] for entry in logs)
+
+
+def test_docker_projection_copy_refuses_an_entry_swapped_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected assets are copied through no-follow descriptors, so a file swapped for a link is never copied."""
+    storage = tmp_path / "storage"
+    docs = storage / "knowledge" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    victim = tmp_path / "victim.md"
+    victim.write_text("victim-only note\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_KNOWLEDGE_CONFIG.format(source="knowledge/docs"),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+    validate = docker_projection_module.validate_local_copy_source_dir
+
+    def validate_then_swap(source_dir: Path, **kwargs: object) -> Path:
+        validated = validate(source_dir, **kwargs)
+        if validated.name == "docs":
+            (docs / "guide.md").unlink()
+            (docs / "guide.md").symlink_to(victim)
+        return validated
+
+    monkeypatch.setattr(docker_projection_module, "validate_local_copy_source_dir", validate_then_swap)
+
+    with pytest.raises((WorkerBackendError, OSError, ValueError)):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert not any("victim-only" in path.read_text() for path in storage.rglob("guide.md") if not path.is_symlink())
 
 
 def test_docker_backend_rejects_symlinked_projected_directory_assets(
