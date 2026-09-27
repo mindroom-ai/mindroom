@@ -98,9 +98,10 @@ def open_directory_within_root(
 
     A supplied root descriptor is borrowed, never closed. A supplied root path
     must already be trusted, with trusted ancestors; its final entry cannot be
-    a symlink. Directory creation is relative to each pinned parent. Symlink
-    swaps cannot redirect traversal; arbitrary directory renames and hard links
-    require the caller's storage ownership/isolation policy.
+    a symlink. Directory creation is relative to each pinned parent, which is
+    synced after it gains a new entry. Symlink swaps cannot redirect traversal;
+    arbitrary directory renames and hard links require the caller's storage
+    ownership/isolation policy.
     """
     parts = _relative_parts(relative_path)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -108,8 +109,13 @@ def open_directory_within_root(
     try:
         for part in parts:
             if create:
-                with suppress(FileExistsError):
+                try:
                     os.mkdir(part, mode=mode, dir_fd=directory)
+                except FileExistsError:
+                    pass
+                else:
+                    with suppress(OSError):
+                        os.fsync(directory)
             child = os.open(part, flags, dir_fd=directory)
             os.close(directory)
             directory = child

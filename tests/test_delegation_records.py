@@ -604,15 +604,22 @@ def test_locator_rejects_malformed_present_execution_identity() -> None:
 
 
 @pytest.mark.parametrize(
-    "leaf_name",
-    ["run.json", "events.jsonl", "transcript.md", ".record.lock", "receipt"],
+    ("leaf_name", "refusal"),
+    [
+        ("run.json", ValueError),
+        ("events.jsonl", ValueError),
+        ("transcript.md", None),
+        (".record.lock", OSError),
+        ("receipt", ValueError),
+    ],
 )
 @pytest.mark.asyncio
-async def test_record_mutation_rejects_symlinked_leaf(
+async def test_record_mutation_never_follows_a_symlinked_leaf(
     leaf_name: str,
+    refusal: type[Exception] | None,
     tmp_path: Path,
 ) -> None:
-    """A writable record leaf must never escape its resolved workspace through a symlink."""
+    """A record leaf replaced by a link is refused or replaced, never read or written through."""
     module = _records_module()
     owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     handle = await owner.start(
@@ -624,7 +631,7 @@ async def test_record_mutation_rejects_symlinked_leaf(
     target = handle.receipt_path if leaf_name == "receipt" else handle.record_dir / leaf_name
     target.unlink()
     outside = tmp_path / f"outside-{leaf_name.replace('.', 'dot')}"
-    outside.write_text("{}\n", encoding="utf-8")
+    outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     target.symlink_to(outside)
 
     async def mutate_record() -> None:
@@ -640,8 +647,64 @@ async def test_record_mutation_rejects_symlinked_leaf(
             ),
         )
 
-    with pytest.raises(ValueError, match="stay within"):
+    if refusal is None:
         await mutate_record()
+        assert not target.is_symlink()
+        assert "blocked" in target.read_text(encoding="utf-8")
+    else:
+        with pytest.raises(refusal):
+            await mutate_record()
+    assert outside.read_text(encoding="utf-8") == '{"victim": "victim-only note"}\n'
+    record_bytes = b"".join(
+        path.read_bytes() for path in handle.record_dir.rglob("*") if path.is_file() and not path.is_symlink()
+    )
+    assert b"victim-only note" not in record_bytes
+
+
+@pytest.mark.parametrize("swapped", ["record_dir", "delegations_root", "events_fifo"])
+@pytest.mark.asyncio
+async def test_record_mutation_refuses_swapped_record_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swapped: str,
+) -> None:
+    """A record directory or ancestor swapped for a link after validation, or a FIFO log, is refused."""
+    module = _records_module()
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+        delegation_id=f"swap-{swapped.replace('_', '-')}",
+    )
+    victim = tmp_path / "victim-workspace" / "record"
+    victim.mkdir(parents=True)
+    (victim / "events.jsonl").write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
+    victim_tree = victim.parent
+    before = {path: path.read_bytes() if path.is_file() else None for path in victim_tree.rglob("*")}
+    validated_handle = module.DelegationRecordOwner._validated_handle
+
+    def swap_after_validation(self: object, record_handle: object) -> object:
+        # Worker code races the primary between path validation and the record I/O.
+        validated = validated_handle(self, record_handle)
+        if swapped == "record_dir":
+            handle.record_dir.rename(handle.record_dir.with_name("moved"))
+            handle.record_dir.symlink_to(victim, target_is_directory=True)
+        elif swapped == "delegations_root":
+            delegations = handle.record_dir.parents[1]
+            delegations.rename(delegations.with_name("moved"))
+            delegations.symlink_to(victim.parent, target_is_directory=True)
+        else:
+            (handle.record_dir / "events.jsonl").unlink()
+            os.mkfifo(handle.record_dir / "events.jsonl")
+        return validated
+
+    monkeypatch.setattr(module.DelegationRecordOwner, "_validated_handle", swap_after_validation)
+    with pytest.raises((OSError, ValueError)):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "attacker"}))
+
+    assert {path: path.read_bytes() if path.is_file() else None for path in victim_tree.rglob("*")} == before
 
 
 @pytest.mark.asyncio
@@ -659,7 +722,7 @@ async def test_oversized_artifact_rejects_symlinked_directory(tmp_path: Path) ->
     outside.mkdir()
     (handle.record_dir / "artifacts").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="stay within"):
+    with pytest.raises(OSError, match=r"Not a directory|Too many levels"):
         await owner.append_event(
             handle,
             module.DelegationEvent(
@@ -668,6 +731,7 @@ async def test_oversized_artifact_rejects_symlinked_directory(tmp_path: Path) ->
                 data={"result": "x" * 100_000},
             ),
         )
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.asyncio

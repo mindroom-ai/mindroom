@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import os
+import stat
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ __all__ = [
     "InheritedFileLockCapability",
     "acquire_shared_file_lock",
     "advisory_file_lock",
+    "advisory_file_lock_at",
     "async_exclusive_file_lock",
     "current_inherited_file_lock",
     "expose_inherited_file_lock",
@@ -73,6 +76,28 @@ def current_inherited_file_lock() -> InheritedFileLockCapability | None:
 def _open_lock_file(lock_path: Path) -> TextIO:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     return lock_path.open("a", encoding="utf-8")
+
+
+@contextmanager
+def advisory_file_lock_at(directory_fd: int, filename: str) -> Iterator[None]:
+    """Acquire a blocking exclusive lock on one file in an open directory without following a link there."""
+    descriptor = os.open(
+        filename,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            msg = f"Lock file must be a regular file: {filename}"
+            raise ValueError(msg)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager

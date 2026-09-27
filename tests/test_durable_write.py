@@ -13,7 +13,6 @@ from mindroom import durable_write
 from mindroom.durable_write import (
     create_directory_durable,
     load_cached_override_records,
-    replace_file_durable,
     write_json_file_durable,
 )
 
@@ -105,7 +104,7 @@ def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyP
     fsynced: list[Path] = []
     monkeypatch.setattr(durable_write, "fsync_directory_durable", fsynced.append)
 
-    replace_file_durable(source, target)
+    durable_write._replace_file_durable(source, target)
 
     assert target.read_text(encoding="utf-8") == "new"
     assert not source.exists()

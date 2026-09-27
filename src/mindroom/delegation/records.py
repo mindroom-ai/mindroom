@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.durable_write import (
-    create_directory_durable,
-    replace_file_durable,
-    write_json_file_durable,
-)
-from mindroom.file_locks import advisory_file_lock
+from mindroom.file_locks import advisory_file_lock_at
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import (
@@ -32,7 +30,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import resolve_agent_workspace_from_state_path, resolve_workspace_relative_path
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -57,6 +55,10 @@ _SCHEMA_VERSION = 1
 _DELEGATION_DIRECTORY = Path(".mindroom/delegations")
 _RECEIPT_DIRECTORY = Path(".mindroom/delegation_receipts")
 _MAX_INLINE_VALUE_BYTES = 64 * 1024
+# Agent code can write the workspace that holds records, so record files are read
+# through bounded no-follow descriptors and published atomically beside them.
+_MAX_RECORD_FILE_BYTES = 64 << 20
+_LOCK_FILENAME = ".record.lock"
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 
@@ -155,6 +157,8 @@ class DelegationRecordHandle:
     record_dir: Path
     receipt_path: Path
     scoped_path: str
+    child_workspace: Path
+    caller_workspace: Path
 
     @property
     def _record_reference(self) -> str:
@@ -257,11 +261,8 @@ class DelegationRecordOwner:
             child_execution_identity=child_execution_identity,
         )
         handle = self._resolve_handle(locator)
-        create_directory_durable(handle.record_dir.parent, mode=0o700)
-        create_directory_durable(handle.record_dir, mode=0o700)
-        with advisory_file_lock(_lock_path(handle)):
-            run_path = _record_file(handle, "run.json")
-            if run_path.exists():
+        with _record_directory(handle, create=True) as record_fd, advisory_file_lock_at(record_fd, _LOCK_FILENAME):
+            if _record_entry_exists(record_fd, "run.json"):
                 msg = f"Delegation record already exists: {resolved_id}"
                 raise FileExistsError(msg)
             run = cast(
@@ -283,7 +284,7 @@ class DelegationRecordOwner:
                     },
                 ),
             )
-            _write_run(run_path, run)
+            _write_run(record_fd, run)
             event = _event_payload(
                 sequence=1,
                 timestamp=timestamp,
@@ -292,34 +293,33 @@ class DelegationRecordOwner:
                 status="running",
                 event_id="delegation_started",
             )
-            _append_jsonl(_record_file(handle, "events.jsonl"), event)
+            _append_jsonl(handle, record_fd, event)
             run["event_count"] = 1
-            _write_run(run_path, run)
-            _write_transcript(handle, run)
-            _write_receipt(handle, run)
+            _write_record_views(handle, record_fd, run)
         return handle
 
     def _reopen(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         handle = self._resolve_handle(locator)
-        run = _load_run(handle)
+        with _record_directory(handle) as record_fd:
+            run = _load_run(handle, record_fd)
         _validate_run_identity(run, locator)
         return handle
 
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
-        with advisory_file_lock(_lock_path(handle)):
-            run = _load_run(handle)
+        with _record_directory(handle) as record_fd, advisory_file_lock_at(record_fd, _LOCK_FILENAME):
+            run = _load_run(handle, record_fd)
             _validate_run_identity(run, handle.locator)
-            events = _load_events(_record_file(handle, "events.jsonl"))
+            events = _load_events(handle, record_fd)
             _apply_event_log(run, events)
             if event.event_id is not None and any(existing.get("event_id") == event.event_id for existing in events):
-                _write_record_views(handle, run)
+                _write_record_views(handle, record_fd, run)
                 return
             _ensure_active(run)
-            sequence = _next_sequence(handle)
+            sequence = _next_sequence(handle, events)
             timestamp = event.timestamp or _utc_timestamp()
             redacted_data = _redacted_event_data(
-                handle,
+                record_fd,
                 sequence=sequence,
                 data=event.data,
             )
@@ -331,14 +331,12 @@ class DelegationRecordOwner:
                 status=event.status,
                 event_id=event.event_id,
             )
-            _append_jsonl(_record_file(handle, "events.jsonl"), payload)
+            _append_jsonl(handle, record_fd, payload)
             run["event_count"] = sequence
             run["updated_at"] = timestamp
             if event.status is not None:
                 run["status"] = event.status
-            _write_run(_record_file(handle, "run.json"), run)
-            _write_transcript(handle, run)
-            _write_receipt(handle, run)
+            _write_record_views(handle, record_fd, run)
 
     def _finish(
         self,
@@ -353,19 +351,19 @@ class DelegationRecordOwner:
             msg = f"Invalid delegation terminal status: {status}"
             raise ValueError(msg)
         handle = self._validated_handle(handle)
-        with advisory_file_lock(_lock_path(handle)):
-            run = _load_run(handle)
+        with _record_directory(handle) as record_fd, advisory_file_lock_at(record_fd, _LOCK_FILENAME):
+            run = _load_run(handle, record_fd)
             _validate_run_identity(run, handle.locator)
-            events = _load_events(_record_file(handle, "events.jsonl"))
+            events = _load_events(handle, record_fd)
             _apply_event_log(run, events)
             if run.get("status") == status:
-                _write_record_views(handle, run)
+                _write_record_views(handle, record_fd, run)
                 return
             _ensure_active(run)
-            sequence = _next_sequence(handle)
+            sequence = _next_sequence(handle, events)
             timestamp = _utc_timestamp()
             terminal_data = _redacted_event_data(
-                handle,
+                record_fd,
                 sequence=sequence,
                 data={
                     "status": status,
@@ -382,7 +380,7 @@ class DelegationRecordOwner:
                 status=None,
                 event_id="delegation_finished",
             )
-            _append_jsonl(_record_file(handle, "events.jsonl"), event)
+            _append_jsonl(handle, record_fd, event)
             run.update(
                 {
                     "status": status,
@@ -394,9 +392,7 @@ class DelegationRecordOwner:
                     "event_count": sequence,
                 },
             )
-            _write_run(_record_file(handle, "run.json"), run)
-            _write_transcript(handle, run)
-            _write_receipt(handle, run)
+            _write_record_views(handle, record_fd, run)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
@@ -421,7 +417,7 @@ class DelegationRecordOwner:
         )
         receipt_path = resolve_workspace_relative_path(
             caller_workspace,
-            _RECEIPT_DIRECTORY / started_date / f"{delegation_id}.json",
+            _receipt_relative_path(locator),
             field_name="Delegation receipt",
         )
         return DelegationRecordHandle(
@@ -429,6 +425,8 @@ class DelegationRecordOwner:
             record_dir=record_dir,
             receipt_path=receipt_path,
             scoped_path=scoped_path.as_posix(),
+            child_workspace=child_workspace,
+            caller_workspace=caller_workspace,
         )
 
     def _validated_handle(self, handle: DelegationRecordHandle) -> DelegationRecordHandle:
@@ -518,43 +516,59 @@ def _utc_timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _lock_path(handle: DelegationRecordHandle) -> Path:
-    return _record_file(handle, ".record.lock")
+def _receipt_relative_path(locator: DelegationRecordLocator) -> Path:
+    return _RECEIPT_DIRECTORY / _validated_date(locator.started_date) / f"{_validated_id(locator.delegation_id)}.json"
 
 
-def _record_file(handle: DelegationRecordHandle, name: str) -> Path:
-    return resolve_workspace_relative_path(
-        handle.record_dir,
-        name,
-        field_name=f"Delegation record {name}",
-    )
+@contextmanager
+def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -> Iterator[int]:
+    """Pin the record directory by a no-follow walk from the child workspace."""
+    if create:
+        handle.child_workspace.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700) as record_fd:
+        yield record_fd
 
 
-def _write_run(path: Path, run: Mapping[str, object]) -> None:
-    write_json_file_durable(
-        path,
-        run,
-        strict_atomic_replace=True,
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
+def _record_entry_exists(record_fd: int, filename: str) -> bool:
+    try:
+        os.stat(filename, dir_fd=record_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
 
 
-def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
+def _read_record_file(record_fd: int, filename: str) -> bytes:
+    return read_regular_file_within_root(record_fd, filename, max_bytes=_MAX_RECORD_FILE_BYTES)
+
+
+def _json_bytes(payload: object) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _write_run(record_fd: int, run: Mapping[str, object]) -> None:
+    atomic_write_bytes_at(record_fd, "run.json", _json_bytes(run))
+
+
+def _append_jsonl(handle: DelegationRecordHandle, record_fd: int, payload: Mapping[str, object]) -> None:
     # These exports already rebuild their transcript after every event. Publish
     # the log atomically too, so a crash cannot leave an unreadable partial line.
-    previous = path.read_text(encoding="utf-8") if path.exists() else ""
-    _write_text_file_durable(path, previous + json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _load_run(handle: DelegationRecordHandle) -> dict[str, _JsonValue]:
-    path = _record_file(handle, "run.json")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        previous = _read_record_file(record_fd, "events.jsonl")
+    except FileNotFoundError:
+        previous = b""
+    except (OSError, ValueError) as exc:
+        msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
+        raise ValueError(msg) from exc
+    line = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    atomic_write_bytes_at(record_fd, "events.jsonl", previous + line.encode("utf-8"))
+
+
+def _load_run(handle: DelegationRecordHandle, record_fd: int) -> dict[str, _JsonValue]:
+    try:
+        payload = json.loads(_read_record_file(record_fd, "run.json").decode("utf-8"))
     except FileNotFoundError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         msg = f"Delegation record is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
     if not isinstance(payload, dict):
@@ -593,8 +607,7 @@ def _ensure_active(run: Mapping[str, object]) -> None:
         raise ValueError(msg)
 
 
-def _next_sequence(handle: DelegationRecordHandle) -> int:
-    events = _load_events(_record_file(handle, "events.jsonl"))
+def _next_sequence(handle: DelegationRecordHandle, events: list[dict[str, object]]) -> int:
     if not events:
         return 1
     sequence = events[-1].get("sequence")
@@ -604,15 +617,16 @@ def _next_sequence(handle: DelegationRecordHandle) -> int:
     return sequence + 1
 
 
-def _load_events(path: Path) -> list[dict[str, object]]:
+def _load_events(handle: DelegationRecordHandle, record_fd: int) -> list[dict[str, object]]:
     try:
-        with path.open(encoding="utf-8") as stream:
+        # Iterate exactly like a text file so Unicode separators inside JSON strings stay within one event.
+        with io.TextIOWrapper(io.BytesIO(_read_record_file(record_fd, "events.jsonl")), encoding="utf-8") as stream:
             events = [json.loads(line) for line in stream]
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        msg = f"Delegation event stream is unreadable: {path.parent.name}"
+    except (OSError, ValueError) as exc:
+        msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
     if not all(isinstance(event, dict) for event in events):
-        msg = f"Delegation event stream is malformed: {path.parent.name}"
+        msg = f"Delegation event stream is malformed: {handle.locator.delegation_id}"
         raise ValueError(msg)
     return cast("list[dict[str, object]]", events)
 
@@ -674,16 +688,17 @@ def _apply_event_log(
 
 def _write_record_views(
     handle: DelegationRecordHandle,
+    record_fd: int,
     run: Mapping[str, object],
 ) -> None:
     """Rewrite the run summary and both readable projections."""
-    _write_run(_record_file(handle, "run.json"), run)
-    _write_transcript(handle, run)
+    _write_run(record_fd, run)
+    _write_transcript(handle, record_fd, run)
     _write_receipt(handle, run)
 
 
 def _redacted_event_data(
-    handle: DelegationRecordHandle,
+    record_fd: int,
     *,
     sequence: int,
     data: Mapping[str, object],
@@ -699,18 +714,8 @@ def _redacted_event_data(
             continue
         artifact_name = f"{sequence:06d}-{index:02d}-{_safe_artifact_label(field_name)}.json"
         artifact_relative_path = Path("artifacts") / artifact_name
-        artifact_path = resolve_workspace_relative_path(
-            handle.record_dir,
-            artifact_relative_path,
-            field_name="Delegation output artifact",
-        )
-        create_directory_durable(artifact_path.parent, mode=0o700)
-        write_json_file_durable(
-            artifact_path,
-            value,
-            strict_atomic_replace=True,
-            sort_keys=True,
-        )
+        with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
+            atomic_write_bytes_at(artifacts_fd, artifact_name, encoded)
         materialized[field_name] = {
             "artifact_path": artifact_relative_path.as_posix(),
             "byte_count": len(encoded),
@@ -741,23 +746,23 @@ def _write_receipt(
         "updated_at": run["updated_at"],
         "finished_at": run["finished_at"],
     }
-    create_directory_durable(handle.receipt_path.parent.parent, mode=0o700)
-    create_directory_durable(handle.receipt_path.parent, mode=0o700)
-    write_json_file_durable(
-        handle.receipt_path,
-        redact_sensitive_data(receipt),
-        strict_atomic_replace=True,
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
+    relative_receipt = _receipt_relative_path(handle.locator)
+    handle.caller_workspace.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(
+        handle.caller_workspace,
+        relative_receipt.parent,
+        create=True,
+        mode=0o700,
+    ) as receipt_dir_fd:
+        atomic_write_bytes_at(receipt_dir_fd, relative_receipt.name, _json_bytes(redact_sensitive_data(receipt)))
 
 
 def _write_transcript(
     handle: DelegationRecordHandle,
+    record_fd: int,
     run: Mapping[str, object],
 ) -> None:
-    events = _load_events(_record_file(handle, "events.jsonl"))
+    events = _load_events(handle, record_fd)
     lines = [
         f"# Delegation {run['delegation_id']}",
         "",
@@ -792,25 +797,4 @@ def _write_transcript(
     text = "\n".join(lines)
     if not text.endswith("\n"):
         text += "\n"
-    _write_text_file_durable(_record_file(handle, "transcript.md"), text)
-
-
-def _write_text_file_durable(path: Path, text: str) -> None:
-    temp_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f"{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        replace_file_durable(temp_path, path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
+    atomic_write_bytes_at(record_fd, "transcript.md", text.encode("utf-8"))
