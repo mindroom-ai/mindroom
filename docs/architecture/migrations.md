@@ -68,6 +68,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
+| [`src/mindroom/workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts], with [`docker.py`][docker-worker-backend] and [`kubernetes_resources.py`][kubernetes-worker-resources] | Primary startup finds a running Kubernetes worker Deployment without the `mindroom.ai/storage-layout` annotation or a Docker worker container without that label, created when workers mounted whole agent state roots. | Kubernetes scales such Deployments to zero and Docker removes such containers, addressed only by the runtime's ownership labels, so the next ensure recreates them with workspace-only mounts; a failing backend API is logged and never blocks startup. A bounded scan then warns, without following or changing anything, about symlinks above workspaces and hard links leaving them. |
 
 ## Python provenance and regression coverage
 
@@ -104,6 +105,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
+| [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, logged API failures, and link and hard-link reports that leave storage unchanged; [Docker worker tests][docker-worker-tests] and [Kubernetes worker tests][kubernetes-worker-tests] stop only unmarked running workers. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -273,6 +275,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [desktop-journal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_desktop_command_journal.py
 [attachment-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_attachments.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
+[docker-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/docker.py
 [docker-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_docker_worker_backend.py
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
@@ -289,6 +292,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
+[kubernetes-worker-resources]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes_resources.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
@@ -297,6 +301,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
+[legacy-state-root-mounts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_state_root_mounts.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
 [legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
@@ -366,6 +371,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
 [legacy-revision-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_revision_replay.py
 [legacy-compaction-state-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_compaction_state.py
+[legacy-state-root-mounts-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_state_root_mounts.py
 [compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py

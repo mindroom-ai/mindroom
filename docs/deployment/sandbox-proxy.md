@@ -133,7 +133,7 @@ Key differences from the primary MindRoom runtime:
 > **Filesystem isolation depends on the worker backend.**
 > Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner.
 > Local in-process execution still shares the primary process filesystem.
-> Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes).
+> Dedicated Docker and Kubernetes workers mount only agent workspaces, so each runtime only sees its own agent's workspace (for `shared`, `user_agent`, and unscoped modes) and never the sessions, memory, or learning data stored beside it.
 > The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files.
 > Use `user_agent` for per-agent filesystem isolation.
 
@@ -212,6 +212,8 @@ This leaves same-worker token exposure as a local containment risk, while per-wo
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts: Kubernetes scales their Deployments to zero and Docker removes their containers, so the next use recreates them with workspace-only mounts.
+Startup then logs warnings, without changing anything, for symlinks above a workspace and hard links leaving one, which code in those older workers could have planted; review and remove the listed paths by hand.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
 
@@ -633,7 +635,11 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
+- With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
+  `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
+  `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces, since it shares one runtime across those agents, and never mounts agents on other scopes.
+  Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
+  A workspace is mounted only when it is a real directory reached from the storage root without links; the primary creates missing shared workspaces without following links before the worker starts, and a private workspace becomes visible once the primary has materialized that instance.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints

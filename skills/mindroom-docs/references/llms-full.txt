@@ -2852,13 +2852,13 @@ Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 
-- **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space.
+- **Kubernetes and Docker dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's workspace plus its worker-local scratch space; the agent's sessions, memory, and learning data stay with the primary.
   This is the strongest isolation available today.
-- **Kubernetes dedicated workers** (`user`): the runtime can see the storage of every non-private agent that resolves to `worker_scope: user`, plus that user's own private-instance namespace, because `user` mode intentionally shares one runtime across that user's agents.
+- **Kubernetes and Docker dedicated workers** (`user`): the runtime can see the workspaces of every non-private agent that resolves to `worker_scope: user`, plus that user's own private workspaces, because `user` mode intentionally shares one runtime across that user's agents.
   It never mounts agents on `shared`, `user_agent`, or unscoped execution, so their sessions, memory, and workspaces stay out of reach.
-  It still mounts every `worker_scope: user` agent, including that agent's sessions from other requesters, even when this requester may not use all of them.
+  It still mounts every `worker_scope: user` agent's shared workspace, including files other requesters leave there, even when this requester may not use all of them.
   Treat this as a shared workstation.
-  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside the allowed state roots or worker root`).
+  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside a visible workspace or the worker root`).
   Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so Kubernetes and Docker recreate those workers on their next use.
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
@@ -13118,7 +13118,7 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 ## Worker And Network Requirements
 
 The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
-New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from their configured worker-state root.
+New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from the agent workspace mounted into them.
 Existing Kubernetes script workers can keep their launch image across primary upgrades when the script protocol version and worker authority remain compatible.
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
@@ -16778,7 +16778,7 @@ If a checkout already holds a credential-bearing remote from before this check e
 #### Checkout layout
 
 The knowledge folder holds the checked-out files only.
-Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every state root a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every workspace a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
 Git runs programs that repository metadata names (`core.fsmonitor`, hooks, filters, credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file.
 Knowledge Git commands also disable those programs, read no system or global Git configuration, and receive a minimal environment without MindRoom secrets; configure proxies, CA bundles and SSH through environment variables or `~/.ssh/config`, and credentials through `credentials_service`.
 
@@ -20870,6 +20870,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
+| [`src/mindroom/workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts], with [`docker.py`][docker-worker-backend] and [`kubernetes_resources.py`][kubernetes-worker-resources] | Primary startup finds a running Kubernetes worker Deployment without the `mindroom.ai/storage-layout` annotation or a Docker worker container without that label, created when workers mounted whole agent state roots. | Kubernetes scales such Deployments to zero and Docker removes such containers, addressed only by the runtime's ownership labels, so the next ensure recreates them with workspace-only mounts; a failing backend API is logged and never blocks startup. A bounded scan then warns, without following or changing anything, about symlinks above workspaces and hard links leaving them. |
 
 ## Python provenance and regression coverage
 
@@ -20906,6 +20907,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
+| [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, logged API failures, and link and hard-link reports that leave storage unchanged; [Docker worker tests][docker-worker-tests] and [Kubernetes worker tests][kubernetes-worker-tests] stop only unmarked running workers. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -21075,6 +21077,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [desktop-journal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_desktop_command_journal.py
 [attachment-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_attachments.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
+[docker-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/docker.py
 [docker-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_docker_worker_backend.py
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
@@ -21091,6 +21094,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
+[kubernetes-worker-resources]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes_resources.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
@@ -21099,6 +21103,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
+[legacy-state-root-mounts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_state_root_mounts.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
 [legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
@@ -21168,6 +21173,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
 [legacy-revision-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_revision_replay.py
 [legacy-compaction-state-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_compaction_state.py
+[legacy-state-root-mounts-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_state_root_mounts.py
 [compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
@@ -21396,6 +21402,12 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
 
+Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them.
+Sessions, memory, learning, Mem0 data, private-instance identity records, and every other agent's workspace stay out of the worker.
+A workspace is mounted only when it is a real directory reached from the storage root without links, and assigned knowledge outside it is mounted read-only.
+The primary treats everything inside a mounted workspace as worker-controlled.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through descriptors walked from the workspace root that refuse links and FIFOs, with a size cap on reads.
+
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
 
@@ -21413,7 +21425,7 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
-| Worker path tools | `file`, `coding` | Follow the agent's `file_access` with lexical path checks only; they run in a worker by default, and the known gap below covers routing them to the primary process |
+| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, while listing and search keep lexical checks only, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
 
@@ -21430,8 +21442,9 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- `file` and `coding` confine paths lexically but do not open through no-follow descriptors, so when an operator routes them to the primary process while worker code shares the workspace, a link swapped into the workspace can redirect them; they run in a worker by default, where worker code already shares their trust.
-- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` are explicitly exempt from the link-swap scenarios until they read through descriptors.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) confine paths lexically and then walk and read by path, so when an operator routes these tools to the primary process while worker code shares the workspace, a planted link can make them list or read another directory, and a planted FIFO can block them; they run in a worker by default, where worker code already shares their trust.
+- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
+- Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path, so worker code that swaps the knowledge folder for a link in the window between that check and the Git command can still redirect one sync.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
@@ -21450,6 +21463,8 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
+- A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
+- After an upgrade from workers that mounted whole state roots, startup only warns about symlinks above workspaces and hard links leaving them; it never removes or repairs them, because an automatic repair could itself follow a planted entry, so an operator reviews the listed paths.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 
 ## Reviewing security findings
@@ -23339,7 +23354,7 @@ Key differences from the primary MindRoom runtime:
 > **Filesystem isolation depends on the worker backend.**
 > Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner.
 > Local in-process execution still shares the primary process filesystem.
-> Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes).
+> Dedicated Docker and Kubernetes workers mount only agent workspaces, so each runtime only sees its own agent's workspace (for `shared`, `user_agent`, and unscoped modes) and never the sessions, memory, or learning data stored beside it.
 > The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files.
 > Use `user_agent` for per-agent filesystem isolation.
 
@@ -23418,6 +23433,8 @@ This leaves same-worker token exposure as a local containment risk, while per-wo
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
 Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+Upgrading from a release whose workers mounted whole agent state roots stops those workers when the primary starts: Kubernetes scales their Deployments to zero and Docker removes their containers, so the next use recreates them with workspace-only mounts.
+Startup then logs warnings, without changing anything, for symlinks above a workspace and hard links leaving one, which code in those older workers could have planted; review and remove the listed paths by hand.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
@@ -23839,7 +23856,11 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
+- With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
+  `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
+  `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces, since it shares one runtime across those agents, and never mounts agents on other scopes.
+  Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
+  A workspace is mounted only when it is a real directory reached from the storage root without links; the primary creates missing shared workspaces without following links before the worker starts, and a private workspace becomes visible once the primary has materialized that instance.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints
@@ -24365,7 +24386,7 @@ See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-pr
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
 The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
-Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
+Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
@@ -24375,8 +24396,8 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
-> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
+> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's workspace — this is the strongest isolation available.
+> With `user`, the worker can see the workspaces of every non-private `worker_scope: user` agent, plus that user's own private workspaces, because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility
@@ -24401,7 +24422,7 @@ The worker mounts that directory from the existing worker-storage PVC with `subP
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.
 
-If the source already lies inside a storage root visible to the worker's existing scope, the existing mount provides access and MindRoom does not add a nested duplicate mount.
+If the source already lies inside a workspace the worker mounts, that writable workspace mount provides access and MindRoom does not add a nested duplicate mount.
 Sources outside the shared worker-storage root are ignored so existing configurations continue to work without granting access to host-only paths.
 Mount plans that would overlap another knowledge source or contain an existing scoped mount fail closed before a Deployment is created.
 The final knowledge mount list is part of the worker pod-template hash, so reconciliation recreates workers whose mounted assignments are stale.
@@ -24438,8 +24459,8 @@ Important behavior and constraints:
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - `kubernetesWorkerRuntimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers. The runtime chart uses `workers.kubernetes.runtimeClassName`; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
 - Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
-- Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
-- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
+- Dedicated workers need access to the shared instance PVC so they can reach agent workspaces.
+- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
 - Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.

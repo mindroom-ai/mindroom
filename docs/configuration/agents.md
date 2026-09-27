@@ -470,13 +470,13 @@ Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 
-- **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space.
+- **Kubernetes and Docker dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's workspace plus its worker-local scratch space; the agent's sessions, memory, and learning data stay with the primary.
   This is the strongest isolation available today.
-- **Kubernetes dedicated workers** (`user`): the runtime can see the storage of every non-private agent that resolves to `worker_scope: user`, plus that user's own private-instance namespace, because `user` mode intentionally shares one runtime across that user's agents.
+- **Kubernetes and Docker dedicated workers** (`user`): the runtime can see the workspaces of every non-private agent that resolves to `worker_scope: user`, plus that user's own private workspaces, because `user` mode intentionally shares one runtime across that user's agents.
   It never mounts agents on `shared`, `user_agent`, or unscoped execution, so their sessions, memory, and workspaces stay out of reach.
-  It still mounts every `worker_scope: user` agent, including that agent's sessions from other requesters, even when this requester may not use all of them.
+  It still mounts every `worker_scope: user` agent's shared workspace, including files other requesters leave there, even when this requester may not use all of them.
   Treat this as a shared workstation.
-  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside the allowed state roots or worker root`).
+  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside a visible workspace or the worker root`).
   Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so Kubernetes and Docker recreate those workers on their next use.
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
