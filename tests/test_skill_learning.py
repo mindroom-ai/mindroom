@@ -241,8 +241,20 @@ def _queue(
     )
 
 
+@dataclass
+class _NoticeBot:
+    """A running agent bot whose thread projection knows the newest thread event."""
+
+    client: object | None
+    running: bool = True
+
+    async def latest_thread_event_id_if_needed(self, _room_id: str, thread_id: str) -> str | None:
+        return f"{thread_id}-latest"
+
+
 def _runner(paths: RuntimePaths, client: object | None = None) -> SkillReviewRunner:
-    return SkillReviewRunner(paths, client_provider=lambda _agent: client)
+    bot = _NoticeBot(client)
+    return SkillReviewRunner(paths, bot_provider=lambda _agent: bot)
 
 
 async def _notices_sent(runner: SkillReviewRunner) -> None:
@@ -1084,6 +1096,8 @@ async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path) -
     assert content["msgtype"] == "m.notice"
     assert content["body"] == "💾 Skill review: created `deploy-checks`"
     assert content["m.relates_to"]["event_id"] == "$thread"
+    # Like approval events, clients without threads see the notice as a reply to the thread's newest event.
+    assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread-latest"
 
 
 @pytest.mark.asyncio
@@ -2590,6 +2604,36 @@ async def test_a_refused_removal_keeps_the_reviews_read(tmp_path: Path) -> None:
         ),
     )
     assert patched["success"], patched
+    assert "1. Run smoke." in (root / "deploy-checks/SKILL.md").read_text()
+
+
+def test_a_history_snapshot_pruned_by_another_process_never_refuses_a_change(tmp_path: Path) -> None:
+    """Two processes sharing a workspace may prune the same snapshot; the change still lands."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=False)
+    history = root / ".history" / "deploy-checks"
+    history.mkdir(parents=True)
+    for index in range(12):
+        (history / f"20260101T0000{index:02d}000000Z--SKILL.md").write_text("old")
+    real_list_entries = library.list_entries
+
+    def listing_then_pruned_elsewhere(directory_fd: int, *, directories: bool) -> list[str]:
+        entries = real_list_entries(directory_fd, directories=directories)
+        if not directories and entries and entries[0].startswith("20260101T000000"):
+            os.unlink(entries[0], dir_fd=directory_fd)
+        return entries
+
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    with patch.object(library, "list_entries", listing_then_pruned_elsewhere):
+        library.write_skill_file(
+            root,
+            "deploy-checks",
+            "SKILL.md",
+            LEARNED.replace("1. Run the smoke test.", "1. Run smoke."),
+            expected_digest=current.digest,
+            learner=False,
+        )
     assert "1. Run smoke." in (root / "deploy-checks/SKILL.md").read_text()
 
 

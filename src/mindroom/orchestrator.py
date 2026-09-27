@@ -465,7 +465,7 @@ class _MultiAgentOrchestrator:
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
         )
-        self._skill_reviews = SkillReviewRunner(self.runtime_paths, self._running_agent_client)
+        self._skill_reviews = SkillReviewRunner(self.runtime_paths, lambda agent_name: self.agent_bots.get(agent_name))
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -558,11 +558,6 @@ class _MultiAgentOrchestrator:
     def skill_reviews(self) -> SkillReviewRunner:
         """Return the orchestrator-owned runner of automatic skill reviews."""
         return self._skill_reviews
-
-    def _running_agent_client(self, agent_name: str) -> nio.AsyncClient | None:
-        """Return a running agent bot's Matrix client for skill review notices."""
-        bot = self.agent_bots.get(agent_name)
-        return bot.client if bot is not None and bot.running else None
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""

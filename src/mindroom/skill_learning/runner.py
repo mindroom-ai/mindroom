@@ -14,7 +14,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
@@ -46,6 +46,15 @@ logger = get_logger(__name__)
 type _Outcome = Literal["reviewed", "failed", "interrupted"]
 
 
+class _NoticeBot(Protocol):
+    """The agent bot a review's notice is sent as."""
+
+    running: bool
+    client: nio.AsyncClient | None
+
+    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None: ...
+
+
 def _skills_root(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry) -> Path:
     """Return the workspace skills directory that this conversation's reviews maintain."""
     runtime = resolve_agent_runtime(entry.agent, config, runtime_paths, execution_identity=entry.execution_identity())
@@ -65,7 +74,7 @@ class SkillReviewRunner:
     """Own the process's running skill reviews, at most one per conversation, and their notices."""
 
     runtime_paths: RuntimePaths
-    client_provider: Callable[[str], nio.AsyncClient | None]
+    bot_provider: Callable[[str], _NoticeBot | None]
     _reviews: dict[str, tuple[str, asyncio.Task[None]]] = field(default_factory=dict, init=False)
     # A notice is sent apart from its review, because a Matrix send can retry for as long as the homeserver is down.
     _notices: set[asyncio.Task[None]] = field(default_factory=set, init=False)
@@ -212,15 +221,18 @@ class SkillReviewRunner:
 
     async def _notify(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
-        client = self.client_provider(agent_name)
-        if client is None or identity.channel != "matrix" or identity.room_id is None:
+        bot = self.bot_provider(agent_name)
+        client = bot.client if bot is not None and bot.running else None
+        if bot is None or client is None or identity.channel != "matrix" or identity.room_id is None:
             return
         body = "💾 Skill review: " + " · ".join(f"{action} `{name}`" for name, action in sorted(changes.items()))
         thread_id = identity.resolved_thread_id
+        # Like approval events, the reply fallback names the thread's newest event for clients without threads.
+        latest = await bot.latest_thread_event_id_if_needed(identity.room_id, thread_id) if thread_id else None
         content = build_message_content(
             body,
             thread_event_id=thread_id,
-            latest_thread_event_id=thread_id,
+            latest_thread_event_id=latest or thread_id,
             # The marker keeps the notice out of later model context, like compaction notices.
             extra_content={
                 "msgtype": "m.notice",

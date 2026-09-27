@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -348,7 +348,9 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
     with open_directory_within_root(root_fd, f"{_HISTORY_DIRNAME}/{name}", create=True) as history_fd:
         atomic_write_bytes_at(history_fd, f"{stamp}--{relative_path.replace('/', '--')}", content.encode())
         for stale in list_entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
-            os.unlink(stale, dir_fd=history_fd)
+            # Another process sharing the workspace may prune the same snapshot first.
+            with suppress(FileNotFoundError):
+                os.unlink(stale, dir_fd=history_fd)
 
 
 def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: datetime) -> list[str]:
