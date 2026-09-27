@@ -24,8 +24,18 @@ brew install --cask mindroom-ai/tap/mindroom
 ```
 
 Open **MindRoom** from Applications or Spotlight.
-The window has **Overview**, **Local agents**, **Computer access**, and **Settings** sections.
+The window has **Overview**, **Chat**, **Dashboard**, **Local agents**, **Computer access**, and **Settings** sections.
 Overview explains the two roles and shows their status separately.
+
+## Chat in the App
+
+Select **Chat** to use MindRoom without leaving the app.
+Sign in once; the app remembers that session, and switching sections keeps your open conversation and draft.
+Your browser's sign-in session is separate.
+For a self-hosted chat client, change **Chat website** in **Settings**.
+The default is `https://chat.mindroom.chat`.
+Use **Open in Browser** if you prefer your existing browser session or a sign-in provider requires a browser.
+**Reload** returns to your configured Chat website.
 
 ## Set Up Local Agents
 
@@ -39,9 +49,12 @@ Open **Local agents** and expand **Set up or reconnect local agents**.
 4. **Install and Start Agents** installs and starts the launchd background service.
 
 Commands show progress and their results in the window.
-Once the service is running, **Configure Agents…** opens the existing web dashboard at `http://localhost:8765`.
-Use that dashboard for agent and model configuration.
-**Open Chat** opens `https://chat.mindroom.chat` in your browser.
+Once the service is running, **Open Dashboard** opens the local dashboard inside the app for agent and model configuration.
+The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
+It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
+Automatic sign-in is limited to HTTP loopback URLs (`localhost`, `127.0.0.1`, or `[::1]`) with an explicit port.
+The dashboard session stays separate from Chat and is not saved after the app quits.
+**Open Chat** opens the Chat section in the app.
 
 ### Where do my agents run?
 
@@ -147,7 +160,7 @@ Opening MindRoom presents its window and Dock icon.
 Closing the window leaves the app available in the menu bar and keeps its background work running.
 Reopen the window with **Open MindRoom…** in the menu or by opening the application again.
 
-The menu shows local-agent and computer-access status as clickable shortcuts to their app sections, plus chat, start/stop, settings, and quit actions.
+The menu shows local-agent and computer-access status as clickable shortcuts to their app sections, plus chat, dashboard, start/stop, settings, and quit actions.
 **Service running** reports the local process state; use Chat or the dashboard to confirm that agents are ready.
 
 In **Settings**, **Open menu bar app at login** launches the menu app quietly.
@@ -178,6 +191,7 @@ The service appends to its existing logs, so records written by older versions m
 **Open Config Folder** opens `~/.mindroom`, which is shared with the CLI.
 Failed local-agent actions show their output in the window with a copy action.
 If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.
+After changing its URL or API key in `.env`, select **Reload** in Dashboard to read the updated values.
 If pairing expires, generate a new code in the relevant chat flow.
 
 Homebrew users can also update the app with:
