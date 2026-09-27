@@ -490,6 +490,7 @@ def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> t
         msg = f"Failed to list Docker workers: {exc}"
         raise WorkerBackendError(msg) from exc
     removed: list[str] = []
+    failed: list[str] = []
     for container in containers:
         config = container.attrs.get("Config")
         labels = cast("dict[str, object]", config).get("Labels") if isinstance(config, dict) else None
@@ -503,9 +504,13 @@ def remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> t
         except docker_errors.NotFound:
             continue
         except docker_errors.DockerException as exc:
-            msg = f"Failed to remove Docker worker: {exc}"
-            raise WorkerBackendError(msg) from exc
+            # One failure must not leave the remaining old containers running.
+            failed.append(f"{container.id} ({exc})")
+            continue
         removed.append(container.id)
+    if failed:
+        msg = f"Failed to remove Docker workers: {', '.join(failed)}; removed {removed}"
+        raise WorkerBackendError(msg)
     return tuple(removed)
 
 

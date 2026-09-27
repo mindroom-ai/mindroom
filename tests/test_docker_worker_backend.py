@@ -888,6 +888,33 @@ def test_docker_startup_removes_workers_mounting_state_roots(
     assert recreated.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"] == "workspaces"
 
 
+def test_docker_retirement_keeps_removing_old_containers_after_one_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A container Docker refuses to remove never shields the old containers listed after it."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    containers = []
+    for name in ("first", "second", "third"):
+        handle = backend.ensure_worker(WorkerSpec(f"v1:default:shared:{name}"), now=0.0)
+        container = fake_client.containers.get(handle.worker_id)
+        del container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+        containers.append(container)
+
+    def refuse_removal(force: bool = True) -> None:
+        del force
+        message = "removal of container is already in progress"
+        raise _FakeDockerError(message)
+
+    monkeypatch.setattr(containers[0], "remove", refuse_removal)
+
+    with pytest.raises(WorkerBackendError, match=containers[0].id):
+        remove_docker_workers_mounting_state_roots(runtime_paths)
+
+    assert [container.removed for container in containers[1:]] == [1, 1]
+
+
 def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWorkerBackend) -> None:
     monkeypatch.setattr(
         backend,
