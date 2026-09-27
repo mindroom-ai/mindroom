@@ -61,6 +61,9 @@ _DELEGATION_DIRECTORY = Path(".mindroom/delegations")
 _RECEIPT_DIRECTORY = Path(".mindroom/delegation_receipts")
 _MAX_INLINE_VALUE_BYTES = 64 * 1024
 _LOCK_FILENAME = ".record.lock"
+# Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real events stay far below these.
+_MAX_EVENT_LINE_BYTES = 4 << 20
+_MAX_EVENT_LOG_BYTES = 256 << 20
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 
@@ -604,13 +607,24 @@ def _next_sequence(handle: DelegationRecordHandle, events: list[dict[str, object
     return sequence + 1
 
 
+def _read_event_lines(descriptor: int) -> list[object]:
+    if os.fstat(descriptor).st_size > _MAX_EVENT_LOG_BYTES:
+        msg = "Delegation event log exceeds its size limit"
+        raise ValueError(msg)
+    events: list[object] = []
+    with os.fdopen(os.dup(descriptor), "rb") as stream:
+        while line := stream.readline(_MAX_EVENT_LINE_BYTES + 1):
+            if len(line) > _MAX_EVENT_LINE_BYTES:
+                msg = "Delegation event exceeds its size limit"
+                raise ValueError(msg)
+            events.append(json.loads(line))
+    return events
+
+
 def _load_events(handle: DelegationRecordHandle, record_fd: int) -> list[dict[str, object]]:
     try:
-        with (
-            open_regular_file_within_root(record_fd, "events.jsonl") as descriptor,
-            os.fdopen(os.dup(descriptor), encoding="utf-8") as stream,
-        ):
-            events = [json.loads(line) for line in stream]
+        with open_regular_file_within_root(record_fd, "events.jsonl") as descriptor:
+            events = _read_event_lines(descriptor)
     except (OSError, ValueError) as exc:
         msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc

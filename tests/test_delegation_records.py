@@ -87,6 +87,25 @@ async def test_event_log_is_streamed_and_appended_without_a_capped_read(
     assert [event["sequence"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [1, 2, 3]
 
 
+@pytest.mark.asyncio
+async def test_event_log_refuses_an_oversized_event_line(tmp_path: Path) -> None:
+    """A planted multi-megabyte event line is refused instead of loaded, since large values move to artifacts."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    huge = {"sequence": 2, "kind": "output", "timestamp": "2026-01-01T00:00:00Z", "data": {"content": "x" * (5 << 20)}}
+    with event_path.open("a", encoding="utf-8") as events:
+        events.write(json.dumps(huge) + "\n")
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+
+
 def _config(*, private_child: bool = False) -> Config:
     child = AgentConfig(display_name="Child")
     if private_child:
