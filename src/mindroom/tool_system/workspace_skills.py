@@ -16,11 +16,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
-import yaml
 from agno.skills.skill import Skill
 from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
+from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -128,13 +128,9 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
 
 
 def _strict_frontmatter(text: str) -> Any:  # noqa: ANN401
-    """Parse frontmatter with PyYAML's pure-Python loader, like Agno's LocalSkills.
-
-    libyaml overflows the C stack on deeply nested input that worker code can plant, killing the process, where the
-    pure-Python loader raises RecursionError.
-    """
+    """Parse frontmatter that worker code can write with PyYAML's pure-Python loader, like Agno's LocalSkills."""
     try:
-        return yaml.load(text, Loader=yaml.SafeLoader) or {}
+        return yaml_io.safe_load_untrusted(text) or {}
     except YAMLError:
         raise
     except Exception as exc:
@@ -306,7 +302,7 @@ def _usage_records(root_fd: int) -> dict[str, object] | None:
     try:
         payload = read_text_at(root_fd, _USAGE_FILENAME)
         records = json.loads(payload) if payload else {}
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         logger.warning("Ignoring unreadable skill usage telemetry", error=str(exc))
         return None
     if not isinstance(records, dict):
@@ -320,10 +316,17 @@ def _parse_usage(record: object) -> SkillUsage | None:
     if not isinstance(record, dict):
         return None
     try:
-        return SkillUsage.model_validate(record)
+        usage = SkillUsage.model_validate(record)
     except ValidationError as exc:
         invalid = {error["loc"][0] for error in exc.errors()}
-        return SkillUsage.model_validate({name: value for name, value in record.items() if name not in invalid})
+        usage = SkillUsage.model_validate({name: value for name, value in record.items() if name not in invalid})
+    try:
+        usage.model_dump(mode="json")
+    except ValueError:
+        # A hand-added field nested too deeply to write back makes the record malformed, so its next update replaces
+        # it instead of failing after the skill change it records already landed.
+        return None
+    return usage
 
 
 def _write_usage_records(root_fd: int, records: dict[str, object]) -> None:

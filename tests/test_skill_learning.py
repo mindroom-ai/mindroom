@@ -2253,6 +2253,68 @@ async def test_chat_patches_a_skill_written_with_crlf_line_endings(tmp_path: Pat
     assert (root / "deploy-checks" / "references" / "notes.md").read_bytes() == b"one\n"
 
 
+def test_deeply_nested_usage_telemetry_never_fails_skill_changes(tmp_path: Path) -> None:
+    """A usage file too deep to parse reads as empty and stays as written; a record too deep to write back is replaced."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    usage_file = root / ".usage.json"
+    depth = 200_000
+    unreadable = '{"deploy-checks": {"x": ' + "[" * depth + "]" * depth + "}}"
+    usage_file.write_text(unreadable)
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    library.write_skill_file(root, "deploy-checks", "references/a.md", "A.", expected_digest=None, learner=False)
+    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+    assert usage_file.read_text() == unreadable
+    deep_field = {"deploy-checks": {"created_by": "learner", "x": json.loads("[" * 300 + "]" * 300)}}
+    usage_file.write_text(json.dumps(deep_field))
+    library.write_skill_file(root, "deploy-checks", "references/b.md", "B.", expected_digest=None, learner=False)
+    assert json.loads(usage_file.read_text())["deploy-checks"]["patch_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_review_reads_and_patches_crlf_skills_as_the_text_it_is_served(tmp_path: Path) -> None:
+    """The review loads CRLF files with normalized line endings; patches of that text or of the raw text land as LF."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    (root / "deploy-checks" / "SKILL.md").write_bytes(LEARNED.replace("\n", "\r\n").encode())
+    library.write_skill_file(root, "deploy-checks", "references/notes.md", "x", expected_digest=None, learner=True)
+    (root / "deploy-checks" / "references" / "notes.md").write_bytes(b"one\r\ntwo\r\n")
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    loaded = json.loads(await tools.get_skill_instructions("deploy-checks"))["content"]
+    assert loaded == LEARNED
+    reference = json.loads(await tools.get_skill_reference("deploy-checks", "references/notes.md"))["content"]
+    assert reference == "one\ntwo\n"
+    unchanged = json.loads(
+        await tools.skill_manage("patch", "deploy-checks", old_string="1. Run", new_string="1. Run"),
+    )
+    assert "No change was made" in unchanged["error"]
+    patched = await tools.skill_manage(
+        "patch",
+        "deploy-checks",
+        old_string="---\r\n1. Run the smoke test.",
+        new_string="---\n1. Run smoke.",
+    )
+    assert json.loads(patched)["success"], patched
+    patched_reference = await tools.skill_manage(
+        "patch",
+        "deploy-checks",
+        old_string="one\ntwo\n",
+        new_string="one\n",
+        file_path="references/notes.md",
+    )
+    assert json.loads(patched_reference)["success"], patched_reference
+    assert (root / "deploy-checks" / "SKILL.md").read_bytes() == LEARNED.replace(
+        "1. Run the smoke test.",
+        "1. Run smoke.",
+    ).encode()
+    assert (root / "deploy-checks" / "references" / "notes.md").read_bytes() == b"one\n"
+    assert tools.progress is not None
+    assert tools.progress.changes == {"deploy-checks": "updated"}
+
+
 @pytest.mark.asyncio
 async def test_parallel_chat_skill_edits_both_land(tmp_path: Path) -> None:
     """Several chat skill_manage calls of one reply take turns, so every patch builds on the one before."""

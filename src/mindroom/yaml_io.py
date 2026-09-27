@@ -5,6 +5,11 @@ dumper, even when PyYAML was built with libyaml. The C classes parse and
 serialize 10-20x faster with identical semantics for the safe tag set, so
 every safe load/dump in this codebase should go through this module.
 
+Input that untrusted code can write, such as workspace files that worker code
+shares, goes through ``safe_load_untrusted`` instead: libyaml's composer
+recurses in C, so deeply nested input overflows the C stack and kills the
+process, where the pure-Python loader raises ``RecursionError``.
+
 ``SafeLoader`` is also the base for custom safe loaders, so they share the
 same libyaml preference and pure-Python fallback.
 """
@@ -47,6 +52,11 @@ class _DumpOptions(TypedDict, total=False):
 def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     """Parse one YAML document like ``yaml.safe_load``, preferring libyaml."""
     return yaml.load(stream, Loader=SafeLoader)
+
+
+def safe_load_untrusted(stream: str) -> Any:  # noqa: ANN401
+    """Parse one YAML document that untrusted code can write, with the pure-Python loader."""
+    return yaml.safe_load(stream)
 
 
 @overload
