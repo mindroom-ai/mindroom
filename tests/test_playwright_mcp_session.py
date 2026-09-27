@@ -319,7 +319,9 @@ setInterval(()=>{},1000);
     # fixture setup, while "startup" still stalls inside MCP initialize.
     session._actor_task = asyncio.create_task(session._run_actor())
     try:
-        async with asyncio.timeout(5):
+        # Birth spans the Python supervisor, Node, and its grandchild. Loaded CI
+        # runners have stalled it past 5 seconds, so only a hang should fail here.
+        async with asyncio.timeout(30):
             while not pidfile.exists():
                 assert not session._actor_task.done(), "Fixture actor exited before child readiness"
                 await asyncio.sleep(0.01)
