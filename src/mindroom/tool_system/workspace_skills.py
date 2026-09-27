@@ -91,7 +91,10 @@ def read_text_at(directory_fd: int, relative_path: str) -> str | None:
 
 
 def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
-    """Return sorted visible real directories or regular files, never links; an entry removed meanwhile is skipped."""
+    """Return sorted visible real directories or regular files, never links.
+
+    An entry removed meanwhile never raises here; callers skip it when opening it fails.
+    """
     with os.scandir(directory_fd) as entries:
         return sorted(
             entry.name
@@ -335,7 +338,8 @@ def _parse_usage(record: object) -> SkillUsage | None:
     try:
         usage.model_dump(mode="json")
     except ValueError:
-        # Hand-added fields nested too deeply to write back are dropped, keeping ownership and the counts.
+        # Hand-added fields that cannot all be written back, such as one nested too deeply, are dropped together,
+        # keeping ownership and the counts.
         usage = SkillUsage.model_validate(usage.model_dump(include=set(SkillUsage.model_fields)))
     return usage
 
@@ -358,7 +362,7 @@ def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
     """Replace one skill's usage record atomically, leaving every other record as written.
 
-    Telemetry never fails its caller: a record that cannot be updated is logged and left as written.
+    Telemetry never fails its caller: records are cleaned when read, and a write that fails is logged.
     The lock is process-local on purpose: any lock inside the worker-shared workspace could be held by worker
     code to stall the primary, so concurrent primaries sharing one storage root may occasionally drop a count.
     """
@@ -368,11 +372,11 @@ def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsag
             # Rewriting an unreadable file would drop every record in it; a person can still repair it.
             return
         current = _parse_usage(records.get(directory)) or SkillUsage()
+        records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
         try:
-            records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
             _write_usage_records(root_fd, records)
-        except (OSError, ValueError, RecursionError) as exc:
-            # The file is worker-writable bookkeeping, and the change it records has already landed.
+        except OSError as exc:
+            # The change this records has already landed, so a failed write, such as on a full disk, is only logged.
             logger.warning("Could not update skill usage telemetry", directory=directory, error=str(exc))
 
 

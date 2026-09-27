@@ -270,7 +270,9 @@ Archived directories are named `<skill>--<timestamp>`; move one back to `skills/
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
-A field that cannot be read is dropped without affecting the rest of its record or other records, a record that is not an object is ignored and left in place until its own skill's record is next updated, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
+A field that cannot be read is dropped without affecting the rest of its record or other records, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
+A record that is not an object, or that has a key that is not valid Unicode, is ignored and left in place until its own skill's record is next updated, and a record whose hand-added fields cannot all be written back loses them at its next update while keeping its ownership and counts.
+A telemetry write that fails, for example on a full disk, is logged and never fails the skill change it records.
 A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.
 Rewrites keep a file's existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
