@@ -772,6 +772,28 @@ def _runner_tool_output_workspace_root(
     return None
 
 
+def _mounted_output_workspace_root(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    runtime_overrides: dict[str, object] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    routing_agent_name: str | None,
+) -> Path | tuple[str, Literal["tool", "worker"]]:
+    """Return the output workspace, or an error that does not count against the worker when it is unmounted."""
+    try:
+        workspace_root = _runner_tool_output_workspace_root(
+            config=config,
+            runtime_paths=runtime_paths,
+            runtime_overrides=runtime_overrides,
+            execution_identity=execution_identity,
+            routing_agent_name=routing_agent_name,
+        )
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        return str(exc), "tool"
+    return workspace_root if workspace_root is not None else ("Worker output workspace is unavailable.", "worker")
+
+
 def _optional_runner_tool_output_workspace_root(
     *,
     config: Config,
@@ -1692,19 +1714,15 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
         prepared_worker.runtime_overrides if prepared_worker is not None else None,
     )
-    workspace_root = _runner_tool_output_workspace_root(
+    workspace_root = _mounted_output_workspace_root(
         config=config,
         runtime_paths=runtime_paths,
         runtime_overrides=runtime_overrides,
         execution_identity=execution_identity,
         routing_agent_name=payload.routing_agent_name,
     )
-    if workspace_root is None:
-        return SandboxRunnerSaveAttachmentResponse(
-            ok=False,
-            error="Worker output workspace is unavailable.",
-            failure_kind="worker",
-        )
+    if not isinstance(workspace_root, Path):
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=workspace_root[0], failure_kind=workspace_root[1])
 
     policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
     path_error = validate_output_path(policy, output_path)
@@ -1762,26 +1780,22 @@ async def view_file_in_worker(
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
         prepared_worker.runtime_overrides if prepared_worker is not None else None,
     )
-    workspace_root: Path | None = None
+    workspace_root: Path | tuple[str, Literal["tool", "worker"]] | None = None
     prepared_base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
     if isinstance(prepared_base_dir, Path):
         workspace_root = prepared_base_dir
     elif isinstance(prepared_base_dir, str):
         workspace_root = Path(prepared_base_dir)
     if workspace_root is None:
-        workspace_root = _runner_tool_output_workspace_root(
+        workspace_root = _mounted_output_workspace_root(
             config=config,
             runtime_paths=runtime_paths,
             runtime_overrides=runtime_overrides,
             execution_identity=execution_identity,
             routing_agent_name=payload.routing_agent_name,
         )
-    if workspace_root is None:
-        return SandboxRunnerViewFileResponse(
-            ok=False,
-            error="Worker output workspace is unavailable.",
-            failure_kind="worker",
-        )
+    if isinstance(workspace_root, tuple):
+        return SandboxRunnerViewFileResponse(ok=False, error=workspace_root[0], failure_kind=workspace_root[1])
 
     result = await asyncio.to_thread(
         _view_file_result_envelope,

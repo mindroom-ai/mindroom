@@ -4887,10 +4887,12 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("route", ["execute", "save-attachment"])
 def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    route: str,
 ) -> None:
     """A workspace missing from the pod is a request error the primary does not count against the worker."""
     _set_sandbox_token(monkeypatch)
@@ -4922,22 +4924,25 @@ def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
     _refresh_runner_app_from_env()
 
+    request = {
+        "worker_key": worker_key,
+        "routing_agent_name": "alpha",
+        "execution_identity": asdict(identity),
+        "private_agent_names": ["alpha"],
+    }
+    if route == "execute":
+        request |= {"tool_name": "shell", "function_name": "run_shell_command", "args": [["true"]], "kwargs": {}}
+        request["worker_scope"] = "user_agent"
+    else:
+        request |= {
+            "attachment_id": "att_sample",
+            "mindroom_output_path": "incoming/sample.txt",
+            "sha256": hashlib.sha256(b"payload").hexdigest(),
+            "size_bytes": 7,
+            "bytes_b64": base64.b64encode(b"payload").decode("ascii"),
+        }
     try:
-        response = runner_client.post(
-            "/api/sandbox-runner/execute",
-            headers=SANDBOX_HEADERS,
-            json={
-                "tool_name": "shell",
-                "function_name": "run_shell_command",
-                "args": [["true"]],
-                "kwargs": {},
-                "worker_key": worker_key,
-                "worker_scope": "user_agent",
-                "routing_agent_name": "alpha",
-                "execution_identity": asdict(identity),
-                "private_agent_names": ["alpha"],
-            },
-        )
+        response = runner_client.post(f"/api/sandbox-runner/{route}", headers=SANDBOX_HEADERS, json=request)
     finally:
         unmounted_parent.chmod(0o755)
 
