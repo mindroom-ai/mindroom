@@ -951,7 +951,7 @@ class KubernetesResourceManager:
     # Legacy format: Deployments whose template hash is not the one this release recorded beside it, because an
     #   older release, including after a downgrade, wrote a template that mounted agents/<agent> and
     #   private_instances/<scope> writable.
-    # Last legacy release: v2026.9.324; the next release mounts only workspaces and records its template hash.
+    # Last legacy release: v2026.9.326; the next release mounts only workspaces and records its template hash.
     # Handling: scale each such running Deployment to zero, as idle cleanup does, and wait for its pods to exit; the
     #   next ensure or idle reconciliation recreates it from the current template. Scaled-down Deployments stay.
     # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots.

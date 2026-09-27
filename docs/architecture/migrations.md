@@ -249,10 +249,10 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 
 ### Workspace-only worker mounts
 
-Releases after v2026.9.324 mount only agent workspaces into dedicated Docker and Kubernetes workers.
+Releases after v2026.9.326 mount only agent workspaces into dedicated Docker and Kubernetes workers.
 Drain worker activity before upgrading, because primary startup stops every worker from an older release, which ends its tool calls, shells, background scripts, and CLI sessions.
 Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
-Rolling back to v2026.9.324 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
+Rolling back to v2026.9.326 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
 
 Before upgrading, check two new limits:
 
