@@ -798,7 +798,12 @@ def resolve_agent_owned_path(
     files are authoritative.
     """
     relative_target = agent_workspace_relative_path(path_text)
-    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
+    lexical_workspace_root = agent_workspace_root_path(base_storage_path, agent_name)
+    agent_workspace_root = lexical_workspace_root.resolve()
+    if agent_workspace_root != lexical_workspace_root:
+        # Workers of older releases could replace the workspace; the mount planner refuses such links too.
+        msg = f"Agent workspace must not be reached through a link: {lexical_workspace_root}"
+        raise ValueError(msg)
     return _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
 
 

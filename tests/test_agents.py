@@ -3035,6 +3035,26 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
     assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
 
 
+def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_path: Path) -> None:
+    """A workspace an older worker replaced with a link is refused, as the mount planner refuses to mount it."""
+    storage_path = tmp_path / "storage"
+    state_root = storage_path / "agents" / "general"
+    (state_root / "elsewhere").mkdir(parents=True)
+    (state_root / "elsewhere" / "SOUL.md").write_text("planted soul", encoding="utf-8")
+    (state_root / "workspace").symlink_to(state_root / "elsewhere", target_is_directory=True)
+
+    with capture_logs() as logs:
+        loaded = _load_context_files(
+            ["SOUL.md"],
+            _runtime_paths(storage_path),
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert loaded == []
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_refused"]
+
+
 def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_path: Path) -> None:
     """A context file above the 1 MiB read cap is truncated with a warning instead of read whole."""
     storage_path = tmp_path / "storage"
