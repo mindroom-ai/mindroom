@@ -109,7 +109,6 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
-_MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 
 @dataclass
@@ -284,29 +283,23 @@ def _load_context_files(
 
 @timed("system_prompt_assembly.agent_create.context_file_read")
 def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agent_name: str | None) -> str | None:
-    """Return one context file's text, or warn once and return ``None`` when it is missing or refused.
+    """Return one context file's text, or warn and return ``None`` when it is missing or refused.
 
-    Agent code writes workspace files, so they are read once through a
-    non-blocking, bounded descriptor walked from the workspace root without
-    following links; config files outside workspaces are operator-owned.
+    Workspace files are read through a capped no-follow walk; preload truncation shortens them further.
     """
-    if workspace_root is None:
-        if resolved_path.is_file():
-            return resolved_path.read_text(encoding="utf-8").strip()
-        logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
-        return None
     try:
-        payload = read_regular_file_within_root(
-            workspace_root,
-            resolved_path.relative_to(workspace_root),
-            max_bytes=_MAX_WORKSPACE_CONTEXT_FILE_BYTES,
-        )
-        return payload.decode("utf-8").strip()
+        if workspace_root is None:
+            payload = resolved_path.read_bytes()
+        else:
+            relative_path = resolved_path.relative_to(workspace_root)
+            payload = read_regular_file_within_root(workspace_root, relative_path, truncate=True)
     except FileNotFoundError:
         logger.warning("context_file_not_found", agent=agent_name, path=str(resolved_path))
+        return None
     except (OSError, ValueError) as exc:
         logger.warning("context_file_refused", agent=agent_name, path=str(resolved_path), error_type=type(exc).__name__)
-    return None
+        return None
+    return payload.decode("utf-8", errors="replace").strip()
 
 
 def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:

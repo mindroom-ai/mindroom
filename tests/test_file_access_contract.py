@@ -350,3 +350,18 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
     monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", _PROBES[-2:], ids=["file:read_file", "coding:read_file"])
+async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    probe: _ToolProbe,
+) -> None:
+    """A huge or sparse workspace file is refused instead of being read whole into the primary."""
+    with (workspace / probe.filename).open("r+b") as doc:
+        doc.truncate(65 << 20)
+
+    assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)

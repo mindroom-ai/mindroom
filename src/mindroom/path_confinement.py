@@ -3,6 +3,11 @@
 Resolution checks a pathname at one instant; it does not authorize a later open.
 Use the descriptor helpers for local I/O that must reject links swapped after
 validation. Roots are trusted caller inputs, not discovered or authorized here.
+
+Sandbox workers write agent workspaces, so the primary treats workspace content
+as untrusted: it reaches its own files there by walking from the workspace root
+with these helpers, which open every component without following links, open
+files non-blocking so a planted FIFO cannot stall it, and cap what they read.
 """
 
 from __future__ import annotations
@@ -12,6 +17,8 @@ import stat
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+
+from mindroom.atomic_file import atomic_write_bytes_at
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -124,6 +131,16 @@ def open_directory_within_root(
         os.close(directory)
 
 
+def open_regular_file_at(directory_fd: int, name: str, flags: int = os.O_RDONLY, mode: int = 0o600) -> int:
+    """Open one entry of a pinned directory as a regular file; the caller closes the returned descriptor."""
+    descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=directory_fd)
+    if stat.S_ISREG(os.fstat(descriptor).st_mode):
+        return descriptor
+    os.close(descriptor)
+    message = "Path must name a regular file."
+    raise ValueError(message)
+
+
 @contextmanager
 def open_regular_file_within_root(
     root: Path | int,
@@ -132,45 +149,66 @@ def open_regular_file_within_root(
     """Open a regular file for reading without following links or blocking on a FIFO.
 
     Pass canonical relative paths from the resolver to allow internal links;
-    pass lexical relative paths to reject them. Writes use the directory helper
-    with descriptor-relative publication instead.
+    pass lexical relative paths to reject them.
     """
     parts = _relative_parts(relative_path)
     if not parts:
         message = "Path must name a regular file."
         raise ValueError(message)
     with open_directory_within_root(root, Path(*parts[:-1])) as directory:
-        descriptor = os.open(
-            parts[-1],
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=directory,
-        )
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                message = "Path must name a regular file."
-                raise ValueError(message)
-            yield descriptor
-        finally:
-            os.close(descriptor)
+        descriptor = open_regular_file_at(directory, parts[-1])
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
-class _FileTooLargeError(ValueError):
-    """Raised when a bounded read finds more bytes than its cap allows."""
-
-    def __init__(self, relative_path: str | Path) -> None:
-        super().__init__(f"File exceeds its size limit: {relative_path}")
-
-
-def read_regular_file_within_root(root: Path | int, relative_path: str | Path, *, max_bytes: int) -> bytes:
-    """Read one regular file through a no-follow walk, refusing links, FIFOs, and files above ``max_bytes``."""
+def read_regular_file_within_root(
+    root: Path | int,
+    relative_path: str | Path,
+    *,
+    max_bytes: int = 64 << 20,
+    truncate: bool = False,
+) -> bytes:
+    """Read one regular file through a no-follow walk; a file above ``max_bytes`` is refused, or cut when ``truncate``."""
     with open_regular_file_within_root(root, relative_path) as descriptor:
-        if os.fstat(descriptor).st_size > max_bytes:
-            raise _FileTooLargeError(relative_path)
+        if not truncate and os.fstat(descriptor).st_size > max_bytes:
+            message = f"File exceeds its size limit: {relative_path}"
+            raise ValueError(message)
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining > 0 and (chunk := os.read(descriptor, min(remaining, 1 << 16))):
             chunks.append(chunk)
             remaining -= len(chunk)
-    if remaining <= 0:
-        raise _FileTooLargeError(relative_path)
-    return b"".join(chunks)
+    payload = b"".join(chunks)
+    if len(payload) > max_bytes and not truncate:
+        message = f"File exceeds its size limit: {relative_path}"
+        raise ValueError(message)
+    return payload[:max_bytes]
+
+
+def write_file_within_root(
+    root: Path,
+    relative_path: str | Path,
+    payload: bytes,
+    *,
+    file_mode: int = 0o600,
+    dir_mode: int = 0o777,
+    exclusive: bool = False,
+) -> None:
+    """Publish one file below a trusted root, creating missing directories through a no-follow walk.
+
+    The file replaces any entry atomically; with ``exclusive`` it is created only
+    when nothing exists at its name, raising ``FileExistsError`` otherwise.
+    """
+    parts = _relative_parts(relative_path)
+    root.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(root, Path(*parts[:-1]), create=True, mode=dir_mode) as directory:
+        if not exclusive:
+            atomic_write_bytes_at(directory, parts[-1], payload, file_mode=file_mode)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        with os.fdopen(open_regular_file_at(directory, parts[-1], flags, file_mode), "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())

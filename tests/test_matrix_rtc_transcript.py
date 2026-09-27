@@ -12,6 +12,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
+from mindroom.matrix_rtc import transcript as transcript_module
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
@@ -330,6 +331,29 @@ async def test_private_transcripts_and_memory_are_requester_scoped(
     assert add_memory.await_args.kwargs["execution_identity"] is alice_identity
     assert add_memory.await_args.args[2] == runtime_paths.storage_root
     assert "Transcript: calls/" in add_memory.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_finalize_keeps_the_memory_of_a_transcript_above_the_read_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transcript longer than the read cap is stored truncated instead of losing the memory entry."""
+    add_memory = AsyncMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
+    read = transcript_module.read_regular_file_within_root
+    monkeypatch.setattr(
+        transcript_module,
+        "read_regular_file_within_root",
+        lambda *args, **kwargs: read(*args, **{**kwargs, "max_bytes": 32}),
+    )
+    transcript = _transcript(tmp_path)
+    transcript.record("user", "Ping " * 100)
+
+    await transcript.finalize(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
+
+    add_memory.assert_awaited_once()
+    assert "# Voice call in Lobby" in add_memory.await_args.args[0]
 
 
 @pytest.mark.asyncio

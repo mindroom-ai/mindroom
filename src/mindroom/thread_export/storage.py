@@ -31,8 +31,6 @@ _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
 _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
-# Exports live in workspaces agent code writes; reads never block on a FIFO or buffer past this.
-_MAX_EXPORT_FILE_BYTES = 64 << 20
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -412,9 +410,9 @@ def _fsync_directory_fd(directory_fd: int) -> None:
 
 
 def _read_text_at(directory_fd: int, filename: str) -> str | None:
-    """Read a bounded regular file relative to a pinned directory without following links or waiting on a FIFO."""
+    """Read a regular file relative to a pinned directory through a capped no-follow open."""
     try:
-        return read_regular_file_within_root(directory_fd, filename, max_bytes=_MAX_EXPORT_FILE_BYTES).decode("utf-8")
+        return read_regular_file_within_root(directory_fd, filename).decode("utf-8")
     except (OSError, ValueError):
         return None
 

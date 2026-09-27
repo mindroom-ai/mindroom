@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -109,6 +110,20 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert f"CALLBACK_URL=http://127.0.0.1:8765/api/triggers/{callback_id}" in script_text
     assert "CALLBACK_TOKEN=mrt_" in script_text
     assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_mint_callback_needs_no_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workspaces on SMB, gcsfuse, and similar mounts lack hard links, so publication never needs one."""
+
+    def no_hard_links(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    assert stat.S_IMODE(Path(payload["script_path"]).stat().st_mode) == 0o700
 
 
 def test_mint_callback_uses_current_trigger_policy(tmp_path: Path) -> None:

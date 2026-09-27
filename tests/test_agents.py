@@ -29,7 +29,7 @@ from structlog.testing import capture_logs
 
 import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
-from mindroom import prompts
+from mindroom import path_confinement, prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
@@ -2976,9 +2976,9 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Updated canonical soul context." not in deleted_agent.role
 
 
-@pytest.mark.parametrize("planted", ["other_instance_link", "primary_file_link", "fifo", "huge_file"])
+@pytest.mark.parametrize("planted", ["other_instance_link", "primary_file_link", "fifo"])
 def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, planted: str) -> None:
-    """Links out of the workspace, FIFOs, and huge files are skipped with a warning, never read or waited on."""
+    """Links out of the workspace and FIFOs are skipped with a warning, never read or waited on."""
     storage_path = tmp_path / "storage"
     runtime_paths = _runtime_paths(storage_path)
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -2995,10 +2995,8 @@ def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, pl
         soul.symlink_to(victim_file)
     elif planted == "primary_file_link":
         soul.symlink_to(primary_file)
-    elif planted == "fifo":
-        os.mkfifo(soul)
     else:
-        soul.write_text("x" * ((1 << 20) + 1), encoding="utf-8")
+        os.mkfifo(soul)
 
     with capture_logs() as logs:
         loaded = _load_context_files(
@@ -3010,6 +3008,31 @@ def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, pl
 
     assert [chunk.body for chunk in loaded] == ["own user notes"]
     assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_refused"]
+
+
+def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context file above the read cap is truncated like any long file instead of being dropped."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "SOUL.md").write_text("soul " * 64, encoding="utf-8")
+    read_regular_file_within_root = path_confinement.read_regular_file_within_root
+    monkeypatch.setattr(
+        "mindroom.agents.read_regular_file_within_root",
+        lambda *args, **kwargs: read_regular_file_within_root(*args, **{**kwargs, "max_bytes": 20}),
+    )
+
+    loaded = _load_context_files(
+        ["SOUL.md"],
+        _runtime_paths(storage_path),
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
 
 
 def test_load_context_files_refuses_a_workspace_file_swapped_after_resolution(tmp_path: Path) -> None:

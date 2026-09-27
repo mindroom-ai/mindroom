@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
-from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
@@ -23,6 +22,7 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     open_regular_file_within_root,
     resolve_path_within_root,
+    write_file_within_root,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import (
@@ -1344,21 +1344,14 @@ def _snapshot_locator(storage_root: Path, workspace: Path, run_id: str) -> str:
 
 
 def _write_snapshot(workspace: Path, run_id: str, *, source: bytes, token: str) -> tuple[Path, Path]:
-    """Publish one run's source and capability in a fresh directory pinned from the workspace.
-
-    Worker code can write the workspace, so the run directory is created by a
-    no-follow walk and both files are published only under new names.
-    """
+    """Publish one run's source and capability in a fresh directory below the workspace."""
     relative_dir = _snapshot_relative_dir(run_id)
     workspace.mkdir(parents=True, exist_ok=True)
     with open_directory_within_root(workspace, relative_dir.parent, create=True, mode=0o700) as parent_fd:
         os.mkdir(relative_dir.name, mode=0o700, dir_fd=parent_fd)
-        with open_directory_within_root(parent_fd, relative_dir.name) as run_fd:
-            os.fchmod(run_fd, 0o700)
-            atomic_write_bytes_at(run_fd, "source.py", source, file_mode=0o600, exclusive=True)
-            atomic_write_bytes_at(run_fd, "capability", token.encode("utf-8"), file_mode=0o600, exclusive=True)
-    run_dir = workspace / relative_dir
-    return run_dir / "source.py", run_dir / "capability"
+    for name, payload in (("source.py", source), ("capability", token.encode("utf-8"))):
+        write_file_within_root(workspace, relative_dir / name, payload, exclusive=True)
+    return workspace / relative_dir / "source.py", workspace / relative_dir / "capability"
 
 
 def _remove_snapshot(storage_root: Path, locator: str) -> bool:

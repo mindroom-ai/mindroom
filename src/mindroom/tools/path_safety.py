@@ -9,7 +9,8 @@ from pathlib import Path
 
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_within_root,
+    open_regular_file_at,
+    read_regular_file_within_root,
     resolve_path_within_root,
 )
 
@@ -89,45 +90,27 @@ def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
 
 
 def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
-    """Read one resolved file, by a no-follow walk from ``base_dir`` when it lies inside it.
+    """Read one resolved file, through a capped no-follow walk when it lies below ``base_dir``.
 
-    Worker code can write the workspace, so a file checked by resolution and
-    then swapped for a link or FIFO is refused instead of followed. A path
-    outside ``base_dir`` only resolves under unrestricted file access, the
-    operator's full-trust choice, and is read by path.
+    Paths outside ``base_dir`` resolve only under unrestricted file access, the
+    operator's full-trust choice, and are read by path.
     """
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         return resolved.read_bytes()
-    with (
-        open_regular_file_within_root(base_dir.resolve(), relative) as descriptor,
-        os.fdopen(descriptor, "rb", closefd=False) as file,
-    ):
-        return file.read()
+    return read_regular_file_within_root(base_dir.resolve(), relative)
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
-    """Create or overwrite one resolved file in place without following a link below ``base_dir``.
-
-    Parents are created by the same no-follow walk, and an existing file keeps
-    its mode and inode like an ordinary write.
-    """
+    """Create or overwrite one resolved file in place, keeping an existing file's mode and inode."""
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(payload)
         return
     with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
-        descriptor = os.open(
-            relative.name,
-            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-            0o666,
-            dir_fd=directory_fd,
-        )
+        descriptor = open_regular_file_at(directory_fd, relative.name, os.O_WRONLY | os.O_CREAT, 0o666)
     with os.fdopen(descriptor, "wb") as file:
-        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
-            msg = f"Not a regular file: {resolved}"
-            raise OSError(msg)
         file.truncate(0)
         file.write(payload)
 

@@ -2188,18 +2188,18 @@ async def test_partial_snapshot_cleanup_preserves_original_launch_error(
 ) -> None:
     """A token-write failure remains the launch error after partial snapshot cleanup."""
     manager, _backend, _client = _manager(tmp_path)
-    original_write = manager_module.atomic_write_bytes_at
+    original_write = manager_module.write_file_within_root
     calls = 0
 
-    def fail_token_write(directory_fd: int, filename: str, payload: bytes, **kwargs: object) -> None:
+    def fail_token_write(root: Path, relative_path: Path, payload: bytes, **kwargs: object) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             message = "token write denied"
             raise PermissionError(message)
-        original_write(directory_fd, filename, payload, **kwargs)
+        original_write(root, relative_path, payload, **kwargs)
 
-    monkeypatch.setattr(manager_module, "atomic_write_bytes_at", fail_token_write)
+    monkeypatch.setattr(manager_module, "write_file_within_root", fail_token_write)
 
     with pytest.raises(PermissionError, match="token write denied"):
         await manager.run(_context(tmp_path), source="print('ok')\n")

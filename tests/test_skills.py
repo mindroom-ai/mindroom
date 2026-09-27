@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
@@ -592,14 +593,16 @@ def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Pa
         elif layout == "fifo_skill_file":
             os.mkfifo(skill_dir / "SKILL.md")
         else:
-            (skill_dir / "SKILL.md").write_text(
-                "---\nname: planted\ndescription: big\n---\n" + "x" * (1 << 20),
-                encoding="utf-8",
-            )
+            with (skill_dir / "SKILL.md").open("wb") as skill_file:
+                skill_file.write(b"---\nname: planted\ndescription: big\n---\n")
+                skill_file.truncate(65 << 20)
 
-    skills = _load_workspace_only(tmp_path, storage)
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
 
     assert _skill_names(skills) == []
+    if layout != "linked_skills_dir":
+        assert any(str(entry.get("path", "")).endswith("planted/SKILL.md") for entry in logs)
 
 
 def test_workspace_skill_references_are_read_without_following_links(tmp_path: Path) -> None:
@@ -896,3 +899,18 @@ def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path
     finally:
         skills_module.set_plugin_skill_roots(original_roots)
         skills_module.clear_skill_cache()
+
+
+def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
+    """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    for index in range(skills_module._MAX_WORKSPACE_SKILLS + 1):
+        _write_skill(workspace_skills, f"skill-{index:04d}", "Numbered skill")
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert len(_skill_names(skills)) == skills_module._MAX_WORKSPACE_SKILLS
+    assert any(
+        entry["log_level"] == "warning" and entry.get("limit") == skills_module._MAX_WORKSPACE_SKILLS for entry in logs
+    )

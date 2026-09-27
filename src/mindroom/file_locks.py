@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
-import stat
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from mindroom.path_confinement import open_regular_file_at
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -81,16 +82,8 @@ def _open_lock_file(lock_path: Path) -> TextIO:
 @contextmanager
 def advisory_file_lock_at(directory_fd: int, filename: str) -> Iterator[None]:
     """Acquire a blocking exclusive lock on one file in an open directory without following a link there."""
-    descriptor = os.open(
-        filename,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-        0o600,
-        dir_fd=directory_fd,
-    )
+    descriptor = open_regular_file_at(directory_fd, filename, os.O_RDWR | os.O_CREAT)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            msg = f"Lock file must be a regular file: {filename}"
-            raise ValueError(msg)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         try:
             yield

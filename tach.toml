@@ -7427,7 +7427,7 @@ depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.
 
 [[modules]]
 path = "mindroom.path_confinement"
-depends_on = []
+depends_on = ["mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.file_access"

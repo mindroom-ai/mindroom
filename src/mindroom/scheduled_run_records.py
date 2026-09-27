@@ -10,10 +10,9 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.path_confinement import read_regular_file_within_root, write_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
@@ -27,9 +26,6 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION = 1
 _RUN_DIRECTORY = ".mindroom/scheduled_runs"
-# Receipts live in workspaces agent code writes, so they are read and published
-# through no-follow descriptors walked from the workspace root.
-_MAX_RECEIPT_BYTES = 4 << 20
 
 
 @dataclass(frozen=True)
@@ -87,10 +83,8 @@ def _receipt_relative_path(source_event_id: str) -> Path:
 
 
 def _atomic_write_receipt(workspace: Path, relative_path: Path, receipt: _ScheduledRunReceipt) -> None:
-    workspace.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n").encode("utf-8")
-    with open_directory_within_root(workspace, relative_path.parent, create=True, mode=0o700) as directory_fd:
-        atomic_write_bytes_at(directory_fd, relative_path.name, payload)
+    write_file_within_root(workspace, relative_path, payload, dir_mode=0o700)
 
 
 def _workspace_for_agent(
@@ -160,7 +154,7 @@ def _existing_receipt_state(
     expected: _ScheduledRunReceipt,
 ) -> _ExistingReceiptState | None:
     try:
-        payload = json.loads(read_regular_file_within_root(workspace, relative_path, max_bytes=_MAX_RECEIPT_BYTES))
+        payload = json.loads(read_regular_file_within_root(workspace, relative_path))
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.keys() != _RECEIPT_FIELDS:

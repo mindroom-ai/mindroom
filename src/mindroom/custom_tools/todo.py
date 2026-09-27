@@ -52,7 +52,6 @@ _PRIORITY_EMOJI: dict[str, str] = {
 }
 _TEMPLATE_RECURSION_LIMIT = 3
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
-_MAX_WORKSPACE_TEMPLATE_BYTES = 1 << 20
 _JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
 
 
@@ -143,11 +142,7 @@ _PARAMS_SCHEMAS: dict[str, type[BaseModel]] = {
 
 @dataclass(frozen=True, slots=True)
 class _TemplateRoot:
-    """One visible source of todo templates.
-
-    Workspace templates are written by agent code, so they are read through a
-    bounded no-follow walk from ``workspace_root``; built-in templates are read by path.
-    """
+    """One visible source of todo templates; workspace templates are read by a capped no-follow walk."""
 
     path: Path
     source: str
@@ -157,12 +152,7 @@ class _TemplateRoot:
         """Return one template's text from this root."""
         if self.workspace_root is None:
             return path.read_text(encoding="utf-8")
-        payload = read_regular_file_within_root(
-            self.workspace_root,
-            path.relative_to(self.workspace_root),
-            max_bytes=_MAX_WORKSPACE_TEMPLATE_BYTES,
-        )
-        return payload.decode("utf-8")
+        return read_regular_file_within_root(self.workspace_root, path.relative_to(self.workspace_root)).decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)

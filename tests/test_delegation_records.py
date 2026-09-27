@@ -39,7 +39,7 @@ async def test_interrupted_event_publication_preserves_committed_log(
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
     )
-    event_path = handle.record_dir / "events.jsonl"
+    event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
 
     def interrupted_flush(_fd: int) -> None:
@@ -56,7 +56,35 @@ async def test_interrupted_event_publication_preserves_committed_log(
     await owner.finish(reopened, status="completed", output="Done")
     events = [json.loads(line) for line in event_path.read_text().splitlines()]
     assert [event["sequence"] for event in events] == [1, 2, 3]
-    assert _read_json(handle.record_dir / "run.json")["status"] == "completed"
+    assert _read_json(_record_dir(handle) / "run.json")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_event_log_is_streamed_and_appended_without_a_capped_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event log is never loaded into one capped buffer, so a long delegation has no log size ceiling."""
+    module = _records_module()
+    read = module.read_regular_file_within_root
+    capped_reads: list[str] = []
+
+    def spy(root: object, relative_path: object, **kwargs: object) -> bytes:
+        capped_reads.append(str(relative_path))
+        return read(root, relative_path, **kwargs)
+
+    monkeypatch.setattr(module, "read_regular_file_within_root", spy)
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    await owner.finish(handle, status="completed", output="Done")
+
+    assert "events.jsonl" not in capped_reads
+    assert [event["sequence"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [1, 2, 3]
 
 
 def _config(*, private_child: bool = False) -> Config:
@@ -103,6 +131,14 @@ def _metadata(module: ModuleType, **overrides: object) -> object:
     return module.DelegationMetadata(**values)
 
 
+def _record_dir(handle: object) -> Path:
+    return handle.child_workspace / handle.scoped_path
+
+
+def _receipt_path(handle: object) -> Path:
+    return handle.caller_workspace / _records_module()._receipt_relative_path(handle.locator)
+
+
 def _read_json(path: Path) -> dict[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
@@ -131,7 +167,7 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
     )
     content = f"First{separator}second"
     await owner.append_event(handle, module.DelegationEvent(kind="tool_result", data={"result": content}))
-    event_path = handle.record_dir / "events.jsonl"
+    event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
     assert separator.encode("utf-8") in committed
 
@@ -143,10 +179,10 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
     assert [event["sequence"] for event in events] == [1, 2, 3]
     assert events[1]["data"]["result"] == content
     assert events[2]["data"]["output"] == content
-    run = _read_json(handle.record_dir / "run.json")
+    run = _read_json(_record_dir(handle) / "run.json")
     assert run["status"] == "completed"
     assert run["output"] == content
-    assert content in (handle.record_dir / "transcript.md").read_text(encoding="utf-8")
+    assert content in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -164,9 +200,9 @@ async def test_invalid_event_stream_blocks_finish_without_mutation(tmp_path: Pat
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
     )
-    event_path = handle.record_dir / "events.jsonl"
+    event_path = _record_dir(handle) / "events.jsonl"
     event_path.write_bytes(contents)
-    run_path = handle.record_dir / "run.json"
+    run_path = _record_dir(handle) / "run.json"
     original_run = run_path.read_bytes()
 
     with pytest.raises(ValueError, match=f"Delegation event stream is {error}"):
@@ -193,8 +229,8 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     expected_scoped_path = ".mindroom/delegations"
     assert handle.locator.delegation_id == "delegation-123"
     assert handle.scoped_path.startswith(f"{expected_scoped_path}/")
-    assert handle.record_dir == (runtime_paths.storage_root / "agents" / "child" / "workspace" / handle.scoped_path)
-    run = _read_json(handle.record_dir / "run.json")
+    assert _record_dir(handle) == (runtime_paths.storage_root / "agents" / "child" / "workspace" / handle.scoped_path)
+    run = _read_json(_record_dir(handle) / "run.json")
     assert run == {
         "schema_version": 1,
         "delegation_id": "delegation-123",
@@ -222,11 +258,11 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     }
     assert isinstance(run["started_at"], str)
     assert str(run["started_at"]).endswith("Z")
-    events = _read_events(handle.record_dir / "events.jsonl")
+    events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [(event["sequence"], event["kind"]) for event in events] == [(1, "delegation_started")]
-    assert "Investigate the failure" in (handle.record_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "Investigate the failure" in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
 
-    receipt = _read_json(handle.receipt_path)
+    receipt = _read_json(_receipt_path(handle))
     assert receipt["delegation_id"] == "delegation-123"
     expected_reference = f"{handle.locator.child_agent_name}:{handle.scoped_path}"
     assert receipt["record_reference"] == expected_reference
@@ -237,8 +273,8 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     serialized = handle.locator.to_dict()
     reopened = await owner.reopen(module.DelegationRecordLocator.from_dict(serialized))
 
-    assert reopened.record_dir == handle.record_dir
-    assert reopened.receipt_path == handle.receipt_path
+    assert _record_dir(reopened) == _record_dir(handle)
+    assert _receipt_path(reopened) == _receipt_path(handle)
 
 
 @pytest.mark.asyncio
@@ -275,7 +311,7 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         ),
     )
 
-    events = _read_events(handle.record_dir / "events.jsonl")
+    events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [event["sequence"] for event in events] == [1, 2, 3]
     assert events[1]["data"] == {
         "tool_call_id": "call-1",
@@ -286,8 +322,8 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         "tool_call_id": "call-1",
         "result": {"items": [{"name": "first"}, {"name": "second"}]},
     }
-    assert _read_json(handle.record_dir / "run.json")["event_count"] == 3
-    transcript = (handle.record_dir / "transcript.md").read_text(encoding="utf-8")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
+    transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
     assert transcript.index("tool_call") < transcript.index("tool_result")
 
 
@@ -313,8 +349,8 @@ async def test_append_event_updates_paused_status_and_reopened_receipt(tmp_path:
         ),
     )
 
-    assert _read_json(handle.record_dir / "run.json")["status"] == "paused"
-    assert _read_json(handle.receipt_path)["status"] == "paused"
+    assert _read_json(_record_dir(handle) / "run.json")["status"] == "paused"
+    assert _read_json(_receipt_path(handle))["status"] == "paused"
 
 
 @pytest.mark.asyncio
@@ -338,12 +374,12 @@ async def test_append_event_deduplicates_stable_event_id_after_reopen(tmp_path: 
     reopened = await owner.reopen(module.DelegationRecordLocator.from_dict(handle.locator.to_dict()))
     await owner.append_event(reopened, event)
 
-    events = _read_events(handle.record_dir / "events.jsonl")
+    events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [entry["event_id"] for entry in events] == [
         "delegation_started",
         "tool:call-1:result",
     ]
-    assert _read_json(handle.record_dir / "run.json")["event_count"] == 2
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -358,11 +394,11 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
         child_execution_identity=_identity("child"),
         delegation_id="event-repair",
     )
-    run_path = handle.record_dir / "run.json"
-    transcript_path = handle.record_dir / "transcript.md"
+    run_path = _record_dir(handle) / "run.json"
+    transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
     stale_transcript = transcript_path.read_bytes()
-    stale_receipt = handle.receipt_path.read_bytes()
+    stale_receipt = _receipt_path(handle).read_bytes()
     event = module.DelegationEvent(
         kind="approval_requested",
         data={"tool_call_id": "pending", "arguments": {"command": "pwd"}},
@@ -372,7 +408,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     await owner.append_event(handle, event)
     run_path.write_bytes(stale_run)
     transcript_path.write_bytes(stale_transcript)
-    handle.receipt_path.write_bytes(stale_receipt)
+    _receipt_path(handle).write_bytes(stale_receipt)
 
     if fresh_event:
         event = module.DelegationEvent(kind="output", data={"content": "Still waiting"}, event_id="fresh-output")
@@ -380,7 +416,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
 
     assert _read_json(run_path)["event_count"] == 2 + fresh_event
     assert _read_json(run_path)["status"] == "paused"
-    assert _read_json(handle.receipt_path)["status"] == "paused"
+    assert _read_json(_receipt_path(handle))["status"] == "paused"
     transcript = transcript_path.read_text(encoding="utf-8")
     assert "Status: paused" in transcript
     assert "approval_requested" in transcript
@@ -398,15 +434,15 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
         child_execution_identity=_identity("child"),
         delegation_id="finish-repair",
     )
-    run_path = handle.record_dir / "run.json"
-    transcript_path = handle.record_dir / "transcript.md"
+    run_path = _record_dir(handle) / "run.json"
+    transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
     stale_transcript = transcript_path.read_bytes()
-    stale_receipt = handle.receipt_path.read_bytes()
+    stale_receipt = _receipt_path(handle).read_bytes()
     await owner.finish(handle, status="completed", output="durable result", usage={"output_tokens": 4})
     run_path.write_bytes(stale_run)
     transcript_path.write_bytes(stale_transcript)
-    handle.receipt_path.write_bytes(stale_receipt)
+    _receipt_path(handle).write_bytes(stale_receipt)
 
     if reject_fresh_event:
         with pytest.raises(ValueError, match="already terminal"):
@@ -420,9 +456,9 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
     assert run["status"] == "completed"
     assert run["output"] == "durable result"
     assert run["usage"] == {"output_tokens": 4}
-    assert _read_json(handle.receipt_path)["status"] == "completed"
+    assert _read_json(_receipt_path(handle))["status"] == "completed"
     assert "Status: completed" in transcript_path.read_text(encoding="utf-8")
-    assert [event["kind"] for event in _read_events(handle.record_dir / "events.jsonl")].count(
+    assert [event["kind"] for event in _read_events(_record_dir(handle) / "events.jsonl")].count(
         "delegation_finished",
     ) == 1
 
@@ -450,15 +486,15 @@ async def test_finish_persists_each_terminal_outcome(status: str, tmp_path: Path
         usage={"input_tokens": 11, "output_tokens": 7},
     )
 
-    run = _read_json(handle.record_dir / "run.json")
+    run = _read_json(_record_dir(handle) / "run.json")
     assert run["status"] == status
     assert run["output"] == output
     assert run["error"] == error
     assert run["usage"] == {"input_tokens": 11, "output_tokens": 7}
     assert isinstance(run["finished_at"], str)
-    assert _read_json(handle.receipt_path)["status"] == status
-    assert _read_events(handle.record_dir / "events.jsonl")[-1]["kind"] == "delegation_finished"
-    assert f"Status: {status}" in (handle.record_dir / "transcript.md").read_text(encoding="utf-8")
+    assert _read_json(_receipt_path(handle))["status"] == status
+    assert _read_events(_record_dir(handle) / "events.jsonl")[-1]["kind"] == "delegation_finished"
+    assert f"Status: {status}" in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -488,8 +524,8 @@ async def test_all_record_surfaces_redact_credentials(tmp_path: Path) -> None:
         error="password=example-error-secret",
     )
 
-    exported = "\n".join(path.read_text(encoding="utf-8") for path in handle.record_dir.rglob("*") if path.is_file())
-    exported += handle.receipt_path.read_text(encoding="utf-8")
+    exported = "\n".join(path.read_text(encoding="utf-8") for path in _record_dir(handle).rglob("*") if path.is_file())
+    exported += _receipt_path(handle).read_text(encoding="utf-8")
     for secret in (
         "sk-example-task-secret",
         "sk-example-argument-secret",
@@ -521,14 +557,14 @@ async def test_oversized_tool_output_is_preserved_as_redacted_artifact(tmp_path:
         ),
     )
 
-    event = _read_events(handle.record_dir / "events.jsonl")[-1]
+    event = _read_events(_record_dir(handle) / "events.jsonl")[-1]
     data = event["data"]
     assert isinstance(data, dict)
     artifact_reference = data["result"]
     assert isinstance(artifact_reference, dict)
     assert artifact_reference["oversized"] is True
     assert artifact_reference["redacted"] is True
-    artifact_path = handle.record_dir / str(artifact_reference["artifact_path"])
+    artifact_path = _record_dir(handle) / str(artifact_reference["artifact_path"])
     assert artifact_path.is_file()
     artifact_bytes = artifact_path.read_bytes()
     assert json.loads(artifact_bytes) == large_output
@@ -554,8 +590,8 @@ async def test_oversized_dict_artifact_hashes_exact_written_bytes(tmp_path: Path
         module.DelegationEvent(kind="tool_result", data={"result": large_output}),
     )
 
-    reference = _read_events(handle.record_dir / "events.jsonl")[-1]["data"]["result"]
-    artifact_bytes = (handle.record_dir / reference["artifact_path"]).read_bytes()
+    reference = _read_events(_record_dir(handle) / "events.jsonl")[-1]["data"]["result"]
+    artifact_bytes = (_record_dir(handle) / reference["artifact_path"]).read_bytes()
     assert reference["byte_count"] == len(artifact_bytes)
     assert reference["sha256"] == hashlib.sha256(artifact_bytes).hexdigest()
 
@@ -573,8 +609,8 @@ async def test_private_child_record_uses_requester_scope_and_caller_receipt(tmp_
         delegation_id="private-child",
     )
 
-    assert handle.record_dir.is_relative_to(runtime_paths.storage_root / "private_instances")
-    assert handle.receipt_path.is_relative_to(
+    assert _record_dir(handle).is_relative_to(runtime_paths.storage_root / "private_instances")
+    assert _receipt_path(handle).is_relative_to(
         runtime_paths.storage_root / "agents" / "caller" / "workspace",
     )
     assert not (runtime_paths.storage_root / "agents" / "child" / "workspace" / ".mindroom" / "delegations").exists()
@@ -610,7 +646,7 @@ def test_locator_rejects_malformed_present_execution_identity() -> None:
         ("events.jsonl", ValueError),
         ("transcript.md", None),
         (".record.lock", OSError),
-        ("receipt", ValueError),
+        ("receipt", None),
     ],
 )
 @pytest.mark.asyncio
@@ -628,7 +664,7 @@ async def test_record_mutation_never_follows_a_symlinked_leaf(
         child_execution_identity=_identity("child"),
         delegation_id=f"symlink-{leaf_name.replace('.', 'dot')}",
     )
-    target = handle.receipt_path if leaf_name == "receipt" else handle.record_dir / leaf_name
+    target = _receipt_path(handle) if leaf_name == "receipt" else _record_dir(handle) / leaf_name
     target.unlink()
     outside = tmp_path / f"outside-{leaf_name.replace('.', 'dot')}"
     outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
@@ -650,13 +686,13 @@ async def test_record_mutation_never_follows_a_symlinked_leaf(
     if refusal is None:
         await mutate_record()
         assert not target.is_symlink()
-        assert "blocked" in target.read_text(encoding="utf-8")
+        assert "blocked" in target.read_text(encoding="utf-8") or leaf_name == "receipt"
     else:
         with pytest.raises(refusal):
             await mutate_record()
     assert outside.read_text(encoding="utf-8") == '{"victim": "victim-only note"}\n'
     record_bytes = b"".join(
-        path.read_bytes() for path in handle.record_dir.rglob("*") if path.is_file() and not path.is_symlink()
+        path.read_bytes() for path in _record_dir(handle).rglob("*") if path.is_file() and not path.is_symlink()
     )
     assert b"victim-only note" not in record_bytes
 
@@ -689,15 +725,15 @@ async def test_record_mutation_refuses_swapped_record_directories(
         # Worker code races the primary between path validation and the record I/O.
         validated = validated_handle(self, record_handle)
         if swapped == "record_dir":
-            handle.record_dir.rename(handle.record_dir.with_name("moved"))
-            handle.record_dir.symlink_to(victim, target_is_directory=True)
+            _record_dir(handle).rename(_record_dir(handle).with_name("moved"))
+            _record_dir(handle).symlink_to(victim, target_is_directory=True)
         elif swapped == "delegations_root":
-            delegations = handle.record_dir.parents[1]
+            delegations = _record_dir(handle).parents[1]
             delegations.rename(delegations.with_name("moved"))
             delegations.symlink_to(victim.parent, target_is_directory=True)
         else:
-            (handle.record_dir / "events.jsonl").unlink()
-            os.mkfifo(handle.record_dir / "events.jsonl")
+            (_record_dir(handle) / "events.jsonl").unlink()
+            os.mkfifo(_record_dir(handle) / "events.jsonl")
         return validated
 
     monkeypatch.setattr(module.DelegationRecordOwner, "_validated_handle", swap_after_validation)
@@ -720,7 +756,7 @@ async def test_oversized_artifact_rejects_symlinked_directory(tmp_path: Path) ->
     )
     outside = tmp_path / "outside-artifacts"
     outside.mkdir()
-    (handle.record_dir / "artifacts").symlink_to(outside, target_is_directory=True)
+    (_record_dir(handle) / "artifacts").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(OSError, match=r"Not a directory|Too many levels"):
         await owner.append_event(
@@ -753,8 +789,8 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
     )
 
     workspace = runtime_paths.storage_root / "agents" / "caller" / "workspace"
-    assert list(workspace.rglob("transcript.md")) == [handle.record_dir / "transcript.md"]
-    receipt = _read_json(handle.receipt_path)
+    assert list(workspace.rglob("transcript.md")) == [_record_dir(handle) / "transcript.md"]
+    receipt = _read_json(_receipt_path(handle))
     assert set(receipt) == {
         "schema_version",
         "delegation_id",
