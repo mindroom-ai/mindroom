@@ -31,6 +31,7 @@ macos/build-macos-app.sh --universal --dmg
 `build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment using the locked `desktop-helper` dependency group.
 It copies the helper into the parent, stamps matching versions, signs the helper before the parent, and runs `verify-desktop-helper.sh`.
 The helper build does not modify the project environment.
+The frozen helper uses its bundled `certifi` roots for HTTPS, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is explicitly set. This avoids depending on the Python build machine's certificate paths while keeping certificate verification enabled.
 
 Universal releases contain separate `arm64` and `x86_64` helper apps; the native app selects the helper matching its compiled architecture.
 Each helper uses matching Python 3.13 and dependency wheels, and every collected Mach-O file is checked for that architecture.

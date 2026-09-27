@@ -168,6 +168,10 @@ If a runtime action is still in progress, let it finish before quitting.
 Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
 
+If computer access fails to start, **View Details** opens the full error, recovery advice, and redacted diagnostics that you can copy for support.
+Connection and TLS certificate failures keep your saved setup; check the network or update the app before trying **Start Access** again.
+They do not by themselves mean you need to sign in or pair again.
+
 **Open Logs Folder** opens `~/Library/Logs/mindroom`.
 Background services disable terminal colors; redirected output and runtime log files use plain text unless JSON logging is configured.
 The service appends to its existing logs, so records written by older versions may still contain terminal escape codes.

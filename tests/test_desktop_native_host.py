@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import signal
+import ssl
 import sys
 import time
 from contextlib import suppress
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import aiohttp
 import nio
 import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
@@ -54,6 +56,7 @@ from mindroom.desktop.protocol import (
 from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
 from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
+from mindroom.matrix.olm_to_device import OlmToDeviceError
 from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
@@ -284,6 +287,53 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     assert runtime.revoked == 1
     assert runtime.reset == 1
     assert runtime.stopped == 1
+
+
+@pytest.mark.parametrize(
+    ("cause", "code", "guidance"),
+    [
+        (ssl.SSLCertVerificationError(1, "certificate verify failed"), "tls_certificate_error", "certificate"),
+        (aiohttp.ClientConnectionError("connection closed"), "connection_failed", "network"),
+        (TimeoutError(), "connection_failed", "network"),
+    ],
+)
+def test_start_failure_preserves_transport_cause_and_saved_setup(
+    tmp_path: Path,
+    cause: Exception,
+    code: str,
+    guidance: str,
+) -> None:
+    """Nested transport failures must not tell an already paired user to pair again."""
+
+    class FailingRuntime(FakeRuntime):
+        async def start(self) -> None:
+            try:
+                try:
+                    raise cause  # noqa: TRY301 - Reproduce the transport's chained exception.
+                except Exception as exc:
+                    raise nio.LocalProtocolError("durable HTTP connection retries exhausted") from exc
+            except nio.LocalProtocolError as exc:
+                raise OlmToDeviceError(
+                    "Matrix device-key query failed: durable HTTP connection retries exhausted",
+                ) from exc
+
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="test",
+        dependencies=NativeHostDependencies(runtime_factory=lambda *_: FailingRuntime()),
+    )
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("start")))
+
+    assert caught.value.code == code
+    assert guidance in (caught.value.recovery or "").lower()
+    assert "pairing" not in (caught.value.recovery or "").lower()
+    assert caught.value.retryable
+    assert path.read_bytes() == original
+    assert host.status()["bridge"]["state"] == "stopped"
 
 
 @pytest.mark.asyncio

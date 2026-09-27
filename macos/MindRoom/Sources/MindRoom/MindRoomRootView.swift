@@ -5,6 +5,7 @@ struct MindRoomRootView: View {
     @ObservedObject var runner: MindRoomCommandRunner
     @ObservedObject var desktop: DesktopControlStore
     @FocusState private var focusedSection: AppSection?
+    @State private var errorDetails: DesktopErrorDetails?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -52,7 +53,10 @@ struct MindRoomRootView: View {
                                 Text(message).lineLimit(2)
                                 Spacer()
                                 Button("View Details") {
-                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                    errorDetails = DesktopErrorDetails(
+                                        message: message, recovery: desktop.recovery,
+                                        diagnostics: desktop.diagnosticsText
+                                    )
                                 }
                             }.padding(14)
                         }
@@ -66,6 +70,9 @@ struct MindRoomRootView: View {
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .disclosureGroupStyle(AppDisclosureGroupStyle())
+        .sheet(item: $errorDetails) { details in
+            DesktopErrorDetailsView(details: details)
+        }
     }
 
     @ViewBuilder

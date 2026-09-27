@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class DesktopControlStoreTests: XCTestCase {
+    func testDiagnosticsRetainsOperationErrorCodeWithoutIncludingCredentials() async throws {
+        let store = DesktopControlStore(request: { action, _, _ in
+            if action == "start" {
+                throw DesktopBridgeProcessError.helper(DesktopBridgeErrorPayload(
+                    code: "tls_certificate_error", message: "Certificate verification failed",
+                    recovery: "Update MindRoom and retry.", retryable: true
+                ))
+            }
+            return [:]
+        })
+        store.matrixPassword = "private-password"
+        store.pairingCode = "private-pairing-code"
+        store.start()
+        await waitUntilIdle(store)
+        let snapshot = DesktopErrorDetails(
+            message: try XCTUnwrap(store.errorMessage), recovery: store.recovery,
+            diagnostics: store.diagnosticsText
+        )
+        XCTAssertTrue(snapshot.diagnostics.contains("tls_certificate_error"))
+        XCTAssertFalse(snapshot.diagnostics.contains("private-password"))
+        XCTAssertFalse(snapshot.diagnostics.contains("private-pairing-code"))
+
+        store.refresh()
+        await waitUntilIdle(store)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertNil(store.errorCode)
+        XCTAssertFalse(store.diagnosticsText.contains("tls_certificate_error"))
+        XCTAssertTrue(snapshot.diagnostics.contains("tls_certificate_error"), "An open details panel keeps the failure snapshot")
+    }
+
     func testRefreshRetainsManuallyAddedAppMetadataAfterDeselecting() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

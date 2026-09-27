@@ -4500,6 +4500,7 @@ zoom = [
 
 [package.dev-dependencies]
 desktop-helper = [
+    { name = "certifi" },
     { name = "mcp", extra = ["cli"] },
     { name = "mindroom-nio", extra = ["e2e"] },
     { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
@@ -4725,6 +4726,7 @@ provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approve
 
 [package.metadata.requires-dev]
 desktop-helper = [
+    { name = "certifi" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
     { name = "mindroom-nio", extras = ["e2e"] },
     { name = "pillow", specifier = ">=10.2" },

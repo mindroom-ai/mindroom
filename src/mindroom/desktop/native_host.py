@@ -421,15 +421,10 @@ class NativeDesktopHost:
                 self._helper_state = "running"
                 raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
             except Exception as exc:
+                from mindroom.desktop.startup_errors import desktop_startup_error
+
                 self._helper_state = "faulted"
-                message = str(exc) or "Desktop bridge start failed."
-                code = "session_missing" if "session" in message.lower() else "internal_error"
-                raise NativeProtocolError(
-                    code,
-                    message,
-                    recovery="Complete sign-in and pairing, then retry.",
-                    retryable=True,
-                ) from exc
+                raise desktop_startup_error(exc) from exc
             finally:
                 self._startup_task = None
             self._runtime = runtime
