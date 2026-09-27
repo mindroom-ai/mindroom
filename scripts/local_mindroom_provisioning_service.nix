@@ -36,6 +36,12 @@ in
       description = "File containing the Matrix registration token.";
     };
 
+    approveUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Chat UI page that approves device pairing links; null uses the service default (https://chat.mindroom.chat/connect).";
+    };
+
     googleOAuthClientId = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -113,6 +119,8 @@ in
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
       } // lib.optionalAttrs (cfg.matrixServerName != null) {
         MATRIX_SERVER_NAME = cfg.matrixServerName;
+      } // lib.optionalAttrs (cfg.approveUrl != null) {
+        MINDROOM_PROVISIONING_APPROVE_URL = cfg.approveUrl;
       } // lib.optionalAttrs (cfg.googleOAuthClientId != null) {
         MINDROOM_GOOGLE_OAUTH_CLIENT_ID = cfg.googleOAuthClientId;
         MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE = cfg.googleOAuthClientSecretFile;

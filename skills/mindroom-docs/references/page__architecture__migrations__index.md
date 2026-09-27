@@ -100,6 +100,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load pair sessions persisted before device pairing as browser-initiated sessions without device fields. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -179,6 +180,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
 | C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
+| C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads pair sessions persisted before device pairing, which lack device fields, as browser-initiated sessions. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -314,6 +316,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
 [private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
 [private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
+[provisioning-service]: https://github.com/mindroom-ai/mindroom/blob/main/scripts/local_mindroom_provisioning_service.py
 [python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
@@ -371,6 +374,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py
 [native-history-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_native_compaction_history.py
 [partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
+[provisioning-service-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_local_mindroom_provisioning_service.py
 [private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
 [report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
 [response-runner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_runner_focused.py

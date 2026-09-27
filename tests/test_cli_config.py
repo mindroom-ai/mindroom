@@ -592,7 +592,9 @@ class TestConfigInit:
         assert "\n\n\n# AI provider API keys" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
 
     def test_init_mindroom_chat_vertexai_claude_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
         """Hosted Vertex config should use Vertex Claude defaults and hosted Matrix settings."""
@@ -626,7 +628,9 @@ class TestConfigInit:
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
         assert "Vertex AI project/region" in output
         assert "Google" in output
         assert "auth" in output
@@ -774,7 +778,9 @@ class TestConfigInit:
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
         assert "codex login" in output
 
     def test_init_mindroom_chat_kimi_writes_hosted_kimi_defaults(self, tmp_path: Path) -> None:
@@ -801,7 +807,9 @@ class TestConfigInit:
         assert "\nOPENROUTER_API_KEY=" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
         assert "/login" in output
 
     def test_init_mindroom_chat_ollama_writes_hosted_ollama_defaults(
@@ -836,7 +844,9 @@ class TestConfigInit:
         assert "\nANTHROPIC_API_KEY=" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
         assert f"ollama pull {OLLAMA_GEMMA}" in output
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
@@ -881,7 +891,9 @@ class TestConfigInit:
         assert "\nANTHROPIC_API_KEY=" not in env_content
 
         output = normalize_console_output(result.output)
-        assert "mindroom connect --pair-code" in output
+        assert "mindroom run" in output
+        assert "mindroom connect --pair-code" not in output
+        assert "link to approve" in output
         assert llama_cpp_server_command(LLAMA_CPP_GEMMA) in output
         assert llama_cpp_server_command(LLAMA_CPP_QWEN) in output
         assert "llama.cpp" in output
@@ -3440,6 +3452,40 @@ class TestDoctor:
 class TestConnect:
     """Tests for `mindroom connect` pairing command."""
 
+    @staticmethod
+    def _device_flow_responses() -> list[httpx.Response]:
+        """Return start + connected responses for device pairing."""
+        return [
+            httpx.Response(
+                200,
+                json={
+                    "pair_code": "ABCD-EFGH",
+                    "device_secret": "device-secret",
+                    "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                    "expires_at": "2026-09-26T12:10:00Z",
+                    "poll_interval_seconds": 3,
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "status": "connected",
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                    "connection": {
+                        "id": "conn-1",
+                        "client_name": "devbox",
+                        "fingerprint": "sha256:abc",
+                        "created_at": "2026-02-27T12:00:00Z",
+                        "last_seen_at": "2026-02-27T12:00:00Z",
+                        "revoked_at": None,
+                    },
+                },
+            ),
+        ]
+
     def test_connect_persists_local_provisioning_credentials(
         self,
         tmp_path: Path,
@@ -3460,36 +3506,20 @@ class TestConnect:
             '    "*":\n'
             f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        monkeypatch.setattr("mindroom.cli.main.socket.gethostname", lambda: "devbox")
-
-        monkeypatch.setattr(
-            "mindroom.cli.main._httpx_post",
-            lambda *_a, **_kw: httpx.Response(
-                200,
-                json={
-                    "client_id": "client-123",
-                    "client_secret": "secret-123",
-                    "namespace": "a1b2c3d4",
-                    "owner_user_id": "@alice:mindroom.chat",
-                    "connection": {
-                        "id": "conn-1",
-                        "client_name": "devbox",
-                        "fingerprint": "sha256:abc",
-                        "created_at": "2026-02-27T12:00:00Z",
-                        "last_seen_at": "2026-02-27T12:00:00Z",
-                        "revoked_at": None,
-                    },
-                },
-            ),
-        )
+        monkeypatch.setattr("mindroom.cli.connect.socket.gethostname", lambda: "devbox")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
-            ["connect", "--pair-code", "ABCD-EFGH", "--provisioning-url", "https://provisioning.example"],
+            ["connect", "--provisioning-url", "https://provisioning.example"],
             cfg,
         )
 
         assert result.exit_code == 0
-        assert "Paired successfully" in result.output
+        assert "https://chat.example/connect?code=ABCD-EFGH" in result.output
+        assert "ABCD-EFGH" in result.output
+        assert "Connected as @alice:mindroom.chat" in result.output
         env_content = (tmp_path / ".env").read_text()
         assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
@@ -3526,24 +3556,13 @@ class TestConnect:
             "  global_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        monkeypatch.setattr(
-            "mindroom.cli.main._httpx_post",
-            lambda *_a, **_kw: httpx.Response(
-                200,
-                json={
-                    "client_id": "client-123",
-                    "client_secret": "secret-123",
-                    "namespace": "a1b2c3d4",
-                    "owner_user_id": "@alice:mindroom.chat",
-                },
-            ),
-        )
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
             [
                 "connect",
-                "--pair-code",
-                "ABCD-EFGH",
                 "--provisioning-url",
                 "https://provisioning.example",
                 "--path",
@@ -3569,24 +3588,13 @@ class TestConnect:
         """--no-persist-env should print export commands and avoid writing .env."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        monkeypatch.setattr(
-            "mindroom.cli.main._httpx_post",
-            lambda *_a, **_kw: httpx.Response(
-                200,
-                json={
-                    "client_id": "client-123",
-                    "client_secret": "secret-123",
-                    "namespace": "a1b2c3d4",
-                    "owner_user_id": "@alice:mindroom.chat",
-                },
-            ),
-        )
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
             [
                 "connect",
-                "--pair-code",
-                "ABCD-EFGH",
                 "--provisioning-url",
                 "https://provisioning.example",
                 "--no-persist-env",
@@ -3612,24 +3620,34 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         client_secret = f"[red]{'x' * 120};$(id)[/red]"
-        monkeypatch.setattr(
-            "mindroom.cli.main._httpx_post",
-            lambda *_a, **_kw: httpx.Response(
+        responses = [
+            httpx.Response(
                 200,
                 json={
+                    "pair_code": "ABCD-EFGH",
+                    "device_secret": "device-secret",
+                    "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                    "expires_at": "2026-09-26T12:10:00Z",
+                    "poll_interval_seconds": 3,
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "status": "connected",
                     "client_id": "client value",
                     "client_secret": client_secret,
                     "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
             ),
-        )
+        ]
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
             [
                 "connect",
-                "--pair-code",
-                "ABCD-EFGH",
                 "--provisioning-url",
                 "https://x.test/a b",
                 "--no-persist-env",
@@ -3653,14 +3671,25 @@ class TestConnect:
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://env-provisioning.example")
 
-        called: dict[str, object] = {}
+        called: list[str] = []
 
-        def _fake_post(url: str, **kwargs: object) -> httpx.Response:
-            called["url"] = url
-            called["kwargs"] = kwargs
+        def _fake_post(url: str, **_kwargs: object) -> httpx.Response:
+            called.append(url)
+            if "start" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "pair_code": "ABCD-EFGH",
+                        "device_secret": "device-secret",
+                        "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                        "expires_at": "2026-09-26T12:10:00Z",
+                        "poll_interval_seconds": 3,
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
+                    "status": "connected",
                     "client_id": "client-123",
                     "client_secret": "secret-123",
                     "namespace": "a1b2c3d4",
@@ -3668,12 +3697,13 @@ class TestConnect:
                 },
             )
 
-        monkeypatch.setattr("mindroom.cli.main._httpx_post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
-        result = _invoke_with_runtime(["connect", "--pair-code", "ABCD-EFGH", "--no-persist-env"], cfg)
+        result = _invoke_with_runtime(["connect", "--no-persist-env"], cfg)
 
         assert result.exit_code == 0
-        assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
+        assert called[0] == "https://env-provisioning.example/v1/local-mindroom/pair/device/start"
         assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
         assert "export MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in result.output
@@ -3693,21 +3723,33 @@ class TestConnect:
             "  global_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        monkeypatch.setattr(
-            "mindroom.cli.main._httpx_post",
-            lambda *_a, **_kw: httpx.Response(
+        responses = [
+            httpx.Response(
                 200,
                 json={
+                    "pair_code": "ABCD-EFGH",
+                    "device_secret": "device-secret",
+                    "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                    "expires_at": "2026-09-26T12:10:00Z",
+                    "poll_interval_seconds": 3,
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "status": "connected",
                     "client_id": "client-123",
                     "client_secret": "secret-123",
                     "namespace": "a1b2c3d4",
                     "owner_user_id": "not-a-mxid",
                 },
             ),
-        )
+        ]
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
-            ["connect", "--pair-code", "ABCD-EFGH", "--provisioning-url", "https://provisioning.example"],
+            ["connect", "--provisioning-url", "https://provisioning.example"],
             cfg,
         )
 
@@ -3717,6 +3759,47 @@ class TestConnect:
         assert "MINDROOM_OWNER_USER_ID=" not in env_content
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in updated_config
+
+    def test_connect_warns_when_namespace_is_malformed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed namespace should warn."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = [
+            httpx.Response(
+                200,
+                json={
+                    "pair_code": "ABCD-EFGH",
+                    "device_secret": "device-secret",
+                    "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                    "expires_at": "2026-09-26T12:10:00Z",
+                    "poll_interval_seconds": 3,
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "status": "connected",
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "Bad_Namespace",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            ),
+        ]
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+        )
+
+        assert result.exit_code == 0
+        assert "malformed namespace" in normalize_console_output(result.output)
 
     def test_connect_passes_matrix_ssl_verify_to_httpx(
         self,
@@ -3732,9 +3815,21 @@ class TestConnect:
         def _fake_post(url: str, **kwargs: object) -> httpx.Response:
             called["url"] = url
             called["kwargs"] = kwargs
+            if "start" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "pair_code": "ABCD-EFGH",
+                        "device_secret": "device-secret",
+                        "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                        "expires_at": "2026-09-26T12:10:00Z",
+                        "poll_interval_seconds": 3,
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
+                    "status": "connected",
                     "client_id": "client-123",
                     "client_secret": "secret-123",
                     "namespace": "a1b2c3d4",
@@ -3742,13 +3837,12 @@ class TestConnect:
                 },
             )
 
-        monkeypatch.setattr("mindroom.cli.main._httpx_post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
             [
                 "connect",
-                "--pair-code",
-                "ABCD-EFGH",
                 "--provisioning-url",
                 "https://provisioning.example",
                 "--no-persist-env",
@@ -3761,6 +3855,74 @@ class TestConnect:
         kwargs = called["kwargs"]
         assert isinstance(kwargs, dict)
         assert kwargs["verify"] is False
+
+    def test_connect_pair_code_option_removed(self, tmp_path: Path) -> None:
+        """--pair-code should exit with code 2 (option removed)."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        result = _invoke_with_runtime(
+            ["connect", "--pair-code", "ABCD-EFGH", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+        )
+
+        assert result.exit_code == 2
+
+    def test_connect_open_browser_opens_approve_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--open-browser should call webbrowser.open with the approve URL."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        opened_urls: list[str] = []
+        monkeypatch.setattr("mindroom.cli.connect.webbrowser.open", lambda url: opened_urls.append(url))
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example", "--open-browser"],
+            cfg,
+        )
+
+        assert result.exit_code == 0
+        assert opened_urls == ["https://chat.example/connect?code=ABCD-EFGH"]
+
+    def test_connect_exits_on_approval_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Connect exits with timeout message when session expires without renewal."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = [
+            httpx.Response(
+                200,
+                json={
+                    "pair_code": "ABCD-EFGH",
+                    "device_secret": "device-secret",
+                    "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                    "expires_at": "2026-09-26T12:10:00Z",
+                    "poll_interval_seconds": 3,
+                },
+            ),
+            httpx.Response(200, json={"status": "expired"}),
+        ]
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+        )
+
+        assert result.exit_code == 1
+        assert "Approval timed out" in result.output
+        assert "Run the command again to get a new link" in result.output
 
 
 # ---------------------------------------------------------------------------

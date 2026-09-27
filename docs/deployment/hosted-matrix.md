@@ -52,29 +52,23 @@ To use OpenRouter instead, regenerate with `uvx mindroom config init --provider 
 For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
 
-## 3. Pair This Install
-
-1. Open `https://chat.mindroom.chat`.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
-
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-Pair code behavior:
-
-- Valid for 600 seconds (10 minutes).
-- Only used to bootstrap local pairing.
-
-After successful pairing, local provisioning credentials are written to `~/.mindroom/.env` by default unless you use `--no-persist-env`.
-
-## 4. Start MindRoom
+## 3. Start MindRoom (pairing happens automatically)
 
 ```bash
 uvx mindroom run
 ```
+
+On first run, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+Pair code behavior:
+
+- Valid for 600 seconds (10 minutes).
+- MindRoom automatically generates a new code if the previous expires.
+- Only used to bootstrap local pairing.
+
+After successful pairing, local provisioning credentials are written to `~/.mindroom/.env`.
 
 MindRoom then:
 
@@ -140,4 +134,7 @@ You can keep the same local flow and switch endpoints:
 
 If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
 
-Then run `mindroom connect` again with a fresh pair code from your own UI.
+On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https://chat.your-matrix.example.com/connect` so pairing links open your own chat UI.
+It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
+
+Then run `mindroom connect` or `mindroom run` to pair with your own deployment.

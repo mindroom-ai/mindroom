@@ -79,32 +79,29 @@ For hosted providers, set the credentials for the provider you selected:
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
-### 3. Pair your local install from chat UI
-
-1. Open `https://chat.mindroom.chat` and sign in.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
-
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-Notes:
-
-- Pair code is short-lived (10 minutes). Generate a new one if it expires.
-- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
-- Use `--no-persist-env` to print export commands instead of writing `.env`; evaluate or copy those commands into the current shell yourself.
-
-### 4. Run MindRoom
+### 3. Run MindRoom
 
 ```bash
 uvx mindroom run
 ```
 
-### 5. Verify
+On first run, MindRoom automatically initiates pairing.
+It prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 
-**In chat:** Send a message mentioning your agent in a room where it is configured.
+After pairing completes, MindRoom starts the runtime and dashboard.
+
+Notes:
+
+- Pair codes are short-lived (10 minutes).
+- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
+- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
+- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
+
+### 4. Verify
+
+**In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.

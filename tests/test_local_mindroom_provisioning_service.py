@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Self
+from urllib.parse import urlparse
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
+from mindroom.cli import connect as cli_connect
 from mindroom.matrix import provisioning as matrix_provisioning
+from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import httpx
 
 
 def _service_config(
@@ -733,3 +736,448 @@ def test_client_error_detail_constants_match_service() -> None:
     """The runtime client classifies register-agent 403s by these exact strings."""
     assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
     assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL
+
+
+def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> None:
+    """The CLI's device-pairing requests and its response fixtures satisfy the service schemas."""
+    calls: list[tuple[str, dict[str, object]]] = []
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], calls)
+
+    cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint=cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml"),
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    (start_url, start_payload), (poll_url, poll_payload) = calls
+    service_paths = {route.path for route in provisioning.create_app(_service_config(tmp_path / "state.json")).routes}
+    assert urlparse(start_url).path in service_paths
+    assert urlparse(poll_url).path in service_paths
+    provisioning.DevicePairStartRequest.model_validate(start_payload)
+    provisioning.DevicePairPollRequest.model_validate(poll_payload)
+    provisioning.DevicePairStartResponse.model_validate(_START)
+    provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
+
+
+def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generated pair code already held by a live session is replaced before it is handed out."""
+    codes = iter(["AAAA-BBBB", "AAAA-BBBB", "CCCC-DDDD"])
+    monkeypatch.setattr(provisioning, "_generate_pair_code", lambda: next(codes))
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        first = _start_device_pairing(client)
+        second = _start_device_pairing(client)
+
+    assert first["pair_code"] == "AAAA-BBBB"
+    assert second["pair_code"] == "CCCC-DDDD"
+
+
+def _start_device_pairing(client: TestClient, client_name: str = "alice-macbook") -> dict[str, object]:
+    response = client.post(
+        "/v1/local-mindroom/pair/device/start",
+        json={"client_name": client_name, "client_pubkey_or_fingerprint": "sha256:abc123"},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_device_pairing_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local client starts, a browser user approves, and the first poll returns credentials once."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        pair_code = started["pair_code"]
+        assert started["approve_url"] == f"https://chat.mindroom.chat/connect?code={pair_code}"
+        assert started["poll_interval_seconds"] == 3
+
+        pending = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        assert pending.json()["status"] == "pending"
+
+        inspected = client.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": pair_code},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert inspected.status_code == 200
+        assert inspected.json()["client_name"] == "alice-macbook"
+        assert inspected.json()["status"] == "pending"
+
+        approved = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": pair_code},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "approved"
+
+        connected = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        body = connected.json()
+        assert body["status"] == "connected"
+        assert body["owner_user_id"] == "@alice:mindroom.chat"
+        assert body["client_id"] == body["connection"]["id"]
+        assert body["connection"]["client_name"] == "alice-macbook"
+
+        claimed_again = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        )
+        assert claimed_again.status_code == 410
+        assert claimed_again.json()["detail"] == "Pair session already claimed"
+
+        listed = client.get("/v1/local-mindroom/connections", headers={"Authorization": "Bearer token-alice"})
+        assert [item["id"] for item in listed.json()["connections"]] == [body["client_id"]]
+
+
+def test_device_pairing_credentials_register_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentials from device pairing authenticate register-agent like browser-issued ones."""
+    _patch_matrix_auth(monkeypatch)
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        response = _post_register_agent(client, body, _managed_agent_username("code", body["namespace"]))
+
+    assert response.status_code == 200
+    assert register_calls == [_managed_agent_username("code", body["namespace"])]
+
+
+def test_device_approve_requires_matrix_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a signed-in Matrix user may inspect or approve a device code."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        for path in ("inspect", "approve"):
+            response = client.post(f"/v1/local-mindroom/pair/device/{path}", json={"pair_code": started["pair_code"]})
+            assert response.status_code == 401
+
+
+def test_device_code_approved_by_one_user_cannot_be_taken_by_another(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second user cannot re-approve a code another user already approved."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        code = {"pair_code": started["pair_code"]}
+        assert (
+            client.post(
+                "/v1/local-mindroom/pair/device/approve",
+                json=code,
+                headers={"Authorization": "Bearer token-alice"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/v1/local-mindroom/pair/device/approve",
+                json=code,
+                headers={"Authorization": "Bearer token-alice"},
+            ).status_code
+            == 200
+        )
+        taken = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json=code,
+            headers={"Authorization": "Bearer token-bob"},
+        )
+        assert taken.status_code == 409
+        assert taken.json()["detail"] == "Pair code already approved"
+
+
+def test_device_code_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expired device codes can neither be approved nor polled into credentials."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        later = provisioning._now_utc() + provisioning.timedelta(seconds=601)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+
+        approve = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert approve.status_code == 410
+        poll = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        assert poll.json()["status"] == "expired"
+
+
+def test_device_code_cannot_complete_through_browser_initiated_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy pair/complete endpoint must not hand out credentials for a device code."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={
+                "pair_code": started["pair_code"],
+                "client_name": "attacker",
+                "client_pubkey_or_fingerprint": "sha256:evil",
+            },
+        )
+        assert complete.status_code == 404
+
+
+def test_browser_initiated_code_cannot_be_approved_as_device_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Device approval only accepts codes created by the device flow."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        pair_code = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        ).json()["pair_code"]
+        response = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": pair_code},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert response.status_code == 404
+
+
+def test_device_poll_rejects_unknown_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Polling with a secret the service never issued fails without revealing sessions."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        response = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": "not-issued"})
+        assert response.status_code == 404
+
+
+def test_device_start_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unauthenticated device starts are limited per client address."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        for _ in range(10):
+            _start_device_pairing(client)
+        response = client.post(
+            "/v1/local-mindroom/pair/device/start",
+            json={"client_name": "x", "client_pubkey_or_fingerprint": "sha256:x"},
+        )
+        assert response.status_code == 429
+
+
+def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An approval persisted before a restart can still be claimed after it."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert started["device_secret"] not in json.dumps(persisted)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        body = restarted.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "connected"
+        assert body["owner_user_id"] == "@alice:mindroom.chat"
+
+
+def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can point approval links at their own chat client."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.setenv("MINDROOM_PROVISIONING_APPROVE_URL", "https://chat.example.org/connect/")
+    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
+
+
+def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old expired sessions are removed when new pairing starts."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    app = provisioning.create_app(_service_config(state_path))
+
+    with TestClient(app) as client:
+        old_browser = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        ).json()
+        old_device = _start_device_pairing(client, "old-machine")
+
+        later = provisioning._now_utc() + provisioning.timedelta(seconds=601)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+
+        _start_device_pairing(client, "new-machine")
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    session_ids = [s["id"] for s in persisted["pair_sessions"]]
+    assert old_browser["pair_session_id"] not in session_ids
+    assert len(persisted["pair_sessions"]) == 1
+    assert persisted["pair_sessions"][0]["client_name"] == "new-machine"
+
+    with TestClient(app) as restarted:
+        assert (
+            restarted.post(
+                "/v1/local-mindroom/pair/complete",
+                json={"pair_code": old_browser["pair_code"], "client_name": "x", "client_pubkey_or_fingerprint": "x"},
+            ).status_code
+            == 404
+        )
+        assert (
+            restarted.post(
+                "/v1/local-mindroom/pair/device/poll",
+                json={"device_secret": old_device["device_secret"]},
+            ).status_code
+            == 404
+        )
+
+
+def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Approval near expiry extends the window so CLI can still claim credentials."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        near_expiry = provisioning._now_utc() + provisioning.timedelta(seconds=595)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: near_expiry)
+
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        after_original_ttl = near_expiry + provisioning.timedelta(seconds=10)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: after_original_ttl)
+
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "connected"
+
+
+def test_poll_expires_after_grace_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll after grace period returns expired."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        near_expiry = provisioning._now_utc() + provisioning.timedelta(seconds=595)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: near_expiry)
+
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        past_grace = near_expiry + provisioning.timedelta(seconds=70)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: past_grace)
+
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "expired"
+
+
+def test_approve_and_inspect_reject_connected_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After credentials are claimed, approve and inspect return 409."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+
+        for endpoint in ("approve", "inspect"):
+            response = client.post(
+                f"/v1/local-mindroom/pair/device/{endpoint}",
+                json={"pair_code": started["pair_code"]},
+                headers={"Authorization": "Bearer token-alice"},
+            )
+            assert response.status_code == 409
+            assert response.json()["detail"] == "Pair code already used"
+
+
+def test_legacy_state_loads_browser_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """State files written before device pairing load sessions as browser-initiated."""
+    _patch_matrix_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+
+    legacy_payload = {
+        "pair_sessions": [
+            {
+                "id": "legacy-session-id",
+                "user_id": "@alice:mindroom.chat",
+                "pair_code_hash": provisioning._hash_token("AAAA-BBBB"),
+                "status": "pending",
+                "created_at": provisioning._as_utc_iso(provisioning._now_utc()),
+                "expires_at": provisioning._as_utc_iso(provisioning._now_utc() + provisioning.timedelta(seconds=600)),
+                "completed_at": None,
+                "connection_id": None,
+            },
+        ],
+        "connections": [],
+    }
+    state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    app = provisioning.create_app(_service_config(state_path))
+    with TestClient(app):
+
+        async def _get_state() -> provisioning.ProvisioningState:
+            return app.state.runtime_state
+
+        state = asyncio.run(_get_state())
+        session = state.pair_sessions["legacy-session-id"]
+        assert session.user_id == "@alice:mindroom.chat"
+        assert session.device_secret_hash is None
+        assert session.client_name is None
+        assert session.fingerprint is None
+        assert session.approved_at is None

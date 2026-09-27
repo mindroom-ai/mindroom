@@ -4,7 +4,7 @@ Paired local installations automatically retrieve MindRoom's Google desktop OAut
 You do not need to create a Google Cloud project, register callback URLs, or copy a client secret.
 The client configuration is not bundled in the package or committed to the source repository.
 The local runtime uses OAuth PKCE and a callback on `localhost`, `127.0.0.1`, or `::1`.
-Run `mindroom connect --pair-code ...` before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
+Run `mindroom connect` (or `mindroom run` for automatic pairing) before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
 
 ## Choose Providers
 

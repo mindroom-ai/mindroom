@@ -65,8 +65,8 @@ Expected outcome: Restart restores rooms, runtime state, and persisted data with
 - [ ] `CORE-006` Start the runtime while Matrix or another dependency is temporarily unavailable.
 Expected outcome: Startup retries back off and recover on transient failures, while permanent startup failures are reported clearly and do not spin forever.
 
-- [ ] `CORE-007` Run `uvx mindroom connect --pair-code ...` in a hosted pairing flow.
-Expected outcome: Pairing persists the returned local client credentials, updates local environment configuration, and replaces owner placeholder tokens when the pairing response includes an owner user ID.
+- [ ] `CORE-007` Run `uvx mindroom run` or `uvx mindroom connect` in a hosted pairing flow.
+Expected outcome: Pairing displays a link and QR code, waits for approval, persists the returned local client credentials, updates local environment configuration, and replaces owner placeholder tokens when the pairing response includes an owner user ID.
 
 - [ ] `CORE-008` Run `mindroom avatars generate` and `mindroom avatars sync` after the runtime has initialized at least once.
 Expected outcome: Managed avatar assets are generated for supported entities and sync succeeds through the router account without manual state surgery.

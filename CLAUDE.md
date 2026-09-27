@@ -653,17 +653,16 @@ uvx mindroom config init --matrix-server mindroom.chat
 
 2) Add at least one model provider key in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
 
-3) Generate a pair code in `https://chat.mindroom.chat` (`Settings -> Local MindRoom`) and pair locally
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-4) Start MindRoom
+3) Start MindRoom (pairing happens automatically on first run)
 ```bash
 uvx mindroom run
 ```
 
-`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
+On first run, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+`mindroom run` (or `mindroom connect`) writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
 
 ### SaaS Platform Commands
 
@@ -881,8 +880,8 @@ mindroom doctor
 # Run the stack
 uv run mindroom run --storage-path mindroom_data
 
-# Pair local install with hosted provisioning
-mindroom connect --pair-code ABCD-EFGH
+# Pair local install with hosted provisioning (automatic on first run, or explicit via mindroom connect)
+mindroom connect
 
 # Bootstrap local Synapse + MindRoom Chat (Docker)
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix

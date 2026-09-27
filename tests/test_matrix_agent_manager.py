@@ -870,7 +870,7 @@ class TestMatrixRegistration:
         """Provisioning URL without local client creds should fail with actionable guidance."""
         runtime_paths = _runtime_paths(tmp_path, MINDROOM_PROVISIONING_URL="https://provisioning.example")
 
-        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect --pair-code"):
+        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect"):
             await _register_user(
                 "http://localhost:8008",
                 "test_user",

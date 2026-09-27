@@ -53,10 +53,19 @@ def _local_provisioning_client_credentials_from_env(
         msg = (
             "Provisioning credentials are incomplete. "
             "Set both MINDROOM_LOCAL_CLIENT_ID and MINDROOM_LOCAL_CLIENT_SECRET, "
-            "or run `mindroom connect --pair-code ...` again."
+            "or run `mindroom connect` again."
         )
         raise matrix_startup_error(msg, permanent=True)
     return client_id, client_secret
+
+
+def local_pairing_required(runtime_paths: RuntimePaths) -> bool:
+    """Return whether hosted registration needs this install to pair before startup."""
+    return (
+        provisioning_url_from_env(runtime_paths) is not None
+        and registration_token_from_env(runtime_paths) is None
+        and _local_provisioning_client_credentials_from_env(runtime_paths) is None
+    )
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -71,10 +80,7 @@ def required_local_provisioning_client_credentials_for_registration(
 
     creds = _local_provisioning_client_credentials_from_env(runtime_paths)
     if creds is None:
-        msg = (
-            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
-            "Run `mindroom connect --pair-code ...` first."
-        )
+        msg = "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. Run `mindroom connect` first."
         raise matrix_startup_error(msg, permanent=True)
     return creds
 
@@ -98,17 +104,14 @@ def _raise_for_register_agent_error(response: httpx.Response, *, username: str) 
     """Raise the appropriate error for a failed register-agent response."""
     detail = error_detail_from_response(response)
     if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
-        msg = (
-            f"Provisioning credentials are invalid or revoked (server said: {detail}). "
-            "Run `mindroom connect --pair-code ...` again."
-        )
+        msg = f"Provisioning credentials are invalid or revoked (server said: {detail}). Run `mindroom connect` again."
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 403:
         msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
         if detail == _NAMESPACE_MISMATCH_DETAIL:
             msg += (
                 ". Usernames must match mindroom_<entity>_<namespace>; check that MINDROOM_NAMESPACE "
-                "matches this connection's namespace or re-run `mindroom connect --pair-code ...`."
+                "matches this connection's namespace or re-run `mindroom connect`."
             )
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 404:

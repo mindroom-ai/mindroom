@@ -44,12 +44,10 @@ uvx mindroom config init
 # Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
 $EDITOR ~/.mindroom/.env
 
-# Generate pair code in https://chat.mindroom.chat:
-# Settings -> Local MindRoom -> Generate Pair Code
-uvx mindroom connect --pair-code ABCD-EFGH
-
-# Start MindRoom
+# Start MindRoom (pairing happens automatically on first run)
 uvx mindroom run
+# Open the printed link or scan the QR code to approve pairing,
+# or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
 
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
@@ -316,32 +314,29 @@ For hosted providers, set the credentials for the provider you selected:
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
-### 3. Pair your local install from chat UI
-
-1. Open `https://chat.mindroom.chat` and sign in.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
-
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-Notes:
-
-- Pair code is short-lived (10 minutes). Generate a new one if it expires.
-- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
-- Use `--no-persist-env` to print export commands instead of writing `.env`; evaluate or copy those commands into the current shell yourself.
-
-### 4. Run MindRoom
+### 3. Run MindRoom
 
 ```bash
 uvx mindroom run
 ```
 
-### 5. Verify
+On first run, MindRoom automatically initiates pairing.
+It prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 
-**In chat:** Send a message mentioning your agent in a room where it is configured.
+After pairing completes, MindRoom starts the runtime and dashboard.
+
+Notes:
+
+- Pair codes are short-lived (10 minutes).
+- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
+- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
+- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
+
+### 4. Verify
+
+**In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
@@ -20915,6 +20910,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load pair sessions persisted before device pairing as browser-initiated sessions without device fields. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -20994,6 +20990,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
 | C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
+| C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads pair sessions persisted before device pairing, which lack device fields, as browser-initiated sessions. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -21129,6 +21126,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
 [private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
 [private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
+[provisioning-service]: https://github.com/mindroom-ai/mindroom/blob/main/scripts/local_mindroom_provisioning_service.py
 [python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
@@ -21186,6 +21184,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py
 [native-history-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_native_compaction_history.py
 [partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
+[provisioning-service-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_local_mindroom_provisioning_service.py
 [private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
 [report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
 [response-runner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_runner_focused.py
@@ -21600,12 +21599,12 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init
 $EDITOR ~/.mindroom/.env
-uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
+# Open the printed link or scan the QR code to approve pairing,
+# or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
 
-Generate the pair code in `https://chat.mindroom.chat` under:
-`Settings -> Local MindRoom`.
+Pairing happens automatically on first run.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
@@ -21879,29 +21878,23 @@ To use OpenRouter instead, regenerate with `uvx mindroom config init --provider 
 For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
 
-## 3. Pair This Install
-
-1. Open `https://chat.mindroom.chat`.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
-
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-Pair code behavior:
-
-- Valid for 600 seconds (10 minutes).
-- Only used to bootstrap local pairing.
-
-After successful pairing, local provisioning credentials are written to `~/.mindroom/.env` by default unless you use `--no-persist-env`.
-
-## 4. Start MindRoom
+## 3. Start MindRoom (pairing happens automatically)
 
 ```bash
 uvx mindroom run
 ```
+
+On first run, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+Pair code behavior:
+
+- Valid for 600 seconds (10 minutes).
+- MindRoom automatically generates a new code if the previous expires.
+- Only used to bootstrap local pairing.
+
+After successful pairing, local provisioning credentials are written to `~/.mindroom/.env`.
 
 MindRoom then:
 
@@ -21967,7 +21960,10 @@ You can keep the same local flow and switch endpoints:
 
 If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
 
-Then run `mindroom connect` again with a fresh pair code from your own UI.
+On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https://chat.your-matrix.example.com/connect` so pairing links open your own chat UI.
+It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
+
+Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
 
 # Bridges
 
@@ -22248,7 +22244,7 @@ Paired local installations automatically retrieve MindRoom's Google desktop OAut
 You do not need to create a Google Cloud project, register callback URLs, or copy a client secret.
 The client configuration is not bundled in the package or committed to the source repository.
 The local runtime uses OAuth PKCE and a callback on `localhost`, `127.0.0.1`, or `::1`.
-Run `mindroom connect --pair-code ...` before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
+Run `mindroom connect` (or `mindroom run` for automatic pairing) before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
 
 ## Choose Providers
 
@@ -24702,8 +24698,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
-│ connect                  Pair this local MindRoom install with the hosted provisioning │
-│                          service.                                                      │
+│ connect                  Connect this local MindRoom to your MindRoom Chat account by  │
+│                          approving a link.                                             │
 │ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
 │ config                   Manage MindRoom configuration files.                          │
 │ plugins                  Validate and vendor external MindRoom plugins.                │
@@ -26055,13 +26051,20 @@ If parsing fails before the include tree is known, the failure has no fingerprin
 
 ## connect
 
-Pair this local MindRoom install with a provisioning service.
+Pair this local MindRoom install with your MindRoom Chat account through a provisioning service.
 
 Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
 
 ```bash
-mindroom connect --pair-code ABCD-EFGH
+mindroom connect
 ```
+
+The command prints an approval link, a pair code, and (in a terminal) a QR code of the link.
+Open the link or scan the QR code while signed in to MindRoom Chat and approve the machine, or enter the code in MindRoom Chat → Settings → Local MindRoom.
+Add `--open-browser` to open the approval link in your default browser.
+
+`connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
 
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 
@@ -26075,15 +26078,13 @@ If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 
 ```bash
-mindroom connect --pair-code ABCD-EFGH --no-persist-env
+mindroom connect --no-persist-env
 ```
 
 Use `--provisioning-url` for non-default deployments:
 
 ```bash
-mindroom connect \
-  --pair-code ABCD-EFGH \
-  --provisioning-url https://matrix.example.com
+mindroom connect --provisioning-url https://matrix.example.com
 ```
 
 ## local-stack-setup
@@ -26316,8 +26317,10 @@ mindroom run --storage-path /data/mindroom
 
 ### Pair local install with hosted provisioning
 
+`mindroom run` pairs automatically; use `connect` to pair without starting MindRoom.
+
 ```bash
-mindroom connect --pair-code ABCD-EFGH
+mindroom connect --open-browser
 ```
 
 ### Start local Synapse + MindRoom Chat (development)

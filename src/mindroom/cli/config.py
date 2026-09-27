@@ -285,11 +285,6 @@ def _print_config_init_next_steps(
     if env_changed:
         env_hint = _config_init_env_hint(matrix_server, selected_preset)
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
-    if matrix_server == "mindroom.chat":
-        console.print(
-            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
-            "Pair with hosted Matrix (get code from chat.mindroom.chat)",
-        )
     if selected_preset == "ollama":
         console.print(f"  [cyan]ollama pull {OLLAMA_GEMMA}[/cyan]         Pull the default local model")
         console.print(f"  [cyan]ollama pull {OLLAMA_QWEN}[/cyan]   Pull the larger local model option")
@@ -303,6 +298,8 @@ def _print_config_init_next_steps(
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
+    if matrix_server == "mindroom.chat":
+        console.print("  On first run, MindRoom prints a link to approve with your MindRoom Chat account.")
 
 
 def _config_discovery_env(path: Path | None = None) -> dict[str, str]:

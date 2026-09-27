@@ -4174,6 +4174,7 @@ depends_on = [
     "mindroom.error_handling",
     "mindroom.event_journal_open",
     "mindroom.frontend_assets",
+    "mindroom.matrix.provisioning",
     "mindroom.orchestrator",
 ]
 
