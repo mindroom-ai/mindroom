@@ -1935,6 +1935,54 @@ def test_docker_projection_never_copies_knowledge_another_worker_could_redirect(
     assert any(entry["log_level"] in {"warning", "error"} and "knowledge" in entry["event"] for entry in logs)
 
 
+def test_docker_projection_maps_workspace_paths_without_resolving_them(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Context files and knowledge inside the mounted workspace map to the mount, so a swap cannot become an asset."""
+    storage = tmp_path / "storage"
+    victim = storage / "private_instances" / "victim" / "code" / "code_data"
+    victim.mkdir(parents=True)
+    (victim / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    workspace = storage / "agents" / "code" / "workspace"
+    (workspace / "kb").mkdir(parents=True)
+    (workspace / "context.md").write_text("own context\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=(
+            "knowledge_bases:\n  docs:\n    path: ${MINDROOM_STORAGE_PATH}/agents/code/workspace/kb\n"
+            "agents:\n  code:\n    display_name: Code\n    knowledge_bases: [docs]\n"
+            "    context_files: [context.md]\n"
+        ),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+    swaps = {workspace / "context.md": victim / "secret.md", workspace / "kb": victim}
+    is_symlink = Path.is_symlink
+
+    def swap_after_check(path: Path) -> bool:
+        checked = is_symlink(path)
+        if (target := swaps.pop(path, None)) is not None:
+            # Worker code swaps the entry for a link right after the link check saw a plain entry.
+            path.rename(path.with_name(f"{path.name}-moved"))
+            path.symlink_to(target, target_is_directory=target.is_dir())
+        return checked
+
+    monkeypatch.setattr(Path, "is_symlink", swap_after_check)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    projection_root = _projection_root(_volumes_by_source(fake_client.containers.run_calls[0]["volumes"]))
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "path: /app/worker/agents/code/workspace/kb" in projected_config
+    assert "- context.md" in projected_config
+    assert not any(
+        "victim-only" in path.read_text(encoding="utf-8") for path in projection_root.rglob("*") if path.is_file()
+    )
+
+
 def test_docker_projection_copy_refuses_an_entry_swapped_after_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

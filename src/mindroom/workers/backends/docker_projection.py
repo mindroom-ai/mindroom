@@ -431,17 +431,14 @@ class DockerProjectionManager:
                 placeholder_path = temp_root.joinpath(*asset.relative_path.parts)
                 if asset.is_directory:
                     placeholder_path.mkdir(parents=True, exist_ok=True)
-                    resolved_asset_dir = validate_local_copy_source_dir(
-                        asset.host_path,
-                        field_name="Docker worker asset",
-                    )
-                    _copy_directory_tree(resolved_asset_dir, placeholder_path)
+                    validate_local_copy_source_dir(asset.host_path, field_name="Docker worker asset")
+                    _copy_directory_tree(asset.host_path, placeholder_path)
                     continue
                 placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-                source_path = validate_local_copy_source_path(asset.host_path, field_name="Docker worker asset")
+                validate_local_copy_source_path(asset.host_path, field_name="Docker worker asset")
                 with open_regular_file_within_root(
-                    Path(source_path.anchor),
-                    source_path.relative_to(source_path.anchor),
+                    Path(asset.host_path.anchor),
+                    asset.host_path.relative_to(asset.host_path.anchor),
                 ) as source_fd:
                     _copy_file_from(source_fd, placeholder_path)
             (temp_root / _PROJECTION_READY_FILENAME).write_text("ready\n", encoding="utf-8")
@@ -943,16 +940,15 @@ class DockerProjectionManager:
         storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> str:
         # Mutable agent data already mounted into the worker must not enter the
-        # immutable asset hash: each chat export would otherwise replace it.
-        resolved_host_path = (
-            _validated_asset_host_path(host_path) if host_path.exists() else host_path.expanduser().resolve()
-        )
+        # immutable asset hash, and a path inside a mount maps there without being
+        # resolved, so a link swapped in by worker code never becomes an asset.
+        lexical_host_path = Path(os.path.normpath(host_path.expanduser()))
         for local_root, worker_root, _read_only in storage_mounts:
-            if resolved_host_path.is_relative_to(local_root.resolve()):
-                relative = resolved_host_path.relative_to(local_root.resolve())
+            if lexical_host_path.is_relative_to(local_root):
+                relative = lexical_host_path.relative_to(local_root)
                 return str(PurePosixPath(worker_root).joinpath(*relative.parts))
         relative_path = self._projected_asset_path(
-            host_path,
+            lexical_host_path,
             suggested_relative_path,
             asset_paths_by_host=asset_paths_by_host,
             host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
@@ -969,9 +965,10 @@ class DockerProjectionManager:
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> PurePosixPath:
-        resolved_host_path = (
-            _validated_asset_host_path(host_path) if host_path.exists() else host_path.expanduser().resolve()
-        )
+        # Assets are recorded and later copied by this lexical path, never its resolved target.
+        resolved_host_path = Path(os.path.normpath(host_path.expanduser().absolute()))
+        if resolved_host_path.exists():
+            _validated_asset_host_path(resolved_host_path)
         existing_relative_path = asset_paths_by_host.get(resolved_host_path)
         if existing_relative_path is not None:
             return existing_relative_path
