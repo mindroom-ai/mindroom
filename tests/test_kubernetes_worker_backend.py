@@ -5326,3 +5326,35 @@ def test_storage_preflight_reports_remaining_workers_in_paginated_inventory(monk
         backend._resources.check_workers_absent_for_storage_upgrade(timeout_seconds=5.0)
     assert response.released
     assert apps_api.deleted_names == []
+
+
+def test_kubernetes_startup_stops_workers_mounting_state_roots(tmp_path: Path) -> None:
+    """Running workers from releases that mounted whole state roots stop, so no old pod keeps those mounts."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    current = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:current"), now=10.0)
+    legacy = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:legacy"), now=10.0)
+    idle_legacy = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:idle"), now=10.0)
+    for handle in (legacy, idle_legacy):
+        # Older releases never stamped the storage layout on their Deployments.
+        apps_api.deployments[handle.worker_id].metadata.annotations.pop("mindroom.ai/storage-layout")
+    apps_api.deployments[idle_legacy.worker_id].spec.replicas = 0
+    assert apps_api.deployments[current.worker_id].metadata.annotations["mindroom.ai/storage-layout"] == "workspaces"
+
+    stopped = backend._resources.stop_workers_mounting_state_roots(now=20.0)
+
+    assert stopped == (legacy.worker_id,)
+    assert apps_api.deployments[legacy.worker_id].spec.replicas == 0
+    assert apps_api.deployments[legacy.worker_id].metadata.annotations["mindroom.ai/worker-status"] == "idle"
+    assert apps_api.deployments[current.worker_id].spec.replicas == 1
+    assert legacy.worker_id not in core_api.services
+    assert current.worker_id in core_api.services
+
+    # The next ensure rebuilds the stopped worker from the current workspace-only template.
+    backend._invalidate_ready_worker(legacy.worker_key)
+    backend.ensure_worker(WorkerSpec(legacy.worker_key), now=30.0)
+    assert apps_api.deployments[legacy.worker_id].spec.replicas == 1
+    assert apps_api.deployments[legacy.worker_id].metadata.annotations["mindroom.ai/storage-layout"] == "workspaces"

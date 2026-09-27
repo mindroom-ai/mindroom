@@ -56,7 +56,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
 )
-from mindroom.workers.backends._lifecycle import WorkerLifecycleState
+from mindroom.workers.backends._lifecycle import WorkerLifecycleState, mark_worker_idle
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
@@ -101,6 +101,9 @@ _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
+# Deployments whose pods mount only workspaces; earlier releases mounted whole state roots.
+_ANNOTATION_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
+_WORKSPACE_STORAGE_LAYOUT = "workspaces"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -941,6 +944,30 @@ class KubernetesResourceManager:
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
+    # LEGACY_COMPAT: Running worker Deployments whose pods mount whole agent state roots.
+    # Legacy format: Deployments without the mindroom.ai/storage-layout annotation, created by releases whose worker
+    #   pods mounted agents/<agent> and private_instances/<scope> writable.
+    # Last legacy release: v2026.9.320; the next release mounts only workspaces and stamps the annotation.
+    # Handling: scale each such running Deployment to zero, as idle cleanup does, so its old pod stops; the next ensure
+    #   or idle reconciliation recreates it from the current template. Scaled-down Deployments are left alone.
+    # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_startup_stops_workers_mounting_state_roots.
+    def stop_workers_mounting_state_roots(self, *, now: float) -> tuple[str, ...]:
+        """Scale to zero every running worker created before workers mounted only workspaces."""
+        stopped: list[str] = []
+        for deployment in self.list_deployments():
+            annotations = dict(deployment.metadata.annotations or {})
+            if (
+                annotations.get(_ANNOTATION_STORAGE_LAYOUT) == _WORKSPACE_STORAGE_LAYOUT
+                or int(deployment.spec.replicas or 0) == 0
+            ):
+                continue
+            apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
+            self.patch_deployment(deployment.metadata.name, replicas=0, annotations=annotations)
+            self.delete_service(deployment.metadata.name)
+            self.delete_secret(deployment.metadata.name)
+            stopped.append(deployment.metadata.name)
+        return tuple(stopped)
+
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
         """Require all worker controllers and Pods absent throughout this namespace."""
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -1509,6 +1536,7 @@ class KubernetesResourceManager:
             metadata["ownerReferences"] = [owner_reference]
         desired_annotations = dict(annotations)
         desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        desired_annotations[_ANNOTATION_STORAGE_LAYOUT] = _WORKSPACE_STORAGE_LAYOUT
         if private_agent_names is not None:
             desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
                 sorted(private_agent_names),

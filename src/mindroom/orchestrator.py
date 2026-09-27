@@ -109,6 +109,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
@@ -3067,6 +3068,7 @@ async def main(
         # Credential synchronization and storage setup are synchronous. Keep the
         # ordered unit off-loop while retaining exception propagation to startup.
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
+        await retire_state_root_worker_mounts(runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

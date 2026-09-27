@@ -57,6 +57,7 @@ __all__ = [
     "KubernetesWorkerBackendConfig",
     "check_kubernetes_workers_absent_for_storage_upgrade",
     "kubernetes_backend_config_signature",
+    "stop_kubernetes_workers_mounting_state_roots",
 ]
 
 _COLD_START_GRACE_SECONDS = 1.5
@@ -88,23 +89,33 @@ def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> Non
     del _phase, _error
 
 
-def check_kubernetes_workers_absent_for_storage_upgrade(
-    runtime_paths: RuntimePaths,
-    *,
-    timeout_seconds: float,
-) -> None:
-    """Verify Kubernetes worker absence without constructing a worker backend."""
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
-    resource_manager = resources.KubernetesResourceManager(
+def _standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.KubernetesResourceManager:
+    """Build a resource manager for startup maintenance without constructing a worker backend."""
+    return resources.KubernetesResourceManager(
         runtime_paths=runtime_paths,
-        config=config,
+        config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
         auth_token=None,
         storage_root=runtime_paths.storage_root,
         tool_validation_snapshot={},
         config_snapshot={},
         worker_grantable_credentials=frozenset(),
     )
-    resource_manager.check_workers_absent_for_storage_upgrade(timeout_seconds=timeout_seconds)
+
+
+def check_kubernetes_workers_absent_for_storage_upgrade(
+    runtime_paths: RuntimePaths,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Verify Kubernetes worker absence without constructing a worker backend."""
+    _standalone_resource_manager(runtime_paths).check_workers_absent_for_storage_upgrade(
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def stop_kubernetes_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Stop running workers whose pods still mount whole agent state roots."""
+    return _standalone_resource_manager(runtime_paths).stop_workers_mounting_state_roots(now=time.time())
 
 
 def _progress_event(

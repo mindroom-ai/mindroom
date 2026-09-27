@@ -2595,6 +2595,7 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
     "mindroom.thread_export.workspace_sync",
+    "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.workers.runtime",
     "mindroom.delegation.recovery",
 ]
@@ -6406,6 +6407,22 @@ depends_on = [
     "mindroom.workers.storage_preflight",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+
+[[modules]]
+path = "mindroom.workers.backends.legacy_state_root_mounts"
+depends_on = [
+    "mindroom.agent_policy",
+    "mindroom.background_tasks",
+    "mindroom.config.yaml_includes",
+    "mindroom.logging_config",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends._dedicated_worker_common",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.kubernetes",
+    "mindroom.workers.runtime",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.workers.storage_preflight"

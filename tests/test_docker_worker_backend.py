@@ -60,6 +60,7 @@ from mindroom.workers.backends.docker import (
     _WorkerImageIncompatibleError,
     check_docker_workers_absent_for_storage_upgrade,
     ensure_docker_dependencies,
+    remove_docker_workers_mounting_state_roots,
 )
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
@@ -852,6 +853,37 @@ def test_docker_storage_preflight_blocks_unavailable_or_late_inventory(
     monkeypatch.setattr(fake_client.containers, "list", inventory)
     with pytest.raises(WorkerBackendError):
         check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+
+def test_docker_startup_removes_workers_mounting_state_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Containers from releases that mounted whole state roots are removed and recreated on their next ensure."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    current = backend.ensure_worker(WorkerSpec("v1:default:shared:current"), now=0.0)
+    legacy = backend.ensure_worker(WorkerSpec("v1:default:shared:legacy"), now=0.0)
+    foreign = backend.ensure_worker(WorkerSpec("v1:default:shared:foreign"), now=0.0)
+    legacy_container = fake_client.containers.get(legacy.worker_id)
+    foreign_container = fake_client.containers.get(foreign.worker_id)
+    # Older releases never labeled their containers with the storage layout.
+    del legacy_container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+    del foreign_container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+    foreign_container.attrs["Config"]["Labels"]["mindroom.ai/runtime-namespace"] = "another-runtime"
+    sentinel = worker_root_path(tmp_path, "v1:default:shared:legacy") / "retained.bin"
+    sentinel.write_bytes(b"retained worker bytes")
+
+    assert remove_docker_workers_mounting_state_roots(runtime_paths) == (legacy_container.id,)
+
+    assert legacy_container.removed == 1
+    assert fake_client.containers.get(current.worker_id).removed == 0
+    assert foreign_container.removed == 0
+    assert sentinel.read_bytes() == b"retained worker bytes"
+    backend.ensure_worker(WorkerSpec("v1:default:shared:legacy"), now=10.0)
+    recreated = fake_client.containers.get(legacy.worker_id)
+    assert recreated is not legacy_container
+    assert recreated.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"] == "workspaces"
 
 
 def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWorkerBackend) -> None:
