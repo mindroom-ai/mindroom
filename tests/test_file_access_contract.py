@@ -396,13 +396,21 @@ def test_worker_path_tool_writes_replace_the_entry_instead_of_the_linked_inode(
     assert outside.read_text(encoding="utf-8") == "primary-only state"
 
 
-@pytest.mark.parametrize("permitted", [True, False], ids=["owner-kept", "owner-refused"])
+@pytest.mark.parametrize(
+    "refusal",
+    [None, PermissionError(1, "Operation not permitted"), OSError(22, "Invalid argument")],
+    ids=["owner-kept", "owner-refused", "owner-unmapped"],
+)
 def test_worker_path_tool_writes_keep_the_replaced_files_owner_where_permitted(
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
-    permitted: bool,
+    refusal: OSError | None,
 ) -> None:
-    """A replacement keeps the worker's owner, or at least its group, and is still published when both are refused."""
+    """A replacement keeps the worker's owner, or at least its group, and is still published when both are refused.
+
+    An owner the primary cannot map (user namespaces, NFSv4 idmap) is refused with EINVAL rather than EPERM.
+    """
+    permitted = refusal is None
     target = workspace / "notes.md"
     target.write_text("old notes", encoding="utf-8")
     target.chmod(0o640)
@@ -411,8 +419,8 @@ def test_worker_path_tool_writes_keep_the_replaced_files_owner_where_permitted(
 
     def record_fchown(fd: int, uid: int, gid: int) -> None:
         chowned.append((os.fstat(fd).st_ino, uid, gid))
-        if not permitted:
-            raise PermissionError(1, "Operation not permitted")
+        if refusal is not None:
+            raise refusal
 
     monkeypatch.setattr(os, "fchown", record_fchown)
     path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")

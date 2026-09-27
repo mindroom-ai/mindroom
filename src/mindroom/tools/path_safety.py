@@ -99,7 +99,7 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
-    """Publish one resolved file by atomic replacement, keeping an existing file's mode and, where permitted, owner.
+    """Publish one resolved file by atomic replacement, keeping its permission bits (not setuid/setgid) and owner where permitted.
 
     Replacing the entry never writes a hard-linked inode or leaves a partial file.
     """
@@ -120,7 +120,7 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
             os.fchmod(output.fileno(), stat.S_IMODE(existing.st_mode))
             # A worker's file stays the worker's: keep its owner, or at least its group, where the primary may.
             for uid in (existing.st_uid, -1):
-                with suppress(PermissionError):
+                with suppress(OSError):
                     os.fchown(output.fileno(), uid, existing.st_gid)
                     break
             output.write(payload)
