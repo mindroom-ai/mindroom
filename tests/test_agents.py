@@ -4837,7 +4837,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("memory_files", "private.root must not use reserved runtime directory 'memory_files'"),
         ("calls/notes", "private.root must not use reserved runtime directory 'calls'"),
         ("agent_modes.json", "private.root must not use reserved runtime directory 'agent_modes.json'"),
-        ("invited_rooms.json", "private.root must not use reserved runtime directory 'invited_rooms.json'"),
+        ("agent_modes.lock", "private.root must not use reserved runtime directory 'agent_modes.lock'"),
         (".sessions-recovery.lock", "private.root must not use reserved runtime directory '.sessions-recovery.lock'"),
     ],
 )

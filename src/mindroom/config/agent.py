@@ -40,19 +40,19 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
-# Primary-owned children of a private state root. Workers mount only the
-# private workspace, so it must never be, or contain, one of these.
+# Everything the primary writes beside a private workspace in its private state root;
+# tests/test_private_root_reservations.py enumerates the writers. Workers mount only
+# the private workspace, so it must never be, or contain, one of these.
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
     {
         ".sessions-recovery.lock",
         "agent_modes.json",
+        "agent_modes.lock",
         "calls",
         "chroma",
-        "invited_rooms.json",
         "knowledge_db",
         "learning",
         "memory_files",
-        "pending_room_invites.json",
         "sessions",
     },
 )
