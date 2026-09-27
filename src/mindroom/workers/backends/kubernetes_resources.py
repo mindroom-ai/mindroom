@@ -49,6 +49,7 @@ from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolved_worker_key_scope,
     worker_key_agent_name,
+    written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
@@ -56,7 +57,6 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
-    written_by_other_workers,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState, mark_worker_idle
 from mindroom.workers.backends.kubernetes_config import (

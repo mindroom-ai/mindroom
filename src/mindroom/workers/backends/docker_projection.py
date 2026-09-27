@@ -29,12 +29,10 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     shared_storage_root,
     worker_key_agent_name,
-)
-from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends._dedicated_worker_common import (
-    resolved_agent_policies_from_config_data,
     written_by_other_workers,
 )
+from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
 from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -769,7 +767,7 @@ class DockerProjectionManager:
         ):
             return True
         relative_path = lexical_path.relative_to(storage_root)
-        if written_by_other_workers(relative_path, Path("workers")):
+        if written_by_other_workers(relative_path):
             logger.error("Refusing to project knowledge other sandbox workers write", knowledge_base=base_id)
             return False
         try:

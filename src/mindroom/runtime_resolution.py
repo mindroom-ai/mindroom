@@ -22,12 +22,12 @@ from mindroom.constants import (
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_root_path,
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
     resolve_worker_key,
     shared_storage_root,
+    written_by_other_workers,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
@@ -306,19 +306,13 @@ def resolve_agent_storage(
 
 
 def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
-    """Resolve one shared knowledge path, refusing links below an agent workspace; others follow links."""
+    """Resolve one shared knowledge path, following no link below storage that workers write; others follow links."""
     lexical = Path(os.path.normpath(config_relative_path(raw_path, runtime_paths)))
     storage_root = shared_storage_root(runtime_paths.storage_root)
     lexical_storage_root = Path(os.path.normpath(runtime_paths.storage_root.expanduser().absolute()))
     for spelling in dict.fromkeys((lexical_storage_root, storage_root)):
-        if not lexical.is_relative_to(spelling):
-            continue
-        parts = lexical.relative_to(spelling).parts
-        if len(parts) < 3 or parts[0] != "agents":
-            continue
-        workspace = agent_workspace_root_path(storage_root, parts[1])
-        if storage_root.joinpath(*parts[:3]) == workspace:
-            return resolve_workspace_relative_path(workspace, Path(*parts[3:]), field_name="shared knowledge base path")
+        if lexical.is_relative_to(spelling) and written_by_other_workers(relative := lexical.relative_to(spelling)):
+            return resolve_workspace_relative_path(storage_root, relative, field_name="shared knowledge base path")
     return resolve_config_relative_path(raw_path, runtime_paths).resolve()
 
 

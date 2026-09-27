@@ -1518,6 +1518,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.knowledge"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
@@ -5978,6 +5979,7 @@ expose = [
     "unsupported_shared_only_integration_names",
     "private_root_name",
     "visible_workspace_roots",
+    "written_by_other_workers",
     "worker_dir_name",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",

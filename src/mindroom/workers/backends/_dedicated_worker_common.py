@@ -42,7 +42,6 @@ __all__ = [
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
     "validate_unique_worker_visible_paths",
-    "written_by_other_workers",
 ]
 
 logger = get_logger(__name__)
@@ -338,16 +337,6 @@ def plan_scoped_workspace_mounts(
             for mount in private_mounts
         )
     return tuple(mounts)
-
-
-def written_by_other_workers(relative_path: Path, worker_roots: Path) -> bool:
-    """Return whether workers other than the one being planned can write below this storage-relative path."""
-    parts = relative_path.parts
-    return (
-        relative_path.is_relative_to(worker_roots)
-        or parts[:1] == ("private_instances",)
-        or (parts[:1] == ("agents",) and parts[2:3] == ("workspace",))
-    )
 
 
 def validate_unique_worker_visible_paths(

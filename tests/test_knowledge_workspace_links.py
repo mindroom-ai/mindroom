@@ -62,6 +62,20 @@ def test_shared_knowledge_binding_refuses_a_link_below_its_agent_workspace(tmp_p
         resolve_knowledge_binding("threads", config, runtime_paths, execution_identity=None)
 
 
+@pytest.mark.parametrize("area", ["private_instances/scope/alpha", "workers/w1"])
+def test_shared_knowledge_binding_refuses_links_below_what_workers_write(tmp_path: Path, area: str) -> None:
+    """A shared base inside a private instance or worker root is bound without following links there either."""
+    storage = tmp_path / "storage"
+    victim = _victim_notes(tmp_path)
+    (storage / area).mkdir(parents=True)
+    (storage / area / "exports").symlink_to(victim, target_is_directory=True)
+    config = Config(knowledge_bases={"threads": KnowledgeBaseConfig(path=f"${{MINDROOM_STORAGE_PATH}}/{area}/exports")})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+
+    with pytest.raises(ValueError, match="must stay within"):
+        resolve_knowledge_binding("threads", config, runtime_paths, execution_identity=None)
+
+
 def test_shared_knowledge_outside_workspaces_keeps_operator_links(tmp_path: Path) -> None:
     """Operator-owned knowledge outside any agent workspace still follows its configured link."""
     storage = tmp_path / "storage"

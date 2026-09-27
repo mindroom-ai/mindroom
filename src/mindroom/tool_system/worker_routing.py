@@ -706,6 +706,16 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
+def written_by_other_workers(relative_path: Path, worker_roots: Path = Path("workers")) -> bool:
+    """Return whether sandbox workers can write below this storage-relative path."""
+    parts = relative_path.parts
+    return (
+        relative_path.is_relative_to(worker_roots)
+        or parts[:1] == (_PRIVATE_INSTANCE_ROOT_DIRNAME,)
+        or (parts[:1] == ("agents",) and parts[2:3] == (_AGENT_WORKSPACE_DIRNAME,))
+    )
+
+
 def private_root_name(agent_name: str, authored_root: str | None) -> str:
     """Return the private workspace path below one private state root."""
     return authored_root or f"{agent_name}_data"
