@@ -534,18 +534,15 @@ def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path)
     assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
 
 
-def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> None:
-    """Block workspace script execution even when the skill directory is a symlink."""
+def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
     storage = tmp_path / "storage"
-    outside_root = tmp_path / "outside"
-    outside_skill_path = _write_skill(outside_root, "linked", "Linked workspace skill")
-    _write_skill_script(outside_skill_path.parent, "hello.sh", "#!/bin/sh\necho bypass\n")
-
     workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
     workspace_skills.mkdir(parents=True)
-    (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
+    return storage, workspace_skills
 
-    skills = build_agent_skills(
+
+def _load_workspace_only(tmp_path: Path, storage: Path) -> Skills | None:
+    return build_agent_skills(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -553,10 +550,84 @@ def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> Non
         env_vars={},
         credential_keys=set(),
     )
-    assert skills is not None
 
-    execute_result = _get_skill_script(skills, "linked", "hello.sh", execute=True)
-    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+
+def _get_skill_reference(skills: Skills, skill_name: str, reference_path: str) -> dict[str, object]:
+    reference_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference")
+    assert reference_tool.entrypoint is not None
+    return json.loads(reference_tool.entrypoint(skill_name, reference_path))
+
+
+def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
+    """A workspace skill folder linked to another tenant's skill is refused, not read or run."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    outside_skill_path = _write_skill(tmp_path / "other-workspace", "linked", "Victim instructions")
+    _write_skill_script(outside_skill_path.parent, "hello.sh", "#!/bin/sh\necho bypass\n")
+    (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
+    _write_skill(workspace_skills, "own", "Own skill")
+
+    skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == ["own"]
+    assert skills is not None
+    assert "error" in _get_skill_script(skills, "linked", "hello.sh", execute=True)
+
+
+@pytest.mark.parametrize("layout", ["linked_skills_dir", "linked_skill_file", "fifo_skill_file", "huge_skill_file"])
+def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Path, layout: str) -> None:
+    """Links, FIFOs, and oversized files where a SKILL.md belongs never reach the prompt or block the primary."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    secret = tmp_path / "credentials.json"
+    secret.write_text('{"api_key": "primary-only"}', encoding="utf-8")
+    skill_dir = workspace_skills / "planted"
+    if layout == "linked_skills_dir":
+        workspace_skills.rmdir()
+        victim_skills = tmp_path / "victim-skills"
+        _write_skill(victim_skills, "planted", "Victim skill")
+        workspace_skills.symlink_to(victim_skills, target_is_directory=True)
+    else:
+        skill_dir.mkdir()
+        if layout == "linked_skill_file":
+            (skill_dir / "SKILL.md").symlink_to(secret)
+        elif layout == "fifo_skill_file":
+            os.mkfifo(skill_dir / "SKILL.md")
+        else:
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: planted\ndescription: big\n---\n" + "x" * (1 << 20),
+                encoding="utf-8",
+            )
+
+    skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == []
+
+
+def test_workspace_skill_references_are_read_without_following_links(tmp_path: Path) -> None:
+    """Listed references are read by a no-follow walk; planted or later-swapped links are refused."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    skill_dir = _write_skill(workspace_skills, "docs", "Docs skill").parent
+    references = skill_dir / "references"
+    references.mkdir()
+    (references / "guide.md").write_text("own guide", encoding="utf-8")
+    (references / "swapped.md").write_text("own swapped", encoding="utf-8")
+    secret = tmp_path / "victim.md"
+    secret.write_text("victim-only note", encoding="utf-8")
+    (references / "planted.md").symlink_to(secret)
+    os.mkfifo(references / "pipe.md")
+
+    skills = _load_workspace_only(tmp_path, storage)
+    assert skills is not None
+    skill = skills.get_skill("docs")
+    assert skill is not None
+    assert skill.references == ["guide.md", "swapped.md"]
+    (references / "swapped.md").unlink()
+    (references / "swapped.md").symlink_to(secret)
+
+    assert _get_skill_reference(skills, "docs", "guide.md")["content"] == "own guide"
+    swapped = _get_skill_reference(skills, "docs", "swapped.md")
+    assert "victim-only note" not in json.dumps(swapped)
+    assert "error" in swapped
+    assert "error" in _get_skill_reference(skills, "docs", "planted.md")
 
 
 def test_non_workspace_skill_script_execute_unchanged(tmp_path: Path) -> None:

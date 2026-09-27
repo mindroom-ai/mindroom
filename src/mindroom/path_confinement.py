@@ -146,3 +146,25 @@ def open_regular_file_within_root(
             yield descriptor
         finally:
             os.close(descriptor)
+
+
+class _FileTooLargeError(ValueError):
+    """Raised when a bounded read finds more bytes than its cap allows."""
+
+    def __init__(self, relative_path: str | Path) -> None:
+        super().__init__(f"File exceeds its size limit: {relative_path}")
+
+
+def read_regular_file_within_root(root: Path | int, relative_path: str | Path, *, max_bytes: int) -> bytes:
+    """Read one regular file through a no-follow walk, refusing links, FIFOs, and files above ``max_bytes``."""
+    with open_regular_file_within_root(root, relative_path) as descriptor:
+        if os.fstat(descriptor).st_size > max_bytes:
+            raise _FileTooLargeError(relative_path)
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0 and (chunk := os.read(descriptor, min(remaining, 1 << 16))):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    if remaining <= 0:
+        raise _FileTooLargeError(relative_path)
+    return b"".join(chunks)

@@ -792,6 +792,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.minimal_agent",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
@@ -4612,6 +4613,7 @@ visibility = [
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
+    "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.worker_routing",
 ]

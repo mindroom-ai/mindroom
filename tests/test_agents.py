@@ -25,6 +25,7 @@ from agno.session import AgentSession
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import agents as agents_module
 from mindroom import prompts
@@ -3009,6 +3010,81 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert not canonical_soul.exists()
     assert "Canonical soul context." not in deleted_agent.role
     assert "Updated canonical soul context." not in deleted_agent.role
+
+
+@pytest.mark.parametrize("planted", ["other_instance_link", "primary_file_link", "fifo", "huge_file"])
+def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, planted: str) -> None:
+    """Links out of the workspace, FIFOs, and huge files are skipped with a warning, never read or waited on."""
+    storage_path = tmp_path / "storage"
+    runtime_paths = _runtime_paths(storage_path)
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    victim_file = storage_path / "private_instances" / "victim-scope" / "general" / "mind_data" / "SOUL.md"
+    victim_file.parent.mkdir(parents=True)
+    victim_file.write_text("victim-only note", encoding="utf-8")
+    primary_file = storage_path / "credentials" / "openai_credentials.json"
+    primary_file.parent.mkdir(parents=True)
+    primary_file.write_text('{"api_key": "primary-only"}', encoding="utf-8")
+    (workspace / "USER.md").write_text("own user notes", encoding="utf-8")
+    soul = workspace / "SOUL.md"
+    if planted == "other_instance_link":
+        soul.symlink_to(victim_file)
+    elif planted == "primary_file_link":
+        soul.symlink_to(primary_file)
+    elif planted == "fifo":
+        os.mkfifo(soul)
+    else:
+        soul.write_text("x" * ((1 << 20) + 1), encoding="utf-8")
+
+    with capture_logs() as logs:
+        loaded = _load_context_files(
+            ["SOUL.md", "USER.md"],
+            runtime_paths,
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert [chunk.body for chunk in loaded] == ["own user notes"]
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_refused"]
+
+
+def test_load_context_files_refuses_a_workspace_file_swapped_after_resolution(tmp_path: Path) -> None:
+    """A private context file resolved at runtime resolution and then replaced by a link is not followed."""
+    storage_path = tmp_path / "storage"
+    runtime_paths = _runtime_paths(storage_path)
+    workspace = storage_path / "private_instances" / "attacker-scope" / "general" / "mind_data"
+    workspace.mkdir(parents=True)
+    context_file = workspace / "SOUL.md"
+    context_file.write_text("attacker soul", encoding="utf-8")
+    victim_file = storage_path / "private_instances" / "victim-scope" / "general" / "mind_data" / "SOUL.md"
+    victim_file.parent.mkdir(parents=True)
+    victim_file.write_text("victim-only note", encoding="utf-8")
+    context_file.unlink()
+    context_file.symlink_to(victim_file)
+
+    loaded = _load_context_files([context_file], runtime_paths, workspace_root=workspace)
+
+    assert loaded == []
+
+
+def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> None:
+    """Links that stay inside the workspace still load under their canonical path."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "docs" / "soul.md").write_text("Linked soul.\n", encoding="utf-8")
+    (workspace / "SOUL.md").symlink_to("docs/soul.md")
+
+    loaded = _load_context_files(
+        ["SOUL.md"],
+        _runtime_paths(storage_path),
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert [(chunk.title, chunk.body) for chunk in loaded] == [
+        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul."),
+    ]
 
 
 def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
