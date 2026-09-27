@@ -267,7 +267,7 @@ find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "
 find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 ```
 
-The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, list every private agent's root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/[^/]*/\(notes_data\|mail_data\)"`, because a run per root would print the other agents' own workspace links.
+The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, pair every private agent with its root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/\(notes/notes_data\|mail/inbox\)"`, because a run per root would print the other agents' own workspace links, and roots listed without their agents would also skip a directory of that name under any other agent.
 The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
