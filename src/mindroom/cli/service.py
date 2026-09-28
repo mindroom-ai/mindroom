@@ -171,7 +171,7 @@ def restart_service() -> None:
 
 
 def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
-    """Whether the installed service's runtime still waits for this machine to be paired, so its API is not up yet.
+    """Whether the installed service's runtime still waits for this machine to be paired, so its dashboard is not up yet.
 
     The service runs with the environment saved in its unit (config and storage paths), not with the caller's.
     """
