@@ -72,7 +72,8 @@ def _get_secret_from_env_with_source(name: str, runtime_paths: RuntimePaths) -> 
             # Avoid noisy logs here; callers can handle None gracefully
             return None
         else:
-            return content, file_var
+            if content:
+                return content, file_var
     return None
 
 
@@ -121,13 +122,6 @@ def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
     )
 
 
-def _credentials_changed(existing: dict[str, Any], new: dict[str, Any]) -> bool:
-    """Check if credential values actually changed (ignoring _source metadata)."""
-    existing_without_source = {k: v for k, v in existing.items() if not k.startswith("_")}
-    new_without_source = {k: v for k, v in new.items() if not k.startswith("_")}
-    return existing_without_source != new_without_source
-
-
 def _emit_credential_import_notice(
     *,
     service: str,
@@ -136,29 +130,45 @@ def _emit_credential_import_notice(
     is_first_import: bool,
 ) -> None:
     """Emit user-visible notice when credentials are imported or changed."""
-    # Determine source (process env vs .env)
     in_process = env_var in runtime_paths.process_env
     in_env_file = env_var in runtime_paths.env_file_values
 
     if in_process and in_env_file:
-        source_description = "process environment (also set in .env, which is overridden)"
-        removal_instruction = f"remove {env_var} from both your process environment and .env"
+        source = "process_env_overrides_env_file"
     elif in_process:
-        source_description = "process environment"
-        removal_instruction = f"remove {env_var} from your process environment"
+        source = "process_env"
     else:
-        source_description = ".env file"
-        removal_instruction = f"remove {env_var} from your .env file"
+        source = "env_file"
 
-    action = "imported" if is_first_import else "updated"
+    base_var = env_var.removesuffix("_FILE")
+    fallback_var = f"{base_var}_FILE" if env_var == base_var else base_var
+    fallback_in_process = fallback_var in runtime_paths.process_env
+    fallback_in_env_file = fallback_var in runtime_paths.env_file_values
+    has_fallback = fallback_in_process or fallback_in_env_file
 
-    # The human sentence becomes the log event itself
+    if has_fallback:
+        if fallback_in_process and fallback_in_env_file:
+            fallback_source = "process_env_overrides_env_file"
+        elif fallback_in_process:
+            fallback_source = "process_env"
+        else:
+            fallback_source = "env_file"
+        to_stop = (
+            f"remove {env_var} and {fallback_var} from process environment/`.env`, "
+            f"then DELETE /api/credentials/{service}"
+        )
+    else:
+        to_stop = f"remove {env_var} from environment/`.env`, then DELETE /api/credentials/{service}"
+
+    event_name = "credential_imported_from_env" if is_first_import else "credential_updated_from_env"
     logger.info(
-        f"Credential {action}: {env_var} from {source_description} stored as '{service}'. "
-        f"To stop this: {removal_instruction}, "
-        f"and delete the stored credential via the dashboard Credentials tab or API endpoint DELETE /api/credentials/{service}",
+        event_name,
         service=service,
         env_var=env_var,
+        source=source,
+        fallback_var=fallback_var if has_fallback else None,
+        fallback_source=fallback_source if has_fallback else None,
+        to_stop=to_stop,
     )
 
 
@@ -193,14 +203,13 @@ def _sync_service_credentials(
             logger.debug("credential_env_sync_skipped", service=service, source=source)
             return False
 
-    # Check if this is a first import or if values actually changed
     is_first_import = existing is None
-    if existing is not None and not _credentials_changed(existing, credentials):
-        # Skip saving and logging if nothing changed
+    stored = {**credentials, "_source": "env"}
+    if existing == stored:
         logger.debug("credential_env_sync_unchanged", service=service, env_var=env_var)
         return False
 
-    creds_manager.save_credentials(service, {**credentials, "_source": "env"})
+    creds_manager.save_credentials(service, stored)
     _emit_credential_import_notice(
         service=service,
         env_var=env_var,
