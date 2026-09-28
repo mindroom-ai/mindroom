@@ -189,6 +189,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             extra_kwargs["api_key"] = api_key
 
     if canonical_provider_key == "vertexai_claude":
+        # Vertex authenticates with Google credentials and never sends an API key.
+        extra_kwargs.pop("api_key", None)
         if "project_id" not in extra_kwargs:
             project_id = get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
             if project_id:

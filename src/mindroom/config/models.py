@@ -626,6 +626,20 @@ class EmbedderConfig(BaseModel):
         return value.strip() or None
 
 
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings with a trimmed string ``api_key``, dropped when null or blank; reject non-strings."""
+    if "api_key" not in settings:
+        return settings
+    normalized = dict(settings)
+    api_key = normalized.pop("api_key")
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    if api_key and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -683,15 +697,7 @@ class ModelConfig(BaseModel):
     @classmethod
     def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
-        if value is None or "api_key" not in value:
-            return value
-        normalized = dict(value)
-        api_key = normalized.pop("api_key")
-        if isinstance(api_key, str):
-            api_key = api_key.strip()
-        if api_key:
-            normalized["api_key"] = api_key
-        return normalized
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
 
     @field_validator("icon")
     @classmethod

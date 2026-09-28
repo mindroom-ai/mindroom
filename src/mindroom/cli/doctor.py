@@ -214,9 +214,10 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 
 
 def _get_custom_base_url(config: Config, provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
+    """Get the custom base_url of a provider model that uses the shared key, if any."""
     for model in config.models.values():
-        if model.provider == provider and model.extra_kwargs:
+        # A model with its own key never sends the shared key to its endpoint.
+        if model.provider == provider and model.extra_kwargs and not model.configured_api_key():
             base_url = model.extra_kwargs.get("base_url")
             if base_url:
                 return base_url

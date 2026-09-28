@@ -76,6 +76,7 @@ interface KeyDisplayInfo {
   maskedKey: string | null;
   keyId: string | null;
   sourceLabel: string;
+  copyable: boolean;
 }
 
 interface ModelRowData {
@@ -277,9 +278,19 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return copied;
 }
 
+/** Whether config.yaml sets the model's own key, which the backend uses before the provider key. */
+function hasConfigApiKey(modelConfig: ModelConfigType | undefined): boolean {
+  const extraApiKey = modelConfig?.extra_kwargs?.api_key;
+  return Boolean(
+    modelConfig?.api_key?.trim() ||
+    (typeof extraApiKey === "string" && extraApiKey.trim()),
+  );
+}
+
 function getKeyStatusDisplay(
   modelName: string,
   provider: string,
+  usesConfigKey: boolean,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
@@ -297,6 +308,18 @@ function getKeyStatusDisplay(
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
       sourceLabel: keySourceLabel(modelKey),
+      copyable: true,
+    };
+  }
+
+  if (usesConfigKey) {
+    return {
+      hasKey: true,
+      label: "Config key",
+      maskedKey: null,
+      keyId: `config:${modelName}`,
+      sourceLabel: "config.yaml",
+      copyable: false,
     };
   }
 
@@ -310,6 +333,7 @@ function getKeyStatusDisplay(
         ? `key:${providerKey.maskedKey}`
         : `provider:${provider}`,
       sourceLabel: keySourceLabel(providerKey),
+      copyable: true,
     };
   }
 
@@ -319,6 +343,7 @@ function getKeyStatusDisplay(
     maskedKey: null,
     keyId: null,
     sourceLabel: keySourceLabel(null),
+    copyable: false,
   };
 }
 
@@ -979,6 +1004,7 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
+        hasConfigApiKey(modelConfig),
         modelKeys,
         providerKeys,
       );
@@ -1029,7 +1055,7 @@ export function ModelConfig() {
               </span>
             )}
           </Badge>
-          {keyDisplay.hasKey && modelName && provider && (
+          {keyDisplay.copyable && modelName && provider && (
             <Button
               size="icon"
               variant="ghost"
@@ -1087,10 +1113,18 @@ export function ModelConfig() {
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
+    const currentModelConfig = currentModelName
+      ? models[currentModelName]
+      : undefined;
+    // Saving under another provider drops the config.yaml key.
+    const usesConfigKey =
+      currentModelConfig?.provider === draft.provider &&
+      hasConfigApiKey(currentModelConfig);
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
           draft.provider,
+          usesConfigKey,
           modelKeys,
           providerKeys,
         )
@@ -1206,11 +1240,13 @@ export function ModelConfig() {
 
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
-            {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${keySourceLabel(
-                  providerFallbackKey,
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
-              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
+            {usesConfigKey
+              ? "No custom key provided. This model will use its config.yaml key."
+              : providerFallbackKey?.hasKey
+                ? `No custom key provided. This model will use the provider key (${keySourceLabel(
+                    providerFallbackKey,
+                  )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
+                : "No custom key provided. This model will use the provider key (for example from .env) when available."}
           </p>
         )}
       </div>
@@ -1380,8 +1416,11 @@ export function ModelConfig() {
                         baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
+                        // A saved key belongs to the old provider; clearing it stays visible and undoable.
                         clearCustomKey:
-                          provider === "ollama" ? true : current.clearCustomKey,
+                          provider === "ollama" ||
+                          provider !== row.original.provider ||
+                          current.clearCustomKey,
                       }
                     : current,
                 );

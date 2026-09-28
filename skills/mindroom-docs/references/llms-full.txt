@@ -17175,6 +17175,7 @@ memory:
 ```
 
 Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).
+An explicit `memory.llm.config.api_key` is used instead of the provider key, and a blank one counts as unset.
 
 ## Backend: `none`
 

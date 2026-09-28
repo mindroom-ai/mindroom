@@ -202,6 +202,43 @@ def test_model_config_rejects_api_key_in_both_fields_without_echoing_keys() -> N
     assert "sk-secret" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize("api_key", [123, True, ["sk-a"]])
+def test_model_config_rejects_non_string_extra_kwargs_api_key(api_key: object) -> None:
+    """A non-string key (for example YAML ``yes``) must fail validation instead of reaching the provider."""
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.api_key must be a string"):
+        ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"api_key": api_key})
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "extra_kwargs"),
+    [
+        ("codex", "gpt-6-astra", {}),
+        ("kimi", "k3", {}),
+        ("synthetic", "lorem-ipsum", {}),
+        ("vertexai_claude", "claude-opus-5", {"project_id": "p", "region": "us-east1"}),
+        (
+            "bedrock_claude",
+            "anthropic.claude-opus-5",
+            {"aws_region": "us-east-1", "aws_access_key": "a", "aws_secret_key": "b"},
+        ),
+    ],
+)
+def test_keyless_providers_ignore_configured_api_key(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    extra_kwargs: dict[str, object],
+) -> None:
+    """Providers that authenticate without an API key never carry a configured one."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    model_config = ModelConfig(provider=provider, id=model_id, api_key="sk-config", extra_kwargs=extra_kwargs)
+    config = bind_runtime_paths(Config(models={"target": model_config}), runtime_paths)
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert getattr(model, "api_key", None) is None
+
+
 def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:
     """Every OpenAI-wire chat provider must use the tool-call replay-compatible subclass."""
     expected = {

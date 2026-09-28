@@ -346,42 +346,99 @@ describe("ModelConfig", () => {
     });
   });
 
+  function addKeyedOpenAIModel(fields: Record<string, unknown>) {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          keyed: { provider: "openai", id: "gpt-6-astra", ...fields },
+        },
+      },
+    } as unknown as ReturnType<typeof useConfigStore>);
+  }
+
+  function switchKeyedModelToDeepSeek(): HTMLElement {
+    fireEvent.click(screen.getByText("keyed"));
+    const row = screen.getByDisplayValue("keyed").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /DeepSeek/i }));
+    return row;
+  }
+
   it.each([
-    { api_key: "sk-openai-config" },
+    { api_key: "sk-openai-config", extra_kwargs: { temperature: 0.2 } },
     { extra_kwargs: { api_key: "sk-openai-config", temperature: 0.2 } },
   ])(
     "drops config.yaml API keys when changing provider (%o)",
     async (keyFields) => {
-      const mockedUseConfigStore = useConfigStore as unknown as {
-        mockReturnValue: (value: unknown) => void;
-      };
-      mockedUseConfigStore.mockReturnValue({
-        ...mockStore,
-        config: {
-          ...mockStore.config,
-          models: {
-            ...mockStore.config.models,
-            keyed: { provider: "openai", id: "gpt-6-astra", ...keyFields },
-          },
-        },
-      });
+      addKeyedOpenAIModel(keyFields);
       render(<ModelConfig />);
-      fireEvent.click(screen.getByText("keyed"));
-      const row = screen.getByDisplayValue("keyed").closest("tr");
-      if (!row) throw new Error("row not found");
-
-      fireEvent.click(within(row).getAllByRole("combobox")[0]);
-      fireEvent.click(screen.getByRole("option", { name: /DeepSeek/i }));
+      const row = switchKeyedModelToDeepSeek();
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
-        expect(mockStore.updateConfigValue).toHaveBeenCalled();
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "keyed"],
+          {
+            provider: "deepseek",
+            id: "gpt-6-astra",
+            extra_kwargs: { temperature: 0.2 },
+          },
+        );
       });
-      const [, saved] = mockStore.updateConfigValue.mock.calls[0];
-      expect(JSON.stringify(saved)).not.toContain("sk-openai-config");
-      expect(saved).toMatchObject({ provider: "deepseek", id: "gpt-6-astra" });
     },
   );
+
+  it("clears a saved dashboard key when changing provider", async () => {
+    addKeyedOpenAIModel({});
+    keyStatusByService["model:keyed"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-op...1234",
+    };
+    render(<ModelConfig />);
+    await waitFor(() => {
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
+    });
+
+    const row = switchKeyedModelToDeepSeek();
+    expect(
+      within(row).getByText("Custom key will be removed on save."),
+    ).toBeTruthy();
+    expect(
+      within(row).getByRole("button", { name: "Undo clear key" }),
+    ).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/credentials/model:keyed", {
+        method: "DELETE",
+      });
+    });
+  });
+
+  it("labels a config.yaml key without offering to copy it", async () => {
+    addKeyedOpenAIModel({ api_key: "sk-openai-config" });
+    keyStatusByService["openai"] = {
+      has_key: true,
+      source: "env",
+      masked_key: "sk-en...5678",
+    };
+    render(<ModelConfig />);
+
+    const row = screen.getByText("keyed").closest("tr");
+    const providerKeyRow = screen.getByText("openai_local").closest("tr");
+    if (!row || !providerKeyRow) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(providerKeyRow).getByText("Provider key")).toBeTruthy();
+    });
+    expect(within(row).getByText("Config key")).toBeTruthy();
+    expect(within(row).queryByText("Provider key")).toBeNull();
+    expect(within(row).queryByTitle("Copy API key")).toBeNull();
+  });
 
   it("changes provider with inline dropdown", async () => {
     render(<ModelConfig />);

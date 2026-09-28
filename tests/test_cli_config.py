@@ -3171,6 +3171,35 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" not in result.output
 
+    def test_shared_key_is_never_sent_to_endpoint_of_model_with_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates the shared key at the endpoint of models that use it, never another model's endpoint."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: m\n    api_key: tg-own\n"
+            "    extra_kwargs:\n      base_url: https://api.together.xyz/v1\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests: list[tuple[str, dict[str, str]]] = []
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.httpx.get",
+            lambda url, headers=None, **_kw: requests.append((str(url), headers or {})) or httpx.Response(200, json={}),
+        )
+
+        _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
+        assert shared_key_urls == ["https://api.openai.com/v1/models"]
+
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""
         cfg = tmp_path / "config.yaml"
