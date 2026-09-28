@@ -21,12 +21,12 @@ from mindroom.background_tasks import create_background_task
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.tool_system.workspace_skills import (
     FRONTMATTER_PATTERN,
     SKILL_FILENAME,
+    WORKSPACE_SKILLS_DIRNAME,
     load_workspace_skills,
     parse_skill_markdown,
     parse_skill_metadata,
@@ -59,7 +59,7 @@ _BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR.parent / "_bundled_skills"
 
 @dataclass
 class _MindroomSkillsLoader(SkillLoader):
-    """Load skills via Agno, or confined reads for a workspace root, with OpenClaw compatibility filtering."""
+    """Load skills via Agno with OpenClaw compatibility filtering."""
 
     roots: Sequence[Path]
     config: Config
@@ -67,7 +67,6 @@ class _MindroomSkillsLoader(SkillLoader):
     allowlist: Sequence[str] | None = None
     env_vars: Mapping[str, str] | None = None
     credential_keys: set[str] | None = None
-    workspace: bool = False
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
@@ -84,24 +83,20 @@ class _MindroomSkillsLoader(SkillLoader):
         allowlist_set = set(self.allowlist or [])
 
         skills_by_name: dict[str, Skill] = {}
-        # Resolving a workspace root would follow a link that worker code put in place of it; its no-follow reads
-        # refuse one instead.
-        roots = self.roots if self.workspace else _unique_paths(self.roots)
-        for root in roots:
-            for skill in load_workspace_skills(root) if self.workspace else _load_root_skills(root):
-                normalized = _normalize_skill(skill)
-                if normalized is None:
-                    continue
-                if self.allowlist and normalized.name not in allowlist_set:
-                    continue
-                if not _is_skill_eligible(
-                    normalized,
-                    config_data,
-                    env_vars=env_vars,
-                    credential_keys=credential_keys,
-                ):
-                    continue
-                skills_by_name[normalized.name] = normalized
+        for skill in self._candidate_skills():
+            normalized = _normalize_skill(skill)
+            if normalized is None:
+                continue
+            if self.allowlist and normalized.name not in allowlist_set:
+                continue
+            if not _is_skill_eligible(
+                normalized,
+                config_data,
+                env_vars=env_vars,
+                credential_keys=credential_keys,
+            ):
+                continue
+            skills_by_name[normalized.name] = normalized
 
         if self.allowlist:
             return [skills_by_name[name] for name in self.allowlist if name in skills_by_name]
@@ -118,7 +113,7 @@ class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
     workspace_root: Path
 
     def _candidate_skills(self) -> list[Skill]:
-        return _load_workspace_skills(self.workspace_root)
+        return load_workspace_skills(self.workspace_root / WORKSPACE_SKILLS_DIRNAME)
 
 
 class MindroomSkills(Skills):
@@ -147,7 +142,7 @@ class MindroomSkills(Skills):
         for loader in self.loaders:
             try:
                 skills = loader.load()
-                workspace = isinstance(loader, _MindroomSkillsLoader) and loader.workspace
+                workspace = isinstance(loader, _WorkspaceSkillsLoader)
                 for skill in skills:
                     if skill.name in self._skills:
                         logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
@@ -172,6 +167,7 @@ class MindroomSkills(Skills):
     # Remove when: Skills exposes a load callback and reads support files through the loader's reader; the
     # execution block for workspace scripts remains MindRoom policy.
     # Coverage: tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links,
+    # tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
     # tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not, and
     # tests/test_skills.py::test_workspace_skill_script_read_allowed_but_execute_blocked.
     def _get_skill_instructions(self, skill_name: str) -> str:
@@ -248,7 +244,7 @@ def build_agent_skills(
     runtime_paths: RuntimePaths,
     *,
     skill_roots: Sequence[Path] | None = None,
-    workspace_skills_root: Path | None = None,
+    workspace_root: Path | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
@@ -270,18 +266,17 @@ def build_agent_skills(
             credential_keys=resolved_credential_keys,
         )
 
-    workspace_skill_root = (
-        workspace_skills_root
-        if workspace_skills_root is not None
-        else agent_workspace_skills_root(runtime_paths, agent_name, workspace_root=None)
-    )
-    workspace_loader = _MindroomSkillsLoader(
-        roots=[workspace_skill_root],
+    workspace_loader = _WorkspaceSkillsLoader(
+        roots=(),
         config=config,
         runtime_paths=runtime_paths,
         env_vars=env_vars,
         credential_keys=resolved_credential_keys,
-        workspace=True,
+        workspace_root=(
+            workspace_root
+            if workspace_root is not None
+            else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
+        ),
     )
 
     loaders: list[SkillLoader]
@@ -365,7 +360,7 @@ def agent_workspace_skills_root(runtime_paths: RuntimePaths, agent_name: str, *,
         if workspace_root is not None
         else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
     )
-    return root / "skills"
+    return root / WORKSPACE_SKILLS_DIRNAME
 
 
 def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
@@ -468,25 +463,6 @@ def _iter_skill_dirs(root: Path) -> list[Path]:
         if path.is_dir() and not path.name.startswith(".") and (path / SKILL_FILENAME).exists()
     ]
     return sorted(skill_dirs)
-
-
-def _parse_skill_frontmatter(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
-    """Split one ``SKILL.md`` into its frontmatter mapping and instructions."""
-    match = _FRONTMATTER_PATTERN.match(content)
-    if not match:
-        if allow_missing:
-            return {}, content
-        logger.warning("Skill missing frontmatter", path=path)
-        return None
-    try:
-        frontmatter = yaml_io.safe_load(match.group(1)) or {}
-    except Exception as exc:
-        logger.warning("Failed to parse skill frontmatter", path=path, error=str(exc))
-        return None
-    if not isinstance(frontmatter, dict):
-        logger.warning("Skill frontmatter must be a mapping", path=path)
-        return None
-    return cast("dict[str, Any]", frontmatter), match.group(2).strip()
 
 
 def _read_skill_frontmatter(

@@ -100,7 +100,7 @@ class SkillCatalog:
 
 def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
     """Return the skills the agent loads now, with the strict ownership check that edits use."""
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_skills_root=skills_root)
+    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
     entries: dict[str, _CatalogEntry] = {}
     for skill in skills.get_all_skills() if skills is not None else []:
         source = Path(skill.source_path)

@@ -2057,11 +2057,7 @@ def create_agent(
             agent_name,
             config,
             runtime_paths,
-            workspace_skills_root=agent_workspace_skills_root(
-                runtime_paths,
-                agent_name,
-                workspace_root=workspace.root if workspace is not None else None,
-            ),
+            workspace_root=workspace.root if workspace is not None else None,
             output_file_policy=_agent_tool_output_file_policy(
                 agent_runtime,
                 runtime_paths,

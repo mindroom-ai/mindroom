@@ -33,6 +33,13 @@ logger = get_logger(__name__)
 SKILL_FILENAME = "SKILL.md"
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
+WORKSPACE_SKILLS_DIRNAME = "skills"
+_MAX_WORKSPACE_SKILLS = 256
+_MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
+# Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
+_MAX_WORKSPACE_SKILL_NAME_CHARS = 64
+_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
+_MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
@@ -115,10 +122,17 @@ def list_support_files(skill_fd: int, directory: str) -> list[str]:
     """Return the readable regular files directly inside one support directory; a linked directory has none."""
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
+            filenames = list_entries(support_fd, directories=False)
+            if len(filenames) > _MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+                logger.warning(
+                    "Listing only the first workspace skill files",
+                    directory=directory,
+                    found=len(filenames),
+                )
             # A file too large to read is not offered.
             return [
                 filename
-                for filename in list_entries(support_fd, directories=False)
+                for filename in filenames[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
                 if _readable_size(support_fd, filename)
             ]
     except FileNotFoundError:
@@ -198,21 +212,35 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     return None
 
 
-def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], Result | None]) -> list[Result]:
-    """Read every visible workspace skill directory, skipping unreadable entries and an unavailable root.
+def _each_skill_directory[Result](
+    skills_root: Path,
+    read: Callable[[int, str], Result | None],
+    *,
+    limit: int | None = None,
+) -> Iterator[Result]:
+    """Read visible workspace skill directories as the caller consumes them, skipping unreadable entries.
 
-    Worker code can plant entries in a shared workspace, so one never hides the others or fails the caller.
+    Worker code can plant entries in a shared workspace, so one never hides the others or fails the caller, and an
+    unavailable root yields nothing.
     """
     if not skills_root.is_dir():
-        return []
-    results: list[Result] = []
+        return
     try:
         with open_skills_root(skills_root) as root_fd:
             with suppress(FileNotFoundError):
                 os.stat(SKILL_FILENAME, dir_fd=root_fd, follow_symlinks=False)
                 # LocalSkills loaded such a file as the only skill of the root, hiding every skill directory beside it.
                 logger.warning("Ignoring SKILL.md directly in the workspace skills directory", path=str(skills_root))
-            for directory in list_entries(root_fd, directories=True):
+            directories = list_entries(root_fd, directories=True)
+            if limit is not None and len(directories) > limit:
+                logger.warning(
+                    "Loading only the first workspace skills",
+                    path=str(skills_root),
+                    limit=limit,
+                    found=len(directories),
+                )
+                directories = directories[:limit]
+            for directory in directories:
                 try:
                     with open_directory_within_root(root_fd, directory) as skill_fd:
                         result = read(skill_fd, directory)
@@ -224,11 +252,9 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
                     )
                     continue
                 if result is not None:
-                    results.append(result)
+                    yield result
     except OSError as exc:
         logger.warning("Workspace skill root is unavailable", path=str(skills_root), error=str(exc))
-        return []
-    return results
 
 
 # AGNO_COMPAT: LocalSkills reads skill files by pathname and follows links.
@@ -242,18 +268,35 @@ def _each_skill_directory[Result](skills_root: Path, read: Callable[[int, str], 
 # tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
-    """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
-    return _each_skill_directory(
+    """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries.
+
+    Every loaded skill reaches the system prompt, so the skills share a count cap and a total budget.
+    """
+    skills: list[Skill] = []
+    loaded_bytes = 0
+    for skill in _each_skill_directory(
         skills_root,
         lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
-    )
+        limit=_MAX_WORKSPACE_SKILLS,
+    ):
+        prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
+        loaded_bytes += len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
+        if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+            logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
+            break
+        skills.append(skill)
+    return skills
 
 
 def workspace_skill_directories(skills_root: Path) -> list[str]:
     """Return the visible workspace directories that hold a SKILL.md, without reading it."""
-    return _each_skill_directory(
-        skills_root,
-        lambda skill_fd, directory: directory if SKILL_FILENAME in list_entries(skill_fd, directories=False) else None,
+    return list(
+        _each_skill_directory(
+            skills_root,
+            lambda skill_fd, directory: (
+                directory if SKILL_FILENAME in list_entries(skill_fd, directories=False) else None
+            ),
+        ),
     )
 
 
@@ -273,14 +316,27 @@ def workspace_skill_name(content: str, directory: str) -> str | None:
 
 
 def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> Skill | None:
-    content = read_text_at(skill_fd, SKILL_FILENAME)
+    path = skills_root / directory / SKILL_FILENAME
+    try:
+        content = read_text_at(skill_fd, SKILL_FILENAME)
+    except (OSError, ValueError) as exc:
+        logger.warning("Refused a workspace skill file", path=str(path), error=str(exc))
+        return None
     if content is None:
         return None
     frontmatter, instructions = parse_skill_markdown(content, loose=True)
+    # Skill normalization drops a skill without a usable name.
+    name = _frontmatter_name(frontmatter, directory) or ""
+    if len(name) > _MAX_WORKSPACE_SKILL_NAME_CHARS:
+        logger.warning("Refused a workspace skill whose name is too long", path=str(path))
+        return None
+    description = frontmatter.get("description", "")
+    if isinstance(description, str) and len(description) > _MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
+        logger.warning("Truncated a workspace skill description", path=str(path))
+        description = description[:_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
     return Skill(
-        # Skill normalization drops a skill without a usable name.
-        name=_frontmatter_name(frontmatter, directory) or "",
-        description=frontmatter.get("description", ""),
+        name=name,
+        description=description,
         instructions=instructions,
         source_path=str(skills_root / directory),
         scripts=list_support_files(skill_fd, "scripts"),
