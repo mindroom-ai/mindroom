@@ -150,7 +150,7 @@ Manage service credentials directly from the dashboard:
 - **List configured credential services** from `CredentialsManager`
 - **Create/select service names** (for example `github_private` or `model:sonnet`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
-- **Save provider keys under their env var name**: a service named after a provider key env var (for example `ANTHROPIC_API_KEY`) is stored under the canonical provider service (`anthropic`), which the Models page and runtime read
+- **Save provider keys under their env var name**: a new service named after a provider key env var (for example `ANTHROPIC_API_KEY`) is stored under the canonical provider service (`anthropic`), which the Models page and runtime read, while an existing env-var-named service keeps receiving writes because config may reference it by exact name
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
