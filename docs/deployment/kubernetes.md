@@ -488,13 +488,13 @@ The backend runs the scheduler in every replica, so keep the platform backend at
 ### Account Deletion
 
 A customer's deletion request (`POST /my/gdpr/request-deletion`) first sets every renewing Stripe subscription of its customer to end at the end of its current billing period (`cancel_at_period_end`) and marks it with the `mindroom_ends_for_account_deletion` metadata key.
-Subscriptions the customer had already set to end, at their period end or on a chosen date (`cancel_at`), keep their own schedule.
-`incomplete` and `paused` subscriptions have no paid period to finish, so the request cancels them at once, after every change that can be undone.
+A subscription the customer had already set to end within its paid period (`cancel_at`) keeps that end; one set to end later is moved to the period end, and the marker remembers the customer's date so that cancelling the deletion restores it.
 If Stripe fails, the request returns `502`, the subscriptions it had already set to end are set back, and the account is not deleted.
 It then marks the account pending deletion and stops its instances with their platform OpenRouter keys disabled; the response says so when stopping failed and will be retried.
+Only once the deletion is recorded does it cancel `incomplete` and `paused` subscriptions, which have no paid period to finish; a failure there is retried by the nightly run.
 An account pending deletion never runs instances, whatever Stripe reports, so its instances stay stopped during the grace period even while its subscription is still paid, and the nightly run keeps them stopped even while Stripe is unreachable.
 Such an account cannot provision or start instances, open a checkout or the billing portal, or cancel or reactivate its subscription (`409`) until the deletion is cancelled, and an instance being provisioned for it is kept stopped.
-Each nightly run sets the renewing subscriptions of accounts still inside their grace period to end with their period again, which also covers accounts whose deletion was requested before this behavior shipped; it skips an account the customer restored meanwhile and undoes its own change when the restore lands while it runs.
+Each nightly run repeats these Stripe steps for accounts still inside their grace period, which retries a step the request could not finish and also covers deletions requested before these steps existed; it skips an account the customer restored meanwhile and undoes its own change when the restore lands while it runs.
 Cancelling the deletion (`POST /my/gdpr/cancel-deletion`) restores only the account and lets the marked subscriptions renew again; its instances restart once a subscription is entitled, which for a subscription whose period ended meanwhile means a new checkout.
 A customer who cancels or reactivates a subscription through `/my/subscription/cancel` or `/my/subscription/reactivate` also clears the marker, so a later cancelled deletion never renews a subscription the customer chose to end.
 After the 7-day grace period, cancelling returns `409`, because `restore_account` refuses by the database clock.
@@ -505,10 +505,10 @@ Last, the job deletes the account's Supabase auth user through the admin API, wh
 Payment records and Stripe webhook event records are kept after the account is deleted with only their `account_id` cleared (`ON DELETE SET NULL`); they keep the Stripe customer and subscription identifiers, and webhook payloads can include the account ID (subscription metadata) and invoice contact details.
 Soft delete keeps a `suspended` status and `restore_account` only restores a `deleted` one, so cancelling a deletion never lifts a suspension.
 If a teardown, the hard delete, or the auth user deletion fails, the account keeps its `accounts` row, the run is recorded as failed with the error, and the next run retries from the start.
-The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion, runs the same teardown immediately, and deletes the auth user, which takes the account's rows with it.
+The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion and claims it at once, runs the same teardown, calls `hard_delete_account`, and then deletes the auth user, which takes the account row with it.
 When a step fails it answers `500` and keeps the account row, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
 The nightly run, and any reconcile of an account pending deletion, marks instances that an older release's soft delete left `deprovisioned` while their deployment kept running as `running` again; the lifecycle then holds them, or keeps them running for an entitled subscription.
-Keep `cleanupScheduler.teardownGraceDays` at 7 or more, because a held instance's teardown date also applies while its account is pending deletion.
+A held instance of an account pending deletion is never uninstalled by its own teardown date, even when `cleanupScheduler.teardownGraceDays` is shorter than 7 days; the account's cleanup removes it once the customer can no longer cancel.
 
 ## Release Deployment
 
