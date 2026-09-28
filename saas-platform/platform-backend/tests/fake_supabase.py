@@ -77,9 +77,6 @@ class FakeQuery:
         assert value == "null"
         return self._filter("is", column, None)
 
-    def lt(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
-        return self._filter("lt", column, value)
-
     def order(self, column: str, *, desc: bool = False) -> FakeQuery:
         self.order_by = (column, desc)
         return self
@@ -153,11 +150,8 @@ def _matches_filter(op: str, current: Any, value: Any) -> bool:  # noqa: ANN401
         return str(current) == str(value)
     if op == "in":
         return str(current) in {str(v) for v in value}
-    if op == "is":
-        return current is None
-    assert op == "lt"
-    # ISO timestamps written by the backend share one format, so they order as strings.
-    return current is not None and str(current) < str(value)
+    assert op == "is"
+    return current is None
 
 
 @dataclass

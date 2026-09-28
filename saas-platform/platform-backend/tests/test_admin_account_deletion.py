@@ -112,7 +112,7 @@ class TestAdminAccountDeletion:
         response = client.delete("/admin/accounts/account_123/complete")
 
         assert response.status_code == 500
-        assert "nothing was deleted" in response.json()["detail"]
+        assert "account rows were kept, but Stripe billing may already be cancelled" in response.json()["detail"]
         delete_mock.execute.assert_not_called()
 
     def test_generic_delete_blocks_account_deletion(

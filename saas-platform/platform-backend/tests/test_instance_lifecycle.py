@@ -1587,6 +1587,41 @@ async def test_legacy_soft_deleted_instance_that_kept_running_is_held(platform: 
 
 
 @pytest.mark.asyncio
+async def test_legacy_soft_deleted_instance_of_a_paying_restored_account_is_not_held(platform: Platform) -> None:
+    # An older soft delete stored the subscription as cancelled; the account was restored and Stripe still bills.
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.stripe.Subscription.retrieve.assert_called_once_with("sub_stripe_1")
+    assert platform.subscription()["status"] == "active"
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_nightly_run_sets_billing_of_accounts_inside_their_grace_period_to_end(platform: Platform) -> None:
+    # Deletion was requested before a release that set billing to end at request time.
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"))
+
+    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
+    with audit_logs, usage_metrics:
+        run = await run_cleanup_job()
+
+    platform.stripe.Subscription.modify.assert_called_once_with(
+        "sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "true"}
+    )
+    platform.stripe.Subscription.cancel.assert_not_called()
+    assert platform.db.rpc_calls == []
+    assert run["summary"]["accounts"]["errors"] == []
+
+
+@pytest.mark.asyncio
 async def test_deprovisioned_instance_without_a_deployment_is_left_alone(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("cancelled"))
     platform.db.tables["instances"].append(_instance("deprovisioned", openrouter_key_hash=None))
@@ -1683,12 +1718,13 @@ async def test_a_hold_that_lands_while_provisioning_keeps_the_instance_stopped(d
     assert db.row("instances", instance_id=7)["status"] == "stopped"
 
 
-def test_a_repeated_trial_from_a_parallel_checkout_ends_at_once(platform: Platform) -> None:
+def test_a_trial_after_an_ended_earlier_trial_ends_at_once(platform: Platform) -> None:
+    # A checkout opened before the earlier trial was cancelled still carried a trial.
     platform.db.tables["subscriptions"].append(_subscription("cancelled", stripe_subscription_id="sub_stripe_old"))
     trialing = {**_stripe_subscription("trialing"), "created": 1_750_000_000, "trial_start": 1_750_000_000}
     history = [
-        Mock(id="sub_stripe_1", created=1_750_000_000, trial_start=1_750_000_000),
-        Mock(id="sub_stripe_old", created=1_700_000_000, trial_start=1_700_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_old", status="canceled", created=1_700_000_000, trial_start=1_700_000_000),
     ]
     ended = {**_stripe_subscription("active"), "trial_start": 1_750_000_000}
     webhooks = "backend.routes.webhooks.stripe.Subscription"
@@ -1706,12 +1742,35 @@ def test_a_repeated_trial_from_a_parallel_checkout_ends_at_once(platform: Platfo
     assert platform.subscription()["status"] == "active"
 
 
+def test_a_trial_duplicating_a_running_earlier_trial_is_cancelled_and_not_bound(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("trialing", stripe_subscription_id="sub_stripe_first"))
+    later = {**_stripe_subscription("trialing"), "created": 1_750_000_100, "trial_start": 1_750_000_100}
+    history = [
+        Mock(id="sub_stripe_first", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=[{"created": 1_750_000_000}, {"status": "trialing"}]),
+        patch(f"{webhooks}.cancel") as cancel,
+        patch(f"{webhooks}.modify") as modify,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.created", later)
+
+    cancel.assert_called_once_with("sub_stripe_1")
+    modify.assert_not_called()
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
+
+
 def test_the_earliest_of_two_parallel_trials_is_kept(platform: Platform) -> None:
     trialing = {**_stripe_subscription("trialing"), "created": 1_750_000_000, "trial_start": 1_750_000_000}
     webhooks = "backend.routes.webhooks.stripe.Subscription"
     history = [
-        Mock(id="sub_stripe_1", created=1_750_000_000, trial_start=1_750_000_000),
-        Mock(id="sub_stripe_later", created=1_750_000_100, trial_start=1_750_000_100),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_later", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
     ]
 
     with patch(f"{webhooks}.list") as list_subscriptions, patch(f"{webhooks}.modify") as modify:

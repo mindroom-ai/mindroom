@@ -25,6 +25,31 @@ class TestStripeRoutesEndpoints:
             mock.return_value = sb
             yield sb
 
+    @pytest.fixture(autouse=True)
+    def account_pending_deletion(self):
+        """Accounts are not pending deletion unless a test says so."""
+        with patch("backend.services.instance_lifecycle.account_may_run_instances", return_value=True) as may_run:
+            yield may_run
+
+    @pytest.mark.parametrize("path", ["/stripe/checkout", "/stripe/portal"])
+    def test_account_pending_deletion_cannot_change_billing(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        account_pending_deletion: Mock,
+        path: str,
+    ):
+        """Teardown cancels any subscription without refund, so a pending account must cancel the deletion first."""
+        account_pending_deletion.return_value = False
+
+        response = client.post(path, json={"tier": "pro", "billing_cycle": "monthly"})
+
+        assert response.status_code == 409
+        mock_stripe.checkout.Session.create.assert_not_called()
+        mock_stripe.billing_portal.Session.create.assert_not_called()
+
     @pytest.fixture
     def mock_stripe(self):
         """Mock Stripe client."""

@@ -586,7 +586,10 @@ async def admin_delete_account_complete(
         await instance_lifecycle.tear_down_account(account_id)
     except Exception as e:
         logger.exception("Tearing down account %s failed; its rows are kept", account_id)
-        detail = f"Failed to cancel billing or uninstall instances; nothing was deleted: {e!s}"
+        detail = (
+            "Teardown failed, so the account rows were kept, but Stripe billing may already be cancelled and "
+            f"some instances uninstalled; retry the deletion: {e!s}"
+        )
         raise HTTPException(status_code=500, detail=detail) from e
 
     # 2. Delete the account (cascade deletion will handle related records)

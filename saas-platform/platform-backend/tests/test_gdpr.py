@@ -59,13 +59,15 @@ def mock_lifecycle():
     """Stub the Stripe billing and instance lifecycle steps around the deletion RPCs; every step succeeds."""
     lifecycle = "backend.routes.gdpr.instance_lifecycle"
     with (
-        patch(f"{lifecycle}.end_account_billing_at_period_end", new=AsyncMock()) as end_billing,
+        patch(f"{lifecycle}.end_account_billing_at_period_end", new=AsyncMock(return_value=[])) as end_billing,
         patch(f"{lifecycle}.resume_account_billing", new=AsyncMock()) as resume_billing,
+        patch(f"{lifecycle}.resume_subscriptions", new=AsyncMock()) as resume_subscriptions,
         patch(f"{lifecycle}.reconcile_account_instances", new=AsyncMock(return_value=[])) as reconcile,
     ):
         yield MagicMock(
             end_account_billing_at_period_end=end_billing,
             resume_account_billing=resume_billing,
+            resume_subscriptions=resume_subscriptions,
             reconcile_account_instances=reconcile,
         )
 
@@ -348,8 +350,10 @@ class TestGDPREndpoints:
     def test_failed_soft_delete_resumes_the_billing_it_had_scheduled_to_end(
         self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
     ):
-        """If the deletion cannot be recorded, billing goes back to renewing, so the request changed nothing."""
+        """If the deletion cannot be recorded, the billing this request set to end renews again, and only that."""
+        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
+        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": None}])
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -357,8 +361,27 @@ class TestGDPREndpoints:
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Your account was not deleted and your billing is unchanged. Try again."
-        mock_lifecycle.resume_account_billing.assert_awaited_once_with(mock_user["account_id"])
+        mock_lifecycle.resume_subscriptions.assert_awaited_once_with(["sub_a"])
+        mock_lifecycle.resume_account_billing.assert_not_awaited()
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
+
+    def test_soft_delete_that_committed_before_its_response_was_lost_stands(
+        self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
+    ):
+        """The account is pending deletion after all, so its billing stays set to end and its instances stop."""
+        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
+        mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
+        mock_supabase.table().select().eq().execute.return_value = MagicMock(
+            data=[{"deleted_at": datetime.now(UTC).isoformat()}]
+        )
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 200
+        mock_lifecycle.resume_subscriptions.assert_not_awaited()
+        mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
 
     def test_cancel_deletion(self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle):
         """Test canceling deletion request."""

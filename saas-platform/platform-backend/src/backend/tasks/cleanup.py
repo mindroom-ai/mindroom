@@ -11,7 +11,12 @@ from typing import Any
 
 from backend.config import ACCOUNT_DELETION_GRACE_DAYS
 from backend.deps import ensure_supabase
-from backend.services.instance_lifecycle import reconcile_all_subscriptions, tear_down_account
+from backend.entitlements import parse_timestamp
+from backend.services.instance_lifecycle import (
+    end_account_billing_at_period_end,
+    reconcile_all_subscriptions,
+    tear_down_account,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,26 +29,24 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
     Each account is first claimed, which ends its restore window, then its Stripe billing is cancelled and its
     hosted instances are uninstalled before its rows go, because those rows are the only record of what to tear
     down. An account whose teardown or delete fails keeps its rows, is reported in `errors`, and is retried by the
-    next run.
+    next run. An account still inside its grace period has its renewing Stripe subscriptions set to end with their
+    period again, which covers accounts whose deletion was requested before a release that did this at request time.
     """
     sb = ensure_supabase()
     cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
 
-    # Find accounts ready for hard deletion
-    result = (
-        sb.table("accounts")
-        .select("id")
-        .not_.is_("deleted_at", "null")
-        .lt("deleted_at", cutoff_date.isoformat())
-        .execute()
-    )
+    pending = sb.table("accounts").select("id,deleted_at").not_.is_("deleted_at", "null").execute().data or []
 
     accounts_deleted = 0
     errors: list[str] = []
 
-    for account in result.data or []:
+    for account in pending:
         account_id = account["id"]
         try:
+            deleted_at = parse_timestamp(account["deleted_at"])
+            if deleted_at is not None and deleted_at >= cutoff_date:
+                await end_account_billing_at_period_end(account_id)
+                continue
             # The claim uses the database clock, like restore_account, so a restore can never land mid-teardown.
             if not sb.rpc("claim_account_hard_delete", {"target_account_id": account_id}).execute().data:
                 logger.info("Skipping account %s: it was restored or its grace period has not ended", account_id)
@@ -51,7 +54,7 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
             await tear_down_account(account_id)
             sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
         except Exception as exc:
-            logger.exception("Failed to delete account %s; the next run retries", account_id)
+            logger.exception("Deletion step failed for account %s; the next run retries", account_id)
             errors.append(f"account {account_id}: {exc}")
             continue
         accounts_deleted += 1

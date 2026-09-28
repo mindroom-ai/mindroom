@@ -165,22 +165,29 @@ async def reconcile_account_instances(account_id: str) -> list[str]:
     return summary.errors
 
 
-async def end_account_billing_at_period_end(account_id: str) -> None:
+async def end_account_billing_at_period_end(account_id: str) -> list[str]:
     """Let each Stripe subscription of the account's customer end with its paid period, for an account deletion.
 
     Subscriptions the customer already set to end keep their schedule, and ones that bill nothing are left for
-    teardown to cancel; the ones this sets are marked so `resume_account_billing` undoes only those. A Stripe error
-    propagates after this call's changes are undone where Stripe allows, so the request can simply be retried.
-    A no-op without a Stripe customer or without Stripe.
+    teardown to cancel; the ones this sets are marked so `resume_account_billing` undoes only those, and their ids
+    are returned. Repeating it changes nothing. A Stripe error propagates after this call's changes are undone
+    where Stripe allows, so the request can simply be retried. A no-op without a Stripe customer or without Stripe.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        await anyio.to_thread.run_sync(partial(_end_customer_billing_at_period_end, customer_id))
+        return await anyio.to_thread.run_sync(partial(_end_customer_billing_at_period_end, customer_id))
+    return []
 
 
 async def resume_account_billing(account_id: str) -> None:
     """Undo `end_account_billing_at_period_end` after an account deletion is cancelled; a Stripe error propagates."""
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
         await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
+
+
+async def resume_subscriptions(subscription_ids: list[str]) -> None:
+    """Undo the end that `end_account_billing_at_period_end` set on exactly these subscriptions."""
+    for subscription_id in subscription_ids:
+        await anyio.to_thread.run_sync(_resume_subscription, subscription_id)
 
 
 def account_may_run_instances(sb: Client, account_id: str) -> bool:
@@ -281,7 +288,7 @@ def _cancel_customer_subscriptions(customer_id: str) -> None:
         logger.info("Cancelled Stripe subscription %s of customer %s", subscription.id, customer_id)
 
 
-def _end_customer_billing_at_period_end(customer_id: str) -> None:
+def _end_customer_billing_at_period_end(customer_id: str) -> list[str]:
     scheduled: list[str] = []
     try:
         for subscription in _customer_subscriptions(customer_id):
@@ -299,6 +306,7 @@ def _end_customer_billing_at_period_end(customer_id: str) -> None:
             except stripe.StripeError:
                 logger.exception("Could not undo the scheduled end of Stripe subscription %s", subscription_id)
         raise
+    return scheduled
 
 
 def _resume_customer_billing(customer_id: str) -> None:
@@ -490,7 +498,8 @@ def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", 
 
 def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
     if not entitled:
-        return instance.get("status") != "deprovisioned"
+        # A deprovisioned row without a lifecycle hold may be a legacy soft-deleted instance that still runs.
+        return instance.get("status") != "deprovisioned" or instance.get("lifecycle_stopped_at") is None
     if instance.get("lifecycle_stopped_at"):
         return True
     return _plan_alignment(instance, subscription["tier"]) is not None
