@@ -1317,24 +1317,65 @@ class TestCredentialsSync:
         assert _import_notices(events) == []
         assert manager.get_api_key("openai") == existing_key
 
-    def test_empty_name_with_readable_file_names_file_variable(self, temp_credentials_dir: Path) -> None:
+    @pytest.mark.parametrize(
+        ("name", "service"),
+        [
+            ("OPENAI_API_KEY", "openai"),
+            ("GITHUB_TOKEN", "github_private"),
+            ("EMBEDDER_API_KEY", "embedder"),
+        ],
+    )
+    def test_empty_name_with_readable_file_names_file_variable(
+        self,
+        temp_credentials_dir: Path,
+        name: str,
+        service: str,
+    ) -> None:
         """An empty NAME falls back to NAME_FILE, and the notice names NAME_FILE and its source."""
-        secret_file = temp_credentials_dir.parent / "openai-key"
-        secret_file.write_text("sk-from-file\n", encoding="utf-8")
+        secret_file = temp_credentials_dir.parent / "secret"
+        secret_file.write_text("secret-from-file\n", encoding="utf-8")
         runtime_paths = _runtime_paths(
             temp_credentials_dir.parent,
             shared_credentials_dir=temp_credentials_dir,
-            process_env={"OPENAI_API_KEY": ""},
-            env_file=f"OPENAI_API_KEY_FILE={secret_file}\n",
+            process_env={name: ""},
+            env_file=f"{name}_FILE={secret_file}\n",
         )
 
         with capture_logs() as events:
             sync_env_to_credentials(runtime_paths=runtime_paths)
 
-        assert [(notice["env_var"], notice["source"]) for notice in _import_notices(events)] == [
-            ("OPENAI_API_KEY_FILE", "env_file"),
+        assert [(notice["service"], notice["env_var"], notice["source"]) for notice in _import_notices(events)] == [
+            (service, f"{name}_FILE", "env_file"),
         ]
-        assert CredentialsManager(base_path=temp_credentials_dir).get_api_key("openai") == "sk-from-file"
+        stored = CredentialsManager(base_path=temp_credentials_dir).load_credentials(service)
+        assert stored is not None
+        assert "secret-from-file" in stored.values()
+
+    def test_adc_path_notice_names_variable_and_repeat_is_quiet(self, temp_credentials_dir: Path) -> None:
+        """The ADC import notice names GOOGLE_APPLICATION_CREDENTIALS, and an unchanged path stays quiet."""
+        adc_file = temp_credentials_dir.parent / "adc.json"
+        runtime_paths = _runtime_paths(
+            temp_credentials_dir.parent,
+            shared_credentials_dir=temp_credentials_dir,
+            process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(adc_file)},
+        )
+
+        with capture_logs() as first_events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+        with capture_logs() as repeat_events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        assert _import_notices(first_events) == [
+            {
+                "event": "credential_imported_from_env",
+                "log_level": "info",
+                "service": "google_vertex_adc",
+                "env_var": "GOOGLE_APPLICATION_CREDENTIALS",
+                "source": "process_env",
+                "to_stop": _to_stop("google_vertex_adc"),
+            },
+        ]
+        assert _import_notices(repeat_events) == []
 
     def test_valid_name_ignores_unresolvable_file_variable(self, temp_credentials_dir: Path) -> None:
         """A non-empty NAME is imported without resolving a broken NAME_FILE path."""
