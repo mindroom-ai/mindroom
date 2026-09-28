@@ -55,6 +55,9 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
+Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
+When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings fail the crawl.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -697,13 +700,18 @@ On a routed worker, `workspace` mode reads only files inside the worker workspac
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
+Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
+A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
+The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because they all go through a loopback relay that resolves each destination itself and dials only an address the policy allows.
+When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings stop the browser from starting.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
+| `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |

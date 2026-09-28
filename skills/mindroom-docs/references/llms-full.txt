@@ -2119,6 +2119,7 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+Env and file refs always produce strings, so a tool's boolean field accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, or `off` in any letter case, and any other stored value makes that tool fail to load instead of silently choosing a truthiness.
 When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
 To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
@@ -3006,7 +3007,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.per` | `user` or `user_agent` | *required* | Which requester boundary gets its own private instance of the agent's state. MindRoom also uses that same boundary for the agent's internal execution scope |
-| `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root, and the workspace dedicated workers mount. Must be a relative path, cannot escape with `..`, and cannot start with a name the primary writes beside it: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock` |
+| `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root, and the workspace dedicated workers mount. Must be a relative path, cannot escape with `..`, and cannot start with a name the primary writes beside it: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser-profiles`, or `.sessions-recovery.lock` |
 | `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root without overwriting existing files. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error when the directory does not exist |
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
 | `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge) |
@@ -6604,6 +6605,9 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
+Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
+When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings fail the crawl.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -7246,13 +7250,18 @@ On a routed worker, `workspace` mode reads only files inside the worker workspac
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
+Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
+A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
+The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because they all go through a loopback relay that resolves each destination itself and dials only an address the policy allows.
+When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings stop the browser from starting.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
+| `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |
@@ -15284,6 +15293,7 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
 | `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
+| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's resolved state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 Example:
 
@@ -21125,6 +21135,8 @@ Private storage moves require stopped primaries and absent managed workers, as d
 Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
+Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
+A `private.root` may no longer start with `browser-profiles`, the directory those profiles use beside the private workspace.
 
 ### Workspace-only worker mounts
 
@@ -21584,6 +21596,8 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
+- Likewise, a non-private agent's primary-process `browser` profiles live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in; profiles never cross agents or the requesters of a private agent.
+- When the environment configures an egress proxy through `all_proxy`, or matching `http_proxy` and `https_proxy` values, the `browser` and `crawl4ai` tools send every browser connection to it, and that proxy rather than MindRoom's connect-time relay enforces destinations.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
