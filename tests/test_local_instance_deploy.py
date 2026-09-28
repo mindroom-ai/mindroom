@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -1534,3 +1535,75 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     text = normalize_console_output(console.export_text())
     assert "Added MINDROOM_API_KEY, MINDROOM_SANDBOX_PROXY_TOKEN to" in text
     assert "Dashboard API key: MINDROOM_API_KEY in envs/alpha.env" in text
+
+
+@pytest.fixture
+def world_readable_umask() -> Iterator[None]:
+    """Create files the way a default shell does, so only explicit modes keep secrets private."""
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_instance_env_file_and_synapse_config_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider keys, datastore passwords, and the macaroon key must not be readable by other local accounts."""
+    template = tmp_path / ".env.template"
+    template.write_text("OPENAI_API_KEY=\n")
+    template.chmod(0o644)
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", template)
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+
+    deploy._create_environment_file(instance, "alpha", deploy.MatrixType.SYNAPSE)
+    deploy._setup_synapse_config(instance)
+
+    homeserver = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
+    assert _mode(tmp_path / "envs") == 0o700
+    assert _mode(tmp_path / "envs" / "alpha.env") == 0o600
+    assert (tmp_path / "envs" / "alpha.env").read_text().startswith("OPENAI_API_KEY=\n")
+    assert _mode(homeserver) == 0o600
+    assert "macaroon_secret_key" in homeserver.read_text()
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_launch_tightens_an_existing_world_readable_env_file(tmp_path: Path) -> None:
+    """Env files written by older versions become owner-only the next time secrets are checked."""
+    env_file = tmp_path / "alpha.env"
+    env_file.write_text("MINDROOM_API_KEY=existing\n")
+    env_file.chmod(0o644)
+
+    assert deploy._ensure_env_secrets(env_file, ("MINDROOM_API_KEY",)) == []
+    assert _mode(env_file) == 0o600
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credential copies and their directory stay private, including copies left world-readable by older versions."""
+    source_dir = tmp_path / "home" / ".mindroom" / "credentials"
+    source_dir.mkdir(parents=True)
+    for name in ("openai.json", "google_oauth.json"):
+        (source_dir / name).write_text('{"api_key": "secret"}')
+        (source_dir / name).chmod(0o600)
+    monkeypatch.setattr(deploy.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(deploy, "REPO_ROOT", tmp_path / "repo-root")
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+    target_dir.mkdir(parents=True)
+    target_dir.chmod(0o755)
+    (target_dir / "openai.json").write_text('{"api_key": "secret"}')
+    (target_dir / "openai.json").chmod(0o644)
+
+    deploy._create_instance_directories(instance)
+
+    assert _mode(target_dir) == 0o700
+    assert {path.name: _mode(path) for path in target_dir.iterdir()} == {
+        "openai.json": 0o600,
+        "google_oauth.json": 0o600,
+    }
