@@ -12,7 +12,6 @@ from agno.models.response import ModelResponse, ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.tools.calculator import CalculatorTools
-from agno.tools.sleep import SleepTools
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
@@ -24,6 +23,7 @@ from mindroom.approval_execution import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -219,10 +219,10 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         executed.append("add")
         return original_add(self, a, b)
 
-    def sleep(self: SleepTools, seconds: int) -> str:
+    async def sleep(self: SleepTools, seconds: int) -> str:
         assert get_tool_execution_identity() == identity
         executed.append("sleep")
-        return original_sleep(self, seconds)
+        return await original_sleep(self, seconds)
 
     monkeypatch.setattr(CalculatorTools, "add", add)
     monkeypatch.setattr(SleepTools, "sleep", sleep)

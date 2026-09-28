@@ -1152,7 +1152,7 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1456,7 +1456,7 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrow
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1491,7 +1491,7 @@ def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unava
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "load_tool" in function_names
     assert "sleep" not in function_names
     assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
@@ -1533,7 +1533,7 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
         eager_deferred_tools=True,
     )
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "sleep" in function_names
     assert "add" in function_names
     assert "load_tool" not in function_names
@@ -1560,7 +1560,7 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         tool_function_filter=lambda _function: False,
     )
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "sleep" not in function_names
     assert "load_tool" not in function_names
     assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
@@ -1593,7 +1593,7 @@ def test_unsupported_models_keep_homegrown_dynamic_tools_path(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
 
-    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
     assert "load_tool" in function_names
     assert "sleep" not in function_names
     assert "add" in function_names
