@@ -67,14 +67,14 @@ Other private addresses and cloud metadata endpoints remain blocked by default.
 Headless workers, unbound browsers, connected desktops, and ordinary server-side HTTP tools retain their existing policies.
 As with a local development browser, pages opened in Computer mode can make requests to services listening on the same worker's loopback interface.
 
-Without a configured upstream proxy, both providers enforce destinations through a worker-local proxy, including redirects.
-When the worker sets `all_proxy` or `ALL_PROXY` to an HTTP(S) proxy without embedded credentials, Chromium uses that proxy directly for external connections; only loopback bypasses it.
-Matching `http_proxy` and `https_proxy` settings are also supported.
-Per-scheme or automatic proxy configurations that cannot be preserved are rejected with a configuration error rather than silently bypassed; use `all_proxy` for these workers.
-The upstream proxy is trusted to resolve destination hostnames and enforce its own network restrictions, including blocking private and metadata addresses.
-Browser URL validation still requires hostnames to resolve inside the worker; proxy-only DNS names are not supported.
+Both providers make a worker-local destination relay Chromium's only proxy, loopback included, so every connection, including redirects and WebSockets, is validated before it is dialed.
+The relay dials allowed loopback previews itself and, when the worker sets an HTTP(S) egress proxy through `all_proxy`, `http_proxy`, or `https_proxy`, tunnels every other destination through that proxy with HTTP `CONNECT`.
+All set proxy variables must name the same proxy without embedded credentials; differing, SOCKS, or automatic proxy configurations are rejected with a configuration error rather than silently bypassed.
+The tunnel names the destination hostname, so the upstream proxy resolves it and enforces its own network restrictions, including blocking private and metadata addresses and resisting DNS rebinding against its own lookups.
+The relay still validates each hostname against the worker's DNS first, so proxy-only DNS names are not supported.
 This keeps domain-based firewall rules intact.
 A rejected proxy connection never falls back to a direct connection.
+WebRTC cannot send UDP around the relay: the `browser` provider launches Chromium with `--webrtc-ip-handling-policy=disable_non_proxied_udp`, and `browser_mcp` passes the same argument through its bundled Playwright MCP configuration.
 
 For the runtime Helm chart:
 
@@ -160,11 +160,10 @@ agents:
 ```
 
 Metadata and link-local addresses stay blocked even with this option.
-Without a configured upstream proxy, a worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
-With an upstream proxy, that proxy owns destination enforcement as described above.
+The worker-local destination relay checks every TCP connection, including redirect destinations, WebSockets, and loopback, then connects to the validated numeric address or tunnels through the worker's upstream proxy as described above.
 The browser keeps normal TLS, origins, and redirect behavior.
-The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
-This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.
+The URL callback also restricts request schemes and address literals without a DNS lookup; callback errors and timeouts deny requests, and service workers are blocked.
+This guard does not promise rebinding protection against an upstream proxy's own lookups, coverage of every network protocol, or confinement of malicious shell code.
 Persistent workspace files remain intentionally shared with the agent's other worker tools.
 
 ## Browser and container sandboxing

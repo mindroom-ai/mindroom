@@ -6607,8 +6607,8 @@ The current implementation bypasses Crawl4AI cache for fresher reads and truncat
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
 Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
 Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
-WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-When the environment names one HTTP(S) egress proxy, through `all_proxy` or through `http_proxy` and `https_proxy` alone or together, that proxy carries every browser connection instead and owns destination enforcement, as the [browser](#browser) notes describe.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay, which tunnels validated destinations through it as the [browser](#browser) notes describe.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -7253,13 +7253,17 @@ The local desktop bridge always uses `<storage>/desktop-browser` for its transie
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
 Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
+This includes a shared agent with `worker_scope: user` or `user_agent` whose `browser` runs in the primary process; route `browser` to workers with `worker_tools` to give each worker scope its own profiles.
 A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
-The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because they all go through a loopback relay that resolves each destination itself and dials only an address the policy allows.
-WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-When the environment names one HTTP(S) egress proxy, through `all_proxy` or through `http_proxy` and `https_proxy` alone or together, that proxy carries every browser connection instead and owns destination enforcement; spellings of one proxy that differ only in letter case, a trailing slash, or an omitted default port count as one proxy.
-With `allow_private_networks`, loopback and the `no_proxy` hosts go direct instead, because that policy already allows them, and the route guard still checks their page requests but not their WebSockets; `no_proxy` address ranges that include link-local or metadata addresses keep using the proxy.
-A SOCKS proxy URL, credentials inside a proxy URL, or a proxy URL with a path is refused with an error that names the variable.
-When the environment is ambiguous, because `http_proxy` and `https_proxy` name different proxies or `auto_proxy` selects a proxy script, a browser in a sandbox runner refuses to start, since its egress proxy may be what enforces approved egress, while the primary logs a warning and uses the relay, which still enforces the browser's destination policy.
+The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because a loopback relay is Chromium's only proxy, loopback included, and resolves and validates each destination before it dials anything.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay: after validating a destination, the relay dials it directly or opens an HTTP `CONNECT` tunnel through that proxy.
+In the primary process, the tunnel names the address the relay validated, so the proxy cannot resolve the hostname to anything else, and the proxy variables follow curl precedence: `http_proxy` for port 80, `https_proxy` for every other port, and `all_proxy` for either when its own variable is unset.
+Loopback destinations the policy allows are always dialed directly, because a proxy's loopback is another host, and with `allow_private_networks` so are destinations `no_proxy` names, whether by hostname suffix or address range; `no_proxy` can never make a destination the policy refuses, such as a metadata address, reachable.
+The proxy must allow `CONNECT` to each destination port, including port 80 for plain HTTP.
+A SOCKS proxy, credentials inside a proxy URL, a proxy URL with a path, `auto_proxy`, or `socks_server` cannot be followed; the primary logs a warning and the relay dials those destinations directly within the same policy.
+In a sandbox runner, where the proxy may be what enforces approved egress, every set proxy variable must name one such HTTP(S) proxy, spellings that differ only in letter case, a trailing slash, an omitted default port, or a missing `http://` counting as one, and anything else stops the browser from starting.
+The tunnel there names the hostname, because an approved-egress proxy decides by name, so that proxy's own resolution and any rebinding against it are its responsibility; the relay still validates the name against the worker's DNS first.
 
 #### Configuration
 
@@ -7413,14 +7417,14 @@ Other private addresses and cloud metadata endpoints remain blocked by default.
 Headless workers, unbound browsers, connected desktops, and ordinary server-side HTTP tools retain their existing policies.
 As with a local development browser, pages opened in Computer mode can make requests to services listening on the same worker's loopback interface.
 
-Without a configured upstream proxy, both providers enforce destinations through a worker-local proxy, including redirects.
-When the worker sets `all_proxy` or `ALL_PROXY` to an HTTP(S) proxy without embedded credentials, Chromium uses that proxy directly for external connections; only loopback bypasses it.
-Matching `http_proxy` and `https_proxy` settings are also supported.
-Per-scheme or automatic proxy configurations that cannot be preserved are rejected with a configuration error rather than silently bypassed; use `all_proxy` for these workers.
-The upstream proxy is trusted to resolve destination hostnames and enforce its own network restrictions, including blocking private and metadata addresses.
-Browser URL validation still requires hostnames to resolve inside the worker; proxy-only DNS names are not supported.
+Both providers make a worker-local destination relay Chromium's only proxy, loopback included, so every connection, including redirects and WebSockets, is validated before it is dialed.
+The relay dials allowed loopback previews itself and, when the worker sets an HTTP(S) egress proxy through `all_proxy`, `http_proxy`, or `https_proxy`, tunnels every other destination through that proxy with HTTP `CONNECT`.
+All set proxy variables must name the same proxy without embedded credentials; differing, SOCKS, or automatic proxy configurations are rejected with a configuration error rather than silently bypassed.
+The tunnel names the destination hostname, so the upstream proxy resolves it and enforces its own network restrictions, including blocking private and metadata addresses and resisting DNS rebinding against its own lookups.
+The relay still validates each hostname against the worker's DNS first, so proxy-only DNS names are not supported.
 This keeps domain-based firewall rules intact.
 A rejected proxy connection never falls back to a direct connection.
+WebRTC cannot send UDP around the relay: the `browser` provider launches Chromium with `--webrtc-ip-handling-policy=disable_non_proxied_udp`, and `browser_mcp` passes the same argument through its bundled Playwright MCP configuration.
 
 For the runtime Helm chart:
 
@@ -7506,11 +7510,10 @@ agents:
 ```
 
 Metadata and link-local addresses stay blocked even with this option.
-Without a configured upstream proxy, a worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
-With an upstream proxy, that proxy owns destination enforcement as described above.
+The worker-local destination relay checks every TCP connection, including redirect destinations, WebSockets, and loopback, then connects to the validated numeric address or tunnels through the worker's upstream proxy as described above.
 The browser keeps normal TLS, origins, and redirect behavior.
-The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
-This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.
+The URL callback also restricts request schemes and address literals without a DNS lookup; callback errors and timeouts deny requests, and service workers are blocked.
+This guard does not promise rebinding protection against an upstream proxy's own lookups, coverage of every network protocol, or confinement of malicious shell code.
 Persistent workspace files remain intentionally shared with the agent's other worker tools.
 
 ## Browser and container sandboxing
@@ -21143,9 +21146,11 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
 Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
 A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
-Host and headless worker browsers and `crawl4ai` no longer let Chromium read proxy settings from the environment; MindRoom selects one HTTP(S) egress proxy for every connection, or its destination relay when none is configured.
-If the environment set `http_proxy` and `https_proxy` to different proxies or set `auto_proxy`, the primary now connects without a proxy through the relay and sandbox runners refuse to start the browser, so set `all_proxy` to the one proxy to use.
-SOCKS proxy URLs and proxy URLs with credentials are refused, and `no_proxy` applies only to browsers with `allow_private_networks`.
+Chromium in the host, headless worker, and Computer browsers and in `crawl4ai` no longer reads proxy settings from the environment; its only proxy is MindRoom's destination relay, which opens HTTP `CONNECT` tunnels through the configured egress proxy.
+That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests.
+In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
+A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
+Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
 ### Workspace-only worker mounts
 
@@ -21606,8 +21611,8 @@ Do not report or "fix" these; they are deliberate.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
-- When the environment names one HTTP(S) egress proxy, the `browser` and `crawl4ai` tools send every browser connection to it, and that proxy rather than MindRoom's connect-time relay enforces destinations; with `allow_private_networks`, loopback and `no_proxy` hosts go direct, and WebSockets to those direct destinations are not checked, because page routes do not see them.
-- An ambiguous proxy environment on the primary, where no MindRoom egress policy depends on the proxy, makes the browser use the relay instead of refusing to start, while a sandbox runner refuses, because there the proxy may enforce approved egress.
+- A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
+- A proxy environment the primary cannot follow, such as a SOCKS proxy or `auto_proxy`, makes the relay dial directly within the browser's destination policy instead of refusing to start, because no MindRoom egress policy depends on that proxy there; a sandbox runner refuses.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.

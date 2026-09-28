@@ -251,9 +251,11 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
 Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
 A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
-Host and headless worker browsers and `crawl4ai` no longer let Chromium read proxy settings from the environment; MindRoom selects one HTTP(S) egress proxy for every connection, or its destination relay when none is configured.
-If the environment set `http_proxy` and `https_proxy` to different proxies or set `auto_proxy`, the primary now connects without a proxy through the relay and sandbox runners refuse to start the browser, so set `all_proxy` to the one proxy to use.
-SOCKS proxy URLs and proxy URLs with credentials are refused, and `no_proxy` applies only to browsers with `allow_private_networks`.
+Chromium in the host, headless worker, and Computer browsers and in `crawl4ai` no longer reads proxy settings from the environment; its only proxy is MindRoom's destination relay, which opens HTTP `CONNECT` tunnels through the configured egress proxy.
+That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests.
+In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
+A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
+Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
 ### Workspace-only worker mounts
 
