@@ -28,6 +28,7 @@ from mindroom.desktop.accessibility import (
     MacAccessibilityBackend,
 )
 from mindroom.desktop.bridge import (
+    _WIDEST_METRICS,
     DesktopBridge,
     DesktopBridgePolicy,
     _DesktopBridgeStoppedError,
@@ -562,8 +563,7 @@ async def test_remote_status_file_roots_is_bounded_while_local_status_keeps_ever
     )
     await _handle(bridge, _event(command))
     response = _response(transport)
-    # The bridge fits the reply before adding its metrics, which the budget's headroom covers.
-    assert replace(response, result=_without_metrics(response.result)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     file_roots = response.result["bridge"]["file_roots"]
     assert isinstance(file_roots, list)
     assert response.result["bridge"]["file_roots_truncated"] is True
@@ -1106,6 +1106,64 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
     bridge.close()
 
 
+_LONGEST_SESSION_ID = "s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
+
+
+def _longest_request_id(prefix: str) -> str:
+    return prefix + "x" * (_MAX_PROTOCOL_IDENTIFIER_LENGTH - len(prefix))
+
+
+@pytest.mark.asyncio
+async def test_fitted_shell_replies_fit_the_budget_as_recorded_and_sent(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tail, offset, and upload-fallback shell replies fit with their metrics and maximum-length IDs."""
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge.upload_encrypted_media",
+        AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
+    )
+    (tmp_path / "output").write_bytes(("\u00e9" * 30_000).encode())
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = "cat output; while [ ! -f release ]; do sleep 0.05; done; cat output"
+    run_id = _longest_request_id("run")
+    started = replace(_run_shell(command, tmp_path, request_id=run_id), session_id=_LONGEST_SESSION_ID)
+    await _handle(bridge, _event(started))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    request_ids = [run_id]
+
+    async def check(sequence: int, **parameters: object) -> None:
+        request_id = _longest_request_id(f"check-{sequence}-")
+        command = _command(
+            "check_shell",
+            request_id=request_id,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=sequence,
+            parameters={"handle": handle, **parameters},
+        )
+        await _handle(bridge, _event(command))
+        request_ids.append(request_id)
+
+    await check(2, offset=0)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await check(3)
+    for request_id in request_ids:
+        recorded = bridge._journal.get(request_id).response
+        assert recorded is not None
+        assert "metrics" in recorded.result
+        assert recorded.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    final = _response(transport)
+    assert (final.result["state"], final.result["output_truncated"]) == ("completed", True)
+    assert "could not be attached" in str(final.result["warning"])
+    await bridge.stop()
+    bridge.close()
+
+
 async def _wait_for_finished_handle(bridge: DesktopBridge, handle: str) -> None:
     for _ in range(600):
         entries = {entry["handle"]: entry["state"] for entry in bridge.local_status()["shell"]["handles"]}
@@ -1144,7 +1202,7 @@ async def test_check_shell_offset_polls_every_byte_once_without_splitting_charac
     for sequence in range(2, 600):
         await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
         reply = _response(transport)
-        assert reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+        assert reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
         shown = str(reply.result["output"]).encode()
         assert reply.result["next_offset"] == offset + len(shown)
         assert reply.result["output_truncated"] is (reply.result["next_offset"] < reply.result["output_bytes"])
@@ -1377,7 +1435,7 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
     handle = running.result["handle"]
     assert isinstance(handle, str)
     shown = str(running.result["output"])
-    assert running.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+    assert running.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     assert expected.decode().endswith(shown)
     assert 0 < len(shown.encode()) < len(expected)
     assert (running.result["output_bytes"], running.result["output_truncated"]) == (len(expected), True)
@@ -1430,7 +1488,7 @@ async def test_failed_output_upload_keeps_exit_code_and_newest_output(
     assert str(result["output"]).endswith("tail")
     assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "Matrix media upload failed: offline" in str(result["warning"])
-    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     await bridge.stop()
     bridge.close()
 
@@ -1540,7 +1598,7 @@ async def test_bridge_stop_during_a_stalled_output_upload_returns_within_the_bou
 
 
 def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
-    """Size the exact completed reply shape the bridge measures before metrics are added."""
+    """Size the exact completed reply shape the bridge measures, with the metrics room it reserves."""
     return DesktopResponse(
         request_id=command.request_id,
         session_id=command.session_id,
@@ -1554,6 +1612,7 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
             "output_truncated": False,
             "output_attachment": None,
             "next_offset": len(output.encode()),
+            "metrics": _WIDEST_METRICS,
         },
     ).content_bytes()
 
@@ -1598,10 +1657,14 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
             shell=shell,
             clock=lambda: NOW_SECONDS,
         )
-        probe = _run_shell("true", tmp_path, request_id="inline", expires_at_ms=120_000)
+        inline_id, attached_id = "i" * _MAX_PROTOCOL_IDENTIFIER_LENGTH, "a" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
+        probe = replace(
+            _run_shell("true", tmp_path, request_id=inline_id, expires_at_ms=120_000),
+            session_id=_LONGEST_SESSION_ID,
+        )
         count = _largest_inline_count(probe, character)
         results = []
-        for sequence, (request_id, repeat) in enumerate((("inline", count), ("attached", count + 1)), start=1):
+        for sequence, (request_id, repeat) in enumerate(((inline_id, count), (attached_id, count + 1)), start=1):
             script = f"import sys; sys.stdout.buffer.write(({character!r} * {repeat}).encode())"
             command = _run_shell(
                 f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
@@ -1611,14 +1674,22 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
                 timeout_seconds=30,
                 expires_at_ms=120_000,
             )
-            await bridge.on_to_device_event(_event(command))
+            await bridge.on_to_device_event(_event(replace(command, session_id=_LONGEST_SESSION_ID)))
             await _execute(bridge)
             await bridge.deliver_pending()
             body = requests[-1]["body"]
             assert "/sendToDevice/m.room.encrypted/" in requests[-1]["path"]
             assert len(json.dumps(body, separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
-            results.append(bridge._journal.get(request_id).response.result)
-        receipt = _command("request_status", request_id="receipt", sequence=3, parameters={"request_id": "inline"})
+            recorded = bridge._journal.get(request_id).response
+            assert recorded.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+            results.append(recorded.result)
+        receipt = _command(
+            "request_status",
+            request_id="q" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=3,
+            parameters={"request_id": inline_id},
+        )
         await bridge.on_to_device_event(_event(receipt))
         await bridge.deliver_pending()
         assert len(json.dumps(requests[-1]["body"], separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES

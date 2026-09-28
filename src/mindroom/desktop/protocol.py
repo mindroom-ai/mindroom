@@ -19,8 +19,8 @@ MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
 SHELL_OUTPUT_MIME_TYPE = "text/plain"
-# Measured as ASCII-escaped JSON, the form nio encrypts. Olm framing and base64 then add a third, and
-# maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the bridge's metrics and the
+# Measured as ASCII-escaped JSON, the form nio encrypts, including the bridge's metrics. Olm framing and
+# base64 then add a third, and maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the
 # request_status receipt that wraps a stored response.
 MAX_INLINE_RESPONSE_BYTES = 40_960
 _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024

@@ -76,6 +76,16 @@ _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 _MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
 
 
+def _response_metrics(*, elapsed_ms: int, structured_bytes: int, screenshot_bytes: int) -> dict[str, int]:
+    """Build the metrics every executed reply carries."""
+    return {"elapsed_ms": elapsed_ms, "structured_bytes": structured_bytes, "screenshot_bytes": screenshot_bytes}
+
+
+# Replies are fitted before their metrics are known, so fitting reserves the widest value of each metric;
+# JSON consumers hold integers exactly only up to 2**53 - 1.
+_WIDEST_METRICS = _response_metrics(elapsed_ms=2**53 - 1, structured_bytes=2**53 - 1, screenshot_bytes=2**53 - 1)
+
+
 async def _run_macos_application_events() -> None:
     """Refresh AppKit's application cache while asyncio owns the main thread."""
     if sys.platform != "darwin":
@@ -334,11 +344,11 @@ class DesktopBridge:
                         response,
                         result={
                             **response.result,
-                            "metrics": {
-                                "elapsed_ms": max(0, round((self.monotonic_clock() - started_at) * 1000)),
-                                "structured_bytes": len(json.dumps(response.result, ensure_ascii=False).encode()),
-                                "screenshot_bytes": response.screenshot.size if response.screenshot is not None else 0,
-                            },
+                            "metrics": _response_metrics(
+                                elapsed_ms=max(0, round((self.monotonic_clock() - started_at) * 1000)),
+                                structured_bytes=len(json.dumps(response.result, ensure_ascii=False).encode()),
+                                screenshot_bytes=response.screenshot.size if response.screenshot is not None else 0,
+                            ),
                         },
                     )
                     self._journal.remember_response(command, entry.command_fingerprint, response)
@@ -992,7 +1002,7 @@ class DesktopBridge:
             # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
             if len(content) <= MAX_INLINE_RESPONSE_BYTES:
                 inline = {**payload, "output": content.decode()}
-                if self._success_response(command, result=inline).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+                if self._fits_inline(command, inline):
                     return inline
             try:
                 media = await upload_encrypted_media(
@@ -1028,17 +1038,21 @@ class DesktopBridge:
     ) -> int:
         """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
 
-        Shared by every trimmed reply (shell output, listings, status), all measured the same way:
-        ``self._success_response(command, result=build(x)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES``.
+        Shared by every trimmed reply (shell output, listings, status), all measured by ``_fits_inline``.
         Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
         """
         while low < high:
             middle = (low + high) // 2
-            if self._success_response(command, result=build(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+            if self._fits_inline(command, build(middle)):
                 high = middle
             else:
                 low = middle + 1
         return low
+
+    def _fits_inline(self, command: DesktopCommand, result: dict[str, object]) -> bool:
+        """Report whether ``result`` fits one to-device reply once execution adds its metrics."""
+        reply = self._success_response(command, result={**result, "metrics": _WIDEST_METRICS})
+        return reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
 
     def _fit_output_tail(
         self,
