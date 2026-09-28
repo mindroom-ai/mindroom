@@ -594,7 +594,7 @@ def _load_run(handle: DelegationRecordHandle, record_fd: int) -> dict[str, _Json
         payload = json.loads(read_regular_file_within_root(record_fd, "run.json", max_bytes=_MAX_RUN_BYTES))
     except FileNotFoundError:
         raise
-    except (OSError, ValueError) as exc:
+    except (OSError, RecursionError, ValueError) as exc:
         msg = f"Delegation record is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
     if not isinstance(payload, dict):
@@ -690,7 +690,7 @@ def _iter_event_values(handle: DelegationRecordHandle, record_fd: int) -> Iterat
     try:
         with open_regular_file_within_root(record_fd, "events.jsonl") as descriptor:
             yield from _read_event_values(descriptor)
-    except (OSError, ValueError) as exc:
+    except (OSError, RecursionError, ValueError) as exc:
         msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
 

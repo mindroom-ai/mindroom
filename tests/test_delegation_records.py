@@ -451,8 +451,14 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("contents", "error"),
-    [(b"\n", "unreadable"), (b"{", "unreadable"), (b"[]\n", "malformed"), (b"\xff\n", "unreadable")],
-    ids=["blank-line", "invalid-json", "non-object", "invalid-utf8"],
+    [
+        (b"\n", "unreadable"),
+        (b"{", "unreadable"),
+        (b"[]\n", "malformed"),
+        (b"\xff\n", "unreadable"),
+        (b"[" * 100_000 + b"]" * 100_000 + b"\n", "unreadable"),
+    ],
+    ids=["blank-line", "invalid-json", "non-object", "invalid-utf8", "too-deeply-nested"],
 )
 async def test_invalid_event_stream_blocks_finish_without_mutation(tmp_path: Path, contents: bytes, error: str) -> None:
     """Invalid records must fail closed instead of being skipped during settlement."""
