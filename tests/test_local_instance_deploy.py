@@ -1517,8 +1517,7 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     homeserver.parent.mkdir(parents=True)
     homeserver.write_text("database:\n  args:\n    password: synapse_password\n")
     homeserver.chmod(0o644)
-    handed_over: list[tuple[object, ...]] = []
-    monkeypatch.setattr(deploy.os, "chown", lambda *args: handed_over.append(args))
+    monkeypatch.setattr(deploy.os, "chown", lambda *_args: None)
     env_file = _write_older_env_file(instance)
     older_env = env_file.read_text()
     env_at_launch: dict[str, str] = {}
@@ -1539,7 +1538,6 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     assert "REDIS_PASSWORD" not in env_at_launch
     assert homeserver.read_text() == "database:\n  args:\n    password: synapse_password\n"
     assert _mode(homeserver) == 0o600
-    assert (homeserver, 1000, 1000) in handed_over
     assert set(_launched_services(commands)) >= _SANDBOX_SERVICES
     text = normalize_console_output(console.export_text())
     assert "Added MINDROOM_API_KEY, MINDROOM_SANDBOX_PROXY_TOKEN to" in text
@@ -1608,8 +1606,7 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
     target_dir.chmod(0o755)
     (target_dir / "openai.json").write_text('{"api_key": "secret"}')
     (target_dir / "openai.json").chmod(0o644)
-    handed_over: list[tuple[object, ...]] = []
-    monkeypatch.setattr(deploy.os, "chown", lambda *args: handed_over.append(args))
+    monkeypatch.setattr(deploy.os, "chown", lambda *_args: None)
 
     deploy._create_instance_directories(instance)
 
@@ -1618,17 +1615,70 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
         "openai.json": 0o600,
         "google_oauth.json": 0o600,
     }
-    assert {(path, 1000, 1000) for path in target_dir.iterdir()} <= set(handed_over)
+
+
+def _operator_in_group_100(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+    """Fake chown for an operator whose primary group is 100, like NixOS users, so any group change fails."""
+    calls: list[tuple[object, ...]] = []
+
+    def _chown(path: object, uid: int, gid: int) -> None:
+        calls.append((path, uid, gid))
+        if gid not in (-1, 100):
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(deploy.os, "chown", _chown)
+    return calls
+
+
+def test_secret_file_goes_to_the_container_uid_without_changing_its_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator outside group 1000 can still hand a file to the container user and make it owner-only."""
+    homeserver = tmp_path / "homeserver.yaml"
+    homeserver.write_text("macaroon_secret_key: secret\n")
+    homeserver.chmod(0o644)
+    console = Console(record=True, width=400)
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._protect_synapse_config(homeserver)
+
+    assert calls == [(homeserver, os.getuid() + 1, -1)]
+    assert _mode(homeserver) == 0o600
+    assert console.export_text() == ""
+
+
+def test_secret_file_already_owned_by_the_container_uid_is_not_chowned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator running as the container user needs no ownership change and gets no warning."""
+    homeserver = tmp_path / "homeserver.yaml"
+    homeserver.write_text("macaroon_secret_key: secret\n")
+    homeserver.chmod(0o644)
+    console = Console(record=True, width=400)
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid())
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._protect_synapse_config(homeserver)
+
+    assert calls == []
+    assert _mode(homeserver) == 0o600
+    assert console.export_text() == ""
 
 
 def test_unrestrictable_secret_file_prints_the_exact_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When deploy.py cannot hand a secret file to the container user, it says which commands will."""
+    """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how."""
     homeserver = tmp_path / "synapse dir" / "homeserver.yaml"
     homeserver.parent.mkdir()
     homeserver.write_text("macaroon_secret_key: secret\n")
     homeserver.chmod(0o644)
     console = Console(record=True, width=400)
     monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
 
     def _refuse_chown(*_args: object) -> None:
         raise PermissionError(1, "Operation not permitted")
@@ -1637,6 +1687,5 @@ def test_unrestrictable_secret_file_prints_the_exact_fix(tmp_path: Path, monkeyp
 
     deploy._protect_synapse_config(homeserver)
 
-    quoted = shlex.quote(str(homeserver))
-    assert f"sudo chown 1000:1000 {quoted} && sudo chmod 600 {quoted}" in console.export_text()
-    assert _mode(homeserver) == 0o644
+    assert f"sudo chown {os.getuid() + 1} {shlex.quote(str(homeserver))}" in console.export_text()
+    assert _mode(homeserver) == 0o600

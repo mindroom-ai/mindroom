@@ -52,9 +52,8 @@ PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 # start and restart add missing runtime secrets to env files written by older versions.
 RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
 SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
-# Instance containers run as this user and group.
+# Instance containers run as this user.
 CONTAINER_UID = 1000
-CONTAINER_GID = 1000
 
 
 # Pydantic Models
@@ -213,23 +212,27 @@ def _write_private_file(path: Path, content: str) -> None:
         f.write(content)
 
 
-def _restrict_to_container_user(path: Path) -> None:
-    """Give a secret-bearing file to the container user and make it readable by nobody else.
+def _give_to_container_user(path: Path) -> None:
+    """Make the container user own a path, changing only its owner so operators outside that user's group can too."""
+    if path.stat().st_uid != CONTAINER_UID:
+        os.chown(path, CONTAINER_UID, -1)
 
-    The owner changes first, so a file this process cannot hand over stays readable by its container.
-    """
+
+def _restrict_to_container_user(path: Path) -> None:
+    """Give a secret-bearing file to the container user and make it readable by nobody else."""
+    quoted = shlex.quote(str(path))
+    fixes: list[str] = []
     try:
-        os.chown(path, CONTAINER_UID, CONTAINER_GID)
+        _give_to_container_user(path)
+    except OSError:
+        fixes.append(f"sudo chown {CONTAINER_UID} {quoted}")
+    try:
         path.chmod(0o600)
-    except OSError as e:
-        quoted = shlex.quote(str(path))
-        console.print(f"[yellow]Warning:[/yellow] Could not restrict {path} to UID {CONTAINER_UID}: {e}")
-        console.print(
-            f"  Run: sudo chown {CONTAINER_UID}:{CONTAINER_GID} {quoted} && sudo chmod 600 {quoted}",
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
+    except OSError:
+        fixes.append(f"sudo chmod 600 {quoted}")
+    if fixes:
+        console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
+        console.print(f"  Run: {' && '.join(fixes)}", markup=False, highlight=False, soft_wrap=True)
 
 
 def _protect_synapse_config(config_path: Path) -> None:
@@ -903,7 +906,7 @@ def _create_directory_with_permissions(path: Path, mode: int = 0o755) -> None:
     path.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         path.chmod(mode)
-        os.chown(path, CONTAINER_UID, CONTAINER_GID)
+        _give_to_container_user(path)
 
 
 def _copy_credentials_to_instance(instance: Instance) -> None:
@@ -936,7 +939,7 @@ def _copy_config_to_instance(instance: Instance) -> None:
         shutil.copy2(source_config, target_config)
         # Set proper permissions for Docker
         with contextlib.suppress(OSError, PermissionError):
-            os.chown(target_config, CONTAINER_UID, CONTAINER_GID)
+            _give_to_container_user(target_config)
             target_config.chmod(0o644)
         console.print("[green]✓[/green] Copied config.yaml to instance")
 
