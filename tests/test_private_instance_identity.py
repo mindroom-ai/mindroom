@@ -382,7 +382,7 @@ def test_load_never_blocks_on_a_fifo_swapped_in_after_the_type_check(
     def load() -> None:
         try:
             load_private_instance_identity(tmp_path, scope_root)
-        except BaseException as exc:  # noqa: BLE001 - the test inspects whatever the loader raised
+        except BaseException as exc:
             outcomes.append(exc)
         else:
             outcomes.append(None)
