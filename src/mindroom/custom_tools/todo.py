@@ -287,7 +287,7 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
             msg = "Workspace todo template directory escapes workspace"
             raise ValueError(msg) from None
         roots.append(
-            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root.resolve()),
+            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root),
         )
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)

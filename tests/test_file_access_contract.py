@@ -384,6 +384,88 @@ def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_constructio
     assert (outside / "doc.txt").read_text() == _TEXT
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda file_tool, _coding: file_tool.list_files(),
+        lambda file_tool, _coding: file_tool.search_files("*.json"),
+        lambda file_tool, _coding: file_tool.search_content("sk-"),
+        lambda file_tool, _coding: file_tool.search_content("sk-", directory="."),
+        lambda _file, coding_tool: coding_tool.ls(),
+        lambda _file, coding_tool: coding_tool.ls("."),
+        lambda _file, coding_tool: coding_tool.grep("sk-"),
+        lambda _file, coding_tool: coding_tool.grep("sk-", path="."),
+        lambda _file, coding_tool: coding_tool.find_files("*.json"),
+        lambda _file, coding_tool: coding_tool.find_files("*.json", path="."),
+    ],
+    ids=[
+        "file:list_files",
+        "file:search_files",
+        "file:search_content",
+        "file:search_content-directory",
+        "coding:ls",
+        "coding:ls-path",
+        "coding:grep",
+        "coding:grep-path",
+        "coding:find_files",
+        "coding:find_files-path",
+    ],
+)
+def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
+    tmp_path: Path,
+    workspace: Path,
+    outside: Path,
+    operation: Callable[[FileTools, CodingTools], str],
+) -> None:
+    """Listing and searching never reveal the target of a workspace that worker code replaced with a link."""
+    (outside / "openai.json").write_text('{"api_key": "sk-SECRET-VALUE"}\n')
+    file_tool = file_tools()(base_dir=workspace)
+    coding_tool = CodingTools(base_dir=str(workspace))
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    result = operation(file_tool, coding_tool)
+
+    assert "openai.json" not in result
+    assert "SECRET" not in result
+
+
+@pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])
+@pytest.mark.parametrize(
+    "build",
+    [lambda base_dir: file_tools()(base_dir=base_dir), lambda base_dir: CodingTools(base_dir=str(base_dir))],
+    ids=["file", "coding"],
+)
+def test_worker_path_tool_refuses_a_base_dir_swapped_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+    build: Callable[[Path], object],
+    swap: str,
+) -> None:
+    """A workspace swapped after runtime resolution but before the toolkit pins it is refused, never adopted."""
+    if swap == "workspace-link":
+        workspace.rename(tmp_path / "moved-workspace")
+        workspace.symlink_to(outside, target_is_directory=True)
+        base_dir = workspace
+    else:
+        (tmp_path / "current").symlink_to(tmp_path, target_is_directory=True)
+        (outside / "workspace").mkdir()
+        base_dir = tmp_path / "current" / "workspace"
+        open_directory = path_safety_module.open_directory_within_root
+
+        def swap_then_open(root: Path, *args: object, **kwargs: object) -> object:
+            (tmp_path / "current").unlink()
+            (tmp_path / "current").symlink_to(outside, target_is_directory=True)
+            return open_directory(root, *args, **kwargs)
+
+        monkeypatch.setattr(path_safety_module, "open_directory_within_root", swap_then_open)
+
+    with pytest.raises(ValueError, match="base_dir"):
+        build(base_dir)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("probe", _PROBES[-2:], ids=["file:read_file", "coding:read_file"])
 async def test_worker_path_tool_refuses_a_file_above_the_read_cap(

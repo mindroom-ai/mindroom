@@ -41,8 +41,38 @@ def format_path_for_output(path: str | Path, base_dir: Path) -> str:
         return str(path)
 
 
+def resolve_tool_base_dir(base_dir: str | Path | None) -> Path:
+    """Return a toolkit's canonical base dir, refusing a link or a directory swapped while it was resolved.
+
+    Runtime resolution refused links in the workspace path; pinning the same directory here keeps
+    a later swap from becoming the toolkit's root, and every later check refuses a root that moved.
+    """
+    spelled = Path(base_dir) if base_dir else Path.cwd()
+    resolved = spelled.resolve()
+    try:
+        with open_directory_within_root(spelled) as directory_fd:
+            pinned = os.path.samestat(os.fstat(directory_fd), resolved.stat())
+    except FileNotFoundError:
+        # A base dir that does not exist yet has nothing to pin; later checks still refuse one that moved.
+        return resolved
+    except OSError as exc:
+        msg = f"base_dir '{spelled}' must be a directory reached without a link: {exc.strerror}"
+        raise ValueError(msg) from exc
+    if not pinned:
+        msg = f"base_dir '{spelled}' changed while it was being resolved."
+        raise ValueError(msg)
+    return resolved
+
+
+def _base_dir_is_current(base_dir: Path) -> bool:
+    """Return whether a toolkit's canonical base dir still resolves to itself, so no link has replaced it."""
+    return base_dir.resolve() == base_dir
+
+
 def is_within_base_dir(path: Path, base_dir: Path) -> bool:
-    """Check whether a resolved path stays within base_dir."""
+    """Check whether a resolved path stays within base_dir, which must still resolve to itself."""
+    if not _base_dir_is_current(base_dir):
+        return False
     try:
         resolve_path_within_root(base_dir, path.resolve(), symlinks="internal")
     except (OSError, ValueError):
@@ -57,6 +87,9 @@ def resolve_base_dir_path(base_dir: Path, path: str, restrict_to_base_dir: bool 
     if not restrict_to_base_dir:
         return candidate.resolve()
 
+    if not _base_dir_is_current(base_dir):
+        msg = f"base_dir '{base_dir}' no longer resolves to itself; it was moved or replaced by a link."
+        raise ValueError(msg)
     try:
         return resolve_path_within_root(base_dir, requested, symlinks="internal")
     except ValueError:
