@@ -979,7 +979,7 @@ async def test_empty_upload_parts_are_noop_without_source_change_mark_or_refresh
         patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh,
     ):
-        response = await knowledge_api.upload_knowledge_files(
+        response = await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1122,7 +1122,7 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
 
     with pytest.raises(asyncio.CancelledError):
-        await knowledge_api.upload_knowledge_files(
+        await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1163,7 +1163,7 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
 
     with pytest.raises(asyncio.CancelledError):
-        await knowledge_api.upload_knowledge_files(
+        await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1207,7 +1207,7 @@ async def test_upload_cancellation_after_source_change_mark_finalizes_backup_and
     monkeypatch.setattr(knowledge_api, "mark_knowledge_source_changed_async", _slow_source_change_mark)
 
     upload_task = asyncio.create_task(
-        knowledge_api.upload_knowledge_files(
+        knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {

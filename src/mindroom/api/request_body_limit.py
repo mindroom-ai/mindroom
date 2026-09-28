@@ -17,15 +17,26 @@ if TYPE_CHECKING:
 
 _MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 _TOO_LARGE_DETAIL = f"Request body exceeds {_MAX_REQUEST_BODY_BYTES} bytes"
-# Multipart parsing spools file parts to disk, and knowledge uploads enforce their own per-file limit.
-_UNLIMITED_BODY_PATH = re.compile(r"/api/knowledge/bases/[^/]+/upload")
+# Knowledge uploads authenticate before reading the form, accept only file parts, which spool to disk,
+# and enforce their own per-file limit.
+_UNLIMITED_MULTIPART_PATH = re.compile(r"/api/knowledge/bases/[^/]+/upload")
+
+
+def _header(scope: Scope, name: bytes) -> bytes | None:
+    return next((value for header_name, value in scope["headers"] if header_name == name), None)
+
+
+def _is_unlimited_upload(scope: Scope) -> bool:
+    content_type = _header(scope, b"content-type") or b""
+    return (
+        _UNLIMITED_MULTIPART_PATH.fullmatch(scope["path"]) is not None
+        and content_type.split(b";", 1)[0].strip().lower() == b"multipart/form-data"
+    )
 
 
 def _declared_content_length(scope: Scope) -> int | None:
-    for name, value in scope["headers"]:
-        if name == b"content-length":
-            return int(value) if value.isdigit() else None
-    return None
+    value = _header(scope, b"content-length")
+    return int(value) if value is not None and value.isdigit() else None
 
 
 class RequestBodyLimitMiddleware:
@@ -36,7 +47,7 @@ class RequestBodyLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Pass through requests whose bodies stay within the limit."""
-        if scope["type"] != "http" or _UNLIMITED_BODY_PATH.fullmatch(scope["path"]):
+        if scope["type"] != "http" or _is_unlimited_upload(scope):
             await self.app(scope, receive, send)
             return
         declared_length = _declared_content_length(scope)

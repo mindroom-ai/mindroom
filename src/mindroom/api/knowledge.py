@@ -9,9 +9,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request
+from starlette.datastructures import UploadFile
 
 from mindroom.api import config_lifecycle
 from mindroom.constants import resolve_config_relative_path
@@ -50,6 +51,19 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 logger = get_logger(__name__)
 
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
+_UPLOAD_FIELD = "files"
+_UPLOAD_REQUEST_BODY_SCHEMA = {
+    "required": True,
+    "content": {
+        "multipart/form-data": {
+            "schema": {
+                "type": "object",
+                "required": [_UPLOAD_FIELD],
+                "properties": {_UPLOAD_FIELD: {"type": "array", "items": {"type": "string", "format": "binary"}}},
+            },
+        },
+    },
+}
 _UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
 _DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS = 1.0
 
@@ -679,13 +693,22 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     }
 
 
-@router.post("/bases/{base_id}/upload")
-async def upload_knowledge_files(
-    base_id: str,
-    request: Request,
-    files: Annotated[list[UploadFile], File(...)],
-) -> dict[str, Any]:
-    """Upload one or more files into a knowledge base folder."""
+@router.post("/bases/{base_id}/upload", openapi_extra={"requestBody": _UPLOAD_REQUEST_BODY_SCHEMA})
+async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, Any]:
+    """Upload one or more files into a knowledge base folder.
+
+    The form is parsed here rather than by FastAPI, which reads a declared form before dependencies run,
+    so the router's authentication runs before any upload byte is read.
+    Only file parts are accepted, so no form field is buffered in memory.
+    """
+    async with request.form(max_fields=0) as form:
+        files = [upload for upload in form.getlist(_UPLOAD_FIELD) if isinstance(upload, UploadFile)]
+        if not files:
+            raise HTTPException(status_code=422, detail=f"Upload requires files in the '{_UPLOAD_FIELD}' field")
+        return await _upload_knowledge_files(base_id, request, files)
+
+
+async def _upload_knowledge_files(base_id: str, request: Request, files: list[UploadFile]) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
     uploaded: list[str] = []
