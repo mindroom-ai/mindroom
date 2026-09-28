@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 import shlex
 import socket
@@ -213,3 +214,43 @@ def test_registration_rewrite_keeps_appservice_tokens_owner_only(bridge_manager:
         "url": "http://alpha-telegram-bridge:29317",
     }
     assert registration_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_start_strips_tokens_and_world_read_left_by_older_versions(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older registries copied platform tokens, and older bridge files were written at the umask."""
+    data_dir = tmp_path / "bridges" / "telegram"
+    (data_dir / "data").mkdir(parents=True)
+    secret_files = [data_dir / "data" / "config.yaml", data_dir / "data" / "registration.yaml"]
+    for path in secret_files:
+        path.write_text("as_token: as-token-for-tests\n")
+        path.chmod(0o644)
+    registry_file = tmp_path / "bridge_instances.json"
+    bridge = {
+        "bridge_type": "telegram",
+        "instance_name": "alpha",
+        "port": 29317,
+        "data_dir": str(data_dir),
+        "credentials": {"bot_token": "telegram-token-for-tests"},
+    }
+    registry_file.write_text(json.dumps({"bridges": {"alpha": [bridge]}}))
+    registry_file.chmod(0o644)
+    monkeypatch.setattr(bridge_manager, "BRIDGE_REGISTRY_FILE", registry_file)
+    monkeypatch.setattr(
+        bridge_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess("docker compose up -d", 0, "", ""),
+    )
+
+    result = CliRunner().invoke(bridge_manager.app, ["start", "telegram", "--instance", "alpha"])
+
+    assert result.exit_code == 0, result.output
+    assert "telegram-token-for-tests" not in registry_file.read_text()
+    assert {path.name: path.stat().st_mode & 0o777 for path in [*secret_files, registry_file]} == {
+        "config.yaml": 0o600,
+        "registration.yaml": 0o600,
+        "bridge_instances.json": 0o600,
+    }

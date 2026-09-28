@@ -11,6 +11,7 @@
 # ruff: noqa: PLR0912  # complexity is acceptable for CLI commands
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -148,10 +149,16 @@ def load_registry() -> BridgeRegistry:
 
 
 def save_registry(registry: BridgeRegistry) -> None:
-    """Save the bridge registry."""
-    with BRIDGE_REGISTRY_FILE.open("w") as f:
-        data = registry.model_dump(mode="json")
-        json.dump(data, f, indent=2)
+    """Save the bridge registry owner-only, replacing any platform tokens older versions stored in it."""
+    _write_private_file(BRIDGE_REGISTRY_FILE, json.dumps(registry.model_dump(mode="json"), indent=2))
+
+
+def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
+    """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
+    for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
+        # A non-root operator cannot chmod files the bridge container already owns.
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
 
 
 def load_instances() -> dict[str, Any]:
@@ -814,6 +821,7 @@ def start(
             raise typer.Exit(1)
 
     for bridge in bridges_to_start:
+        _protect_bridge_secret_files(bridge)
         with console.status(f"[yellow]Starting {bridge.bridge_type} bridge...[/yellow]"):
             cmd = f"cd {bridge.data_dir} && docker compose up -d"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
