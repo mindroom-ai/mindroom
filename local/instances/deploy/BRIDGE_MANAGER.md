@@ -64,6 +64,9 @@ Generates registration file and provides instructions for Matrix server registra
 ./bridge.py start --all --instance my-instance
 ```
 
+`start` refuses a bridge whose config still has the permissions older versions generated, `user` for the whole homeserver domain and `admin` for `@admin:<domain>`, because anyone can register those accounts.
+Set `bridge.permissions` in the bridge's `data/config.yaml` to the lowest level for `*` plus `admin` for your own Matrix user ID, or recreate the bridge with `remove` and `add --admin`, which deletes its data.
+
 ### `stop` - Stop Bridge(s)
 ```bash
 # Stop specific bridge
