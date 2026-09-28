@@ -9697,7 +9697,7 @@ The control actions are:
 - `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
   Global switching, quit, launch, and address-bar shortcuts are rejected, and the chord is not sent once the app is no longer frontmost.
 
-While a shell command waits for local approval, every control action above except `launch_app` is refused, and a new shell request is shown for approval only one second after the last control action finishes, once its events have reached their target.
+From the moment a shell command needs local approval until it is answered, every control action above except `launch_app` is refused, and the request is shown for approval only one second after a control action already in progress finishes, so events it posted have time to reach their target.
 Agent input therefore never reaches an approval card or the terminal prompt that could answer it.
 
 Folder reads and shell commands are separate opt-in capabilities with their own limits, described in [Read-Only Folders](#read-only-folders) and [Shell Commands](#shell-commands).
