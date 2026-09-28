@@ -83,6 +83,9 @@ async def advance_cli_delegation(
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
+    if decisions is None:
+        # The CLI caller chooses call IDs, so a fresh call never inherits an approval saved under the same ID.
+        state.gates.pop(str(tool.tool_call_id), None)
     persist = partial(persist_delegation_state, catalog.agent, response)
 
     # Same mutation/authorization owner as ordinary prepared dispatch. No parent
