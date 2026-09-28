@@ -1887,9 +1887,9 @@ async def test_host_url_validation_resolves_hostnames_off_event_loop(
 
     await tool.browser(action=action, targetUrl="https://slow-dns.example")
 
-    # Requester-chosen hostnames resolve only on the threads reserved for browser DNS, never on the loop.
+    # Requester-chosen hostnames resolve on threads page traffic cannot occupy, never on the loop.
     assert len(threads) == 1
-    assert threads[0].startswith("mindroom-browser-dns")
+    assert threads[0].startswith("mindroom-browser-url")
 
 
 @pytest.mark.asyncio
@@ -1919,9 +1919,9 @@ async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypa
 
     await tool.browser(action="open", targetUrl="https://slow-dns.example")
 
-    # Requester-chosen hostnames resolve only on the threads reserved for browser DNS, never on the loop.
+    # Requester-chosen hostnames resolve on threads page traffic cannot occupy, never on the loop.
     assert len(threads) == 1
-    assert threads[0].startswith("mindroom-browser-dns")
+    assert threads[0].startswith("mindroom-browser-url")
     assert request.await_args.args[1].parameters["browser_parameters"] == {"targetUrl": "https://slow-dns.example"}
 
 

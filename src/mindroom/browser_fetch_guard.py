@@ -20,12 +20,20 @@ _BROWSER_INTERNAL_SCHEMES = frozenset({"about", "blob", "data"})
 # run on their own threads, so they cannot exhaust the default executor the rest of the runtime shares, and each
 # destination relay holds at most a few of them at once.
 _BROWSER_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="mindroom-browser-dns")
+# Model-requested URLs (open, navigate, desktop open) resolve on separate threads that page traffic cannot occupy.
+_BROWSER_TOOL_URL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mindroom-browser-url")
 
 
 async def run_browser_dns_lookup[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
-    """Run one blocking browser destination lookup on the threads reserved for browser DNS."""
+    """Run one blocking page-driven destination lookup on the threads reserved for browser DNS."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_BROWSER_DNS_EXECUTOR, functools.partial(function, *args, **kwargs))
+
+
+async def run_browser_tool_url_check[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run one blocking validation of a model-requested URL on threads pages cannot exhaust."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_BROWSER_TOOL_URL_EXECUTOR, functools.partial(function, *args, **kwargs))
 
 
 def validate_browser_fetch_url(

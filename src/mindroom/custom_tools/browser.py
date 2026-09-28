@@ -27,7 +27,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch, run_browser_dns_lookup
+from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
 from mindroom.custom_tools.desktop_attachment import (
@@ -929,7 +929,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = await run_browser_dns_lookup(
+            target_url = await run_browser_tool_url_check(
                 validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
@@ -983,7 +983,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = await run_browser_dns_lookup(
+            target_url = await run_browser_tool_url_check(
                 validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
@@ -1123,7 +1123,7 @@ class BrowserTools(Toolkit):
             msg = "Browser target=desktop requires a live Matrix runtime context."
             raise ValueError(msg)
         # URL validation resolves requester-chosen hostnames, which must not block the event loop.
-        parameters = await run_browser_dns_lookup(
+        parameters = await run_browser_tool_url_check(
             _desktop_browser_parameters,
             action,
             target_url=target_url,
