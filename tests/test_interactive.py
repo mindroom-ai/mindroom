@@ -28,12 +28,14 @@ class TestInteractiveFunctions:
             ('Two things.\n\n```interactive\n{"question": "What next?", "opt', "Two things."),
             ("Two things.\n\n```interactive json\n", "Two things."),
             ("Two things.\n\n```\ninteractive\n{", "Two things."),
-            ("Two things.\n\n```inter", "Two things."),
-            ("Two things.\n\n```", "Two things."),
+            ("Two things.\n\n```inter", "Two things.\n\n```inter"),
+            ("Two things.\n\n```", "Two things.\n\n```"),
+            ("Two things.\n\n```\nin", "Two things.\n\n```\nin"),
             ("Two things.\n\n```python\nprint(", "Two things.\n\n```python\nprint("),
             ('Two things.\n\n```json\n{"a": 1', 'Two things.\n\n```json\n{"a": 1'),
             ("Two things.\n\nWhat next?\n1. 📊 Numbers", "Two things.\n\nWhat next?\n1. 📊 Numbers"),
-            ("Two things.\n\n```interactive js", "Two things."),
+            ("Two things.\n\n```interactive js", "Two things.\n\n```interactive js"),
+            ("Notes:\n\n```text\ninteractive\n{", "Notes:\n\n```text\ninteractive\n{"),
             ("Two things.\r\n\r\n```interactive\r\n{", "Two things."),
             ("Before.\n\n```python\nprint(1)\n```", "Before.\n\n```python\nprint(1)\n```"),
             (
@@ -44,7 +46,7 @@ class TestInteractiveFunctions:
         ],
     )
     def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:
-        """Text before an unfinished question block stays; other fences and rendered questions are untouched."""
+        """Only a block marked exactly interactive is cut; partial markers and other code blocks stay as streamed."""
         assert interactive.hide_unfinished_interactive(streamed) == shown
 
     @pytest.mark.parametrize(
