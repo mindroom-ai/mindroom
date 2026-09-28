@@ -4274,8 +4274,10 @@ path = "mindroom.commands.config_commands"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.config.main",
+    "mindroom.config.schema_hints",
     "mindroom.event_journal_open",
     "mindroom.logging_config",
+    "mindroom.redaction",
 ]
 
 [[modules]]
