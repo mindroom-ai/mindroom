@@ -1323,6 +1323,36 @@ def test_google_drive_download_rejects_symlinked_download_root(
     assert service.files_resource.export_media_kwargs is None
 
 
+def test_google_drive_download_rejects_replaced_workspace_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    workspace = runtime_paths.storage_root / "agents" / "writer" / "workspace"
+    workspace.mkdir(parents=True)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+        download_file=True,
+        tool_output_workspace_root=workspace,
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain"}
+    tool.service = service
+    writer_root = workspace.parent
+    writer_root.rename(writer_root.with_name("writer-original"))
+    victim = tmp_path / "victim"
+    (victim / "workspace").mkdir(parents=True)
+    writer_root.symlink_to(victim, target_is_directory=True)
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert "error" in result
+    assert not (victim / "workspace" / "google-drive-downloads" / "notes.txt").exists()
+
+
 @pytest.mark.parametrize("mime_type", ["text/plain", "application/vnd.google-apps.document"])
 def test_google_drive_download_pins_directory_during_request_creation(
     tmp_path: Path,

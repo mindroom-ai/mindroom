@@ -1184,6 +1184,29 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["duckduckgo"] is None
 
 
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agent_storage._ConversationSqliteDb")
+def test_create_agent_preserves_lexical_workspace_for_output_policy(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Output publishers retain workspace ancestry even when it was linked before construction."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    target = agent_workspace_root_path(tmp_path, "other")
+    target.mkdir(parents=True)
+    linked_state = agent_workspace_root_path(tmp_path, "general").parent
+    linked_state.symlink_to(target.parent, target_is_directory=True)
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].tools = ["duckduckgo"]
+    config.agents["general"].include_default_tools = False
+
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    assert mock_get_tool_by_name.call_args.kwargs["tool_output_workspace_root"] == linked_state / "workspace"
+
+
 def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:
     """MindRoom-owned direct toolkits should use the same central output-file wrapper."""
     runtime_paths = _runtime_paths(tmp_path)

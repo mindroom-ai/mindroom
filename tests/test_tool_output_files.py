@@ -152,6 +152,19 @@ def test_worker_output_uses_workspace_outside_runtime_storage(tmp_path: Path) ->
     assert not runtime.storage_root.exists()
 
 
+def test_primary_output_does_not_recreate_deleted_workspace(tmp_path: Path) -> None:
+    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    workspace = tmp_path / "agents" / "writer" / "workspace"
+    workspace.mkdir(parents=True)
+    policy = ToolOutputFilePolicy.from_runtime(workspace, runtime)
+    workspace.rmdir()
+
+    result = write_bytes_to_output_path(policy, "reports/result.txt", b"report")
+
+    assert isinstance(result, str)
+    assert not workspace.exists()
+
+
 def _receipt(result: object) -> dict[str, object]:
     assert isinstance(result, dict)
     envelope = result.get("mindroom_tool_output")

@@ -77,6 +77,7 @@ class ResolvedAgentStorage:
 
     execution: ResolvedAgentExecution
     state_root: Path
+    lexical_state_root: Path
     session_state_root: Path
 
 
@@ -227,6 +228,7 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
+        lexical_state_storage_path=resolved_storage.lexical_state_root,
         use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
         create=create,
     )
@@ -288,19 +290,22 @@ def resolve_agent_storage(
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
             raise ValueError(msg)
+        lexical_state_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / agent_name
         state_root = _resolved_private_state_root(
             runtime_paths=runtime_paths,
             worker_key=worker_key,
             agent_name=agent_name,
         )
     else:
-        state_root = resolve_agent_state_storage_path(
+        lexical_state_root = resolve_agent_state_storage_path(
             agent_name=agent_name,
             base_storage_path=runtime_paths.storage_root,
-        ).resolve()
+        )
+        state_root = lexical_state_root.resolve()
     return ResolvedAgentStorage(
         execution=resolved_execution,
         state_root=state_root,
+        lexical_state_root=lexical_state_root,
         session_state_root=resolve_session_state_root(state_root, runtime_paths),
     )
 

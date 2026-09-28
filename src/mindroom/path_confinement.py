@@ -89,21 +89,6 @@ def resolve_path_within_root(
     return resolved
 
 
-def relative_to_trusted_root(root: Path, path: Path) -> Path:
-    """Return an absolute path's lexical location below a trusted root without resolving links."""
-    trusted = root.expanduser().absolute()
-    requested = path.expanduser().absolute()
-    try:
-        relative = requested.relative_to(trusted)
-    except ValueError as exc:
-        msg = "Path must stay within its trusted root."
-        raise ValueError(msg) from exc
-    if ".." in relative.parts:
-        msg = "Path must stay within its trusted root."
-        raise ValueError(msg)
-    return relative
-
-
 def _relative_parts(path: str | Path) -> tuple[str, ...]:
     relative = Path(path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -149,6 +134,28 @@ def open_directory_within_root(
         yield directory
     finally:
         os.close(directory)
+
+
+@contextmanager
+def open_creatable_directory_within_existing_root(
+    trusted_root: Path,
+    existing_root: Path,
+    relative_path: str | Path,
+    *,
+    mode: int = 0o777,
+) -> Iterator[int]:
+    """Open an existing no-follow root, then create directories only below it."""
+    trusted = trusted_root.expanduser().absolute()
+    try:
+        existing_relative = existing_root.expanduser().absolute().relative_to(trusted)
+    except ValueError as exc:
+        msg = "Existing root must stay within its trusted root."
+        raise ValueError(msg) from exc
+    with (
+        open_directory_within_root(trusted, existing_relative) as existing_fd,
+        open_directory_within_root(existing_fd, relative_path, create=True, mode=mode) as directory_fd,
+    ):
+        yield directory_fd
 
 
 def open_regular_file_at(directory_fd: int, name: str, flags: int = os.O_RDONLY, mode: int = 0o600) -> int:

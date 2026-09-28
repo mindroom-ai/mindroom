@@ -197,6 +197,32 @@ def test_registered_output_rejects_workspace_ancestor_swap(
     assert not (victim / ("" if swap_workspace else "workspace") / output).exists()
 
 
+def test_registered_output_does_not_recreate_deleted_workspace(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """E2B output fails closed when its authorized workspace has been removed."""
+    runtime = test_runtime_paths(tmp_path / "runtime")
+    workspace = runtime.storage_root / "agents" / "writer" / "workspace"
+    workspace.mkdir(parents=True)
+    tool = get_tool_by_name(
+        "e2b",
+        runtime,
+        credential_overrides={"api_key": "test"},
+        disable_sandbox_proxy=True,
+        tool_output_workspace_root=workspace,
+        worker_target=None,
+    )
+    assert isinstance(tool, MindRoomE2BTools)
+    _files(tool).stored["result.txt"] = b"report"
+    workspace.rmdir()
+
+    result = tool.download_file_from_sandbox("result.txt", "reports/result.txt")
+
+    assert _error(result).startswith("Error downloading file:")
+    assert not workspace.exists()
+
+
 def test_upload_reads_workspace_relative_file(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,

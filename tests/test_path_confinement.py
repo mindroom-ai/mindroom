@@ -9,7 +9,6 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     open_regular_file_within_root,
     read_regular_file_within_root,
-    relative_to_trusted_root,
     resolve_path_within_root,
 )
 
@@ -46,17 +45,6 @@ def test_resolution_policies(tmp_path: Path) -> None:
     assert resolve_path_within_root(tmp_path, "new/file", symlinks="internal") == tmp_path / "new/file"
     with pytest.raises(FileNotFoundError):
         resolve_path_within_root(tmp_path, "new/file", symlinks="internal", strict=True)
-
-
-def test_relative_to_trusted_root_preserves_untrusted_components(tmp_path: Path) -> None:
-    """Lexical authorization neither follows links nor admits a neighboring path."""
-    workspace = tmp_path / "agents/writer/workspace"
-    workspace.parent.mkdir(parents=True)
-    workspace.symlink_to(tmp_path.parent, target_is_directory=True)
-
-    assert relative_to_trusted_root(tmp_path, workspace) == Path("agents/writer/workspace")
-    with pytest.raises(ValueError, match="trusted root"):
-        relative_to_trusted_root(tmp_path, tmp_path.parent / "outside")
 
 
 @pytest.mark.parametrize("source", ["../escape", "/absolute"])

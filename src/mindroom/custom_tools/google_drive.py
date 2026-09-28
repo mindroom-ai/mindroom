@@ -35,7 +35,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.path_confinement import (
-    open_directory_within_root,
+    open_creatable_directory_within_existing_root,
     resolve_path_within_root,
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
@@ -163,6 +163,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._creds_manager = credentials_manager
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
+        storage_root = runtime_paths.storage_root.expanduser().absolute()
+        self._output_root = (
+            storage_root
+            if tool_output_workspace_root is not None
+            and tool_output_workspace_root.expanduser().absolute().is_relative_to(storage_root)
+            else tool_output_workspace_root
+        )
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
@@ -540,8 +547,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 return json.dumps(
                     {"error": "Google Drive download target escapes the download directory", "file": metadata},
                 )
+            assert self._output_root is not None
             with (
-                open_directory_within_root(self._workspace_root, "google-drive-downloads", create=True) as directory_fd,
+                open_creatable_directory_within_existing_root(
+                    self._output_root,
+                    self._workspace_root,
+                    "google-drive-downloads",
+                ) as directory_fd,
                 atomic_write_file_at(directory_fd, path.name) as file_handle,
             ):
                 if target_mime:

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, relative_to_trusted_root
+from mindroom.path_confinement import is_git_metadata_path, open_creatable_directory_within_existing_root
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -451,12 +451,10 @@ def _write_atomic(
 ) -> str | None:
     try:
         root = (policy.trusted_root or policy.workspace_root).expanduser().absolute()
-        # Preserve every workspace component for the descriptor's no-follow walk.
-        workspace_relative = relative_to_trusted_root(root, policy.workspace_root)
-        with open_directory_within_root(
+        with open_creatable_directory_within_existing_root(
             root,
-            workspace_relative / relative_path.parent,
-            create=True,
+            policy.workspace_root,
+            relative_path.parent,
         ) as directory_fd:
             atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=file_mode)
     except (OSError, ValueError) as exc:
