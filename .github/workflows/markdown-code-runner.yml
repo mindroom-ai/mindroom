@@ -12,8 +12,6 @@ permissions:
 jobs:
   markdown-code-runner:
     runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.diff.outputs.changed }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -37,55 +35,13 @@ jobs:
           uv sync
           uv run python docs/run_markdown_code_runner.py
 
-      - name: Export updated docs as a patch
-        id: diff
+      # This job runs dependency code, so it never holds a write token; regenerate stale docs locally instead.
+      - name: Check that generated docs are up to date
         run: |
           git add -A -- '*.md'
-          if git diff --cached --quiet; then
-            echo "No changes in docs, skipping commit."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            git diff --cached --binary > "$RUNNER_TEMP/docs.patch"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload docs patch
-        if: steps.diff.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: docs-patch
-          path: ${{ runner.temp }}/docs.patch
-          retention-days: 1
-
-  # This job holds the write token, so it runs no repository or dependency code: it only applies the patch and pushes.
-  push-docs:
-    needs: markdown-code-runner
-    if: needs.markdown-code-runner.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download docs patch
-        uses: actions/download-artifact@v4
-        with:
-          name: docs-patch
-          path: ${{ runner.temp }}/docs-patch
-
-      - name: Commit and push updated docs
-        env:
-          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          git apply --index "$RUNNER_TEMP/docs-patch/docs.patch"
-          if git diff --cached --name-only | grep -v '\.md$'; then
-            echo "::error::The docs patch changes files other than Markdown."
+          if ! git diff --cached --quiet; then
+            echo "::error::Generated docs are stale. Run 'uv run python docs/run_markdown_code_runner.py' locally and commit the result."
+            git diff --cached --stat
+            git diff --cached
             exit 1
           fi
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git commit -m "Update auto-generated docs"
-          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"

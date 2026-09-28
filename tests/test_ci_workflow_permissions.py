@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -60,22 +59,15 @@ def test_code_running_jobs_hold_no_write_scope_or_persisted_token(workflow_name:
     assert all(step.get("with", {}).get("persist-credentials") is False for step in checkouts)
 
 
-def test_docs_push_job_runs_no_repository_code_with_its_write_token() -> None:
-    """The generated docs arrive as a patch, and the pushing job only applies, checks, commits, and pushes it."""
+def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
+    """Generated Markdown can run code, so CI reports stale docs instead of committing what dependency code produced."""
     workflow = _load_workflow("markdown-code-runner.yml")
-    push_job = workflow["jobs"]["push-docs"]
-    actions = [step["uses"].split("@")[0] for step in push_job["steps"] if "uses" in step]
-    commands = [
-        match.group(1)
-        for step in push_job["steps"]
-        for line in step.get("run", "").splitlines()
-        if (match := re.match(r"\s*([^\s;]+)", line))
-    ]
+    steps = workflow["jobs"]["markdown-code-runner"]["steps"]
 
-    assert push_job["needs"] == "markdown-code-runner"
-    assert _job_permissions(workflow, "push-docs") == {"contents": "write"}
-    assert actions == ["actions/checkout", "actions/download-artifact"]
-    assert set(commands) <= {"git", "if", "echo", "exit", "fi"}
+    assert list(workflow["jobs"]) == ["markdown-code-runner"]
+    assert not any("git push" in step.get("run", "") or "git commit" in step.get("run", "") for step in steps)
+    assert not any("push-action" in step.get("uses", "") or "artifact" in step.get("uses", "") for step in steps)
+    assert "exit 1" in steps[-1]["run"]
 
 
 def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
