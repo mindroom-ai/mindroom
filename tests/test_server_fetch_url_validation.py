@@ -231,6 +231,7 @@ def test_validate_server_fetch_url_keeps_ipv4_mapped_metadata_blocked_when_priva
         "[2001:0:4136:e378::57c0:7eef]",
         "[fd00:ec2::23]",
         "[fd20:ce::254]",
+        "[fd00:c1::a9fe:a9fe]",
     ],
 )
 @pytest.mark.parametrize("allow_private_networks", [False, True])

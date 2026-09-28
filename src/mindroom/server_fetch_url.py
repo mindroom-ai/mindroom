@@ -49,6 +49,8 @@ _METADATA_IP_ADDRESSES = frozenset(
         ipaddress.ip_address("fd00:ec2::23"),
         # GCP instance metadata over IPv6.
         ipaddress.ip_address("fd20:ce::254"),
+        # Oracle Cloud Infrastructure instance metadata over IPv6.
+        ipaddress.ip_address("fd00:c1::a9fe:a9fe"),
     },
 )
 _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
