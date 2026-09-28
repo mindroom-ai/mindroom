@@ -17,7 +17,7 @@ from requests import exceptions as requests_exceptions
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.matrix.provisioning import local_client_headers
+from mindroom.matrix.provisioning_env import local_client_headers
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClaimValidationError,

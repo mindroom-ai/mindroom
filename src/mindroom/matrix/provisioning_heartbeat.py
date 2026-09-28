@@ -13,8 +13,9 @@ import httpx
 
 from mindroom.constants import runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.provisioning import local_client_credentials_rejected, local_client_headers
+from mindroom.matrix.provisioning import local_client_credentials_rejected
 from mindroom.matrix.provisioning_env import (
+    local_client_headers,
     local_provisioning_client_credentials_from_env,
     provisioning_url_from_env,
 )

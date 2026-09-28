@@ -38,10 +38,11 @@ Rate limits: every request that the service must resolve through the
 homeserver (OpenID userinfo, or whoami for legacy access tokens) first counts
 against a per-client-address limit of 300 per minute, so invalid tokens cannot
 make the service flood the homeserver while many users behind one NAT still
-reach their per-user limits, which apply after verification. Device polls are
-limited to 30 per minute per device secret, so one client cannot starve the
-others, and then to 300 per minute per client address, leaving room for many
-CLIs behind one NAT.
+reach their per-user limits, which apply after verification. Polls for a
+known device secret are limited to 30 per minute per secret, so one client
+cannot starve the others; unknown secrets get no per-secret state. All device
+polls then count against 300 per minute per client address, leaving room for
+many CLIs behind one NAT.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
@@ -1201,21 +1202,23 @@ async def poll_device_pair(
     remote = request.client.host if request.client else "unknown"
     device_secret_hash = _hash_token(payload.device_secret)
     async with state.lock:
-        # The device limit runs first so polls it rejects do not use up the address budget shared behind a NAT.
-        _enforce_rate_limit_unlocked(
-            state,
-            key=f"pair:device:poll:secret:{device_secret_hash}",
-            limit=DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
-            window_seconds=60,
-        )
+        session_id = state.pair_session_by_device_secret_hash.get(device_secret_hash)
+        session = state.pair_sessions.get(session_id) if session_id else None
+        # Known devices are limited first so polls this rejects do not use up the address budget shared behind a NAT.
+        # Unknown secrets get no bucket of their own, so random secrets cannot grow the rate-limit state.
+        if session is not None:
+            _enforce_rate_limit_unlocked(
+                state,
+                key=f"pair:device:poll:secret:{device_secret_hash}",
+                limit=DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+                window_seconds=60,
+            )
         _enforce_rate_limit_unlocked(
             state,
             key=f"pair:device:poll:{remote}",
             limit=DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE,
             window_seconds=60,
         )
-        session_id = state.pair_session_by_device_secret_hash.get(device_secret_hash)
-        session = state.pair_sessions.get(session_id) if session_id else None
         if session is None:
             raise HTTPException(status_code=404, detail="Pair session not found")
         _expire_if_needed(session, now)

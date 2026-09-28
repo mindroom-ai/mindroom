@@ -11,7 +11,7 @@ from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
-from mindroom.matrix.provisioning_env import local_provisioning_client_credentials_from_env
+from mindroom.matrix.provisioning_env import local_client_headers, local_provisioning_client_credentials_from_env
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -44,14 +44,6 @@ class _ProvisioningRegisterResult:
 # credentials") always use HTTP 401, so only the revoked detail matters for 403.
 _CONNECTION_REVOKED_DETAIL = "Connection revoked"
 _NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
-
-
-def local_client_headers(client_id: str, client_secret: str) -> dict[str, str]:
-    """Return the headers that authenticate a paired install to the provisioning service."""
-    return {
-        "X-Local-MindRoom-Client-Id": client_id,
-        "X-Local-MindRoom-Client-Secret": client_secret,
-    }
 
 
 def local_client_credentials_rejected(response: httpx.Response) -> bool:

@@ -1269,6 +1269,23 @@ def test_device_poll_allows_many_clients_behind_one_address(tmp_path: Path, monk
     assert statuses == [404] * 300 + [429]
 
 
+def test_unknown_device_secrets_do_not_grow_rate_limit_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flood of random device secrets from one address only ever touches that address's bucket."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
+
+    with TestClient(app) as client:
+        statuses = [
+            client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": f"random-{index}"}).status_code
+            for index in range(2000)
+        ]
+        buckets = set(app.state.runtime_state.rate_limit_buckets)
+
+    assert statuses == [404] * per_address + [429] * (2000 - per_address)
+    assert buckets == {"pair:device:poll:testclient"}
+
+
 def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An approval persisted before a restart can still be claimed after it."""
     _patch_openid_auth(monkeypatch)
