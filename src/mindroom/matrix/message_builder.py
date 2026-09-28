@@ -470,9 +470,9 @@ def opens_with_markdown_block(text: str) -> bool:
     """Return whether markdown text opens with a block that only renders at the start of a line.
 
     Tables, headings, lists, quotes, code fences, and rules qualify; a paragraph does not.
-    Only the first two lines are parsed, which keeps per-chunk streaming renders cheap and still decides a table or setext heading.
+    Only the first two lines are parsed, which keeps per-chunk streaming renders cheap and still decides a table or one-line setext heading.
     """
-    tokens = _MARKDOWN_RENDERER.parse("\n".join(text.lstrip().splitlines()[:2]))
+    tokens = _MARKDOWN_RENDERER.parse("\n".join(text.lstrip().split("\n", 2)[:2]))
     return bool(tokens) and tokens[0].type != "paragraph_open"
 
 

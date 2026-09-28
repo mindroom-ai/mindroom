@@ -151,11 +151,15 @@ class TestExtractTeamMemberContributions:
 
         assert format_team_response(team)[0] == f"**ledger**:\n\n{content}"
 
-    def test_member_prose_stays_on_the_name_line(self) -> None:
-        """Prose, including a sentence with a pipe or a number, reads best right after the name."""
+    @pytest.mark.parametrize(
+        "content",
+        ["2026 pricing: seat | usage, three vendors in four.", "[1]: https://example.com"],
+    )
+    def test_member_prose_stays_on_the_name_line(self, content: str) -> None:
+        """Prose with a pipe or a number, and a link definition that renders nothing, stay right after the name."""
         agent = MagicMock(spec=RunOutput)
         agent.agent_name = "scout"
-        agent.content = "2026 pricing: seat | usage, three vendors in four."
+        agent.content = content
         agent.messages = []
 
         team = MagicMock(spec=TeamRunOutput)
@@ -164,7 +168,7 @@ class TestExtractTeamMemberContributions:
         team.member_responses = [agent]
         team.messages = []
 
-        assert format_team_response(team)[0] == "**scout**: 2026 pricing: seat | usage, three vendors in four."
+        assert format_team_response(team)[0] == f"**scout**: {content}"
 
     def test_team_without_consensus(self) -> None:
         """Test team that only has member responses, no consensus."""
