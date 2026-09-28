@@ -123,7 +123,7 @@ extension DesktopShellRequest {
     }
 }
 
-/// Escapes control, invisible-format, text-direction, and non-ASCII space characters so remote text cannot hide what runs.
+/// Escapes control, invisible-format, text-direction, blank-looking, and non-ASCII space characters so remote text cannot hide what runs.
 /// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
 func desktopSafePreview(_ text: String) -> String {
     var preview = ""
@@ -141,11 +141,15 @@ func desktopPreviewEscapes(_ text: String) -> Bool {
     text.unicodeScalars.contains(where: isHiddenPreviewScalar)
 }
 
+/// Letters and symbols that render as empty space; the helper refuses long runs of them too.
+private let desktopBlankGlyphs: Set<Unicode.Scalar> = ["\u{115F}", "\u{1160}", "\u{2800}", "\u{3164}", "\u{FFA0}"]
+
 private func isHiddenPreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
     switch scalar.properties.generalCategory {
     case .control: scalar != "\n"
-    // Look-alike and wide spaces could disguise a command or pad it out of view.
+    // Look-alike, wide, and blank-looking spaces could disguise a command or pad it out of view.
     case .spaceSeparator: scalar != " "
+    case .otherLetter, .otherSymbol: desktopBlankGlyphs.contains(scalar)
     case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: true
     default: false
     }

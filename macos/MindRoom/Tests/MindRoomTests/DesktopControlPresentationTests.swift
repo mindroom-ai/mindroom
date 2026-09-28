@@ -279,6 +279,7 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertTrue(desktopPreviewEscapes(command))
         XCTAssertTrue(shellRequest(command: command).hasEscapedCharacters)
         XCTAssertFalse(desktopPreviewEscapes("ls -la ~/Projects"))
+        XCTAssertEqual(desktopSafePreview("ls #\u{2800}\u{3164}é"), #"ls #\u{2800}\u{3164}"# + "é")
         XCTAssertEqual(shellRequest(command: command).commandSizeLabel, "13 characters on 2 lines")
         XCTAssertEqual(shellRequest(command: "l").commandSizeLabel, "1 character on 1 line")
     }

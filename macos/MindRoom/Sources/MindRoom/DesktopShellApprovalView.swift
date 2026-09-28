@@ -56,7 +56,7 @@ struct DesktopShellApprovalView: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
             Text("The command is \(request.commandSizeLabel).").font(.callout).foregroundStyle(.secondary)
             if request.hasEscapedCharacters {
-                Label("This request contains control, text-direction, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
+                Label("This request contains control, text-direction, blank, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
             detail("Working folder", request.displayCwd)
