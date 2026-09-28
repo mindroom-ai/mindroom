@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from structlog.testing import capture_logs
@@ -56,7 +57,7 @@ def _credential_seed_json(service: str = "google_oauth_client") -> str:
     )
 
 
-def _import_notices(events: list[dict], service: str) -> list[dict]:
+def _import_notices(events: list[dict[str, Any]], service: str) -> list[dict[str, Any]]:
     """Extract credential import/update notices for a service."""
     return [
         e
@@ -565,21 +566,16 @@ class TestCredentialsSync:
             ),
         )
 
-        assert calls == [
-            {
-                "service": "google_oauth_client",
-                "credentials": {"client_id": "client-id", "client_secret": "client-secret"},
-                "runtime_paths": constants_mod.resolve_runtime_paths(
-                    config_path=config_path,
-                    storage_path=tmp_path,
-                    process_env={
-                        "OAUTH_CLIENT_ID": "client-id",
-                        "OAUTH_CLIENT_SECRET": "client-secret",
-                    },
-                ),
-                "env_var": "MINDROOM_CREDENTIAL_SEEDS_FILE",
-            },
-        ]
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["service"] == "google_oauth_client"
+        assert call["credentials"] == {"client_id": "client-id", "client_secret": "client-secret"}
+        assert call["env_vars"] == ["MINDROOM_CREDENTIAL_SEEDS_FILE"]
+        assert (
+            call["stop_instruction_override"]
+            == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_FILE, "
+            "then DELETE /api/credentials/google_oauth_client"
+        )
 
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,
@@ -754,7 +750,7 @@ class TestCredentialsSync:
                     "token": "ghp-test-token",
                 },
                 "runtime_paths": runtime_paths,
-                "env_var": "GITHUB_TOKEN",
+                "env_vars": ["GITHUB_TOKEN"],
             },
         ]
 
@@ -1218,8 +1214,10 @@ class TestCredentialsSync:
         assert notice["event"] == "credential_imported_from_env"
         assert notice["env_var"] == "OPENAI_API_KEY"
         assert notice["service"] == "openai"
-        assert "DELETE /api/credentials/openai" in notice["to_stop"]
-        # Value should NEVER appear anywhere
+        assert (
+            notice["to_stop"]
+            == "remove OPENAI_API_KEY from process environment/.env, then DELETE /api/credentials/openai"
+        )
         assert "sk-new-key" not in json.dumps(events)
 
     def test_credential_import_notice_on_value_change(
@@ -1271,7 +1269,7 @@ class TestCredentialsSync:
         original_save = CredentialsManager.save_credentials
         save_calls: list[str] = []
 
-        def tracked_save(self: CredentialsManager, service: str, credentials: dict) -> None:  # type: ignore[misc]
+        def tracked_save(self: CredentialsManager, service: str, credentials: dict[str, Any]) -> None:
             save_calls.append(service)
             original_save(self, service, credentials)
 
@@ -1384,7 +1382,10 @@ class TestCredentialsSync:
         assert len(github_notices) == 1
         notice = github_notices[0]
         assert notice["env_var"] == "GITHUB_TOKEN_FILE"
-        assert "GITHUB_TOKEN_FILE" in notice["to_stop"]
+        assert (
+            notice["to_stop"] == "remove GITHUB_TOKEN_FILE from process environment/.env, "
+            "then DELETE /api/credentials/github_private"
+        )
 
     def test_credential_import_notice_for_adc_path_change(
         self,
@@ -1413,6 +1414,10 @@ class TestCredentialsSync:
         notice = adc_notices[0]
         assert notice["event"] == "credential_updated_from_env"
         assert notice["env_var"] == "GOOGLE_APPLICATION_CREDENTIALS"
+        assert (
+            notice["to_stop"] == "remove GOOGLE_APPLICATION_CREDENTIALS from process environment/.env, "
+            "then DELETE /api/credentials/google_vertex_adc"
+        )
 
     def test_credential_import_notice_for_declared_seeds(
         self,
@@ -1436,22 +1441,42 @@ class TestCredentialsSync:
         assert len(seed_notices) == 1
         notice = seed_notices[0]
         assert notice["env_var"] == "MINDROOM_CREDENTIAL_SEEDS_JSON"
-        assert "MINDROOM_CREDENTIAL_SEEDS_JSON" in notice["to_stop"]
+        assert (
+            notice["to_stop"] == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_JSON, "
+            "then DELETE /api/credentials/google_oauth_client"
+        )
 
+    @pytest.mark.parametrize(
+        ("file_var", "service", "existing_key"),
+        [
+            ("GITHUB_TOKEN_FILE", "github_private", None),
+            ("GITHUB_TOKEN_FILE", "github_private", "ghp-existing"),
+            ("EMBEDDER_API_KEY_FILE", "embedder", None),
+            ("EMBEDDER_API_KEY_FILE", "embedder", "sk-existing"),
+        ],
+    )
     def test_credential_import_rejects_empty_secret_files(
         self,
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
+        file_var: str,
+        service: str,
+        existing_key: str | None,
     ) -> None:
         """Empty or whitespace-only secret files should not create credentials."""
         cm = CredentialsManager(base_path=temp_credentials_dir)
-        cm.save_credentials("openai", {"api_key": "sk-existing-key", "_source": "env"})
+        if existing_key:
+            if service == "github_private":
+                cm.save_credentials(service, {"username": "x-access-token", "token": existing_key, "_source": "env"})
+            else:
+                cm.save_credentials(service, {"api_key": existing_key, "_source": "env"})
 
         empty_file = temp_credentials_dir.parent / "empty-key"
         empty_file.write_text("   \n  \t  \n", encoding="utf-8")
 
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(empty_file))
+        base_var = file_var.removesuffix("_FILE")
+        monkeypatch.delenv(base_var, raising=False)
+        monkeypatch.setenv(file_var, str(empty_file))
 
         runtime_paths = _runtime_paths(
             temp_credentials_dir.parent,
@@ -1461,10 +1486,18 @@ class TestCredentialsSync:
         with capture_logs() as events:
             sync_env_to_credentials(runtime_paths=runtime_paths)
 
-        openai_notices = _import_notices(events, "openai")
-        assert len(openai_notices) == 0
+        notices = _import_notices(events, service)
+        assert len(notices) == 0
 
-        assert cm.get_api_key("openai") == "sk-existing-key"
+        if existing_key:
+            if service == "github_private":
+                creds = cm.load_credentials(service)
+                assert creds is not None
+                assert creds["token"] == existing_key
+            else:
+                assert cm.get_api_key(service) == existing_key
+        else:
+            assert cm.load_credentials(service) is None
 
     def test_credential_import_notice_includes_file_fallback_when_both_set(
         self,
@@ -1490,6 +1523,39 @@ class TestCredentialsSync:
         assert len(github_notices) == 1
         notice = github_notices[0]
         assert notice["env_var"] == "GITHUB_TOKEN"
-        assert notice["fallback_var"] == "GITHUB_TOKEN_FILE"
-        assert "GITHUB_TOKEN" in notice["to_stop"]
-        assert "GITHUB_TOKEN_FILE" in notice["to_stop"]
+        assert (
+            notice["to_stop"] == "remove GITHUB_TOKEN and GITHUB_TOKEN_FILE from process environment/.env, "
+            "then DELETE /api/credentials/github_private"
+        )
+
+    def test_credential_import_notice_for_seed_declared_in_both_variables(
+        self,
+        temp_credentials_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Seed declared in both JSON and FILE variables should show both in stop instruction."""
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
+
+        seed_file = tmp_path / "seeds.json"
+        seed_file.write_text(_credential_seed_json(), encoding="utf-8")
+
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_FILE", str(seed_file))
+
+        runtime_paths = _runtime_paths(
+            temp_credentials_dir.parent,
+            shared_credentials_dir=temp_credentials_dir,
+        )
+
+        with capture_logs() as events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        seed_notices = _import_notices(events, "google_oauth_client")
+        assert len(seed_notices) >= 1
+        notice = seed_notices[0]
+        assert (
+            notice["to_stop"] == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_FILE "
+            "and MINDROOM_CREDENTIAL_SEEDS_JSON, then DELETE /api/credentials/google_oauth_client"
+        )

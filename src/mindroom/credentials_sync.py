@@ -52,39 +52,51 @@ class _CredentialSeedDeclaration:
     seed: Mapping[str, Any]
 
 
-def _get_secret_from_env_with_source(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
-    """Read a secret from NAME or NAME_FILE, returning value and source var name.
+def _get_secret_from_env_with_source(name: str, runtime_paths: RuntimePaths) -> tuple[str, list[str]] | None:
+    """Read a secret from NAME or NAME_FILE, returning value and configured variable names.
 
-    If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
-    a readable file, return its stripped contents. Else return None.
-
-    Returns (value, source_var_name) where source_var_name is NAME or NAME_FILE.
+    Returns (value, configured_vars) where configured_vars lists all environment
+    variables that could provide this secret (NAME and/or NAME_FILE).
     """
     val = runtime_paths.env_value(name)
-    if val:
-        return val, name
     file_var = f"{name}_FILE"
     file_path = runtime_env_path(runtime_paths, file_var)
+
+    configured_vars = []
+    if name in runtime_paths.process_env or name in runtime_paths.env_file_values:
+        configured_vars.append(name)
+    if file_path is not None and file_path.exists():
+        configured_vars.append(file_var)
+
+    if val:
+        return val, configured_vars
+
     if file_path is not None and file_path.exists():
         try:
             content = file_path.read_text(encoding="utf-8").strip()
         except Exception:
-            # Avoid noisy logs here; callers can handle None gracefully
             return None
         else:
-            if content:
-                return content, file_var
+            return (content, configured_vars) if content else None
+
     return None
 
 
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Read a secret from NAME or NAME_FILE.
-
-    If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
-    a readable file, return its stripped contents. Else return None.
-    """
+    """Read a secret from NAME or NAME_FILE, returning non-empty stripped contents."""
     result = _get_secret_from_env_with_source(name, runtime_paths)
     return result[0] if result else None
+
+
+def _env_source(name: str, runtime_paths: RuntimePaths) -> str:
+    """Return source classification for an environment variable."""
+    in_process = name in runtime_paths.process_env
+    in_env_file = name in runtime_paths.env_file_values
+    if in_process and in_env_file:
+        return "process_env_overrides_env_file"
+    if in_process:
+        return "process_env"
+    return "env_file"
 
 
 def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
@@ -93,7 +105,7 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     if not result:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
-    github_token, source_var = result
+    github_token, env_vars = result
 
     return _sync_service_credentials(
         service="github_private",
@@ -102,7 +114,7 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
             "token": github_token,
         },
         runtime_paths=runtime_paths,
-        env_var=source_var,
+        env_vars=env_vars,
     )
 
 
@@ -112,62 +124,42 @@ def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
     if not result:
         logger.debug("No value found for EMBEDDER_API_KEY or EMBEDDER_API_KEY_FILE")
         return False
-    embedder_api_key, source_var = result
+    embedder_api_key, env_vars = result
 
     return _sync_service_credentials(
         service=_EMBEDDER_CREDENTIAL_SERVICE,
         credentials={"api_key": embedder_api_key},
         runtime_paths=runtime_paths,
-        env_var=source_var,
+        env_vars=env_vars,
     )
 
 
 def _emit_credential_import_notice(
     *,
     service: str,
-    env_var: str,
+    env_vars: list[str],
     runtime_paths: RuntimePaths,
     is_first_import: bool,
+    stop_instruction_override: str | None = None,
 ) -> None:
     """Emit user-visible notice when credentials are imported or changed."""
-    in_process = env_var in runtime_paths.process_env
-    in_env_file = env_var in runtime_paths.env_file_values
+    primary_var = env_vars[0]
+    source = _env_source(primary_var, runtime_paths)
 
-    if in_process and in_env_file:
-        source = "process_env_overrides_env_file"
-    elif in_process:
-        source = "process_env"
+    if stop_instruction_override:
+        to_stop = stop_instruction_override
+    elif len(env_vars) > 1:
+        var_list = " and ".join(env_vars)
+        to_stop = f"remove {var_list} from process environment/.env, then DELETE /api/credentials/{service}"
     else:
-        source = "env_file"
-
-    base_var = env_var.removesuffix("_FILE")
-    fallback_var = f"{base_var}_FILE" if env_var == base_var else base_var
-    fallback_in_process = fallback_var in runtime_paths.process_env
-    fallback_in_env_file = fallback_var in runtime_paths.env_file_values
-    has_fallback = fallback_in_process or fallback_in_env_file
-
-    if has_fallback:
-        if fallback_in_process and fallback_in_env_file:
-            fallback_source = "process_env_overrides_env_file"
-        elif fallback_in_process:
-            fallback_source = "process_env"
-        else:
-            fallback_source = "env_file"
-        to_stop = (
-            f"remove {env_var} and {fallback_var} from process environment/`.env`, "
-            f"then DELETE /api/credentials/{service}"
-        )
-    else:
-        to_stop = f"remove {env_var} from environment/`.env`, then DELETE /api/credentials/{service}"
+        to_stop = f"remove {primary_var} from process environment/.env, then DELETE /api/credentials/{service}"
 
     event_name = "credential_imported_from_env" if is_first_import else "credential_updated_from_env"
     logger.info(
         event_name,
         service=service,
-        env_var=env_var,
+        env_var=primary_var,
         source=source,
-        fallback_var=fallback_var if has_fallback else None,
-        fallback_source=fallback_source if has_fallback else None,
         to_stop=to_stop,
     )
 
@@ -177,7 +169,8 @@ def _sync_service_credentials(
     service: str,
     credentials: dict[str, Any],
     runtime_paths: RuntimePaths,
-    env_var: str,
+    env_vars: list[str],
+    stop_instruction_override: str | None = None,
 ) -> bool:
     """Seed or update one env-backed named service."""
     if is_oauth_token_service(service):
@@ -206,15 +199,16 @@ def _sync_service_credentials(
     is_first_import = existing is None
     stored = {**credentials, "_source": "env"}
     if existing == stored:
-        logger.debug("credential_env_sync_unchanged", service=service, env_var=env_var)
+        logger.debug("credential_env_sync_unchanged", service=service, env_var=env_vars[0])
         return False
 
     creds_manager.save_credentials(service, stored)
     _emit_credential_import_notice(
         service=service,
-        env_var=env_var,
+        env_vars=env_vars,
         runtime_paths=runtime_paths,
         is_first_import=is_first_import,
+        stop_instruction_override=stop_instruction_override,
     )
 
     return True
@@ -370,10 +364,41 @@ def _resolve_seed_credentials(
     return credentials
 
 
+def _build_seed_declaration_vars_map(
+    declarations: list[_CredentialSeedDeclaration],
+) -> dict[str, list[str]]:
+    """Build map of service to all declaration variables that declare it."""
+    service_to_declaration_vars: dict[str, list[str]] = {}
+    for declaration in declarations:
+        seed = declaration.seed
+        raw_service = seed.get("service")
+        if isinstance(raw_service, str):
+            try:
+                service = validate_service_name(raw_service)
+                if service not in service_to_declaration_vars:
+                    service_to_declaration_vars[service] = []
+                if declaration.source_env_var not in service_to_declaration_vars[service]:
+                    service_to_declaration_vars[service].append(declaration.source_env_var)
+            except (TypeError, ValueError):
+                pass
+    return service_to_declaration_vars
+
+
+def _build_seed_stop_instruction(service: str, declaration_vars: list[str]) -> str:
+    """Build stop instruction for a seed credential."""
+    if len(declaration_vars) > 1:
+        var_list = " and ".join(declaration_vars)
+        return f"remove the {service} entry from {var_list}, then DELETE /api/credentials/{service}"
+    return f"remove the {service} entry from {declaration_vars[0]}, then DELETE /api/credentials/{service}"
+
+
 def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
     """Seed/update explicitly declared credential services."""
+    declarations = _load_declared_credential_seeds(runtime_paths)
+    service_to_declaration_vars = _build_seed_declaration_vars_map(declarations)
+
     synced_count = 0
-    for declaration in _load_declared_credential_seeds(runtime_paths):
+    for declaration in declarations:
         seed = declaration.seed
         raw_service = seed.get("service")
         if not isinstance(raw_service, str):
@@ -395,11 +420,16 @@ def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
             continue
         if credentials is None:
             continue
+
+        declaration_vars = service_to_declaration_vars.get(service, [declaration.source_env_var])
+        stop_instruction = _build_seed_stop_instruction(service, declaration_vars)
+
         if _sync_service_credentials(
             service=service,
             credentials=credentials,
             runtime_paths=runtime_paths,
-            env_var=declaration.source_env_var,
+            env_vars=[declaration.source_env_var],
+            stop_instruction_override=stop_instruction,
         ):
             synced_count += 1
     return synced_count
@@ -426,15 +456,15 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
             logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 
-        env_value, source_var = result
-        logger.debug("credential_env_value_found", env_var=source_var, value_length=len(env_value))
+        env_value, env_vars = result
+        logger.debug("credential_env_value_found", env_var=env_vars[0], value_length=len(env_value))
 
         credentials = {"host": env_value} if service == "ollama" else {"api_key": env_value}
         if _sync_service_credentials(
             service=service,
             credentials=credentials,
             runtime_paths=runtime_paths,
-            env_var=source_var,
+            env_vars=env_vars,
         ):
             synced_count += 1
 
@@ -444,7 +474,7 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
             service="google_vertex_adc",
             credentials={"application_credentials_path": str(adc_path)},
             runtime_paths=runtime_paths,
-            env_var="GOOGLE_APPLICATION_CREDENTIALS",
+            env_vars=["GOOGLE_APPLICATION_CREDENTIALS"],
         ):
             synced_count += 1
     else:

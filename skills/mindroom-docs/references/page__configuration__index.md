@@ -461,8 +461,9 @@ All API key variables also support a `_FILE` suffix for file-based secrets (e.g.
 See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
 
 **Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, supported provider and bootstrap environment variables from your process environment or config-adjacent `.env` file are automatically stored in the shared credentials store.
-MindRoom imports the model provider API keys listed above plus `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`), and any credential seeds declared via `MINDROOM_CREDENTIAL_SEEDS_JSON` or `MINDROOM_CREDENTIAL_SEEDS_FILE`.
-All variables (except `GOOGLE_APPLICATION_CREDENTIALS`) also accept a `_FILE` suffix for file-based secrets, and the actual source variable name (`NAME` or `NAME_FILE`) appears in notices and stop instructions.
+MindRoom imports these variables: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+All API key and token variables (except `GOOGLE_APPLICATION_CREDENTIALS`) also accept a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE`), and the actual source variable name appears in notices and stop instructions.
+Credential seeds can be declared via `MINDROOM_CREDENTIAL_SEEDS_JSON` (inline JSON) or `MINDROOM_CREDENTIAL_SEEDS_FILE` (path to a JSON file); see the Credential Seeds section for details.
 On first import or when a value changes, MindRoom logs which variable was imported, where it came from (process environment or `.env`), and the credential service name it was stored under.
 When a variable is set in both sources, the process environment value takes precedence and the `.env` value is overridden.
 Unchanged values on subsequent runs stay quiet.
