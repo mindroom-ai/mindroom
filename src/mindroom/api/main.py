@@ -38,6 +38,7 @@ from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
+from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.response_activity import router as response_activity_router
 from mindroom.api.schedules import router as schedules_router
@@ -751,6 +752,7 @@ app.include_router(auth_router)
 app.include_router(connections_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
+app.include_router(provider_setup_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])

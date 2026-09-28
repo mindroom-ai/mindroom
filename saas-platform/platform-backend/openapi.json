@@ -336,6 +336,52 @@
         "title": "AdminGetOneResponse",
         "type": "object"
       },
+      "AdminInstanceLifecycleResponse": {
+        "description": "Nightly cleanup health, instances pending teardown, and stuck lifecycle states.",
+        "properties": {
+          "cleanup_scheduler_enabled": {
+            "title": "Cleanup Scheduler Enabled",
+            "type": "boolean"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CleanupRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending_teardown": {
+            "items": {
+              "$ref": "#/components/schemas/LifecycleInstanceOut"
+            },
+            "title": "Pending Teardown",
+            "type": "array"
+          },
+          "stuck": {
+            "items": {
+              "$ref": "#/components/schemas/LifecycleInstanceOut"
+            },
+            "title": "Stuck",
+            "type": "array"
+          },
+          "teardown_grace_days": {
+            "title": "Teardown Grace Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cleanup_scheduler_enabled",
+          "teardown_grace_days",
+          "last_run",
+          "pending_teardown",
+          "stuck"
+        ],
+        "title": "AdminInstanceLifecycleResponse",
+        "type": "object"
+      },
       "AdminListResponse": {
         "description": "Admin list response for generic resources.",
         "properties": {
@@ -462,6 +508,36 @@
           "tier"
         ],
         "title": "CheckoutRequest",
+        "type": "object"
+      },
+      "CleanupRunOut": {
+        "description": "One recorded run of the nightly cleanup job.",
+        "properties": {
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "title": "Summary",
+            "type": "object"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at",
+          "ok",
+          "summary"
+        ],
+        "title": "CleanupRunOut",
         "type": "object"
       },
       "ConsentUpdate": {
@@ -965,6 +1041,17 @@
             ],
             "title": "Kubernetes Synced At"
           },
+          "lifecycle_stopped_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Stopped At"
+          },
           "matrix_server_url": {
             "anyOf": [
               {
@@ -1015,6 +1102,17 @@
             "title": "Subscription Id",
             "type": "string"
           },
+          "teardown_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Teardown After"
+          },
           "tier": {
             "anyOf": [
               {
@@ -1062,6 +1160,120 @@
           "instances"
         ],
         "title": "InstancesResponse",
+        "type": "object"
+      },
+      "LifecycleInstanceOut": {
+        "description": "An instance as seen by the subscription lifecycle.",
+        "properties": {
+          "account_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Email"
+          },
+          "account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Instance Id"
+          },
+          "lifecycle_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Error"
+          },
+          "lifecycle_error_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Error At"
+          },
+          "lifecycle_stopped_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Stopped At"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subscription_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscription Status"
+          },
+          "teardown_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Teardown After"
+          }
+        },
+        "required": [
+          "instance_id",
+          "status"
+        ],
+        "title": "LifecycleInstanceOut",
         "type": "object"
       },
       "PlanLimits": {
@@ -1547,7 +1759,9 @@
               "past_due",
               "trialing",
               "paused",
-              "incomplete"
+              "incomplete",
+              "incomplete_expired",
+              "unpaid"
             ],
             "title": "Status",
             "type": "string"
@@ -2196,6 +2410,46 @@
           }
         },
         "summary": "Admin Logout"
+      }
+    },
+    "/admin/instance-lifecycle": {
+      "get": {
+        "description": "Show the last nightly cleanup run, instances pending teardown, and stuck lifecycle states.",
+        "operationId": "get_instance_lifecycle_admin_instance_lifecycle_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInstanceLifecycleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Instance Lifecycle"
       }
     },
     "/admin/instances/{instance_id}/provision": {

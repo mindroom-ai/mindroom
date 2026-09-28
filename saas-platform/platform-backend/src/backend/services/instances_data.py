@@ -16,7 +16,7 @@ from backend.deps import ensure_supabase
 if TYPE_CHECKING:
     from supabase import Client
 
-_OWNED_INSTANCE_COLUMNS = "id,instance_id,subscription_id,account_id"
+_OWNED_INSTANCE_COLUMNS = "id,instance_id,subscription_id,account_id,lifecycle_stopped_at"
 
 
 def get_instance(sb: Client, instance_id: int | str, columns: str = "*") -> dict[str, Any] | None:

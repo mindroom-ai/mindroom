@@ -45,11 +45,11 @@ repos:
         files: ^(src/mindroom/commands\.py|README\.md)$
 
       - id: sync-config-models
-        name: Push models from config.yaml to SaaS platform defaults
-        entry: scripts/sync_config.py
+        name: Regenerate the hosted instance seed config from the config init starter
+        entry: uv run python scripts/sync_config.py
         language: system
         pass_filenames: false
-        files: ^(config\.yaml|saas-platform/default-config\.yaml)$
+        files: ^(scripts/sync_config\.py|src/mindroom/cli/config\.py|src/mindroom/model_defaults\.py|cluster/k8s/instance/default-config\.yaml)$
 
       - id: generate-skill-references
         name: Regenerate mindroom-docs skill references

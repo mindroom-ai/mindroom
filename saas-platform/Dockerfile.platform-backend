@@ -2,7 +2,7 @@
 FROM ghcr.io/astral-sh/uv:latest AS uv
 
 # Tools stage with kubectl and helm for provisioning
-FROM public.ecr.aws/docker/library/python:3.13-slim AS tools
+FROM mirror.gcr.io/library/python:3.13-slim AS tools
 ARG TARGETARCH=amd64
 # Install provisioning tools (kubectl and helm)
 RUN apt-get update && apt-get install -y curl \
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Builder stage with uv for dependencies
-FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
+FROM mirror.gcr.io/library/python:3.13-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
 
@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 # Final production stage
-FROM public.ecr.aws/docker/library/python:3.13-slim AS final
+FROM mirror.gcr.io/library/python:3.13-slim AS final
 # Copy uv for runtime
 COPY --from=uv /uv /uvx /bin/
 

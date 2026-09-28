@@ -9,6 +9,9 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
+
+from mindroom.constants import ensure_writable_config_path
 
 from .banner import make_banner
 from .config import (
@@ -16,6 +19,7 @@ from .config import (
     check_env_keys,
     config_app,
     console,
+    create_first_run_config,
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
@@ -31,7 +35,7 @@ from .service import service_app
 from .trigger import trigger_app
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -41,12 +45,15 @@ _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
 
 [bold]Quick start:[/bold]
-  [cyan]mindroom config init[/cyan]   Create a starter config
-  [cyan]mindroom run[/cyan]           Start the system\
+  [cyan]mindroom run[/cyan]           Set up on first run, pair, and start
+  [cyan]mindroom config init[/cyan]   Create a starter config without starting\
 """
 _CONFIG_INIT_PROVIDER_CHOICES = (
     "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
 )
+# Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
+# The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
+_CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
 
 app = typer.Typer(
     help=_HELP,
@@ -133,6 +140,7 @@ def run(
     """Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
+    - Creates a hosted starter config on first run in a terminal
     - Pairs hosted installs with your MindRoom Chat account on first run
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
@@ -148,8 +156,20 @@ def run(
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    first_run = not ensure_writable_config_path(runtime_paths=runtime_paths) and _terminal_is_interactive()
+    if first_run:
+        try:
+            create_first_run_config(runtime_paths)
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
+        # Pick up the new config and .env before pairing and startup.
+        runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     # Report a broken config or missing model keys before any pairing waits for a human.
-    check_env_keys(_load_active_config_or_exit(runtime_paths), runtime_paths=runtime_paths)
+    config = _load_active_config_or_exit(runtime_paths)
+    if not first_run:
+        # First-run setup has already said which provider credentials are still missing.
+        check_env_keys(config, runtime_paths=runtime_paths)
     try:
         if local_pairing_required(runtime_paths):
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
@@ -158,11 +178,8 @@ def run(
                 runtime_paths,
                 console=console,
                 # `mindroom connect` or the macOS app may pair this machine while the run waits.
-                stop_waiting=lambda: (
-                    not local_pairing_required(
-                        activate_cli_runtime(path=config_path, storage_path=storage_path),
-                    )
-                ),
+                stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
+                confirm_approver=_approver_confirmation(),
             )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -183,7 +200,6 @@ def run(
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
 
     ensure_writable_config_path(runtime_paths=runtime_paths)
 
@@ -595,12 +611,24 @@ def connect(
         "-p",
         help="Override auto-detection and use this config file path for .env persistence.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Pair again even when this machine is already connected.",
+    ),
 ) -> None:
-    """Connect this local MindRoom to your MindRoom Chat account by approving a link."""
+    """Connect this local MindRoom to your MindRoom Chat account by approving a link.
+
+    When this machine is already connected, a terminal asks before pairing again.
+    Without a terminal it exits with code 3 unless --force is given.
+    """
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
     try:
         runtime_paths = activate_cli_runtime(path)
+        if provisioning_url is None and (refusal := cli_connect.self_hosted_pairing_error(runtime_paths)):
+            console.print(f"[red]Error:[/red] {escape(refusal)}")
+            raise typer.Exit(1)
         if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
             "MINDROOM_LOCAL_CLIENT_SECRET",
         ):
@@ -609,7 +637,10 @@ def connect(
                 "Pairing again creates a new connection and a new agent namespace: "
                 "existing agents keep working, and new agents get the new namespace.",
             )
-            if _stdin_is_interactive():
+            if not force:
+                if not _stdin_is_interactive():
+                    console.print("Run `mindroom connect --force` to pair again.")
+                    raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
                 typer.confirm("Pair again?", abort=True)
         cli_connect.pair_local_install(
             runtime_paths,
@@ -619,6 +650,7 @@ def connect(
             persist_env=persist_env,
             open_browser=open_browser,
             renew_expired=False,
+            confirm_approver=_approver_confirmation(),
         )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -629,6 +661,38 @@ def connect(
 def _stdin_is_interactive() -> bool:
     """Whether a person can answer prompts; the macOS app and services run without a terminal."""
     return sys.stdin.isatty()
+
+
+def _terminal_is_interactive() -> bool:
+    """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
+    """Whether another process made pairing unnecessary since this run resolved its runtime."""
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    try:
+        return not local_pairing_required(activate_cli_runtime(path=config_path, storage_path=storage_path))
+    except ValueError:
+        # A half-written or undecodable .env keeps the run waiting because its writer may not have finished.
+        return False
+
+
+def _approver_confirmation() -> Callable[[], bool] | None:
+    """Ask whether the approving account is the user's own, only when a person can answer."""
+    if not _stdin_is_interactive():
+        return None
+
+    def confirm() -> bool:
+        try:
+            return typer.confirm("Is this your account?", default=True)
+        except typer.Abort:
+            # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
+            console.print()
+            return False
+
+    return confirm
 
 
 app.command("local-stack-setup")(local_stack_setup)
@@ -648,7 +712,10 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
         f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
         soft_wrap=True,
     )
-    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
+    console.print(
+        "  [cyan]mindroom run[/cyan]            In an interactive terminal: create a hosted starter config, pair, and start\n",
+        soft_wrap=True,
+    )
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

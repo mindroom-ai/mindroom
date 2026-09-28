@@ -38,17 +38,14 @@ Watch the 2-minute setup video:
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
-# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
-uvx mindroom config init
-
-# Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
-$EDITOR ~/.mindroom/.env
-
-# Start MindRoom (pairing happens automatically on first run)
 uvx mindroom run
-# Open the printed link or scan the QR code to approve pairing,
+# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
+# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
+# then prints a link and QR code: approve it with your MindRoom Chat account,
 # or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
+
+To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
 
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
 
@@ -247,7 +244,41 @@ Watch the 2-minute setup video:
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Initialize local config
+### 1. Run MindRoom
+
+```bash
+uvx mindroom run
+```
+
+When no config exists yet and MindRoom runs in a terminal, it asks a few setup questions first:
+
+1. Choose a model provider preset (default `openai`).
+2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden and never printed.
+   Press Enter to skip, then connect the provider later through the dashboard's provider setup, or add the key to `~/.mindroom/.env` and restart `mindroom run`.
+   MindRoom does not ask when the key is already set in your environment.
+   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting `mindroom run`.
+
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
+Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`.
+
+On first run, MindRoom automatically initiates pairing.
+It prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
+
+After pairing completes, MindRoom starts the runtime and dashboard.
+
+Notes:
+
+- Pair codes are short-lived (10 minutes).
+- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
+- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
+- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
+
+### 2. Optional: set up explicitly with `config init`
+
+Use `config init` to create or review the files before starting, to pick a preset non-interactively, or to use a self-hosted homeserver:
 
 ```bash
 uvx mindroom config init
@@ -297,7 +328,7 @@ These local provider configs run entirely locally and do not require real cloud 
 
 Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
 
-### 2. Add remote-provider credentials when needed
+Then add remote-provider credentials when needed:
 
 ```bash
 $EDITOR ~/.mindroom/.env
@@ -314,34 +345,17 @@ For hosted providers, set the credentials for the provider you selected:
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
-### 3. Run MindRoom
+Then run `uvx mindroom run`.
 
-```bash
-uvx mindroom run
-```
-
-On first run, MindRoom automatically initiates pairing.
-It prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
-Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-
-After pairing completes, MindRoom starts the runtime and dashboard.
-
-Notes:
-
-- Pair codes are short-lived (10 minutes).
-- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
-- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
-- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
-
-### 4. Verify
+### 3. Verify
 
 **In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
-**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
+**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
+Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.
 
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
@@ -597,6 +611,16 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 
+## Connect Your AI Provider
+
+When the router, an agent, or a team uses a model whose provider has no API key, every dashboard page shows a **Connect your AI provider** banner.
+The check uses the same key lookup as the runtime, so keys in `.env`, keys saved per model on the **Models** page, and provider keys saved under their environment variable name (for example `OPENROUTER_API_KEY`) all count.
+Select **Connect provider**, choose OpenRouter, Anthropic, or OpenAI, and paste a key.
+MindRoom checks the key with the provider through a read-only request that does not use credits, and saves it as the `openrouter`, `anthropic`, or `openai` credential only when the provider accepts it.
+OpenRouter is recommended for the hosted default setup, where one key covers chat, memory, and voice.
+If you connect Anthropic or OpenAI while your models still use OpenRouter, the dialog lists the affected models so you can switch them on the **Models** page.
+When an agent cannot reply because no provider key is set, it answers in chat with a pointer to this setup step instead of the raw provider error, including the dashboard address when `MINDROOM_PUBLIC_URL` is set.
+
 ## Dashboard Tabs
 
 ### Home and Browse Workspace
@@ -731,6 +755,7 @@ Manage service credentials directly from the dashboard:
 - **List configured credential services** from `CredentialsManager`
 - **Create/select service names** (for example `github_private` or `model:sonnet`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
+- **Save provider keys under their env var name**: a new service named after a provider key env var (for example `ANTHROPIC_API_KEY`) is stored under the canonical provider service (`anthropic`), which the Models page and runtime read, while an existing env-var-named service keeps receiving writes because config may reference it by exact name
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
@@ -1551,8 +1576,13 @@ Set the API key for each provider you use in `config.yaml`:
 For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
 A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
-All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
+**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`), read only when the plain variable is unset or empty; see [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
+Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
+When a stored value is first imported or changes, MindRoom logs one notice naming the service, the variable that supplied it, and whether it came from the process environment, `.env`, or the process environment overriding `.env`.
+Values are never logged, and unchanged values are neither announced nor rewritten.
+To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env` (for a seed, remove that service's entry from each declaration that lists it), then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Environment sync never overwrites credentials saved through the dashboard (`_source=ui`) or legacy credentials without a source marker.
 
 ### Codex CLI Subscription Auth
 
@@ -1571,7 +1601,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline, except that a certificate verification failure stops startup immediately without retrying (see [Matrix TLS trust](https://docs.mindroom.chat/architecture/matrix/#tls-trust)) | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
@@ -2087,6 +2117,8 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
+To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
 ## Credential Storage Encryption
 
@@ -2174,11 +2206,15 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
+The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png` when present, then the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images, and otherwise the stock `mind-logo` image, which wheel installs (`uvx`) use because they lack bundled files.
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
-Machines without internet access simply get no stock avatar.
+When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
+Agent, team, and root Space avatars are retried the next time MindRoom starts after that window.
+Managed room avatars are only chosen when a room is created, so run `mindroom avatars sync` to fill them in.
+`mindroom avatars sync` also clears recent failures, so it retries immediately and lets the next start retry agent and team avatars.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
-To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
+To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 
 MindRoom can also generate custom avatars for agents, teams, rooms, and the optional root Matrix Space.
 Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.
@@ -3331,6 +3367,12 @@ Changing those later sections does not invalidate the shared instruction prefix;
 The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
 Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
+The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5` and `~anthropic/claude-sonnet-latest`.
+MindRoom sends them as OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching) on message text parts and the last tool definition.
+Other OpenRouter model families, such as OpenAI, DeepSeek, Z.ai, and Gemini, cache implicitly and keep their unmarked request format.
+Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
+Compaction summaries through OpenRouter Claude skip cache writes because their prompts are not reused.
+
 ## OpenAI Responses Prompt Caching
 
 The `openai` Responses API and `codex` providers send shared agent instructions as an initial developer message, followed by a separate developer message containing the current date and session context.
@@ -3341,7 +3383,7 @@ See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guide
 Codex, older models, and custom OpenAI-compatible endpoints receive the same split without the explicit breakpoint field.
 The Codex backend currently rejects that field, so cache reuse there still depends on provider-managed caching; splitting messages alone does not guarantee cross-conversation cache hits.
 Set `extra_kwargs.cache_system_prompt: false` to preserve the original unsplit system message.
-This option applies to Responses models; Chat Completions providers keep their existing request format.
+This option applies to Responses models; Chat Completions providers keep their existing request format, except the OpenRouter Claude routes described above.
 
 ## Configuration Examples
 
@@ -17127,7 +17169,7 @@ memory:
       model: openai/gpt-5.6-luna
 ```
 
-Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to a dashboard credential saved under the env var name (for example `OPENROUTER_API_KEY`).
+Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).
 
 ## Backend: `none`
 
@@ -19581,6 +19623,8 @@ A team's `access` authorizes requests to the team as a whole: a requester the te
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+Each bot syncs on its own, so an agent can receive a new member's first message before the router has applied the join.
+When the answering bot has already seen that sender join a room whose grant covers it, the denial waits up to 15 seconds for the router to catch up instead of dropping the message.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 Inbound invitation policy is independent from responder access.
@@ -20193,6 +20237,14 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
+### TLS Trust
+
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: OpenSSL's default CA file and directory plus certifi's roots.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default location, and setting either one stops MindRoom from adding certifi's roots.
+A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
+Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
+Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+
 ## Agent Users
 
 Each agent, team, and router has its own Matrix user.
@@ -20418,7 +20470,7 @@ matrix_space:
   name: MindRoom       # Display name for the Space
 ```
 
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets, falling back to the stock `mind-logo` image.
 The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
@@ -21281,6 +21333,7 @@ Paths are relative to `src/mindroom/`.
 | Responses reasoning is lost during explicit tool-call replay. | [Issue #9960](https://github.com/agno-agi/agno/issues/9960), [PR #9968](https://github.com/agno-agi/agno/pull/9968), both open. | `agno_compat_openai_responses_items.py`; hosted tool-search output needs separate coverage and tracking. |
 | Unreliable streamed tool-call indexes create malformed or merged calls. | [Issue #8879](https://github.com/agno-agi/agno/issues/8879), [PR #8880](https://github.com/agno-agi/agno/pull/8880), both open. | `agno_compat_openai_chat.py`; local filtering only removes empty slots. |
 | Claude requests include sampling controls rejected in supported modes. | [Issue #9931](https://github.com/agno-agi/agno/issues/9931), [PR #9933](https://github.com/agno-agi/agno/pull/9933), both open. | `agno_compat_claude.py`; check top-level parameters and `extra_body` for the same model generations. |
+| Claude history replays response citations without their required null titles or cited documents. | [PR #10147](https://github.com/agno-agi/agno/pull/10147), open (checked September 27, 2026); restores null document titles only. | `agno_compat_claude.py` drops citations from replayed assistant text blocks; restored titles alone still fail with an invalid document index once the cited document is not replayed. |
 | Vertex Claude tool definitions contain rejected provider-level `strict` fields. | [Issue #6599](https://github.com/agno-agi/agno/issues/6599), open; [PR #6923](https://github.com/agno-agi/agno/pull/6923), closed without merge. | `agno_compat_vertex_claude_tools.py`; preserve schema properties named `strict`. |
 | Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
 | Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC and live-turn catalog paths. |
@@ -21927,6 +21980,8 @@ Watch the 2-minute setup video:
 - A Matrix account that can sign in to `chat.mindroom.chat`
 - At least one AI provider API key, or a local Codex CLI ChatGPT login
 
+Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, and starts in one command; the steps below are the explicit path.
+
 ## 1. Initialize Local Config
 
 ```bash
@@ -21959,6 +22014,10 @@ uvx mindroom run
 On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
+In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+Under a service or the macOS app, it prints the approving account without asking.
 
 Pair code behavior:
 
@@ -22001,6 +22060,11 @@ They can only call provisioning-service endpoints that accept local client crede
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
+That page shows when each paired install was last seen.
+A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
+Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
+The service records these reports with ten-minute resolution.
+If the service rejects the credentials as invalid or revoked, the install logs a warning asking you to run `mindroom connect` again and stops reporting.
 The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
 Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
 Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.
@@ -22036,6 +22100,8 @@ On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https
 It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
 
 Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
+`mindroom connect` refuses to pair a non-mindroom.chat homeserver, including an unset `MATRIX_HOMESERVER` (which defaults to `http://localhost:8008`), unless `MINDROOM_PROVISIONING_URL` is set or `--provisioning-url` is given.
+Without a provisioning service, register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead of pairing.
 
 # Bridges
 
@@ -24329,7 +24395,7 @@ EOF
 
 The authorization header is read from standard input so the token does not appear in curl's process arguments.
 
-Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned, restarted when an inactive subscription stopped it, or re-provisioned when deprovisioned.
 Use the returned `customer_id` with the CLI's `logs <id>` command.
 The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
@@ -24686,7 +24752,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
@@ -24712,6 +24778,34 @@ Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
+
+## Subscription Lifecycle
+
+Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
+Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
+The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
+
+| Subscription state | Instance | Platform OpenRouter key | Data |
+|--------------------|----------|-------------------------|------|
+| `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
+| Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
+| Entitled again while stopped | Started | Re-enabled | Kept |
+| Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
+
+The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
+Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
+A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+Before stopping or resuming a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current status and corrects a stale stored status, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped.
+A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
+A delayed creation event for a Stripe subscription older than the account's current one is ignored.
+Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
+The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
+Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
+Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
+The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 
 ## Deployment Scripts
 
@@ -24768,8 +24862,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  AI agents that live in Matrix and work everywhere via bridges.
 
  Quick start:
- mindroom config init   Create a starter config
- mindroom run           Start the system
+ mindroom run           Set up on first run, pair, and start
+ mindroom config init   Create a starter config without starting
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion            Install completion for the current shell.              │
@@ -24883,6 +24977,15 @@ Show the current MindRoom version.
 
 Start MindRoom with your configuration.
 
+When no config file exists at the selected path and both stdin and stdout are a terminal, `mindroom run` first creates the hosted starter config that `mindroom config init` would create for `mindroom.chat`.
+It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, for the API key with hidden input.
+Pressing Enter skips the key; connect the provider later through the dashboard's provider setup, or add the key to the `.env` next to `config.yaml` and restart `mindroom run`.
+It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
+`.env` is read only at startup, so settings added there after setup take effect when `mindroom run` restarts.
+The same process then pairs with MindRoom Chat and starts.
+Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
+An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -24901,6 +25004,7 @@ Start MindRoom with your configuration.
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
+ - Creates a hosted starter config on first run in a terminal
  - Pairs hosted installs with your MindRoom Chat account on first run
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
@@ -25743,6 +25847,9 @@ Use `--no-confirm` for non-interactive setup.
 
 Show MindRoom service status and recent logs.
 
+While the running service still waits for pairing, the status adds a `pairing: required` line.
+This decision uses the config and storage paths saved in the installed service, so it reflects the service even when you run the command from another config directory.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -25813,6 +25920,7 @@ Runs a series of checks in one pass:
 - **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
+- **Pairing** — on hosted installs, reports whether this machine is paired with MindRoom Chat; before the first run it passes with a `Not paired yet` line instead of warning, because `mindroom run` pairs automatically
 - **Storage** — confirms the storage directory is writable
 - **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
@@ -25901,6 +26009,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 ### config init
 
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
+For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so `config init` is the explicit path for choosing presets up front, self-hosted Matrix, or creating files without starting.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
 Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
@@ -26149,7 +26258,32 @@ Open the link or scan the QR code while signed in to MindRoom Chat and approve t
 Add `--open-browser` to open the approval link in your default browser.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+The 10-minute limit also applies while the provisioning service is unreachable, with one extra minute of grace for an approval made just before expiry.
+When the service rate-limits polling, for example because several machines share one public address, `connect` and `run` wait longer between polls, up to 30 seconds.
 You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
+
+After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
+Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
+Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
+If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+
+If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
+`connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
+You can revoke the unused entry in MindRoom Chat → Settings → Local MindRoom.
+
+Pairing is only for hosted mindroom.chat or your own provisioning service.
+When no provisioning URL is configured and the effective homeserver is not mindroom.chat, `connect` refuses without contacting anything or writing files.
+This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+Self-hosted servers register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead.
+Pass `--provisioning-url` to pair with your own provisioning service anyway.
+
+If this machine is already connected, pairing again creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
+In a terminal, `connect` asks before pairing again.
+Without a terminal, it does not pair and exits with code `3`, so scripts and the macOS app can tell this apart from a failure (exit code `1`).
+Add `--force` to pair again without asking.
 
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 

@@ -1,28 +1,18 @@
 """
-Cleanup tasks for GDPR compliance and data retention.
-KISS principle - simple scheduled cleanup jobs.
+Nightly cleanup job: data retention, GDPR hard deletes, and the hosted instance lifecycle.
+Each task runs independently, and every run is recorded in `cleanup_runs` for the admin portal.
 """
 
+from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 import logging
+from typing import Any
 
 from backend.deps import ensure_supabase
-from backend.entitlements import is_expired_trial, is_subscription_service_active
-from backend.k8s import run_kubectl, tenant_stop_deployment_refs
-from backend.services.instances_data import update_instance
+from backend.services.instance_lifecycle import reconcile_all_subscriptions
 
 logger = logging.getLogger(__name__)
-RUNNING_INSTANCE_STATUSES = ["running", "provisioning", "restarting"]
-
-
-async def _stop_tenant_deployments(instance_id: str | int) -> str | None:
-    """Scale every deployment for a tenant to zero and return an error message on failure."""
-    for deployment_ref in tenant_stop_deployment_refs(instance_id):
-        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace="mindroom-instances")
-        if code != 0:
-            message = (err or out).strip()
-            return message or f"kubectl scale failed for {deployment_ref}"
-    return None
 
 
 def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
@@ -107,72 +97,47 @@ def cleanup_old_usage_metrics(retention_days: int = 365) -> dict:
     }
 
 
-async def cleanup_unentitled_instances() -> dict:
+async def run_cleanup_job() -> dict[str, Any]:
+    """Run every nightly task independently and record the run.
+
+    One failing task never skips the others; its error is kept in the summary and marks the run failed.
     """
-    Stop hosted instances whose subscription no longer allows infrastructure.
-    Expired trials are marked paused so they do not get processed repeatedly.
-    """
-    sb = ensure_supabase()
-    now = datetime.now(UTC)
-    now_iso = now.isoformat()
-    sub_result = sb.table("subscriptions").select("id,tier,status,trial_ends_at").execute()
-
-    instances_stopped = 0
-    subscriptions_paused = 0
-    errors = 0
-
-    for subscription in sub_result.data or []:
-        if is_subscription_service_active(subscription, now=now):
-            continue
-
-        instance_result = (
-            sb.table("instances")
-            .select("instance_id,status")
-            .eq("subscription_id", subscription["id"])
-            .in_("status", RUNNING_INSTANCE_STATUSES)
-            .execute()
-        )
-
-        for instance in instance_result.data or []:
-            instance_id = instance["instance_id"]
-            error = await _stop_tenant_deployments(instance_id)
-            if not error:
-                update_instance(sb, instance_id, {"status": "stopped", "updated_at": now_iso})
-                instances_stopped += 1
-                logger.info("Stopped instance %s because subscription %s is inactive", instance_id, subscription["id"])
-            else:
-                errors += 1
-                logger.warning(
-                    "Failed to stop instance %s for inactive subscription %s: %s",
-                    instance_id,
-                    subscription["id"],
-                    error,
-                )
-
-        if is_expired_trial(subscription, now=now):
-            sb.table("subscriptions").update({"status": "paused", "updated_at": now_iso}).eq(
-                "id", subscription["id"]
-            ).execute()
-            subscriptions_paused += 1
-
-    return {
-        "instances_stopped": instances_stopped,
-        "subscriptions_paused": subscriptions_paused,
-        "errors": errors,
-        "timestamp": now_iso,
+    started_at = datetime.now(UTC)
+    summary: dict[str, Any] = {}
+    ok = True
+    retention_tasks: dict[str, Callable[[], dict]] = {
+        "accounts": cleanup_soft_deleted_accounts,
+        "audit_logs": cleanup_old_audit_logs,
+        "usage_metrics": cleanup_old_usage_metrics,
     }
+    for name, task in retention_tasks.items():
+        try:
+            summary[name] = task()
+        except Exception as exc:
+            logger.exception("Cleanup task %s failed", name)
+            summary[name] = {"error": str(exc)}
+            ok = False
 
+    try:
+        lifecycle = await reconcile_all_subscriptions()
+        summary["instance_lifecycle"] = asdict(lifecycle)
+        ok = ok and not lifecycle.errors
+    except Exception as exc:
+        logger.exception("Instance lifecycle reconcile failed")
+        summary["instance_lifecycle"] = {"error": str(exc)}
+        ok = False
 
-def run_all_cleanup_tasks() -> dict:
-    """
-    Run all cleanup tasks.
-    This should be scheduled to run daily via cron/scheduler.
-    """
-    return {
-        "accounts": cleanup_soft_deleted_accounts(),
-        "audit_logs": cleanup_old_audit_logs(),
-        "usage_metrics": cleanup_old_usage_metrics(),
+    run = {
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "ok": ok,
+        "summary": summary,
     }
+    try:
+        ensure_supabase().table("cleanup_runs").insert(run).execute()
+    except Exception:
+        logger.exception("Failed to record cleanup run")
+    return run
 
 
 if __name__ == "__main__":
@@ -180,6 +145,4 @@ if __name__ == "__main__":
     import asyncio
     import json
 
-    results = run_all_cleanup_tasks()
-    results["subscription_lifecycle"] = asyncio.run(cleanup_unentitled_instances())
-    print(json.dumps(results, indent=2))
+    print(json.dumps(asyncio.run(run_cleanup_job()), indent=2))

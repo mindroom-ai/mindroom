@@ -37,6 +37,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
+from mindroom.openrouter_prompt_cache import openrouter_prompt_cache_control, with_prompt_cache_ladder
 from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.tools.function import Function
+    from openai import AsyncOpenAI as AsyncOpenAIClient
+    from openai import OpenAI as OpenAIClient
     from openai.types.responses import Response
     from pydantic import BaseModel
 
@@ -123,7 +126,32 @@ class MindRoomOpenAILike(OpenAIChatProviderCompat, OpenAILike):
 
 @dataclass
 class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
-    """OpenRouter model that can replay tool calls from other providers."""
+    """OpenRouter model with cross-provider tool replay and Claude prompt caching.
+
+    ``cache_system_prompt`` and ``extended_cache_time`` mirror the direct Claude
+    providers' settings and only affect model IDs that route to Anthropic.
+    """
+
+    cache_system_prompt: bool = True
+    extended_cache_time: bool = True
+
+    def _prompt_cache_control(self) -> dict[str, str] | None:
+        return openrouter_prompt_cache_control(
+            self.id,
+            cache_system_prompt=self.cache_system_prompt,
+            extended_cache_time=self.extended_cache_time,
+        )
+
+    def get_client(self) -> OpenAIClient:
+        """Route chat completions through the Anthropic-routed prompt-cache ladder."""
+        return cast("OpenAIClient", with_prompt_cache_ladder(super().get_client(), self._prompt_cache_control))
+
+    def get_async_client(self) -> AsyncOpenAIClient:
+        """Route async chat completions through the Anthropic-routed prompt-cache ladder."""
+        return cast(
+            "AsyncOpenAIClient",
+            with_prompt_cache_ladder(super().get_async_client(), self._prompt_cache_control),
+        )
 
 
 @dataclass

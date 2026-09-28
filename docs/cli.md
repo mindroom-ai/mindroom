@@ -32,8 +32,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  AI agents that live in Matrix and work everywhere via bridges.
 
  Quick start:
- mindroom config init   Create a starter config
- mindroom run           Start the system
+ mindroom run           Set up on first run, pair, and start
+ mindroom config init   Create a starter config without starting
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion            Install completion for the current shell.              │
@@ -147,6 +147,15 @@ Show the current MindRoom version.
 
 Start MindRoom with your configuration.
 
+When no config file exists at the selected path and both stdin and stdout are a terminal, `mindroom run` first creates the hosted starter config that `mindroom config init` would create for `mindroom.chat`.
+It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, for the API key with hidden input.
+Pressing Enter skips the key; connect the provider later through the dashboard's provider setup, or add the key to the `.env` next to `config.yaml` and restart `mindroom run`.
+It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
+`.env` is read only at startup, so settings added there after setup take effect when `mindroom run` restarts.
+The same process then pairs with MindRoom Chat and starts.
+Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
+An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -165,6 +174,7 @@ Start MindRoom with your configuration.
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
+ - Creates a hosted starter config on first run in a terminal
  - Pairs hosted installs with your MindRoom Chat account on first run
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
@@ -1007,6 +1017,9 @@ Use `--no-confirm` for non-interactive setup.
 
 Show MindRoom service status and recent logs.
 
+While the running service still waits for pairing, the status adds a `pairing: required` line.
+This decision uses the config and storage paths saved in the installed service, so it reflects the service even when you run the command from another config directory.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -1077,6 +1090,7 @@ Runs a series of checks in one pass:
 - **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
+- **Pairing** — on hosted installs, reports whether this machine is paired with MindRoom Chat; before the first run it passes with a `Not paired yet` line instead of warning, because `mindroom run` pairs automatically
 - **Storage** — confirms the storage directory is writable
 - **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
@@ -1165,6 +1179,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 ### config init
 
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
+For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so `config init` is the explicit path for choosing presets up front, self-hosted Matrix, or creating files without starting.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
 Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
@@ -1413,7 +1428,32 @@ Open the link or scan the QR code while signed in to MindRoom Chat and approve t
 Add `--open-browser` to open the approval link in your default browser.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+The 10-minute limit also applies while the provisioning service is unreachable, with one extra minute of grace for an approval made just before expiry.
+When the service rate-limits polling, for example because several machines share one public address, `connect` and `run` wait longer between polls, up to 30 seconds.
 You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
+
+After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
+Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
+Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
+If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+
+If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
+`connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
+You can revoke the unused entry in MindRoom Chat → Settings → Local MindRoom.
+
+Pairing is only for hosted mindroom.chat or your own provisioning service.
+When no provisioning URL is configured and the effective homeserver is not mindroom.chat, `connect` refuses without contacting anything or writing files.
+This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+Self-hosted servers register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead.
+Pass `--provisioning-url` to pair with your own provisioning service anyway.
+
+If this machine is already connected, pairing again creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
+In a terminal, `connect` asks before pairing again.
+Without a terminal, it does not pair and exits with code `3`, so scripts and the macOS app can tell this apart from a failure (exit code `1`).
+Add `--force` to pair again without asking.
 
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 

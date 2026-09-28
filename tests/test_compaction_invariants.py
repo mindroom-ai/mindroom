@@ -69,6 +69,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.openai_models import MindRoomOpenRouter
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
@@ -604,6 +605,15 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
     assert model.max_tokens == 8192
     assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "timeout": httpx.Timeout(600.0)}
+
+
+def test_configure_summary_model_disables_openrouter_claude_cache_writes() -> None:
+    model = MindRoomOpenRouter(id="anthropic/claude-sonnet-5", api_key="test-key", max_retries=2)
+
+    configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
+
+    assert model.cache_system_prompt is False
+    assert model.max_retries == 0
 
 
 def test_effective_summary_timeout_resolves_every_provider_timeout_shape() -> None:

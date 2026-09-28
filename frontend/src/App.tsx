@@ -22,6 +22,7 @@ import { Skills } from "@/components/Skills/Skills";
 import { Settings } from "@/components/Settings/Settings";
 import { Schedules } from "@/components/Schedules/Schedules";
 import { Credentials } from "@/components/Credentials/Credentials";
+import { ProviderSetupBanner } from "@/components/ProviderSetup/ProviderSetup";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/toaster";
@@ -98,6 +99,7 @@ function AppContent() {
     diagnostics,
     configUsesIncludes,
     configJournalPendingRestart,
+    committedGeneration,
     isLoading,
     isDirty,
     selectedAgentId,
@@ -416,6 +418,14 @@ function AppContent() {
             run <code>mindroom journal adopt</code> first if the move is
             deliberate.
           </div>
+        )}
+
+        {config != null && (
+          // Refetch on navigation and config commits so keys added on the
+          // Models or Credentials pages clear the banner.
+          <ProviderSetupBanner
+            refreshKey={`${committedGeneration ?? "none"}:${currentTab}`}
+          />
         )}
 
         {visibleGlobalDiagnostics.map((diagnostic, index) => (

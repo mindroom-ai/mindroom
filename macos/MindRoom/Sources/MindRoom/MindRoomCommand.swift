@@ -12,10 +12,15 @@ enum MindRoomCommand: Equatable {
     case initializeHostedConfig
     case initializeSelfHostedConfig
     case pairHosted
+    case reconnectHosted
     case openDashboard
     case openHostedChat
     case openConfigFolder
     case openLogsFolder
+
+    /// Exit code of `mindroom connect` when this Mac is already connected and pairing was not forced.
+    /// Matches `_CONNECT_ALREADY_CONNECTED_EXIT_CODE` in src/mindroom/cli/main.py.
+    static let alreadyConnectedExitCode: Int32 = 3
 
     var title: String {
         switch self {
@@ -41,6 +46,8 @@ enum MindRoomCommand: Equatable {
             return "Prepare Self-Hosted Configuration"
         case .pairHosted:
             return "Pair Chat Account"
+        case .reconnectHosted:
+            return "Reconnect Chat Account"
         case .openDashboard:
             return "Open Dashboard"
         case .openHostedChat:
@@ -72,6 +79,8 @@ enum MindRoomCommand: Equatable {
             return "Configuration is ready. Edit your configuration and .env for your Matrix server and model provider, then install and start agents."
         case .pairHosted:
             return "The chat account was paired. Configure an AI provider, then install and start agents."
+        case .reconnectHosted:
+            return "The chat account was paired again. Existing agents keep working; new agents get the new namespace."
         case .checkSetup:
             return "The setup check finished. Review the Check summary before continuing to Start."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
@@ -103,6 +112,8 @@ enum MindRoomCommand: Equatable {
             return .initializeSelfHostedConfig
         case .pairHosted:
             return .pairHosted
+        case .reconnectHosted:
+            return .reconnectHosted
         case .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }

@@ -50,6 +50,12 @@ struct LocalAgentsView: View {
             if result?.setupCheckPassed == true { show(.start) }
         }
         .onChange(of: runner.runningCommandTitle) { _, _ in scrollToTop() }
+        .alert("This Mac is already connected", isPresented: $runner.needsReconnectConfirmation) {
+            Button("Pair Again") { runner.run(.reconnectHosted) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Pairing again creates a new connection and a new agent namespace. Existing agents keep working; new agents get the new namespace.")
+        }
     }
 
     private var summary: some View {

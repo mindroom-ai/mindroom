@@ -34,6 +34,30 @@ browser-initiated flow (``/v1/local-mindroom/pair/start``,
 ``/v1/local-mindroom/pair/status``, ``/v1/local-mindroom/pair/complete``) is
 kept for one release to allow existing chat clients to migrate.
 
+Rate limits: every request that the service must resolve through the
+homeserver (OpenID userinfo, or whoami for legacy access tokens) first counts
+against a per-client-address limit of 300 per minute, so invalid tokens cannot
+make the service flood the homeserver while many users behind one NAT still
+reach their per-user limits, which apply after verification. Polls for a
+known device secret are limited to 30 per minute per secret, so one client
+cannot starve the others; unknown secrets get no per-secret state. All device
+polls then count against 300 per minute per client address, leaving room for
+many CLIs behind one NAT. The service refuses to start with a
+MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS short enough for the per-secret
+limit to throttle clients that follow it.
+
+Retention: pair sessions that expired or were claimed stay one more code
+lifetime after expiry or completion, so old codes and replayed polls still
+report expired or already claimed, and are then pruned. Connections are never
+pruned.
+
+Last seen: paired installs authenticate with their client credentials. Agent
+registration, Google OAuth client fetches, and
+``/v1/local-mindroom/heartbeat`` all refresh the connection's ``last_seen_at``,
+which the chat client shows for each install. Running installs send a heartbeat
+at startup and every few hours; the service records heartbeats at most once per
+connection every ten minutes so it does not rewrite the state file on every call.
+
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
 ``mindroom_<entity>_<namespace>``. The operator's own installs are the
@@ -99,12 +123,22 @@ NAMESPACE_LENGTH = 8
 MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
 MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
 # The local MindRoom client (src/mindroom/matrix/provisioning.py) classifies
-# register-agent errors by these exact strings; a contract test keeps the two sides in sync.
+# register-agent and heartbeat errors by these exact strings; a contract test keeps the two sides in sync.
 CONNECTION_REVOKED_DETAIL = "Connection revoked"
 NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
-# The CLI only shows this detail; it does not classify device poll errors by string.
+# `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
+HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+# Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
+# It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
+HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
+# Many CLIs polling every few seconds may share one NAT address; each device secret is limited separately.
+DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE = 300
+DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE = 30
+# The rate-limit window includes both ends, so a client polling exactly every 60 / limit seconds sends one poll
+# too many per window; the advertised interval must be strictly longer to stay within the per-device limit.
+MIN_PAIR_POLL_INTERVAL_SECONDS = 60 // DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE + 1
 
 
 @dataclass(slots=True)
@@ -249,6 +283,12 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+
+
+class HeartbeatResponse(BaseModel):
+    """Acknowledgement of a local install heartbeat."""
+
+    status: Literal["ok"]
 
 
 class GoogleOAuthClientResponse(BaseModel):
@@ -418,7 +458,7 @@ def _load_service_config_from_env() -> ServiceConfig:
     poll_interval = _env_int(
         "MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS",
         default=DEFAULT_PAIR_POLL_INTERVAL_SECONDS,
-        minimum=1,
+        minimum=MIN_PAIR_POLL_INTERVAL_SECONDS,
     )
 
     raw_origins = os.getenv("MINDROOM_PROVISIONING_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
@@ -648,20 +688,28 @@ def _expire_if_needed(session: PairSession, now: datetime) -> None:
 
 
 def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_code_ttl_seconds: int) -> None:
-    """Remove sessions expired for longer than one more code lifetime to prevent unbounded growth.
+    """Remove finished sessions after one more code lifetime to prevent unbounded growth.
 
-    Recently expired sessions stay so that an old code or poll still reports
-    "expired" (410 / ``status="expired"``) instead of "not found" after the
-    CLI renews its code.
+    Expired sessions stay one code lifetime past expiry so that an old code or
+    poll still reports "expired" (410 / ``status="expired"``) instead of "not
+    found" after the CLI renews its code. Connected sessions stay one code
+    lifetime past completion so a replayed poll still reports 410. Connections
+    themselves are never pruned.
     """
     retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
-    expired_ids = []
+    finished_ids = []
     for session_id, session in state.pair_sessions.items():
         _expire_if_needed(session, now)
-        if session.status == "expired" and session.expires_at <= retain_after:
-            expired_ids.append(session_id)
+        if session.status == "expired":
+            finished_at = session.expires_at
+        elif session.status == "connected":
+            finished_at = session.completed_at or session.expires_at
+        else:
+            continue
+        if finished_at <= retain_after:
+            finished_ids.append(session_id)
 
-    for session_id in expired_ids:
+    for session_id in finished_ids:
         session = state.pair_sessions.pop(session_id)
         state.pair_session_by_hash.pop(session.pair_code_hash, None)
         if session.device_secret_hash is not None:
@@ -844,6 +892,19 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
+async def _limit_homeserver_token_lookup(request: Request) -> None:
+    """Bound homeserver lookups per client address so invalid tokens cannot amplify traffic."""
+    state = _runtime_state_from_request(request)
+    remote = request.client.host if request.client else "unknown"
+    async with state.lock:
+        _enforce_rate_limit_unlocked(
+            state,
+            key=f"auth:homeserver-lookup:{remote}",
+            limit=HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE,
+            window_seconds=60,
+        )
+
+
 async def _verify_openid_user(
     request: Request,
     x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
@@ -851,6 +912,7 @@ async def _verify_openid_user(
     token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
     if not token:
         raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    await _limit_homeserver_token_lookup(request)
     return await _matrix_openid_userinfo(_service_config_from_request(request), token)
 
 
@@ -873,6 +935,7 @@ async def _verify_browser_user(
         token = x_matrix_access_token.strip()
     if not token:
         raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    await _limit_homeserver_token_lookup(request)
     return await _matrix_whoami(_service_config_from_request(request), token)
 
 
@@ -1142,10 +1205,25 @@ async def poll_device_pair(
     """Report device pairing progress and hand out credentials once after approval."""
     now = _now_utc()
     remote = request.client.host if request.client else "unknown"
+    device_secret_hash = _hash_token(payload.device_secret)
     async with state.lock:
-        _enforce_rate_limit_unlocked(state, key=f"pair:device:poll:{remote}", limit=60, window_seconds=60)
-        session_id = state.pair_session_by_device_secret_hash.get(_hash_token(payload.device_secret))
+        session_id = state.pair_session_by_device_secret_hash.get(device_secret_hash)
         session = state.pair_sessions.get(session_id) if session_id else None
+        # Known devices are limited first so polls this rejects do not use up the address budget shared behind a NAT.
+        # Unknown secrets get no bucket of their own, so random secrets cannot grow the rate-limit state.
+        if session is not None:
+            _enforce_rate_limit_unlocked(
+                state,
+                key=f"pair:device:poll:secret:{device_secret_hash}",
+                limit=DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+                window_seconds=60,
+            )
+        _enforce_rate_limit_unlocked(
+            state,
+            key=f"pair:device:poll:{remote}",
+            limit=DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE,
+            window_seconds=60,
+        )
         if session is None:
             raise HTTPException(status_code=404, detail="Pair session not found")
         _expire_if_needed(session, now)
@@ -1252,6 +1330,24 @@ async def register_agent(
         _persist_state_unlocked(state, config.state_path)
 
     return await _register_agent_with_matrix(config, payload)
+
+
+@router.post("/v1/local-mindroom/heartbeat", response_model=HeartbeatResponse)
+async def heartbeat(
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
+    x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
+) -> HeartbeatResponse:
+    """Record that an authenticated local client is still running."""
+    now = _now_utc()
+    async with state.lock:
+        connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
+        _enforce_rate_limit_unlocked(state, key=f"heartbeat:{connection.id}", limit=10, window_seconds=60)
+        if now - connection.last_seen_at >= HEARTBEAT_LAST_SEEN_RESOLUTION:
+            connection.last_seen_at = now
+            _persist_state_unlocked(state, config.state_path)
+    return HeartbeatResponse(status="ok")
 
 
 @router.get("/v1/local-mindroom/oauth/google-client", response_model=GoogleOAuthClientResponse)

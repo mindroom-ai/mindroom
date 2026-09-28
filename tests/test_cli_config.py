@@ -28,8 +28,15 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
-from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
+from mindroom.cli.main import (
+    _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
+    _load_active_config_or_exit,
+    _terminal_is_interactive,
+    _threads_export,
+    app,
+)
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
@@ -44,9 +51,11 @@ from mindroom.model_defaults import (
     OPENAI_GPT_TERRA,
     llama_cpp_server_command,
 )
+from mindroom.model_loading import missing_model_api_key_provider
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
 
 if TYPE_CHECKING:
@@ -1967,6 +1976,306 @@ class TestConfigPath:
 
 
 # ---------------------------------------------------------------------------
+# run command first-run setup
+# ---------------------------------------------------------------------------
+
+
+class TestRunFirstRunSetup:
+    """`mindroom run` in a terminal creates a hosted starter config, pairs, and starts in one command."""
+
+    @pytest.fixture(autouse=True)
+    def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: True)
+        for name in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "MATRIX_HOMESERVER",
+            "MATRIX_REGISTRATION_TOKEN",
+            "MINDROOM_PROVISIONING_URL",
+            "MINDROOM_LOCAL_CLIENT_ID",
+            "MINDROOM_LOCAL_CLIENT_SECRET",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    @staticmethod
+    def _invoke_run(
+        config_path: Path,
+        answers: str,
+        *,
+        env: dict[str, str] | None = None,
+        args: tuple[str, ...] = (),
+    ) -> tuple[object, list[constants_module.RuntimePaths], list[constants_module.RuntimePaths]]:
+        paired: list[constants_module.RuntimePaths] = []
+        started: list[constants_module.RuntimePaths] = []
+
+        def fake_pair(runtime_paths: constants_module.RuntimePaths, **_kwargs: object) -> None:
+            paired.append(runtime_paths)
+
+        async def fake_run(*, config_path: Path | None, storage_path: Path | None, **_kwargs: object) -> None:
+            started.append(activate_cli_runtime(config_path, storage_path=storage_path))
+
+        with (
+            patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
+            patch("mindroom.cli.main._run", side_effect=fake_run),
+        ):
+            result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)
+        return result, paired, started
+
+    def test_prompts_writes_hosted_config_with_hidden_key_then_pairs_and_starts(self, tmp_path: Path) -> None:
+        """A new user answers the provider and key prompts, and the same process pairs and starts."""
+        config_path = tmp_path / "home" / "config.yaml"
+        env_path = config_path.parent / ".env"
+        typed_key = "sk-first-run-dummy-123"
+
+        result, paired, started = self._invoke_run(config_path, f"openai\n{typed_key}\n")
+
+        assert result.exit_code == 0, result.output
+        assert "No MindRoom config found" in result.output
+        assert "Choose provider preset" in result.output
+        assert "API key" in result.output
+        assert typed_key not in result.output
+        assert config_path.is_file()
+        assert "provider: openai" in config_path.read_text(encoding="utf-8")
+        env_content = env_path.read_text(encoding="utf-8")
+        assert f"OPENAI_API_KEY={typed_key}\n" in env_content
+        assert "your-openai-key-here" not in env_content
+        assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
+        assert env_path.stat().st_mode & 0o777 == 0o600
+        assert "Missing environment variables" not in result.output
+        # Pairing and startup both see the files written by first-run setup.
+        assert len(paired) == 1
+        assert paired[0].config_path == config_path.resolve()
+        assert paired[0].env_value("MINDROOM_PROVISIONING_URL") == "https://mindroom.chat"
+        assert len(started) == 1
+        assert started[0].env_value("OPENAI_API_KEY") == typed_key
+
+    def test_skipped_key_leaves_placeholder_and_says_where_to_add_it(self, tmp_path: Path) -> None:
+        """Pressing Enter writes the `config init` placeholder, which counts as unset, and points to the dashboard and `.env`."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+
+        result, paired, started = self._invoke_run(config_path, "anthropic\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert "ANTHROPIC_API_KEY=your-anthropic-key-here\n" in env_path.read_text(encoding="utf-8")
+        output = normalize_console_output(result.output)
+        assert "Skipped" in output
+        assert "Missing environment variables" not in output
+        assert "ANTHROPIC_API_KEY" in output
+        assert str(env_path.resolve()) in output
+        assert "dashboard" in output
+        assert "restart `mindroom run`" in output
+        assert len(paired) == 1
+        assert len(started) == 1
+        assert get_secret_from_env("ANTHROPIC_API_KEY", started[0]) is None
+
+    @pytest.mark.parametrize(
+        ("preset", "hint", "needs_restart"),
+        [
+            ("azure", "Azure OpenAI key and endpoint", True),
+            ("bedrock_claude", "AWS Bedrock region", True),
+            ("vertexai_claude", "Vertex AI project", True),
+            ("codex", "codex login", False),
+            ("kimi", "/login", False),
+            ("ollama", f"ollama pull {OLLAMA_GEMMA}", False),
+            ("llama_cpp", "llama.cpp server", False),
+        ],
+    )
+    def test_provider_without_key_shows_setup_hint_instead_of_key_prompt(
+        self,
+        tmp_path: Path,
+        preset: str,
+        hint: str,
+        needs_restart: bool,
+    ) -> None:
+        """Providers without one API key skip the prompt, and the hint holds while startup continues."""
+        config_path = tmp_path / "config.yaml"
+
+        result, paired, started = self._invoke_run(config_path, f"{preset}\n")
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "API key" not in output
+        assert hint in output
+        assert "before starting" not in output
+        assert ("restart `mindroom run`" in output) is needs_restart
+        assert len(paired) == 1
+        assert len(started) == 1
+
+    def test_key_already_in_environment_is_not_prompted(self, tmp_path: Path) -> None:
+        """An exported provider key is used as is; the new `.env` placeholder cannot shadow it."""
+        config_path = tmp_path / "config.yaml"
+
+        result, _paired, started = self._invoke_run(config_path, "openai\n", env={"OPENAI_API_KEY": "sk-exported"})
+
+        assert result.exit_code == 0, result.output
+        assert "API key (" not in result.output
+        assert "OPENAI_API_KEY=your-openai-key-here\n" in (tmp_path / ".env").read_text(encoding="utf-8")
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-exported"
+
+    def test_key_is_added_to_env_file_created_by_connect(self, tmp_path: Path) -> None:
+        """A `.env` from an earlier `mindroom connect` keeps its values and gains the key and hosted defaults."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=client\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n", encoding="utf-8")
+
+        result, paired, started = self._invoke_run(config_path, "openrouter\nsk-or-key\n")
+
+        assert result.exit_code == 0, result.output
+        env_content = env_path.read_text(encoding="utf-8")
+        assert "MINDROOM_LOCAL_CLIENT_ID=client\n" in env_content
+        assert "OPENROUTER_API_KEY=sk-or-key\n" in env_content
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert paired == []
+        assert started[0].env_value("OPENROUTER_API_KEY") == "sk-or-key"
+
+    def test_existing_config_starts_without_prompts(self, tmp_path: Path) -> None:
+        """An existing config goes straight to startup even in a terminal."""
+        config_path = tmp_path / "config.yaml"
+        original = "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "")
+
+        assert result.exit_code == 0, result.output
+        assert "Choose provider preset" not in result.output
+        assert "No MindRoom config found" not in result.output
+        assert config_path.read_text(encoding="utf-8") == original
+        assert len(started) == 1
+
+    def test_storage_path_option_seeds_the_selected_storage(self, tmp_path: Path) -> None:
+        """`run --storage-path` puts the Mind workspace and `.env` storage root under the chosen directory."""
+        config_path = tmp_path / "config.yaml"
+        storage = tmp_path / "chosen-storage"
+
+        result, _paired, started = self._invoke_run(config_path, "codex\n", args=("--storage-path", str(storage)))
+
+        assert result.exit_code == 0, result.output
+        env_content = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert f"MINDROOM_STORAGE_PATH={storage.resolve()}\n" in env_content
+        assert agent_workspace_root_path(storage.resolve(), "mind").is_dir()
+        assert not (tmp_path / "mindroom_data").exists()
+        assert started[0].storage_root == storage.resolve()
+
+    def test_env_write_failure_leaves_no_config_behind(self, tmp_path: Path) -> None:
+        """A `.env` that cannot be written fails setup before `config.yaml` exists, so the next run asks again."""
+        config_path = tmp_path / "config.yaml"
+        real_env = tmp_path / "elsewhere.env"
+        real_env.write_text("", encoding="utf-8")
+        (tmp_path / ".env").symlink_to(real_env)
+
+        result, paired, started = self._invoke_run(config_path, "openai\nsk-typed\n")
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Refusing to write env file through a symlink" in normalize_console_output(result.output)
+        assert "sk-typed" not in result.output
+        assert not config_path.exists()
+        assert real_env.read_text(encoding="utf-8") == ""
+        assert paired == []
+        assert started == []
+
+    def test_template_placeholder_key_is_prompted_and_replaced(self, tmp_path: Path) -> None:
+        """A leftover `.env` placeholder is not a key: first-run asks and replaces it."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\nsk-real\n")
+
+        assert result.exit_code == 0, result.output
+        assert "OpenAI API key" in result.output
+        env_content = env_path.read_text(encoding="utf-8")
+        assert "OPENAI_API_KEY=sk-real\n" in env_content
+        assert "your-openai-key-here" not in env_content
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-real"
+
+    @pytest.mark.parametrize("exported", ["", "your-openai-key-here"])
+    def test_typed_key_wins_over_exported_empty_or_placeholder_value(self, tmp_path: Path, exported: str) -> None:
+        """An exported value that counts as unset cannot shadow the key typed at the prompt for this run."""
+        config_path = tmp_path / "config.yaml"
+
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "openai\nsk-typed\n",
+            env={"OPENAI_API_KEY": exported},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "OpenAI API key" in result.output
+        assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+
+    def test_skipped_key_leaves_template_placeholder_unset(self, tmp_path: Path) -> None:
+        """A skipped key leaves a leftover placeholder in `.env`, and it still never counts as a configured key."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=your-openai-key-here # replace this\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert "OpenAI API key" in result.output
+        assert "Skipped" in result.output
+        assert "OPENAI_API_KEY=your-openai-key-here # replace this\n" in env_path.read_text(encoding="utf-8")
+        # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
+        sync_env_to_credentials(started[0])
+        config = load_config_yaml(config_path)
+        assert missing_model_api_key_provider(config, started[0], "default") == "openai"
+
+    def test_typed_key_replaces_every_existing_assignment(self, tmp_path: Path) -> None:
+        """Duplicate assignments in an existing `.env` cannot override the typed key, since dotenv reads the last one."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=\nOPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\nsk-typed\n")
+
+        assert result.exit_code == 0, result.output
+        assert re.findall(r"^OPENAI_API_KEY=.*$", env_path.read_text(encoding="utf-8"), re.MULTILINE) == [
+            "OPENAI_API_KEY=sk-typed",
+        ]
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+
+    def test_real_env_file_key_is_used_without_prompt(self, tmp_path: Path) -> None:
+        """A real key already in `.env` is used without a prompt and left unchanged."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-real\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Using OPENAI_API_KEY from your environment." in result.output
+        assert "OPENAI_API_KEY=sk-real\n" in env_path.read_text(encoding="utf-8")
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-real"
+
+    def test_template_placeholder_key_is_reported_missing_at_startup(self, tmp_path: Path) -> None:
+        """An unedited `config init` placeholder counts as a missing key in the startup check."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "agents: {}\nmodels:\n  default:\n    provider: openai\n    id: gpt-6-astra\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "")
+
+        assert result.exit_code == 0, result.output
+        assert "openai: Set OPENAI_API_KEY" in normalize_console_output(result.output)
+        assert len(started) == 1
+
+
+def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Services and piped runs never prompt, even when only one stream is a terminal."""
+    for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
+        monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
+        assert _terminal_is_interactive() is expected
+
+
+# ---------------------------------------------------------------------------
 # run command error handling
 # ---------------------------------------------------------------------------
 
@@ -1985,6 +2294,12 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
+        assert (
+            "In an interactive terminal: create a hosted starter config, pair, and start"
+            in normalize_console_output(
+                result.output,
+            )
+        )
         provider_guidance = (
             "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
         )
@@ -2765,8 +3080,9 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert len(status_messages) == 7
+        assert len(status_messages) == 8
         assert any("Matrix homeserver" in msg for msg in status_messages)
+        assert any("pairing" in msg for msg in status_messages)
         assert any("memory config" in msg for msg in status_messages)
         assert any("encryption stores" in msg for msg in status_messages)
 
@@ -3522,7 +3838,8 @@ class TestConnect:
         assert result.exit_code == 0
         assert "https://chat.example/connect?code=ABCD-EFGH" in result.output
         assert "ABCD-EFGH" in result.output
-        assert "Connected as @alice:mindroom.chat" in result.output
+        assert "Approved by @alice:mindroom.chat." in result.output
+        assert "Connected." in result.output
         env_content = (tmp_path / ".env").read_text()
         assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
@@ -3927,26 +4244,60 @@ class TestConnect:
         assert "Approval timed out" in result.output
         assert "Run the command again to get a new link" in result.output
 
-    def test_connect_warns_before_repairing_a_connected_machine(
+    def test_connect_refuses_to_repair_a_connected_machine_without_a_terminal(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Non-interactive callers such as the macOS app are warned but not prompted."""
+        """Non-interactive callers such as the macOS app need --force; nothing is contacted otherwise."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        env_path = tmp_path / ".env"
+        env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
+        posts: list[str] = []
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda url, **_kw: posts.append(url))
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == _CONNECT_ALREADY_CONNECTED_EXIT_CODE == 3
+        output = normalize_console_output(result.output)
+        assert "already connected" in output
+        assert "new agent namespace" in output
+        assert "mindroom connect --force" in output
+        assert "Pair again?" not in output
+        assert posts == []
+        assert env_path.read_text() == "MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n"
+
+    @pytest.mark.parametrize("interactive", [False, True])
+    def test_connect_force_repairs_a_connected_machine_without_asking(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        interactive: bool,
+    ) -> None:
+        """--force warns and pairs again without a prompt, with or without a terminal."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         (tmp_path / ".env").write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
         responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: interactive)
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
         monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
-        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example", "--force"],
+            cfg,
+            # A terminal still confirms the approving account after pairing.
+            input="\n",
+        )
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
         assert "already connected" in output
         assert "new agent namespace" in output
         assert "Pair again?" not in output
+        assert "--force" not in output
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
 
     def test_connect_asks_before_repairing_in_a_terminal(
@@ -3984,6 +4335,130 @@ class TestConnect:
 
         assert result.exit_code == 1
         assert "Error: bad runtime" in result.output
+
+    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", True)])
+    def test_connect_asks_whether_the_approving_account_is_yours(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        answer: str,
+        saved: bool,
+    ) -> None:
+        """A terminal confirms the approving account (default yes); declining saves nothing and fails."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
+            f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+            input=answer,
+        )
+
+        output = normalize_console_output(result.output)
+        assert "Approved by @alice:mindroom.chat." in output
+        assert "Is this your account? [Y/n]" in output
+        assert (tmp_path / ".env").exists() is saved
+        assert (OWNER_MATRIX_USER_ID_PLACEHOLDER in cfg.read_text()) is not saved
+        if saved:
+            assert result.exit_code == 0, result.output
+        else:
+            assert result.exit_code == 1
+            assert "Credentials discarded" in output
+            assert "MindRoom Chat → Settings → Local MindRoom" in output
+
+    def test_connect_treats_an_interrupted_confirmation_as_no(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """EOF or Ctrl+C at the approver prompt discards the credentials with the revoke hint, not a bare abort."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg, input="")
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "Aborted" not in output
+        assert "Credentials discarded" in output
+        assert "MindRoom Chat → Settings → Local MindRoom" in output
+        assert not (tmp_path / ".env").exists()
+
+    def test_connect_does_not_ask_about_the_approving_account_without_a_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The macOS app and services get the approving account printed instead of a prompt."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Approved by @alice:mindroom.chat." in output
+        assert "Is this your account?" not in output
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
+
+    def test_connect_refuses_to_pair_a_self_hosted_homeserver(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without a provisioning URL, a self-hosted homeserver is told how to register agents instead."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        env_path = tmp_path / ".env"
+        env_path.write_text("MATRIX_HOMESERVER=https://matrix.example.org\n")
+        posts: list[str] = []
+        monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda url, **_kw: posts.append(url))
+
+        result = _invoke_with_runtime(["connect"], cfg)
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "hosted mindroom.chat" in output
+        assert "MATRIX_REGISTRATION_TOKEN" in output
+        assert posts == []
+        assert env_path.read_text() == "MATRIX_HOMESERVER=https://matrix.example.org\n"
+
+    def test_connect_pairs_a_self_hosted_homeserver_with_an_explicit_provisioning_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit --provisioning-url is the operator's own provisioning service, so pairing proceeds."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://matrix.example.org\n")
+        responses = self._device_flow_responses()
+        monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 0, result.output
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
 
 
 # ---------------------------------------------------------------------------

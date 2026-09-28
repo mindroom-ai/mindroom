@@ -410,7 +410,13 @@ class TestProvisionerExtended:
         assert response.status_code == 500
         assert "Failed to restart instance" in response.json()["detail"]
 
-    def test_uninstall_instance_status_update_failure(self, client: TestClient, mock_helm: Mock, valid_auth: dict):
+    def test_uninstall_instance_status_update_failure(
+        self,
+        client: TestClient,
+        mock_helm: Mock,
+        valid_auth: dict,
+        stub_uninstall_cleanup: Mock,  # noqa: ARG002
+    ):
         """Test uninstall handles status update failure."""
         with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
             with patch("backend.services.provisioner_service.update_instance_status") as mock_update:

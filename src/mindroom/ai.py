@@ -943,6 +943,7 @@ async def _run_non_streaming_agent_attempts(
 def _failed_agent_attempt(
     ctx: ResponseTurnContext,
     error: Exception,
+    runtime_paths: RuntimePaths,
     *,
     session_id: str | None = None,
     run_id: str | None = None,
@@ -954,7 +955,10 @@ def _failed_agent_attempt(
         session_id=session_id,
         run_id=run_id,
     )
-    return skipped or ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(error, ctx.entity_label))
+    return skipped or ExcludedAttempt(
+        RunStatus.error,
+        get_user_friendly_error_message(error, ctx.entity_label, runtime_paths=runtime_paths),
+    )
 
 
 def _assert_agent_target(agent_name: str, config: Config) -> None:
@@ -1544,7 +1548,7 @@ async def ai_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
-        return get_user_friendly_error_message(e, agent_name)
+        return get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
 
     holder = _AgentTurnHolder()
     reusable_agent_base_context = reusable_agent.additional_context if reusable_agent is not None else None
@@ -1598,7 +1602,7 @@ async def ai_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return _failed_agent_attempt(ctx, e)
+            return _failed_agent_attempt(ctx, e, runtime_paths)
         prepared_run = run_context.prepared_run
         holder.agent = prepared_run.agent
         run.unseen_event_ids = prepared_run.unseen_event_ids
@@ -1625,6 +1629,7 @@ async def ai_response(  # noqa: C901, PLR0915
             return _failed_agent_attempt(
                 ctx,
                 attempt_result.user_error,
+                runtime_paths,
                 session_id=session_id,
                 run_id=attempt.attempt_run_id,
             )
@@ -1705,6 +1710,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 response_text = get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown agent error")),
                     agent_name,
+                    runtime_paths=runtime_paths,
                 )
             elif response.status is RunStatus.paused:
                 response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
@@ -2044,7 +2050,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
-        yield get_user_friendly_error_message(e, agent_name)
+        yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
         return
 
     holder = _AgentTurnHolder(state=_StreamingAttemptState())
@@ -2114,7 +2120,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
                 yield AttemptResolved(skipped)
                 return
-            yield get_user_friendly_error_message(e, agent_name)
+            yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
             yield AttemptResolved(HandledAttempt())
             return
         prepared_run = run_context.prepared_run
@@ -2227,7 +2233,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield AttemptResolved(skipped)
             else:
-                yield get_user_friendly_error_message(run_error, agent_name)
+                yield get_user_friendly_error_message(run_error, agent_name, runtime_paths=runtime_paths)
                 yield AttemptResolved(HandledAttempt())
             return
 

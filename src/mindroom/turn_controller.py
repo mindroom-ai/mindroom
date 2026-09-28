@@ -1871,7 +1871,11 @@ class TurnController:
         is no row to race and nothing else will ever put this notice in the
         room.
         """
-        error_text = get_user_friendly_error_message(error, self.deps.agent_name)
+        error_text = get_user_friendly_error_message(
+            error,
+            self.deps.agent_name,
+            runtime_paths=self.deps.runtime_paths,
+        )
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         if existing_event_id is not None:
             edited = await self.deps.delivery_gateway.edit_text(

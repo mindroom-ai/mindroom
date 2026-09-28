@@ -69,8 +69,8 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
     )
     audit_logs = audit_result.data or []
 
-    # Get payments (if any)
-    payment_result = sb.table("payments").select("*").in_("subscription_id", [s["id"] for s in subscriptions]).execute()
+    # Get payments (if any); payments.subscription_id holds the Stripe id, not subscriptions.id
+    payment_result = sb.table("payments").select("*").eq("account_id", account_id).execute()
     payments = payment_result.data or []
 
     return {

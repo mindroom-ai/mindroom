@@ -1073,6 +1073,7 @@ depends_on = [
 ]
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
+    "mindroom.api.provider_setup",
     "mindroom.agents",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -1663,6 +1664,7 @@ depends_on = [
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
+    "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
@@ -1694,9 +1696,20 @@ depends_on = [
     "mindroom.api.credentials_target",
     "mindroom.credential_policy",
     "mindroom.credentials",
+    "mindroom.credentials_sync",
     "mindroom.embedder_health",
     "mindroom.embedding_factory",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.provider_setup"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials",
+    "mindroom.logging_config",
+    "mindroom.model_defaults",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -2265,6 +2278,11 @@ depends_on = ["mindroom.agno_compat_openai_responses_items", "mindroom.legacy_op
 visibility = ["mindroom.openai_models"]
 
 [[modules]]
+path = "mindroom.openrouter_prompt_cache"
+depends_on = ["mindroom.claude_prompt_cache", "mindroom.hooks.enrichment"]
+visibility = ["mindroom.openai_models"]
+
+[[modules]]
 path = "mindroom.claude_native_compaction"
 depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
 visibility = ["mindroom.claude_compat"]
@@ -2438,6 +2456,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.provisioning_heartbeat"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.provisioning",
+    "mindroom.matrix.provisioning_env",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.matrix.provisioning_env"
 depends_on = [
     "mindroom.constants",
@@ -2583,6 +2611,7 @@ depends_on = [
     "mindroom.knowledge.watch",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.provisioning_heartbeat",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.stale_stream_cleanup",
@@ -4063,6 +4092,7 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.http_error_detail",
+    "mindroom.matrix.provisioning_env",
 ]
 
 [[modules]]
@@ -4095,6 +4125,7 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.matrix.client_session",
     "mindroom.matrix.health",
+    "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
 ]
 
@@ -5407,7 +5438,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance"]
+expose = ["get_model_instance", "missing_model_api_key_provider"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]
@@ -5615,7 +5646,12 @@ expose = [
     "require_runtime_paths_arg",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing", "mindroom.desktop.session"]
+visibility = [
+    "mindroom.matrix._owned_session",
+    "mindroom.matrix.typing",
+    "mindroom.desktop.session",
+    "mindroom.orchestration.runtime",
+]
 
 [[interfaces]]
 expose = [
@@ -6723,7 +6759,7 @@ visibility = ["mindroom.history.compaction"]
 
 [[modules]]
 path = "mindroom.history.summary_provider_compat"
-depends_on = ["mindroom.claude_prompt_cache"]
+depends_on = ["mindroom.claude_prompt_cache", "mindroom.openai_models"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]
@@ -7189,11 +7225,11 @@ expose = ["TOOL_SEARCH_ITEMS_KEY", "RESPONSE_OUTPUT_KEY", "record_tool_search_it
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat"]
+visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
-expose = ["ClaudeProviderSDKCompat"]
+expose = ["ClaudeProviderSDKCompat", "request_kwargs_without_replayed_citations"]
 
 
 [[modules]]

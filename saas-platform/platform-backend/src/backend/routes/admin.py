@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import logger, stripe
+from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.models import (
     ActionResult,
@@ -13,6 +13,7 @@ from backend.models import (
     AdminDashboardMetricsResponse,
     AdminDeleteResponse,
     AdminGetOneResponse,
+    AdminInstanceLifecycleResponse,
     AdminListResponse,
     AdminLogoutResponse,
     AdminStatsOut,
@@ -22,7 +23,7 @@ from backend.models import (
     UpdateAccountStatusResponse,
 )
 from backend.pricing import PRICING_CONFIG_MODEL
-from backend.services import instances_data, provisioner_service
+from backend.services import instance_lifecycle, instances_data, provisioner_service
 from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -187,6 +188,24 @@ async def admin_provision_instance(
         details={"account_id": instance.get("account_id"), "tier": instance.get("tier")},
     )
     return result
+
+
+@router.get("/admin/instance-lifecycle", response_model=AdminInstanceLifecycleResponse)
+@limiter.limit("30/minute")
+async def get_instance_lifecycle(
+    request: Request,  # noqa: ARG001
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008, ARG001
+) -> dict[str, Any]:
+    """Show the last nightly cleanup run, instances pending teardown, and stuck lifecycle states."""
+    runs = ensure_supabase().table("cleanup_runs").select("*").order("started_at", desc=True).limit(1).execute()
+    pending, stuck = instance_lifecycle.lifecycle_overview()
+    return {
+        "cleanup_scheduler_enabled": ENABLE_CLEANUP_SCHEDULER,
+        "teardown_grace_days": INSTANCE_TEARDOWN_GRACE_DAYS,
+        "last_run": runs.data[0] if runs.data else None,
+        "pending_teardown": pending,
+        "stuck": stuck,
+    }
 
 
 @router.post("/admin/sync-instances", response_model=SyncResult)

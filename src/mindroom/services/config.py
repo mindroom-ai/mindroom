@@ -67,6 +67,7 @@ class ServiceManager(NamedTuple):
     stop_service: Callable[[], ServiceActionResult]
     restart_service: Callable[[], ServiceActionResult]
     get_service_status: Callable[[], ServiceStatus]
+    get_service_environment: Callable[[], dict[str, str]]
     get_log_command: Callable[[], str]
     get_log_args: Callable[[], list[str]]
     get_recent_logs: Callable[[int], list[str]]

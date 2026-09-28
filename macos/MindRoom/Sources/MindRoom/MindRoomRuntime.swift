@@ -12,6 +12,7 @@ enum MindRoomRuntimeAction: Equatable {
     case initializeHostedConfig
     case initializeSelfHostedConfig
     case pairHosted
+    case reconnectHosted
 }
 
 struct MindRoomCommandInvocation: Equatable {
@@ -113,6 +114,8 @@ struct MindRoomRuntime {
             return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "self-hosted", "--no-input"])
         case .pairHosted:
             return mindroomCommand(arguments: ["connect", "--open-browser"])
+        case .reconnectHosted:
+            return mindroomCommand(arguments: ["connect", "--open-browser", "--force"])
         }
     }
 

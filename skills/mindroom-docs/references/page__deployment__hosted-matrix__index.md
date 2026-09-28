@@ -25,6 +25,8 @@ Watch the 2-minute setup video:
 - A Matrix account that can sign in to `chat.mindroom.chat`
 - At least one AI provider API key, or a local Codex CLI ChatGPT login
 
+Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, and starts in one command; the steps below are the explicit path.
+
 ## 1. Initialize Local Config
 
 ```bash
@@ -57,6 +59,10 @@ uvx mindroom run
 On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
+In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+Under a service or the macOS app, it prints the approving account without asking.
 
 Pair code behavior:
 
@@ -99,6 +105,11 @@ They can only call provisioning-service endpoints that accept local client crede
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
+That page shows when each paired install was last seen.
+A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
+Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
+The service records these reports with ten-minute resolution.
+If the service rejects the credentials as invalid or revoked, the install logs a warning asking you to run `mindroom connect` again and stops reporting.
 The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
 Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
 Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.
@@ -134,3 +145,5 @@ On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https
 It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
 
 Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
+`mindroom connect` refuses to pair a non-mindroom.chat homeserver, including an unset `MATRIX_HOMESERVER` (which defaults to `http://localhost:8008`), unless `MINDROOM_PROVISIONING_URL` is set or `--provisioning-url` is given.
+Without a provisioning service, register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead of pairing.

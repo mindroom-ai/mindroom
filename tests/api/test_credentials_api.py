@@ -16,6 +16,7 @@ from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
@@ -130,6 +131,7 @@ class TestCredentialsAPI:
         assert response.status_code == 200
         assert response.json() == {
             "status": "success",
+            "service": "email",
             "message": "Credentials saved for email",
         }
 
@@ -165,6 +167,7 @@ class TestCredentialsAPI:
         assert response.status_code == 200
         assert response.json() == {
             "status": "success",
+            "service": "openai",
             "message": "API key set for openai",
         }
 
@@ -2119,6 +2122,143 @@ class TestCredentialsAPI:
             "openai",
             {"api_key": "new-key-from-ui", "_source": "ui"},
         )
+
+    def test_get_api_key_reports_env_named_provider_twin(self, client: TestClient) -> None:
+        """Provider key status must match runtime resolution for keys saved under the env var name."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("ANTHROPIC_API_KEY", {"api_key": "sk-ant-env-named-key", "_source": "ui"})
+
+        response = client.get("/api/credentials/anthropic/api-key?key_name=api_key&include_value=true")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "service": "anthropic",
+            "credential_service": "ANTHROPIC_API_KEY",
+            "has_key": True,
+            "key_name": "api_key",
+            "masked_key": "sk-a...-key",
+            "source": "ui",
+            "api_key": "sk-ant-env-named-key",
+        }
+
+    def test_get_api_key_prefers_canonical_provider_service(self, client: TestClient) -> None:
+        """The canonical provider service wins over its env-var-named twin, like at runtime."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("openrouter", {"api_key": "sk-or-canonical", "_source": "env"})
+        manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "sk-or-env-named", "_source": "ui"})
+
+        response = client.get("/api/credentials/openrouter/api-key?include_value=true")
+
+        assert response.status_code == 200
+        assert response.json()["credential_service"] == "openrouter"
+        assert response.json()["source"] == "env"
+        assert response.json()["api_key"] == "sk-or-canonical"
+
+    def test_get_api_key_does_not_alias_non_api_key_fields(self, client: TestClient) -> None:
+        """Only the ``api_key`` field follows runtime alias resolution."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("OPENAI_API_KEY", {"api_key": "sk-env-named", "org": "org-env-named"})
+
+        response = client.get("/api/credentials/openai/api-key?key_name=org")
+
+        assert response.status_code == 200
+        assert response.json() == {"service": "openai", "has_key": False, "key_name": "org"}
+
+    def test_set_credentials_stores_env_named_provider_under_canonical_service(self, client: TestClient) -> None:
+        """Saving ``ANTHROPIC_API_KEY`` stores the key under ``anthropic`` so all readers agree."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+
+        response = client.post(
+            "/api/credentials/ANTHROPIC_API_KEY",
+            json={"credentials": {"api_key": "sk-ant-dashboard"}},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "anthropic"
+        assert manager.load_credentials("anthropic") == {"api_key": "sk-ant-dashboard", "_source": "ui"}
+        assert manager.load_credentials("ANTHROPIC_API_KEY") is None
+
+    def test_set_api_key_stores_env_named_provider_under_canonical_service(self, client: TestClient) -> None:
+        """The api-key write route canonicalizes env-var-named provider services too."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+
+        response = client.post(
+            "/api/credentials/OPENAI_API_KEY/api-key",
+            json={"service": "OPENAI_API_KEY", "api_key": "sk-openai-dashboard"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "openai"
+        assert manager.load_credentials("openai") == {"api_key": "sk-openai-dashboard", "_source": "ui"}
+        assert manager.load_credentials("OPENAI_API_KEY") is None
+
+    def test_copy_credentials_stores_env_named_provider_destination_under_canonical_service(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Copying into an env-var-named provider service writes the canonical service."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("model:sonnet", {"api_key": "sk-ant-model", "_source": "ui"})
+
+        response = client.post("/api/credentials/ANTHROPIC_API_KEY/copy-from/model:sonnet")
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "anthropic"
+        assert manager.load_credentials("anthropic") == {"api_key": "sk-ant-model", "_source": "ui"}
+        assert manager.load_credentials("ANTHROPIC_API_KEY") is None
+
+    @pytest.mark.parametrize("route", ["set", "api-key", "copy"])
+    def test_rotating_existing_env_named_provider_service_updates_it_in_place(
+        self,
+        client: TestClient,
+        route: str,
+    ) -> None:
+        """An existing env-var-named service may be bound by exact name, so rotation must keep writing it."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "sk-or-old", "_source": "ui"})
+        manager.save_credentials("model:router", {"api_key": "sk-or-new", "_source": "ui"})
+
+        if route == "set":
+            response = client.post(
+                "/api/credentials/OPENROUTER_API_KEY",
+                json={"credentials": {"api_key": "sk-or-new"}},
+            )
+        elif route == "api-key":
+            response = client.post(
+                "/api/credentials/OPENROUTER_API_KEY/api-key",
+                json={"service": "OPENROUTER_API_KEY", "api_key": "sk-or-new"},
+            )
+        else:
+            response = client.post("/api/credentials/OPENROUTER_API_KEY/copy-from/model:router")
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "OPENROUTER_API_KEY"
+        assert manager.load_credentials("OPENROUTER_API_KEY") == {"api_key": "sk-or-new", "_source": "ui"}
+        assert manager.load_credentials("openrouter") is None
+        assert get_embedder_api_key(runtime_paths, credentials_service="OPENROUTER_API_KEY") == "sk-or-new"
+
+    def test_env_named_provider_service_remains_readable_and_deletable(self, client: TestClient) -> None:
+        """Already-stored env-var-named services stay visible so users can inspect and remove them."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "sk-or-legacy", "_source": "ui"})
+
+        get_response = client.get("/api/credentials/OPENROUTER_API_KEY")
+        delete_response = client.delete("/api/credentials/OPENROUTER_API_KEY")
+
+        assert get_response.json() == {"service": "OPENROUTER_API_KEY", "credentials": {"api_key": "sk-or-legacy"}}
+        assert delete_response.status_code == 200
+        assert manager.load_credentials("OPENROUTER_API_KEY") is None
+
+    def test_ollama_host_service_is_not_canonicalized(self, client: TestClient) -> None:
+        """``OLLAMA_HOST`` is a host setting, not a provider API key, so it keeps its own service."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+
+        response = client.post("/api/credentials/OLLAMA_HOST", json={"credentials": {"host": "http://ollama:11434"}})
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "OLLAMA_HOST"
+        assert manager.load_credentials("ollama") is None
 
     def test_rejects_invalid_service_name(
         self,
