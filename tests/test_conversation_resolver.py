@@ -225,7 +225,7 @@ async def test_dispatch_repairs_pending_refresh_before_counting_participants(con
     reader = _conversation_reader(*messages)
     reader.read.return_value = ConversationPage(  # type: ignore[attr-defined]
         messages=messages,
-        refresh_pending=(RefreshRequest(_ROOM_ID, _THREAD_ROOT, "$answer", "$final-edit", 1, 1),)
+        refresh_pending=(RefreshRequest(_ROOM_ID, _THREAD_ROOT, "$answer", "$final-edit", 1, 1, "@agent:localhost", 1),)
         if incomplete == "refresh"
         else (),
         next_cursor=ConversationCursor(500, "$older") if incomplete == "cursor" else None,

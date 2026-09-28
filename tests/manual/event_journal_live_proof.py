@@ -346,7 +346,11 @@ async def prove_edit_redaction(
     )
 
     request = next(r for r in page.refresh_pending if r.logical_event_id == original)
-    installed = await hydrator.refresh(request)
+    unavailable = await hydrator.resolve_refreshes([request])
+    installed = not unavailable and all(
+        pending.logical_event_id != original
+        for pending in (await store.read_conversation(room_id=room_id, thread_id=None, limit=50)).refresh_pending
+    )
     findings.record("the point refetch installs a server revision", installed)
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)

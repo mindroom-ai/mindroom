@@ -437,4 +437,6 @@ def _refresh_request(row: Row) -> RefreshRequest:
         revision_event_id=row["revision_event_id"],
         refresh_token=int(row["refresh_token"]),
         membership_epoch=int(row["membership_epoch"]),
+        sender=row["sender"],
+        created_ts=int(row["created_ts"]),
     )

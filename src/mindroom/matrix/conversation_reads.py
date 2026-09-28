@@ -297,6 +297,12 @@ class ConversationReader:
         building a prompt cannot tell an omitted message from a conversation
         that never had one, so silently dropping it would change what the model
         is answering.
+
+        A long message whose sidecar cannot be read in this read is not missing:
+        it is returned as its preview with a visible note that the rest is
+        unavailable, for this read only, and its debt stays for the next. Any
+        room member can post such a message, so letting it fail the read would
+        let them make the conversation unreadable.
         """
         await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
         page = await self.store.read_conversation(
@@ -307,20 +313,27 @@ class ConversationReader:
         )
         if not page.refresh_pending:
             return page
-        await self.hydrator.resolve_refreshes(page.refresh_pending)
+        unavailable_previews = await self.hydrator.resolve_refreshes(page.refresh_pending)
         page = await self.store.read_conversation(
             room_id=room_id,
             thread_id=thread_id,
             limit=limit,
             before=before,
         )
-        if page.refresh_pending:
-            msg = (
-                f"Conversation {room_id}/{thread_id} has "
-                f"{len(page.refresh_pending)} message(s) awaiting a server refetch"
-            )
+        if not page.refresh_pending:
+            return page
+        missing = [request for request in page.refresh_pending if request.logical_event_id not in unavailable_previews]
+        if missing:
+            msg = f"Conversation {room_id}/{thread_id} has {len(missing)} message(s) awaiting a server refetch"
             raise _StaleConversationError(msg)
-        return page
+        previews = (unavailable_previews[request.logical_event_id] for request in page.refresh_pending)
+        return replace(
+            page,
+            messages=tuple(
+                sorted((*page.messages, *previews), key=lambda message: (message.created_ts, message.logical_event_id)),
+            ),
+            refresh_pending=(),
+        )
 
 
 async def latest_agent_message_snapshot(

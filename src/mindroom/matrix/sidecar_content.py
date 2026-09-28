@@ -6,8 +6,11 @@ from collections.abc import Mapping
 from typing import Any
 
 _LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
-_LONG_TEXT_UNAVAILABLE_KEY = "io.mindroom.long_text_unavailable"
 _LONG_TEXT_UNAVAILABLE_NOTE = "[long message content unavailable]"
+# The fields that make a preview a file message pointing at its sidecar; a placeholder is plain text instead.
+_SIDECAR_TRANSPORT_KEYS = frozenset(
+    {_LONG_TEXT_METADATA_KEY, "url", "file", "info", "filename", "format", "formatted_body"},
+)
 
 
 def _validated_mxc_url(value: object) -> str | None:
@@ -58,24 +61,25 @@ def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
 
 
 def unavailable_sidecar_content(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return content that settles a sidecar which can never be read, keeping its preview.
+    """Return content that stands in for a sidecar that could not be read, keeping its preview text.
 
-    The sidecar metadata is removed from whichever dict owned it, top-level content or an edit's
-    ``m.new_content``, and replaced by an explicit marker. The preview body gains a note, so a model reading
-    it knows the text is incomplete. The event's ``m.relates_to`` and every other field stay as sent.
+    Whichever dict owned the sidecar, top-level content or an edit's ``m.new_content``, becomes a plain text
+    message: the fields that pointed at the file are dropped, so nothing treats the stand-in as an attachment,
+    and the preview body gains a note, so a model reading it knows the text is incomplete. The event's
+    ``m.relates_to`` and every other field stay as sent.
     """
     placeholder = dict(content)
     owner = sidecar_content_to_resolve(content)
     if owner is None:
         return placeholder
-    settled_owner = {key: value for key, value in owner.items() if key != _LONG_TEXT_METADATA_KEY}
+    settled_owner = {key: value for key, value in owner.items() if key not in _SIDECAR_TRANSPORT_KEYS}
     preview = owner.get("body")
+    settled_owner["msgtype"] = "m.text"
     settled_owner["body"] = (
         f"{preview}\n\n{_LONG_TEXT_UNAVAILABLE_NOTE}"
         if isinstance(preview, str) and preview
         else _LONG_TEXT_UNAVAILABLE_NOTE
     )
-    settled_owner[_LONG_TEXT_UNAVAILABLE_KEY] = True
     if owner is content:
         return settled_owner
     placeholder["m.new_content"] = settled_owner

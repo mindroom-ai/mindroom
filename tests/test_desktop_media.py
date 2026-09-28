@@ -123,7 +123,6 @@ async def test_screenshot_download_timeout_is_bounded() -> None:
     async def stuck_download(*_args: object, **_kwargs: object) -> None:
         await asyncio.Event().wait()
 
-    client.access_token = TEST_ACCESS_TOKEN
     client.send.side_effect = stuck_download
     media = EncryptedDesktopMedia(
         url="mxc://example.org/screenshot",

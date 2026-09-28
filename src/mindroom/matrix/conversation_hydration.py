@@ -56,6 +56,7 @@ from mindroom.event_journal import (
     HydrationPolicy,
     ProjectedEvent,
     RefreshRequest,
+    VisibleMessage,
     replacement_target,
     thread_root,
     visible_content,
@@ -122,7 +123,7 @@ _MAX_FETCHED_EVENTS = 20_000
 # code to count. See `_fetch_relations`.
 _MAX_MESSAGES_REQUESTS = 400
 # Sidecar downloads one strict read may start, so a page of unreadable attachments costs a bounded fetch per read.
-_MAX_SIDECAR_DOWNLOADS_PER_READ = 8
+_MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ = 8
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
 # under the fresh epoch is almost always enough; a room whose membership keeps
@@ -454,14 +455,22 @@ def _reduce_current_revision(
 
 
 @dataclass(slots=True)
-class _SidecarDownloadBudget:
-    """Sidecar downloads one strict read may still start.
+class _RefreshPass:
+    """What one strict read may still spend on sidecar downloads, and the stand-ins it serves instead.
 
-    Debts beyond it keep their tokens for a later read, which reaches them because unreadable
-    sidecars are remembered and cost no download while remembered.
+    Only failed downloads are charged: a successful one is installed and never repeated. A debt whose sidecar is
+    not resolved in this read keeps its token and is served, for this read only, as its preview marked unavailable.
     """
 
-    remaining: int = _MAX_SIDECAR_DOWNLOADS_PER_READ
+    failed_downloads_remaining: int = _MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ
+    unavailable_previews: dict[str, VisibleMessage] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _RevisionContent:
+    content: Mapping[str, object]
+    # Whether the content may be installed for this revision, or only served to the current read.
+    durable: bool
 
 
 @dataclass
@@ -1121,7 +1130,7 @@ class ConversationHydrator:
                 )
             start = next_start
 
-    async def refresh(self, request: RefreshRequest, sidecar_budget: _SidecarDownloadBudget | None = None) -> bool:
+    async def refresh(self, request: RefreshRequest, refresh_pass: _RefreshPass) -> bool:
         """Refetch one logical message whose visible revision was redacted.
 
         Returns whether the projection was updated. A ``False`` result leaves
@@ -1175,12 +1184,18 @@ class ConversationHydrator:
             )
             return False
         revision = _reduce_current_revision(projected, relations.events)
-        content = await self._resolved_content(
-            revision.event_id,
-            revision.content,
-            sidecar_budget if sidecar_budget is not None else _SidecarDownloadBudget(),
-        )
-        if content is None:
+        resolved = await self._resolved_content(revision.event_id, revision.content, refresh_pass)
+        if not resolved.durable:
+            refresh_pass.unavailable_previews[request.logical_event_id] = VisibleMessage(
+                logical_event_id=request.logical_event_id,
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                sender=request.sender,
+                created_ts=request.created_ts,
+                revision_event_id=revision.event_id,
+                revision_ts=revision.origin_server_ts,
+                content=resolved.content,
+            )
             return False
         return await self.store.install_refetched_revision(
             request,
@@ -1188,15 +1203,15 @@ class ConversationHydrator:
             revision_ts=revision.origin_server_ts,
             revision_sender=revision.sender,
             revision_transaction_id=revision.transaction_id,
-            content=content,
+            content=resolved.content,
         )
 
     async def _resolved_content(
         self,
         event_id: str,
         content: Mapping[str, object],
-        sidecar_budget: _SidecarDownloadBudget,
-    ) -> Mapping[str, object] | None:
+        refresh_pass: _RefreshPass,
+    ) -> _RevisionContent:
         """Return one revision's whole text, fetching its sidecar when it has one.
 
         A message too large for a single Matrix event carries a preview in its
@@ -1210,36 +1225,33 @@ class ConversationHydrator:
         hydrated room, because the caller asking for the text is the one whose
         page size bounds how much of it is worth fetching.
 
-        Returning nothing means the attachment could not be read this time. The
-        message then stays unreadable and keeps its refresh token, so the next
-        strict read tries again rather than installing the preview and calling
-        the debt settled. An attachment that can never be read -- missing,
-        oversized, undecryptable, or not a message payload, or one that has
-        kept failing transiently for too long -- is settled instead with its
-        preview and an explicit unavailable marker, because any room member can
-        post one and a debt nothing can repay would fail every later strict
-        read of the conversation.
+        A sidecar that this event's own reference can never resolve -- missing
+        or oversized media, or a payload that does not decrypt with its key,
+        is not UTF-8, is not a message payload, or chains too far -- settles the
+        revision with its preview marked unavailable, because any room member
+        can post one and a debt nothing can repay would be retried by every read.
+        Anything else, such as a rate limit or an unreachable homeserver, may
+        clear later, so it is never installed: this read gets the marked preview
+        and the refresh token stays for the next.
         """
         if not holds_unresolved_sidecar(content):
-            return content
-        if sidecar_budget.remaining <= 0:
+            return _RevisionContent(content, durable=True)
+        if refresh_pass.failed_downloads_remaining <= 0:
             logger.info("conversation_refresh_sidecar_deferred", event_id=event_id)
-            return None
+            return _RevisionContent(unavailable_sidecar_content(content), durable=False)
         sidecar = await resolve_sidecar_content(content, self._client())
-        sidecar_budget.remaining -= sidecar.downloads
+        if sidecar.failed_download:
+            refresh_pass.failed_downloads_remaining -= 1
         if not holds_unresolved_sidecar(sidecar.content):
-            return sidecar.content
+            return _RevisionContent(sidecar.content, durable=True)
         if sidecar.permanently_unavailable:
             logger.info("conversation_refresh_sidecar_unavailable", event_id=event_id)
-            return unavailable_sidecar_content(content)
-        logger.info(
-            "conversation_refresh_sidecar_unresolved",
-            event_id=event_id,
-        )
-        return None
+            return _RevisionContent(unavailable_sidecar_content(content), durable=True)
+        logger.info("conversation_refresh_sidecar_unresolved", event_id=event_id)
+        return _RevisionContent(unavailable_sidecar_content(content), durable=False)
 
-    async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
-        """Repair exactly the messages one read found missing.
+    async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> dict[str, VisibleMessage]:
+        """Repair exactly the messages one read found missing, returning stand-ins for unresolved sidecars.
 
         The caller passes the debts from its own page rather than naming a
         conversation, because those are not the same set. Re-selecting from the
@@ -1252,6 +1264,7 @@ class ConversationHydrator:
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
         """
-        sidecar_budget = _SidecarDownloadBudget()
+        refresh_pass = _RefreshPass()
         for request in requests:
-            await self.refresh(request, sidecar_budget)
+            await self.refresh(request, refresh_pass)
+        return refresh_pass.unavailable_previews

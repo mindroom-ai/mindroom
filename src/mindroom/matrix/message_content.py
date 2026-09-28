@@ -15,10 +15,13 @@ plaintext store that misses a redaction serves deleted content.
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -52,84 +55,78 @@ _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
 # The writer uploads one sidecar per message, and the nested edits scripts/utilities/repair_nested_sidecars.py
 # repairs hold one more, so a chain longer than two can only come from a crafted event.
 _MAX_SIDECAR_HOPS = 2
-# Unreadable sidecars are remembered per process, so every agent in a room and every read does not fetch them again.
+# Failed sidecars are remembered per process, so every agent in a room and every read does not fetch them again.
 # Plaintext is never kept: it belongs to the visible revision the projection stores.
-_UNAVAILABLE_SIDECAR_CACHE_SIZE = 1024
+_SIDECAR_MEMORY_SIZE = 1024
 _TRANSIENT_UNAVAILABLE_SECONDS = 30.0
-# A sidecar that keeps failing in ways that could clear later is treated as unreadable for good after this many
-# failed downloads, or once it has kept failing this long, so a sender-controlled media server cannot keep its
-# message owed forever.
-_TRANSIENT_FAILURES_BEFORE_PERMANENT = 3
-_TRANSIENT_FAILURE_WINDOW_SECONDS = 600.0
+
+# One sidecar reference: the media URL and the canonical JSON of the event's own `file` dict, or None without one.
+# Everything that decides whether the payload decrypts and parses is in it, so one sender's reference cannot decide
+# the outcome of another's.
+type _SidecarReference = tuple[str, str | None]
 
 
 @dataclass(frozen=True, slots=True)
-class _UnavailableSidecar:
+class _RememberedFailure:
     permanent: bool
-    transient_failures: int
-    first_failure_at: float
     retry_at: float
 
 
-_unavailable_sidecars: OrderedDict[tuple[str, str | None], _UnavailableSidecar] = OrderedDict()
+# Media URLs the homeserver answered as missing or too large, which holds for every reference to them.
+_unavailable_media_urls: OrderedDict[str, None] = OrderedDict()
+# Failures of whole references: a content failure is permanent for that exact reference, others retry after a pause.
+_reference_failures: OrderedDict[_SidecarReference, _RememberedFailure] = OrderedDict()
+# One download chain per reference at a time; concurrent readers await the same attempt.
+_inflight_chains: dict[_SidecarReference, asyncio.Task[_SidecarChain]] = {}
 
 
-def _cached_unavailable_sidecar(key: tuple[str, str | None]) -> MxcUnavailable | None:
-    """Return a remembered failure, or nothing when the sidecar should be downloaded again."""
-    entry = _unavailable_sidecars.get(key)
-    if entry is None:
-        return None
-    _unavailable_sidecars.move_to_end(key)
-    if entry.permanent:
+def _remember_bounded[Key, Value](memory: OrderedDict[Key, Value], key: Key, value: Value) -> None:
+    memory[key] = value
+    memory.move_to_end(key)
+    while len(memory) > _SIDECAR_MEMORY_SIZE:
+        memory.popitem(last=False)
+
+
+def _remembered_failure(reference: _SidecarReference) -> MxcUnavailable | None:
+    """Return a remembered failure of this reference, or nothing when it should be downloaded."""
+    if reference[0] in _unavailable_media_urls:
         return MxcUnavailable(permanent=True)
-    if monotonic() < entry.retry_at:
-        return MxcUnavailable(permanent=False)
-    return None
-
-
-def _remember_sidecar_outcome(key: tuple[str, str | None], unavailable: MxcUnavailable | None) -> MxcUnavailable | None:
-    """Record one download outcome and return it, escalating a transient failure that has repeated for too long."""
-    if unavailable is None:
-        _unavailable_sidecars.pop(key, None)
+    entry = _reference_failures.get(reference)
+    if entry is None or (not entry.permanent and monotonic() >= entry.retry_at):
         return None
-    now = monotonic()
-    previous = _unavailable_sidecars.get(key)
-    first_failure_at = now if previous is None else previous.first_failure_at
-    transient_failures = 1 if previous is None else previous.transient_failures + 1
-    permanent = (
-        unavailable.permanent
-        or transient_failures >= _TRANSIENT_FAILURES_BEFORE_PERMANENT
-        or now - first_failure_at >= _TRANSIENT_FAILURE_WINDOW_SECONDS
-    )
-    if permanent and not unavailable.permanent:
-        logger.warning("mxc_sidecar_transient_failures_escalated", mxc_url=key[0], failures=transient_failures)
-    _unavailable_sidecars[key] = _UnavailableSidecar(
-        permanent=permanent,
-        transient_failures=transient_failures,
-        first_failure_at=first_failure_at,
-        retry_at=math.inf if permanent else now + _TRANSIENT_UNAVAILABLE_SECONDS,
-    )
-    _unavailable_sidecars.move_to_end(key)
-    while len(_unavailable_sidecars) > _UNAVAILABLE_SIDECAR_CACHE_SIZE:
-        _unavailable_sidecars.popitem(last=False)
-    return MxcUnavailable(permanent=permanent)
+    return MxcUnavailable(permanent=entry.permanent)
+
+
+def _remember_chain_outcome(reference: _SidecarReference, unavailable: MxcUnavailable | None) -> None:
+    if unavailable is None:
+        _reference_failures.pop(reference, None)
+        return
+    retry_at = math.inf if unavailable.permanent else monotonic() + _TRANSIENT_UNAVAILABLE_SECONDS
+    _remember_bounded(_reference_failures, reference, _RememberedFailure(unavailable.permanent, retry_at))
 
 
 @dataclass(frozen=True, slots=True)
-class _SidecarContent:
-    """One event's canonical content, or its preview and why the sidecar behind it could not be read."""
+class SidecarResolution:
+    """One event's canonical content, or its preview and why the sidecar behind it could not be read.
+
+    ``permanently_unavailable`` means that event's own reference can never resolve: its media is missing or too
+    large, or the payload does not decrypt with its key, is not UTF-8, is not a message payload, or chains too far.
+    ``failed_download`` means this call downloaded something that failed, rather than reusing a remembered outcome.
+    """
 
     content: dict[str, Any]
     changed: bool
     permanently_unavailable: bool
-    downloads: int
+    failed_download: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _SidecarChain:
+    # The last content the chain reached, shared between concurrent readers of one reference and never mutated.
     content: dict[str, Any]
+    changed: bool
     unavailable: MxcUnavailable | None
-    downloads: int
+    failed_download: bool
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -195,18 +192,18 @@ async def _resolve_event_content(
     return sidecar.content, sidecar.changed
 
 
-async def resolve_sidecar_content(content: object, client: nio.AsyncClient | None) -> _SidecarContent:
+async def resolve_sidecar_content(content: object, client: nio.AsyncClient | None) -> SidecarResolution:
     """Resolve one event content's long-text sidecar chain and say whether an unresolved one can never resolve."""
     preview_content = _normalized_content_dict(content)
     chain = await _resolve_canonical_content(preview_content, client)
     resolved_content = (
-        preview_content if chain.content is preview_content else _with_event_relation(chain.content, preview_content)
+        _with_event_relation(copy.deepcopy(chain.content), preview_content) if chain.changed else preview_content
     )
-    return _SidecarContent(
+    return SidecarResolution(
         content=resolved_content,
-        changed=chain.content is not preview_content,
+        changed=chain.changed,
         permanently_unavailable=chain.unavailable is not None and chain.unavailable.permanent,
-        downloads=chain.downloads,
+        failed_download=chain.failed_download,
     )
 
 
@@ -230,10 +227,13 @@ async def _download_mxc_text(
 ) -> str | MxcUnavailable:
     """Download the text content behind one MXC reference, or say why it cannot be read.
 
-    A payload that cannot decrypt, exceeds the limit once decrypted, or is not UTF-8 never will.
+    A payload that cannot decrypt with this reference's key, exceeds the limit once decrypted, or is not UTF-8 never
+    will. Missing or oversized media is remembered by URL, because that holds for every reference to it.
     """
     download = await download_bounded_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
     if isinstance(download, MxcUnavailable):
+        if download.permanent:
+            _remember_bounded(_unavailable_media_urls, mxc_url, None)
         return download
     text_bytes = download.data
     if file_info and "key" in file_info:
@@ -355,32 +355,55 @@ async def _resolve_canonical_content(
     first_sidecar = sidecar_content_to_resolve(content)
     first_mxc_url = None if first_sidecar is None else sidecar_mxc_url(first_sidecar)
     if client is None or first_sidecar is None or first_mxc_url is None:
-        return _SidecarChain(content=content, unavailable=None, downloads=0)
-    cache_key = _sidecar_cache_key(first_mxc_url, first_sidecar)
-    if (cached := _cached_unavailable_sidecar(cache_key)) is not None:
-        return _SidecarChain(content=content, unavailable=cached, downloads=0)
-    chain = await _download_sidecar_chain(content, client)
-    return replace(chain, unavailable=_remember_sidecar_outcome(cache_key, chain.unavailable))
+        return _SidecarChain(content=content, changed=False, unavailable=None, failed_download=False)
+    reference = (first_mxc_url, _canonical_file_info(first_sidecar))
+    if (remembered := _remembered_failure(reference)) is not None:
+        return _SidecarChain(content=content, changed=False, unavailable=remembered, failed_download=False)
+    loop = asyncio.get_running_loop()
+    joined = _inflight_chains.get(reference)
+    if joined is not None and joined.get_loop() is loop:
+        # A reader that joins another's attempt downloads nothing itself.
+        return replace(await asyncio.shield(joined), failed_download=False)
+    task = loop.create_task(_download_and_remember_chain(reference, content, client))
+    _inflight_chains[reference] = task
+    task.add_done_callback(partial(_forget_inflight_chain, reference))
+    return await asyncio.shield(task)
 
 
-def _sidecar_cache_key(mxc_url: str, sidecar_content: Mapping[str, Any]) -> tuple[str, str | None]:
-    """Key one sidecar by its media and, for encrypted media, the ciphertext hash its event names."""
+def _canonical_file_info(sidecar_content: Mapping[str, Any]) -> str | None:
     file_info = sidecar_content.get("file")
-    hashes = file_info.get("hashes") if isinstance(file_info, dict) else None
-    sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
-    return mxc_url, sha256 if isinstance(sha256, str) else None
+    if not isinstance(file_info, dict):
+        return None
+    return json.dumps(file_info, sort_keys=True, separators=(",", ":"), default=repr)
+
+
+def _forget_inflight_chain(reference: _SidecarReference, task: asyncio.Task[_SidecarChain]) -> None:
+    if _inflight_chains.get(reference) is task:
+        del _inflight_chains[reference]
+
+
+async def _download_and_remember_chain(
+    reference: _SidecarReference,
+    content: dict[str, Any],
+    client: nio.AsyncClient,
+) -> _SidecarChain:
+    chain = await _download_sidecar_chain(content, client)
+    _remember_chain_outcome(reference, chain.unavailable)
+    return chain
 
 
 async def _download_sidecar_chain(content: dict[str, Any], client: nio.AsyncClient) -> _SidecarChain:
     visited: set[str] = set()
-    for downloads in range(_MAX_SIDECAR_HOPS + 1):
+    for hop in range(_MAX_SIDECAR_HOPS + 1):
         sidecar_content = sidecar_content_to_resolve(content)
         if sidecar_content is None:
-            return _SidecarChain(content=content, unavailable=None, downloads=downloads)
+            return _SidecarChain(content=content, changed=hop > 0, unavailable=None, failed_download=False)
         mxc_url = sidecar_mxc_url(sidecar_content)
-        if mxc_url is None or mxc_url in visited or downloads == _MAX_SIDECAR_HOPS:
-            logger.warning("mxc_sidecar_chain_unresolvable", mxc_url=mxc_url, hops=downloads)
-            return _SidecarChain(content=content, unavailable=MxcUnavailable(permanent=True), downloads=downloads)
+        if mxc_url is None or mxc_url in visited or hop == _MAX_SIDECAR_HOPS:
+            logger.warning("mxc_sidecar_chain_unresolvable", mxc_url=mxc_url, hops=hop)
+            return _unresolved_chain(content, hop, MxcUnavailable(permanent=True), failed_download=False)
+        if mxc_url in _unavailable_media_urls:
+            return _unresolved_chain(content, hop, MxcUnavailable(permanent=True), failed_download=False)
         visited.add(mxc_url)
         file_info = sidecar_content.get("file")
         try:
@@ -389,11 +412,21 @@ async def _download_sidecar_chain(content: dict[str, Any], client: nio.AsyncClie
             logger.exception("Error downloading MXC content", mxc_url=mxc_url)
             full_text = MxcUnavailable(permanent=False)
         if isinstance(full_text, MxcUnavailable):
-            return _SidecarChain(content=content, unavailable=full_text, downloads=downloads + 1)
+            return _unresolved_chain(content, hop, full_text, failed_download=True)
         resolved_content = _extract_large_message_v2_content(full_text)
         if resolved_content is None:
             logger.warning("Invalid large-message v2 payload JSON, returning preview content", mxc_url=mxc_url)
-            return _SidecarChain(content=content, unavailable=MxcUnavailable(permanent=True), downloads=downloads + 1)
+            return _unresolved_chain(content, hop, MxcUnavailable(permanent=True), failed_download=True)
         content = resolved_content
     msg = "Sidecar chain ended without an outcome"
     raise AssertionError(msg)
+
+
+def _unresolved_chain(
+    content: dict[str, Any],
+    hop: int,
+    unavailable: MxcUnavailable,
+    *,
+    failed_download: bool,
+) -> _SidecarChain:
+    return _SidecarChain(content=content, changed=hop > 0, unavailable=unavailable, failed_download=failed_download)

@@ -49,7 +49,7 @@ _MXC_RATE_LIMIT_MAX_WAIT_SECONDS = 30
 _MXC_CONNECTION_RETRY_WAIT_SECONDS = 1
 _MXC_DOWNLOAD_BASE_SECONDS = 30
 _MXC_DOWNLOAD_MIN_BYTES_PER_SECOND = 256 * 1024
-_TRANSIENT_CLIENT_ERROR_STATUSES = frozenset({401, 408, 429})
+_MEDIA_INTRINSIC_FAILURE_STATUSES = frozenset({404, 413})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
 _HEADER_DIMENSION_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
@@ -454,7 +454,10 @@ class _MxcFetched:
 
 @dataclass(frozen=True, slots=True)
 class MxcUnavailable:
-    """An MXC payload that could not be read, and whether retrying could ever change that."""
+    """An MXC payload that could not be read, and whether that is a fact about the media itself.
+
+    Permanent means the media is missing, too large for the caller, or its URI is invalid, which no retry changes.
+    """
 
     permanent: bool
 
@@ -463,9 +466,9 @@ type _MxcDownload = _MxcFetched | MxcUnavailable
 
 
 def _unavailable_for_status(mxc_url: str, status: int) -> MxcUnavailable:
-    # Client errors such as 404 M_NOT_FOUND or 413 M_TOO_LARGE answer for the media itself; an expired token,
-    # a timeout, a rate limit, or a server error can clear on a later attempt.
-    permanent = 400 <= status < 500 and status not in _TRANSIENT_CLIENT_ERROR_STATUSES
+    # Only 404 M_NOT_FOUND and 413 M_TOO_LARGE answer for the media itself; any other status, such as a rate limit,
+    # an expired token, a refusal, or a server error, can clear on a later attempt.
+    permanent = status in _MEDIA_INTRINSIC_FAILURE_STATUSES
     logger.warning("matrix_media_download_failed", mxc_url=mxc_url, http_status=status, permanent=permanent)
     return MxcUnavailable(permanent=permanent)
 

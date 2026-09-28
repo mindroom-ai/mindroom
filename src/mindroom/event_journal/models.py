@@ -364,6 +364,9 @@ class RefreshRequest:
     revision_event_id: str
     refresh_token: int
     membership_epoch: int
+    # Where the message sits, so a read can place a stand-in for it without its body.
+    sender: str
+    created_ts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,7 +376,9 @@ class ConversationPage:
     ``messages`` never contains a message whose visible revision was redacted;
     such a message appears in ``refresh_pending`` instead. A caller that must
     not omit content resolves the refresh and reads again, and a caller that
-    must not block ignores it. Neither can see the redacted revision.
+    must not block ignores it. Neither can see the redacted revision. A strict
+    read may also carry, for itself only, a long message whose sidecar it could
+    not read, as its preview with a note that the rest is unavailable.
     """
 
     messages: tuple[VisibleMessage, ...]

@@ -562,10 +562,10 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(
     client.send.assert_not_awaited()
 
 
-async def test_an_unreachable_sidecar_fails_the_thread_instead_of_exporting_the_preview(
+async def test_an_unreachable_sidecar_exports_its_marked_preview_and_stays_owed(
     router: PrincipalStore,
 ) -> None:
-    """A file that may become readable later leaves the debt owed, and the caller is told."""
+    """A file that may become readable later exports as its marked preview, and its debt stays for the next export."""
     homeserver = FakeHomeserver(sidecar_statuses={SIDECAR_URL: 503})
     serve_thread(
         homeserver,
@@ -581,12 +581,15 @@ async def test_an_unreachable_sidecar_fails_the_thread_instead_of_exporting_the_
         ],
     )
 
-    with pytest.raises(RuntimeError, match="awaiting a server refetch"):
-        await export(reader_for(router, homeserver))
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole long mes…\n\n[long message content unavailable]"]
+    stored = await router.read_conversation(room_id=ROOM, thread_id=ROOT, limit=10)
+    assert [request.logical_event_id for request in stored.refresh_pending] == ["$b:example.org"]
 
 
 async def test_a_missing_sidecar_exports_its_preview_marked_unavailable(router: PrincipalStore) -> None:
-    """A file that can never be read settles its message with the preview, so the thread still exports."""
+    """A file that can never be read settles its message as plain text with the preview and a note."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
@@ -605,8 +608,11 @@ async def test_a_missing_sidecar_exports_its_preview_marked_unavailable(router: 
     messages = await export(reader_for(router, homeserver))
 
     assert bodies(messages) == ["root", "the whole long mes…\n\n[long message content unavailable]"]
-    assert messages[-1].content["io.mindroom.long_text_unavailable"] is True
+    assert messages[-1].content["msgtype"] == "m.text"
+    assert "url" not in messages[-1].content
     assert homeserver.download_calls == 1
+    stored = await router.read_conversation(room_id=ROOM, thread_id=ROOT, limit=10)
+    assert stored.refresh_pending == ()
 
 
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
