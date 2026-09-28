@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+import ssl
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from mindroom.cancellation import (
     request_task_cancel,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_session import certificate_verification_failure, maybe_ssl_context
+from mindroom.matrix.client_session import maybe_ssl_context
 from mindroom.matrix.health import (
     MATRIX_INGESTION_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
@@ -565,6 +566,19 @@ async def run_with_retry(
             return
 
 
+def _certificate_verification_failure(error: BaseException) -> ssl.SSLCertVerificationError | None:
+    """Return the certificate verification error behind an httpx transport error, if any."""
+    seen: list[BaseException] = []
+    cause: BaseException | None = error
+    while cause is not None and cause not in seen:
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return cause
+        seen.append(cause)
+        # Follow __context__ even when suppressed: httpcore re-raises connect errors with a cosmetic `from None`.
+        cause = cause.__cause__ or cause.__context__
+    return None
+
+
 async def wait_for_matrix_homeserver(
     *,
     runtime_paths: RuntimePaths,
@@ -598,7 +612,7 @@ async def wait_for_matrix_homeserver(
                 response = await client.get(versions_url)
             except httpx.TransportError as exc:
                 # An untrusted certificate is a setup problem that waiting cannot fix.
-                verification_error = certificate_verification_failure(exc)
+                verification_error = _certificate_verification_failure(exc)
                 if verification_error is not None:
                     msg = (
                         f"Could not verify the TLS certificate of Matrix homeserver {homeserver}: {verification_error}. "

@@ -38,18 +38,6 @@ class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
-def certificate_verification_failure(error: BaseException) -> ssl_module.SSLCertVerificationError | None:
-    """Return the first certificate verification error in an exception's cause chain, if any."""
-    seen: list[BaseException] = []
-    cause: BaseException | None = error
-    while cause is not None and cause not in seen:
-        if isinstance(cause, ssl_module.SSLCertVerificationError):
-            return cause
-        seen.append(cause)
-        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
-    return None
-
-
 class _MatrixTransportShutdownError(RuntimeError):
     """Raised when process shutdown has permanently fenced Matrix transport."""
 
@@ -408,7 +396,6 @@ __all__ = [
     "MatrixSyncStorage",
     "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
-    "certificate_verification_failure",
     "create_authenticated_client",
     "create_matrix_http_client",
     "login",

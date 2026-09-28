@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import ssl
+
 import aiohttp
 
 from mindroom.desktop.native_protocol import NativeProtocolError
 from mindroom.desktop.session import DesktopSessionNotFoundError
-from mindroom.matrix.client_session import certificate_verification_failure
 
 
 def desktop_startup_error(error: Exception) -> NativeProtocolError:
@@ -16,7 +17,7 @@ def desktop_startup_error(error: Exception) -> NativeProtocolError:
     while cause is not None and cause not in causes:
         causes.append(cause)
         cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
-    if certificate_verification_failure(error) is not None:
+    if any(isinstance(item, ssl.SSLCertVerificationError | aiohttp.ClientConnectorCertificateError) for item in causes):
         return NativeProtocolError(
             "tls_certificate_error",
             f"{error} The server's TLS certificate could not be verified.",

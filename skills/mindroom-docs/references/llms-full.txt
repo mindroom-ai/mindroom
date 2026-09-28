@@ -20210,7 +20210,8 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
 
-The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: the system store plus certifi's roots, or only `SSL_CERT_FILE`/`SSL_CERT_DIR` when either is set.
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: OpenSSL's default CA file and directory plus certifi's roots.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default location, and setting either one stops MindRoom from adding certifi's roots.
 A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
 Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
 Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.

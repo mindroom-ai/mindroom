@@ -1015,18 +1015,6 @@ def _certificate_failure() -> aiohttp.ClientConnectorCertificateError:
     return raised.value
 
 
-def _suppressed_certificate_failure() -> RuntimeError:
-    """Build an error raised `from None` while handling a certificate failure."""
-    try:
-        try:
-            raise _certificate_failure()
-        except aiohttp.ClientConnectorCertificateError:
-            msg = "unrelated failure"
-            raise RuntimeError(msg) from None
-    except RuntimeError as exc:
-        return exc
-
-
 def _connection_refused() -> aiohttp.ClientConnectorError:
     return aiohttp.ClientConnectorError(
         _connection_key("matrix.example.org", 443),
@@ -1141,32 +1129,3 @@ async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch
         ("warning", "ClientConnectorError"),
     ]
     assert failures[1]["error"] == "TimeoutError"
-
-
-def test_certificate_verification_failure_finds_a_wrapped_certificate_failure() -> None:
-    """A certificate failure that caused a higher-level error is still found."""
-    transport_error = _certificate_failure()
-    msg = "login failed"
-    with pytest.raises(RuntimeError) as raised:
-        raise RuntimeError(msg) from transport_error
-    assert client_session.certificate_verification_failure(raised.value) is transport_error
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),
-        aiohttp.ClientConnectorSSLError(
-            _connection_key("matrix.example.org", 443),
-            ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),
-        ),
-        aiohttp.ClientConnectorError(
-            _connection_key("matrix.example.org", 443),
-            ConnectionRefusedError(111, "Connection refused"),
-        ),
-        _suppressed_certificate_failure(),
-    ],
-)
-def test_certificate_verification_failure_ignores_other_and_suppressed_failures(error: BaseException) -> None:
-    """Other TLS and connection failures, and contexts hidden with `from None`, are not certificate failures."""
-    assert client_session.certificate_verification_failure(error) is None
