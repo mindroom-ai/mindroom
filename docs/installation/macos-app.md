@@ -158,7 +158,8 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
     The working folder does not confine it.
 
 While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
-The card shows the command, working folder, agent, requester, and expiry, with control and text-direction characters shown escaped.
+The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, and non-ASCII space characters shown escaped.
+**Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.
 Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
 Without a waiting request, **Allow Without Asking…** offers the same durations.
 **Approve & Allow…** and **Allow Without Asking…** ask for confirmation first and list the agents and requesters the choice covers.
