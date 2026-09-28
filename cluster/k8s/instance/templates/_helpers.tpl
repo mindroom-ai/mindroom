@@ -22,6 +22,16 @@
 {{- end -}}
 {{- end }}
 
+{{- define "mindroom.ingressControllerPeer" -}}
+- namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ required "ingressControllerNamespace is required" .Values.ingressControllerNamespace | quote }}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+      app.kubernetes.io/name: ingress-nginx
+{{- end }}
+
 {{- define "mindroom.staticRunnerContainer" -}}
 {{- $values := .values -}}
 {{- /*

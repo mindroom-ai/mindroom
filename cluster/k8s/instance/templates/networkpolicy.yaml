@@ -14,15 +14,9 @@ spec:
   - Ingress
   - Egress
   ingress:
-  # Allow only ingress-nginx and same-instance pods to reach the public service ports.
+  # Allow only the ingress controller and same-instance pods to reach the public service ports.
   - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: ingress-nginx
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/component: controller
-          app.kubernetes.io/name: ingress-nginx
+    {{- include "mindroom.ingressControllerPeer" . | nindent 4 }}
     - podSelector:
         matchLabels:
           customer: {{ .Values.customer | quote }}
@@ -61,13 +55,7 @@ spec:
         except:
         - fc00::/7
         - fe80::/10
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: ingress-nginx
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/component: controller
-          app.kubernetes.io/name: ingress-nginx
+    {{- include "mindroom.ingressControllerPeer" . | nindent 4 }}
     ports:
     - port: 80
     - port: 443

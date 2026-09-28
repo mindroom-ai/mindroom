@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -223,20 +224,28 @@ _BASELINE_CAPABILITIES = {
 def test_instance_chart_pods_satisfy_the_tenant_namespace_pod_security_baseline() -> None:
     """The tenant namespace enforces the Pod Security baseline profile, so every chart pod must pass it."""
     docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
-    pod_specs = [doc["spec"]["template"]["spec"] for doc in docs if doc["kind"] == "Deployment"]
+    templates = [doc["spec"]["template"] for doc in docs if doc["kind"] == "Deployment"]
 
-    assert len(pod_specs) == 2
-    for pod in pod_specs:
+    assert len(templates) == 2
+    for template in templates:
+        pod = template["spec"]
+        annotations = template["metadata"].get("annotations", {})
+        assert not any(key.startswith("container.apparmor.security.beta.kubernetes.io/") for key in annotations)
         for host_field in ("hostNetwork", "hostPID", "hostIPC"):
             assert not pod.get(host_field)
         assert all("hostPath" not in volume for volume in pod["volumes"])
+        containers = [*pod.get("initContainers", []), *pod["containers"]]
+        for security_context in [pod.get("securityContext", {}), *(c.get("securityContext", {}) for c in containers)]:
+            assert security_context.get("seccompProfile", {}).get("type") != "Unconfined"
+            assert security_context.get("appArmorProfile", {}).get("type") != "Unconfined"
+            assert "seLinuxOptions" not in security_context
+            assert "windowsOptions" not in security_context
         assert "sysctls" not in pod.get("securityContext", {})
-        for container in [*pod.get("initContainers", []), *pod["containers"]]:
+        for container in containers:
             security_context = container.get("securityContext", {})
             assert not security_context.get("privileged")
             assert set(security_context.get("capabilities", {}).get("add", [])) <= _BASELINE_CAPABILITIES
             assert "procMount" not in security_context
-            assert security_context.get("seccompProfile", {}).get("type") != "Unconfined"
             assert all("hostPort" not in port for port in container.get("ports", []))
 
 
@@ -301,6 +310,38 @@ def test_instance_chart_limits_web_egress_to_public_addresses_and_the_ingress_co
     assert all(
         "to" in rule for rule in policy["spec"]["egress"] if {port.get("port") for port in rule["ports"]} != {53}
     )
+
+
+def _ingress_controller_peers(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = [*policy["spec"]["ingress"], *policy["spec"]["egress"]]
+    peers = [peer for rule in rules for peer in [*rule.get("from", []), *rule.get("to", [])]]
+    return [peer for peer in peers if "namespaceSelector" in peer]
+
+
+@pytest.mark.parametrize("namespace", [None, "nginx"])
+def test_instance_chart_admits_the_ingress_controller_namespace_terraform_installs(namespace: str | None) -> None:
+    """Both controller rules follow one chart value, whose default is the namespace the cluster installs into."""
+    kube_tf = Path("cluster/terraform/terraform-k8s/kube.tf").read_text(encoding="utf-8")
+    terraform_namespace = re.search(r'^\s*ingress_target_namespace\s*=\s*"([^"]+)"', kube_tf, re.MULTILINE)
+    assert terraform_namespace is not None, "kube.tf must pin the ingress controller namespace"
+    chart_values = yaml.safe_load(Path("cluster/k8s/instance/values.yaml").read_text(encoding="utf-8"))
+    assert chart_values["ingressControllerNamespace"] == terraform_namespace.group(1)
+    expected = namespace or terraform_namespace.group(1)
+    set_args = () if namespace is None else (f"ingressControllerNamespace={namespace}",)
+    policy = _resource(
+        _render_chart(Path("cluster/k8s/instance"), *set_args),
+        "NetworkPolicy",
+        "instance-traffic-controls-demo",
+    )
+
+    assert _ingress_controller_peers(policy) == 2 * [
+        {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": expected}},
+            "podSelector": {
+                "matchLabels": {"app.kubernetes.io/component": "controller", "app.kubernetes.io/name": "ingress-nginx"},
+            },
+        },
+    ]
 
 
 def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instance_pods() -> None:

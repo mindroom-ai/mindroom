@@ -6,6 +6,9 @@ storageClassName: hcloud-volumes  # Override to local cluster storage class (for
 storageAccessMode: ReadWriteOnce  # MindRoom storage access mode.
 synapseStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
+# Namespace of the ingress-nginx controller pods, which alone may reach instance service ports.
+# Must match ingress_target_namespace in cluster/terraform/terraform-k8s/kube.tf.
+ingressControllerNamespace: ingress-nginx
 
 mindroomResources:
   requests:
