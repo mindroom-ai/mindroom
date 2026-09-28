@@ -877,6 +877,140 @@ async def test_invite_join_lock_is_kept_while_a_waiter_has_not_resumed(tmp_path:
     assert lifecycle._invite_join_locks == {}
 
 
+@pytest.mark.asyncio
+async def test_a_pass_skips_rooms_nio_retracts_or_joins_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Invites retracted or turned into joins during a pass are skipped, and the pass still arms its retry."""
+    _config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    bot.client.invited_rooms = {}
+    for room_id in ("!a:localhost", "!b:localhost", "!c:localhost"):
+        _cache_current_invite(bot, room_id, "@owner:localhost")
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.monotonic", lambda: 1000.0)
+    attempted: list[str] = []
+
+    async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
+        attempted.append(room_id)
+        # While the first join is in flight, sync retracts one invite and
+        # reports another room as joined through some other path.
+        bot.client.invited_rooms.pop("!b:localhost", None)
+        bot.client.invited_rooms.pop("!c:localhost", None)
+        bot.client.rooms["!c:localhost"] = nio.MatrixRoom("!c:localhost", bot.agent_user.user_id)
+        return RoomJoinOutcome.RETRYABLE_FAILURE
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=join_room))
+
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert attempted == ["!a:localhost"]
+    assert set(bot._room_lifecycle._pending_invite_retries) == {"!a:localhost"}
+    assert bot._room_lifecycle._pending_invite_retry_timer is not None
+    bot._room_lifecycle.cancel_pending_invite_retry()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_retries_stay_off_until_the_sync_loop_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pass that fails after shutdown cancelled retries cannot re-arm the timer until retries resume."""
+    _config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    bot.client.invited_rooms = {}
+    _cache_current_invite(bot, "!slow:localhost", "@owner:localhost")
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def blocked_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.RETRYABLE_FAILURE
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=blocked_join))
+    lifecycle = bot._room_lifecycle
+
+    reconciliation = asyncio.create_task(lifecycle.reconcile_pending_invites())
+    await asyncio.wait_for(join_started.wait(), timeout=2)
+    lifecycle.cancel_pending_invite_retry()
+    release_join.set()
+    await asyncio.wait_for(reconciliation, timeout=2)
+
+    assert "!slow:localhost" in lifecycle._pending_invite_retries
+    assert lifecycle._pending_invite_retry_timer is None
+    lifecycle._pending_invite_retry_fired()
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    lifecycle.resume_pending_invite_retries()
+    assert lifecycle._pending_invite_retry_timer is not None
+    lifecycle.cancel_pending_invite_retry()
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_ledger_failure_fails_every_batched_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A write that fails with any error answers every change batched into it."""
+    _config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    update = bot_room_lifecycle._update_pending_room_invites
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def failing_update(*args: object) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(2)
+            return update(*args)
+        msg = "ledger unreadable"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle._update_pending_room_invites", failing_update)
+    lifecycle = bot._room_lifecycle
+    first = asyncio.create_task(lifecycle._record_accepted_invite("!first:localhost", "@owner:localhost"))
+    assert await asyncio.to_thread(started.wait, 2)
+    batched = [
+        asyncio.create_task(lifecycle._record_accepted_invite(f"!batched-{index}:localhost", "@owner:localhost"))
+        for index in range(3)
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(first, timeout=2)
+    results = await asyncio.wait_for(asyncio.gather(*batched, return_exceptions=True), timeout=2)
+
+    assert calls == 2
+    assert [type(result) for result in results] == [ValueError] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_join_that_landed_while_reported_failed_keeps_its_inviter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A join nio already projects as done when the command reports failure is finished by the next pass."""
+    _config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.monotonic", lambda: 1000.0)
+
+    async def landed_but_failed(_client: object, room_id: str) -> RoomJoinOutcome:
+        bot.client.invited_rooms.pop(room_id, None)
+        bot.client.rooms[room_id] = nio.MatrixRoom(room_id, bot.agent_user.user_id)
+        return RoomJoinOutcome.RETRYABLE_FAILURE
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=landed_but_failed))
+    welcome = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
+
+    await _handle_invite(bot, room, event)
+    assert bot._room_lifecycle._unconfirmed_join_inviters == {room.room_id: event.sender}
+    assert bot._room_lifecycle._pending_invite_retry_timer is not None
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    welcome.assert_awaited_once_with(room.room_id, event.sender)
+    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    bot._room_lifecycle.cancel_pending_invite_retry()
+
+
 @pytest.fixture
 def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with agents and teams."""

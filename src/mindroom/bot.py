@@ -1372,6 +1372,7 @@ class AgentBot:
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
         self._response_runner.resume_pending_admissions()
+        self._room_lifecycle.resume_pending_invite_retries()
         self._request_call_reconciliation()
         if self.agent_name == ROUTER_AGENT_NAME:
             self._invalidate_agent_reply_memberships(reason="sync_loop_started")

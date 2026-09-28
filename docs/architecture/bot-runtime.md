@@ -172,7 +172,8 @@ Neither record grants inviter authority: routers and agents re-read nio's curren
 A failed join keeps the decrypt fence for retry while nio still holds the invite.
 Reconciliation runs one pass at a time, and triggers that arrive during a pass share the next one.
 Each pass drops accepted-invite records whose room is neither invited nor joined, or whose current invite the policy refuses, in one write, then handles nio's current invites from allowed inviters and the joined rooms still owed completion, each on its own and at most 32 per pass; a pass that stops at that bound schedules the next one a second later.
-A room whose handling fails, whether from a delivered invite or during a pass, is retried by a timed pass 30, 60, 120, and 240 seconds after successive failures, with one timer armed for the earliest retry due.
+A room whose handling fails, whether from a delivered invite or during a pass, is retried by a timed pass 30, 60, 120, and 240 seconds after successive failures, with one timer armed for the earliest retry due; sync shutdown disarms it until the next sync loop starts.
+A pass re-reads nio for every room, so an invite retracted or turned into a join while the pass runs is skipped.
 After five failures it is not retried until the invite is delivered again or the process restarts; giving up changes no durable state, so a joined room whose welcome keeps failing is retried after a restart.
 Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
