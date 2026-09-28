@@ -151,6 +151,8 @@ It does not ask for a key that is already set in the environment, and other pres
 The same process then pairs with MindRoom Chat and starts.
 Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
+While a hosted install waits for pairing approval, `mindroom run` already listens on the API address: `/api/health` returns `200` and `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`, so container health checks do not restart it.
+The dashboard and the rest of the API start after pairing, and `--no-api` skips these probes too.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -1422,6 +1424,7 @@ mindroom connect
 The command prints an approval link, a pair code, and (in a terminal) a QR code of the link.
 Open the link or scan the QR code while signed in to MindRoom Chat and approve the machine, or enter the code in MindRoom Chat → Settings → Local MindRoom.
 Add `--open-browser` to open the approval link in your default browser.
+Approve only when the code on the page matches your terminal (`Approve only if the page shows code ABCD-EFGH`); the page also shows the address the request came from.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
 The 10-minute limit also applies while the provisioning service is unreachable, with one extra minute of grace for an approval made just before expiry.

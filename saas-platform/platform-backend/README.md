@@ -61,3 +61,17 @@ Requires:
 - `STRIPE_WEBHOOK_SECRET` - Webhook endpoint secret
 - Optional: `ENABLE_CLEANUP_SCHEDULER=true` to enable the daily cleanup job (runs at 03:00 UTC): GDPR hard deletes, log and metric retention, and the hosted instance lifecycle
 - Optional: `INSTANCE_TEARDOWN_GRACE_DAYS` (default `30`) days an instance of an inactive subscription stays stopped before teardown; see `docs/deployment/kubernetes.md#subscription-lifecycle`
+
+## Backfilling Stripe payments
+
+`backend.scripts.backfill_payments` records paid Stripe invoices in the `payments` table with the same row-building code as the `invoice.payment_succeeded` webhook.
+Use it when webhook deliveries were lost or failed, for example the invoices paid before the webhook handled the Stripe basil invoice shape.
+It only considers paid invoices with `amount_paid > 0`, and it skips and reports invoices without a subscription or without a matching account.
+The default is a dry run that prints each invoice id, payment date, amount, currency, and account email without writing anything.
+`--apply` upserts on `invoice_id`, so re-running it never creates duplicate rows.
+Run it inside the platform-backend container, which already has the Stripe and Supabase credentials:
+
+```bash
+kubectl -n mindroom-production exec deploy/platform-backend -- python -m backend.scripts.backfill_payments --dry-run
+kubectl -n mindroom-production exec deploy/platform-backend -- python -m backend.scripts.backfill_payments --apply
+```

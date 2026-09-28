@@ -36,6 +36,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptStatus,
 )
 from mindroom.shell_execution import ShellRunResult
+from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
@@ -236,6 +237,7 @@ class _WorkerClient:
     store: ScriptRunStore
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
     launch_state_scope_worker_keys: list[str | None] = field(default_factory=list)
+    launch_config_snapshots: list[dict[str, object] | None] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
     cancel_handles: list[str] = field(default_factory=list)
@@ -260,10 +262,12 @@ class _WorkerClient:
         max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
+        config_snapshot: dict[str, object] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
         assert max_runtime_seconds > 0
         self.launch_state_scope_worker_keys.append(state_scope_worker_key)
+        self.launch_config_snapshots.append(config_snapshot)
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
@@ -360,6 +364,23 @@ async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: P
     assert run.state is ScriptRunState.RUNNING
     assert (run.recovery_signature is not None) is (backend_name == "kubernetes")
     assert ScriptRunStore(context.runtime_paths).get_run(run.run_id).recovery_signature == run.recovery_signature
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
+async def test_launch_sends_live_config_only_to_seeded_workers(tmp_path: Path, backend_name: str) -> None:
+    """Kubernetes script workers mount only a seed config, so the launch carries the primary's redacted live config."""
+    manager, backend, client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
+    backend.backend_name = backend_name
+    context = _context(tmp_path, backend=backend_name, isolated_script_gateway=True)
+
+    run = await manager.run(context, source="print('ok')\n")
+
+    assert run.state is ScriptRunState.RUNNING
+    expected = runner_config_snapshot(context.runtime_paths, context.config) if backend_name == "kubernetes" else None
+    assert client.launch_config_snapshots == [expected]
+    if expected is not None:
+        assert set(expected["agents"]) == {"watcher", "analyzer"}
 
 
 async def _wait_for_cancel_request(manager: ScriptRunManager, run_id: str) -> None:

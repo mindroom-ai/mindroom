@@ -480,6 +480,7 @@ def pair_local_install(
         console.print("\nConnect this machine to MindRoom:")
         console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
         console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
+        console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
         if console.is_terminal:
             console.print(render_qr(session.approve_url), markup=False, highlight=False)
         console.print("Waiting for approval (Ctrl+C to cancel)…")

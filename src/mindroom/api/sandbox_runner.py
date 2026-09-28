@@ -622,7 +622,7 @@ def app_runtime_config(app: FastAPI) -> Config:
     return _app_context(app).config
 
 
-def _request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None) -> Config:
+def request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None) -> Config:
     """Return the config one request runs under: the primary's live snapshot when sent, else the startup config.
 
     The runner's own config file is only a seed, so agents added or edited after
@@ -646,6 +646,7 @@ def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
 
 def resolve_script_state_workspace(
     app: FastAPI,
+    config: Config,
     *,
     state_scope_worker_key: str,
     agent_name: str,
@@ -653,7 +654,6 @@ def resolve_script_state_workspace(
 ) -> Path:
     """Resolve the canonical agent workspace mounted into one script worker."""
     runtime_paths = app_runtime_paths(app)
-    config = app_runtime_config(app)
     agent_config = config.agents.get(agent_name)
     if agent_config is None:
         msg = "Script state scope does not resolve an agent workspace."
@@ -1662,7 +1662,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
 ) -> SandboxRunnerSaveAttachmentResponse:
     """Save one context-authorized attachment into the prepared worker workspace."""
     runtime_paths = app_runtime_paths(request.app)
-    config = _request_runtime_config(request.app, payload.config_snapshot)
+    config = request_runtime_config(request.app, payload.config_snapshot)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1756,7 +1756,7 @@ async def view_file_in_worker(
 ) -> SandboxRunnerViewFileResponse:
     """View an image only after resolving its prepared worker workspace."""
     runtime_paths = app_runtime_paths(request.app)
-    config = _request_runtime_config(request.app, payload.config_snapshot)
+    config = request_runtime_config(request.app, payload.config_snapshot)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1963,7 +1963,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     """Execute a tool function locally and return the serialized result."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
-    config = _request_runtime_config(request.app, payload.config_snapshot)
+    config = request_runtime_config(request.app, payload.config_snapshot)
     tool_metadata = context.tool_metadata
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)

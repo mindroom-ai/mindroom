@@ -620,6 +620,14 @@ class TurnController:
             self.deps.agent_name != ROUTER_AGENT_NAME
             or command_parser.parse(event.body.strip()) is not None
             or is_v2_sidecar_text_preview(event.source)
+            # A caption for an upload still waiting in this sender's burst must join that upload's
+            # turn, or the router routes the upload alone while the named agent answers the caption.
+            or any(
+                self.deps.coalescing_gate.has_pending_work(
+                    requester_coalescing_key(room.room_id, scope_thread_id, requester_user_id),
+                )
+                for scope_thread_id in {None, thread_id}
+            )
         ):
             return False
 
