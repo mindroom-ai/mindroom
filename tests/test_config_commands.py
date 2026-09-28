@@ -1841,6 +1841,87 @@ async def test_config_set_secret_value_never_reaches_room_state(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
+async def test_room_rejoin_restore_keeps_withheld_value_in_memory(tmp_path: Path) -> None:
+    """Rejoins and config reloads restore room state again without dropping the process's withheld value."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+    _response, change_info = await handle_config_command(
+        "set models.default.api_key sk-new-config-sentinel",
+        runtime_paths,
+    )
+    assert change_info is not None
+    assert change_info["new_value_withheld"] is True
+
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=runtime_paths,
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            new_value_withheld=True,
+            requester="@admin:example.org",
+        )
+        client.room_get_state.return_value = nio.RoomGetStateResponse(
+            [
+                {
+                    "type": config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+                    "state_key": "$preview",
+                    "sender": client.user_id,
+                    "content": _written_pending_states(client)[-1],
+                },
+            ],
+            "!room:example.org",
+        )
+        assert await config_confirmation.restore_pending_changes(client, "!room:example.org") == 1
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "Configuration updated successfully" in response_text
+    assert "sk-new-config-sentinel" in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_expired_in_memory_config_change_is_discarded() -> None:
+    """A pending change held in memory expires after 24 hours like one read from room state."""
+    stale = config_confirmation._PendingConfigChange(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="defaults.markdown",
+        new_value=False,
+        requester="@admin:example.org",
+        created_at=datetime.now(UTC) - timedelta(hours=25),
+    )
+    client = _empty_pending_state_client()
+    with patch.object(config_confirmation, "_pending_changes", {"$preview": stale}):
+        resolved = await config_confirmation._resolve_pending_change(client, "!room:example.org", "$preview")
+        assert config_confirmation._get_pending_change("$preview") is None
+
+    assert resolved is None
+    assert _written_pending_states(client) == [{}]
+
+
+@pytest.mark.asyncio
 async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_path: Path) -> None:
     """A restored withheld change has no value to apply, so its confirmation says so and clears the state."""
     config_path = _write_config_with_secrets(tmp_path)

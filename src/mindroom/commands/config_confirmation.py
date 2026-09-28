@@ -294,7 +294,7 @@ async def _resolve_pending_change(
     """Resolve one pending change from memory or its bot-authored Matrix state."""
     pending_change = _get_pending_change(event_id)
     if pending_change is not None:
-        return pending_change
+        return await _unexpired_pending_change(client, room_id, event_id, pending_change)
 
     response = await client.room_get_state_event(
         room_id,
@@ -334,6 +334,25 @@ async def resolve_reaction_pending_change(
     return await _resolve_pending_change(client, room_id, event.reacts_to)
 
 
+async def _unexpired_pending_change(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    pending_change: _PendingConfigChange,
+) -> _PendingConfigChange | None:
+    """Return one pending change, or discard it from memory and room state once it has expired."""
+    if not pending_change.is_expired():
+        return pending_change
+    logger.info(
+        "Discarding expired pending config change",
+        event_id=event_id,
+        created_at=pending_change.created_at,
+    )
+    await _remove_pending_change_from_matrix(client, room_id, event_id)
+    _remove_pending_change(event_id)
+    return None
+
+
 async def _restore_pending_change(
     client: nio.AsyncClient,
     room_id: str,
@@ -341,14 +360,18 @@ async def _restore_pending_change(
     content: dict[str, Any],
 ) -> _PendingConfigChange | None:
     """Restore one unexpired Matrix-backed pending change into memory."""
-    pending_change = _PendingConfigChange.from_dict(content)
-    if pending_change.is_expired():
-        logger.info(
-            "Skipping expired pending config change",
-            event_id=event_id,
-            created_at=pending_change.created_at,
-        )
-        await _remove_pending_change_from_matrix(client, room_id, event_id)
+    in_memory = _get_pending_change(event_id)
+    if in_memory is not None:
+        # Rejoins and config reloads restore again; this process's own entry is current
+        # and holds any withheld value that the room state copy lacks.
+        return await _unexpired_pending_change(client, room_id, event_id, in_memory)
+    pending_change = await _unexpired_pending_change(
+        client,
+        room_id,
+        event_id,
+        _PendingConfigChange.from_dict(content),
+    )
+    if pending_change is None:
         return None
     _pending_changes[event_id] = pending_change
     logger.info(
