@@ -14,7 +14,8 @@ ingressControllerNamespace: ingress-nginx
 
 # Tenants share nodes, so every container bounds its ephemeral storage (writable layer, logs, and emptyDirs).
 # Kubelet evicts only the pod that exceeds its limit.
-# The primary's limit leaves room for tool extras it installs into the image's virtualenv at runtime.
+# The primary's limit leaves room for tool extras it installs into the image's virtualenv at runtime;
+# sentence_transformers with its torch and CUDA wheels alone unpacks to about 7 GiB on x86_64.
 # Ephemeral-storage requests stay small: every tenant's requests count against the node's allocatable ephemeral
 # storage, so large ones would leave new tenant pods Pending. They are explicit because a limit without a request
 # makes Kubernetes request the full limit.
@@ -26,7 +27,7 @@ mindroomResources:
   limits:
     memory: "2Gi"
     cpu: "1000m"
-    ephemeral-storage: "8Gi"
+    ephemeral-storage: "16Gi"
 
 synapseResources:
   requests:

@@ -1203,7 +1203,7 @@ def test_instance_chart_renders_configurable_control_plane_resources() -> None:
 
     assert _container(mindroom, "mindroom")["resources"] == {
         "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "64Mi"},
-        "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "8Gi"},
+        "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "16Gi"},
     }
     assert _container(synapse, "synapse")["resources"] == {
         "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "64Mi"},

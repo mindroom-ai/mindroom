@@ -100,7 +100,7 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "mindroomResources.requests.ephemeral-storage": "64Mi",
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
-        "mindroomResources.limits.ephemeral-storage": "16Gi",
+        "mindroomResources.limits.ephemeral-storage": "32Gi",
         "synapseResources.requests.memory": "1Gi",
         "synapseResources.requests.cpu": "500m",
         "synapseResources.requests.ephemeral-storage": "64Mi",

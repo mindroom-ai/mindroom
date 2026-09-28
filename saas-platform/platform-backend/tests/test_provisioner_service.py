@@ -122,6 +122,16 @@ class TestHelmArgsAssembly:
         assert "sandboxRunnerResources.limits.ephemeral-storage" in default_keys
         assert default_keys <= set(provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"])
 
+    def test_pro_resource_profile_doubles_default_ephemeral_storage_limits(self):
+        """Pro containers get twice the default disk headroom, including the primary's room for runtime tool extras."""
+        chart_values = yaml.safe_load((_REPOSITORY_ROOT / "cluster/k8s/instance/values.yaml").read_text())
+        pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+
+        assert chart_values["mindroomResources"]["limits"]["ephemeral-storage"] == "16Gi"
+        for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources"):
+            default_gib = int(chart_values[component]["limits"]["ephemeral-storage"].removesuffix("Gi"))
+            assert pro[f"{component}.limits.ephemeral-storage"] == f"{2 * default_gib}Gi"
+
     def test_pro_resource_profile_keeps_ephemeral_storage_requests_small(self):
         """Every tenant's requests count against the shared node's allocatable ephemeral storage."""
         pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
