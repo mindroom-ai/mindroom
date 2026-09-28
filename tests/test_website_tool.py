@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import socket
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from bs4 import BeautifulSoup
 
+from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.custom_tools.website import (
+    _MAX_PAGE_BYTES,
     _MAX_REDIRECTS,
     _TOO_MANY_REDIRECTS,
     WebsiteTools,
@@ -22,6 +26,9 @@ from mindroom.custom_tools.website import (
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tools.website import website_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture(autouse=True)
@@ -87,9 +94,8 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
@@ -148,10 +154,9 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
     start_url = "https://example.com/redirect"
     requested_urls: list[str] = []
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         if url == start_url:
             return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"}, request=request)
@@ -178,10 +183,9 @@ def test_website_reader_follows_allowed_redirect_chain(monkeypatch: pytest.Monke
     final_url = "https://example.com/final"
     requested_urls: list[str] = []
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         if url == start_url:
             return httpx.Response(302, headers={"Location": intermediate_url}, request=request)
@@ -216,10 +220,9 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
     """
     requested_urls: list[str] = []
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         if url == start_url:
             return httpx.Response(301, headers={"Location": final_url}, request=request)
@@ -245,10 +248,9 @@ def test_website_reader_respects_max_redirects(monkeypatch: pytest.MonkeyPatch) 
     start_url = "https://example.com/redirect"
     requested_urls: list[str] = []
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(302, headers={"Location": start_url}, request=request)
 
@@ -338,10 +340,9 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         if url == redirect_url:
             return httpx.Response(302, headers={"Location": offsite_url}, request=request)
@@ -383,10 +384,9 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         if url == redirect_url:
             return httpx.Response(302, headers={"Location": private_url}, request=request)
@@ -423,11 +423,10 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
     </html>
     """
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert url == start_url
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
@@ -459,10 +458,9 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
     </html>
     """
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         assert url == start_url
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
@@ -521,10 +519,9 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
@@ -580,10 +577,9 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     def fake_log_debug(message: str) -> None:
         logged_messages.append(message)
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    def fake_get(url: str, *, timeout: int) -> httpx.Response:
         assert url == full_url
         assert timeout == 10
-        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
@@ -647,3 +643,83 @@ def test_website_docs_describe_mindroom_reader() -> None:
     docs = Path("docs/tools/web-scraping-and-browser.md").read_text(encoding="utf-8")
 
     assert "MindRoom's WebsiteReader variant" in docs
+
+
+def _mock_server_fetch_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> list[httpx.Request]:
+    """Serve website fetches from a handler while keeping the reader's own client and body handling."""
+    requests: list[httpx.Request] = []
+
+    def recording_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    monkeypatch.setattr(
+        "mindroom.custom_tools.website.ServerFetchHTTPTransport",
+        lambda: httpx.MockTransport(recording_handler),
+    )
+    return requests
+
+
+def test_website_fetch_refuses_compressed_bodies_without_inflating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small gzip body that inflates to megabytes is refused instead of decoded in the primary process."""
+    bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))
+    requests = _mock_server_fetch_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip", "Content-Type": "text/html"},
+            content=iter([bomb]),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="identity content encoding"):
+        _MindRoomWebsiteReader()._get_validated_response("https://example.test/")
+
+    assert [request.headers["Accept-Encoding"] for request in requests] == ["identity"]
+
+
+def test_website_fetch_stops_reading_at_the_page_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An oversized page is abandoned once it crosses the limit rather than buffered whole."""
+    chunk = b"<p>x</p>" * 8192
+    served_chunks: list[int] = []
+
+    def body() -> Iterator[bytes]:
+        for index in range(48):
+            served_chunks.append(index)
+            yield chunk
+
+    _mock_server_fetch_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"Content-Type": "text/html"}, content=body()),
+    )
+
+    with pytest.raises(ByteLimitExceededError):
+        _MindRoomWebsiteReader()._get_validated_response("https://example.test/")
+
+    assert len(served_chunks) <= _MAX_PAGE_BYTES // len(chunk) + 1
+
+
+def test_website_read_url_reads_pages_within_the_limit_after_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect hops and in-limit pages still flow through the bounded fetch."""
+    page = b"<html><body><main><h1>Docs</h1><p>Detailed reference material lives here.</p></main></body></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "https://example.test/docs"})
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, content=iter([page]))
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    requests = _mock_server_fetch_transport(monkeypatch, handler)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = json.loads(WebsiteTools().read_url("https://example.test/start"))
+
+    assert [str(request.url) for request in requests] == ["https://example.test/start", "https://example.test/docs"]
+    assert documents[0]["meta_data"]["url"] == "https://example.test/docs"
+    assert "Detailed reference material" in documents[0]["content"]

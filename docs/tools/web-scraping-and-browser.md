@@ -133,6 +133,7 @@ read_url("https://docs.mindroom.chat")
 - Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
 - Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
 - Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
+- Each page and redirect hop is requested uncompressed and read up to 2 MiB; a larger page, or one the server compresses anyway, fails instead of being buffered in the primary process.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 

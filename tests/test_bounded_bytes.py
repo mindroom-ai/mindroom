@@ -1,11 +1,11 @@
 """Bounded byte collection preserves stream data, failures, and cancellation."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes, collect_bounded_sync_bytes
 
 
 async def _chunks(values: list[bytes]) -> AsyncIterator[bytes]:
@@ -82,3 +82,17 @@ async def test_cancellation_reaches_pending_read() -> None:
     with pytest.raises(asyncio.CancelledError) as raised:
         await task
     assert cancelled == [raised.value]
+
+
+def test_sync_collection_matches_async_limits() -> None:
+    """The synchronous collector keeps exact-limit bodies and rejects the first overflowing chunk unread."""
+
+    def stream() -> Iterator[bytes]:
+        yield b"a"
+        yield b"bc"
+        yield b"d"
+        pytest.fail("Read past the overflowing chunk")
+
+    assert collect_bounded_sync_bytes(iter([b"a", b"", b"bc"]), max_bytes=3) == b"abc"
+    with pytest.raises(ByteLimitExceededError):
+        collect_bounded_sync_bytes(stream(), max_bytes=3)

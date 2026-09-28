@@ -15,6 +15,7 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.bounded_bytes import collect_bounded_sync_bytes
 from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
@@ -57,6 +58,8 @@ _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
 _TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
 _MAX_REDIRECTS = 10
+# BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so pages stay small.
+_MAX_PAGE_BYTES = 2 * 1024 * 1024
 
 
 def _normalize_text(text: str) -> str:
@@ -147,20 +150,36 @@ def _normalized_hostname(url: str) -> str:
         return ""
 
 
-def _server_fetch_get(
-    url: str,
-    *,
-    timeout: int,
-    follow_redirects: bool,
-    proxy: str | None = None,
-) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured."""
-    if proxy:
-        # With a configured proxy, URL and redirect validation happen before this handoff.
-        # The proxy owns target DNS resolution and egress policy from here.
-        return httpx.get(url, timeout=timeout, proxy=proxy, follow_redirects=follow_redirects)
-    with httpx.Client(transport=ServerFetchHTTPTransport(), follow_redirects=follow_redirects) as client:
-        return client.get(url, timeout=timeout)
+def _bounded_page_body(response: httpx.Response) -> bytes:
+    """Read one uncompressed response body without buffering past the page byte limit."""
+    encoding = response.headers.get("content-encoding", "")
+    if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
+        msg = "Website pages require identity content encoding."
+        raise ValueError(msg)
+    return collect_bounded_sync_bytes(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
+
+
+def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> httpx.Response:
+    """Fetch one URL hop through the server-fetch transport when no proxy is configured.
+
+    Bodies are requested uncompressed and read as raw bytes within the page byte limit,
+    so a small compressed body can never inflate in the primary process.
+    Redirects are returned without their bodies for the caller to validate and follow.
+    """
+    # With a configured proxy, URL and redirect validation happen before this handoff.
+    # The proxy owns target DNS resolution and egress policy from here.
+    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
+    with (
+        httpx.Client(headers={"Accept-Encoding": "identity"}, timeout=timeout, **route) as client,
+        client.stream("GET", url) as response,
+    ):
+        content = b"" if response.is_redirect else _bounded_page_body(response)
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=content,
+            request=response.request,
+        )
 
 
 def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
@@ -222,12 +241,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
         request_url = validate_server_fetch_url(current_url)
         fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(
-                request_url,
-                timeout=self.timeout,
-                follow_redirects=False,
-                **fetch_kwargs,
-            )
+            response = _server_fetch_get(request_url, timeout=self.timeout, **fetch_kwargs)
             if not response.is_redirect:
                 return response, request_url
             request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
