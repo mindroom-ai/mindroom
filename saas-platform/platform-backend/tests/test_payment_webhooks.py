@@ -1,4 +1,4 @@
-"""Stripe invoice webhooks, in the payload shape of the pinned Stripe API version, write only real table columns."""
+"""Stripe invoice and subscription webhooks, in the payload shape of the pinned Stripe API version, write only real table columns."""
 
 from __future__ import annotations
 
@@ -122,6 +122,62 @@ def _invoice(invoice_id: str = "in_1", *, status: str = "paid", amount_paid: int
     }
 
 
+def _subscription(*, period_start: int = 1_787_000_000, period_end: int = 1_789_678_400) -> dict[str, Any]:
+    """A subscription as Stripe sends it since API version 2025-03-31.basil.
+
+    The billing period moved from ``subscription.current_period_*`` to each ``subscription.items.data[i]``.
+    """
+    return {
+        "id": "sub_stripe_1",
+        "object": "subscription",
+        "billing_cycle_anchor": period_start,
+        "billing_mode": {"type": "classic"},
+        "cancel_at": None,
+        "cancel_at_period_end": False,
+        "canceled_at": None,
+        "collection_method": "charge_automatically",
+        "created": 1_784_321_600,
+        "currency": "usd",
+        "customer": "cus_1",
+        "items": {
+            "object": "list",
+            "data": [
+                {
+                    "id": "si_1",
+                    "object": "subscription_item",
+                    "created": 1_784_321_600,
+                    "current_period_end": period_end,
+                    "current_period_start": period_start,
+                    "metadata": {},
+                    "price": {
+                        "id": "price_hobby",
+                        "object": "price",
+                        "active": True,
+                        "currency": "usd",
+                        "metadata": {"tier": "hobby", "billing_cycle": "monthly"},
+                        "product": "prod_hobby",
+                        "recurring": {"interval": "month", "interval_count": 1},
+                        "type": "recurring",
+                        "unit_amount": 2900,
+                    },
+                    "quantity": 1,
+                    "subscription": "sub_stripe_1",
+                }
+            ],
+            "has_more": False,
+            "total_count": 1,
+            "url": "/v1/subscription_items?subscription=sub_stripe_1",
+        },
+        "latest_invoice": "in_1",
+        "livemode": True,
+        "metadata": {},
+        "start_date": 1_784_321_600,
+        "status": "active",
+        "trial_end": None,
+        "trial_start": None,
+    }
+
+
 @pytest.fixture
 def db() -> Iterator[_SchemaCheckedSupabase]:
     db = _SchemaCheckedSupabase(
@@ -148,7 +204,7 @@ def db() -> Iterator[_SchemaCheckedSupabase]:
         yield db
 
 
-def _deliver(event_type: str, invoice: dict[str, Any], event_id: str = "evt_1") -> dict[str, Any]:
+def _deliver(event_type: str, stripe_object: dict[str, Any], event_id: str = "evt_1") -> dict[str, Any]:
     """Sign and post the event the way Stripe does, so the handler sees a real ``stripe.StripeObject``."""
     body = json.dumps(
         {
@@ -156,7 +212,7 @@ def _deliver(event_type: str, invoice: dict[str, Any], event_id: str = "evt_1") 
             "object": "event",
             "api_version": stripe.api_version,
             "created": 1_787_000_100,
-            "data": {"object": invoice},
+            "data": {"object": stripe_object},
             "livemode": True,
             "pending_webhooks": 1,
             "request": {"id": None, "idempotency_key": None},
@@ -173,7 +229,7 @@ def _deliver(event_type: str, invoice: dict[str, Any], event_id: str = "evt_1") 
 
 
 def test_stripe_library_pins_a_basil_api_version() -> None:
-    """The invoice fixture above follows basil; revisit it when the Stripe library moves to a new major version."""
+    """The invoice and subscription fixtures above follow basil; revisit it when the Stripe library moves to a new major version."""
     assert stripe.api_version.endswith(".basil")
 
 
@@ -249,3 +305,24 @@ def test_invoice_without_subscription_is_not_recorded(db: _SchemaCheckedSupabase
 
     assert _deliver("invoice.payment_succeeded", invoice) == {"received": True, "error": "Failed to process payment"}
     assert db.tables["payments"] == []
+
+
+@pytest.mark.parametrize("event_type", ["customer.subscription.created", "customer.subscription.updated"])
+def test_subscription_event_stores_billing_period_from_items(db: _SchemaCheckedSupabase, event_type: str) -> None:
+    assert _deliver(event_type, _subscription()) == {"received": True, "error": None}
+
+    subscription = db.row("subscriptions", id=SUBSCRIPTION_ROW_ID)
+    assert subscription["current_period_start"] == "2026-08-17T20:53:20+00:00"
+    assert subscription["current_period_end"] == "2026-09-17T20:53:20+00:00"
+    assert "error" not in db.row("webhook_events", stripe_event_id="evt_1")
+
+
+def test_subscription_renewal_moves_billing_period(db: _SchemaCheckedSupabase) -> None:
+    _deliver("customer.subscription.updated", _subscription(), event_id="evt_1")
+    renewed = _subscription(period_start=1_789_678_400, period_end=1_792_270_400)
+
+    assert _deliver("customer.subscription.updated", renewed, event_id="evt_2") == {"received": True, "error": None}
+
+    subscription = db.row("subscriptions", id=SUBSCRIPTION_ROW_ID)
+    assert subscription["current_period_start"] == "2026-09-17T20:53:20+00:00"
+    assert subscription["current_period_end"] == "2026-10-17T20:53:20+00:00"

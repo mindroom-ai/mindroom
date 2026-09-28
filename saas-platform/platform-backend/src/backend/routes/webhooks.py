@@ -96,7 +96,8 @@ class _SubscriptionFields(TypedDict):
 
 def _subscription_fields(subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
+    price_data = item["price"] if item else {}
     tier = _get_tier_from_price(price_data)
     _get_billing_cycle_from_price(price_data)
     limits = get_plan_limits_from_metadata(tier)
@@ -112,10 +113,11 @@ def _subscription_fields(subscription: dict) -> _SubscriptionFields:
         "updated_at": datetime.now(UTC).isoformat(),
     }
 
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
+    # Since Stripe API version 2025-03-31.basil the billing period lives on each subscription item, not on the
+    # subscription; our subscriptions have a single item.
+    if start := item.get("current_period_start"):
         subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
+    if end := item.get("current_period_end"):
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
     return subscription_data
 
