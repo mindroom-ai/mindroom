@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import ipaddress
 import re
 import socket
 import time
@@ -670,27 +669,17 @@ def _required_client_credential(data: dict[str, object], key: str) -> str:
 
 
 def _parse_approve_url(raw_value: str) -> str:
-    """Return an approval link a browser may open: an https page, or http on a loopback development server."""
+    """Return an approval link a browser may open: a plain http(s) URL that every URL parser reads alike."""
     msg = "Pairing response has invalid approve_url."
-    if not raw_value.isprintable() or " " in raw_value:
+    if not raw_value.isprintable() or " " in raw_value or "\\" in raw_value:
         raise ValueError(msg)
     try:
         parsed = urlparse(raw_value)
     except ValueError:
         raise ValueError(msg) from None
-    host = parsed.hostname
-    if host and (parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(host))):
-        return raw_value
-    raise ValueError(msg)
-
-
-def _is_loopback_host(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
+        raise ValueError(msg)
+    return raw_value
 
 
 def _parse_namespace(raw_value: object) -> str | None:

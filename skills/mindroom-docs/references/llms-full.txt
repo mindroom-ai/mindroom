@@ -26309,7 +26309,7 @@ mindroom connect
 The command prints an approval link, a pair code, and (in a terminal) a QR code of the link.
 Open the link or scan the QR code while signed in to MindRoom Chat and approve the machine, or enter the code in MindRoom Chat → Settings → Local MindRoom.
 Add `--open-browser` to open the approval link in your default browser.
-The link must be an `https` page, or `http` on `localhost` or a loopback address for a local development service; any other link from the provisioning service fails the pairing.
+The link must be a plain `http` or `https` URL without credentials, backslashes, or whitespace; any other link from the provisioning service fails the pairing.
 Approve only when the code on the page matches your terminal (`Approve only if the page shows code ABCD-EFGH`); the page also shows the address the request came from.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`

@@ -395,15 +395,16 @@ def test_pairing_accepts_token_shaped_credentials() -> None:
         "file:///etc/passwd",
         "smb://attacker.example/share",
         "x-mindroom-helper://run",
-        "http://chat.example/connect?code=ABCD-EFGH",
-        "http://10.0.0.5/connect",
         "https:///connect",
+        "http://evil.example\\@127.0.0.1/connect",
+        "https://user@chat.example/connect",
+        "https://:secret@chat.example/connect",
         "https://chat.example/connect?code=ABCD EFGH",
         "https://chat.example/connect\n?code=ABCD-EFGH",
     ],
 )
 def test_pairing_refuses_approve_urls_a_browser_should_not_open(approve_url: str) -> None:
-    """The service's approval link may be opened automatically, so it must be an https page or a loopback dev server."""
+    """The service's approval link may be opened automatically, so it must be a plain http(s) URL."""
     with pytest.raises(ValueError, match="Pairing response has invalid approve_url"):
         _pair_once([httpx.Response(200, json={**_START, "approve_url": approve_url})])
 
@@ -413,12 +414,13 @@ def test_pairing_refuses_approve_urls_a_browser_should_not_open(approve_url: str
     [
         "https://chat.example/connect?code=ABCD-EFGH",
         "http://localhost:8080/connect?code=ABCD-EFGH",
-        "http://127.0.0.1:8080/connect?code=ABCD-EFGH",
         "http://[::1]:8080/connect?code=ABCD-EFGH",
+        "http://10.0.0.5:8776/connect?code=ABCD-EFGH",
+        "http://provisioning.tailnet.example/connect?code=ABCD-EFGH",
     ],
 )
-def test_pairing_accepts_https_and_loopback_approve_urls(approve_url: str) -> None:
-    """Hosted approval pages and a local development provisioning service keep working."""
+def test_pairing_accepts_http_and_https_approve_urls(approve_url: str) -> None:
+    """Hosted approval pages and self-hosted provisioning services on a LAN, tailnet, or loopback keep working."""
     announced: list[cli_connect.DevicePairSession] = []
     cli_connect.run_device_pairing(
         provisioning_url="https://provisioning.example",
