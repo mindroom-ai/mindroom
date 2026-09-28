@@ -787,10 +787,40 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        output = normalize_console_output(result.output)
-        assert f"{OWNER_MATRIX_USER_ID_ENV} in" in output
-        assert "is not a valid Matrix user ID ('@Alice:selfhosted.example')" in output
+        # Rich folds long paths mid-token, so compare without any whitespace.
+        output = "".join(result.output.split())
+        expected = f"{OWNER_MATRIX_USER_ID_ENV} in {tmp_path / '.env'} is not a valid Matrix user ID ('@Alice:selfhosted.example')"
+        assert "".join(expected.split()) in output
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
+
+    def test_init_names_the_environment_as_the_source_of_an_unusable_owner(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An owner that came from the process environment is not blamed on `.env`."""
+        target = tmp_path / "config.yaml"
+        monkeypatch.setenv(OWNER_MATRIX_USER_ID_ENV, "@Alice:selfhosted.example")
+
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        output = normalize_console_output(result.output)
+        assert f"{OWNER_MATRIX_USER_ID_ENV} in the environment is not a valid Matrix user ID" in output
+        assert ".env is not a valid" not in output
 
     def test_init_mindroom_chat_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex config should use Codex defaults and hosted Matrix settings."""

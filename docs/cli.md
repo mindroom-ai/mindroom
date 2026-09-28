@@ -1471,7 +1471,7 @@ The client ID and secret must be plain tokens of letters, digits, and `._~+/-` o
 If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in membership access and managed-room policy settings when pairing returns a valid `owner_user_id`.
 A valid `owner_user_id` is a Matrix user ID with a current-grammar localpart (lowercase letters, digits, and `._=/+-`) and a valid server name; any other value is reported as malformed and never written to `.env` or `config.yaml`.
 Such an account still counts as named: it is printed as `Approved by '<value>', which is not a valid Matrix user ID.` and, in a terminal, confirmed like any other approver.
-`mindroom config init` likewise warns when `.env` holds a `MINDROOM_OWNER_USER_ID` outside that grammar and leaves the owner placeholders for you to replace.
+`mindroom config init` likewise warns when `MINDROOM_OWNER_USER_ID`, from the environment or `.env`, is outside that grammar, names where it came from, and leaves the owner placeholders for you to replace.
 
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 

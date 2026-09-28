@@ -151,8 +151,13 @@ def _config_init_owner_user_id(config_path: Path) -> str | None:
     raw_owner_user_id = (runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV) or "").strip()
     owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
     if raw_owner_user_id and owner_user_id is None:
+        source = (
+            "the environment"
+            if constants.OWNER_MATRIX_USER_ID_ENV in runtime_paths.process_env
+            else str(runtime_paths.env_path)
+        )
         _err_console.print(
-            f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(str(runtime_paths.env_path))} "
+            f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(source)} "
             f"is not a valid Matrix user ID ({escape(repr(raw_owner_user_id))}), "
             "so the owner placeholders in config.yaml were left for you to replace.",
         )
