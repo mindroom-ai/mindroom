@@ -68,7 +68,6 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
-    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
     r"))(?![A-Za-z0-9])",
 )
 _TOKEN_LIKE_MARKERS = (
@@ -92,8 +91,23 @@ _TOKEN_LIKE_MARKERS = (
     "ghr_",
     "github_pat_",
     "AIza",
-    "eyJ",
 )
+# Reviewer-facing copies hide only credentials in known token formats with realistic lengths, so hosts,
+# paths, and short names such as `sk-deploy.sh` stay visible. Every hidden span is letters, digits, and
+# `._-`; possessive quantifiers and the lookbehind keep matching linear on long runs of token characters.
+_REVIEW_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?P<token>"
+    r"(?:sk|pk)-[A-Za-z0-9_-]{16,}+"
+    r"|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}+"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}+"
+    r"|gh[pousr]_[A-Za-z0-9]{30,}+"
+    r"|github_pat_[A-Za-z0-9_]{30,}+"
+    r"|AIza[0-9A-Za-z_-]{30,}+"
+    r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
+    r")(?![A-Za-z0-9_.-])",
+)
+# Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
+_LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
@@ -524,19 +538,22 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
-def _redact_known_tokens(value: str, *, max_length: int | None) -> str:
-    """Hide only credentials in known token formats, leaving all other text as written.
+def _redact_review_tokens(value: str, *, max_length: int | None, placeholders: dict[str, str]) -> str:
+    """Replace each distinct credential in a known token format with its own numbered placeholder.
 
-    Every hidden span consists of letters, digits, and ``._-``, so hiding it can never
-    change how the surrounding text reads, for example as a shell command.
+    Equal tokens share a placeholder and different tokens get different ones, so the copy keeps
+    the structure of the original text and loses only the characters of each hidden token.
+    Tokens are replaced before shortening, so a shortened copy never numbers a cut-off token.
     """
-    bounded_value = _bounded_redaction_input(value, max_length=max_length)
-    redacted = bounded_value
-    if any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS):
-        redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, bounded_value)
-    if len(bounded_value) < len(value) and not redacted.endswith(_TRUNCATED):
-        # Hiding tokens can shrink cut input below the limit, so mark the cut explicitly.
-        redacted += _TRUNCATED
+
+    def placeholder(match: re.Match[str]) -> str:
+        token = match.group("token")
+        if "--" in token:
+            # `--` starts a comment in SQL, Lua, and Haskell, so hiding it could change how the line reads.
+            return token
+        return placeholders.setdefault(token, f"\u27e6secret-{len(placeholders) + 1}\u27e7")
+
+    redacted = _REVIEW_TOKEN_PATTERN.sub(placeholder, _LONE_SURROGATE_PATTERN.sub("\ufffd", value))
     return _truncate_text(redacted, max_length)
 
 
@@ -577,7 +594,7 @@ def _redact_mapping(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
-    tokens_only: bool,
+    token_placeholders: dict[str, str] | None,
     ancestor_ids: frozenset[int],
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
@@ -619,7 +636,7 @@ def _redact_mapping(
             _depth=depth + 1,
             _force_redact=force_redact or redact_key,
             _ancestor_ids=ancestor_ids,
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     if mapping_is_truncated:
         redacted["__truncated__"] = f"{len(value) - len(items)} more items"
@@ -635,7 +652,7 @@ def _redact_sequence(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
-    tokens_only: bool,
+    token_placeholders: dict[str, str] | None,
     ancestor_ids: frozenset[int],
 ) -> list[_RedactedValue]:
     items = list(value) if max_collection_items is None else list(islice(value, max_collection_items))
@@ -649,7 +666,7 @@ def _redact_sequence(
             _depth=depth + 1,
             _force_redact=force_redact,
             _ancestor_ids=ancestor_ids,
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
         for item in items
     ]
@@ -664,7 +681,7 @@ def _redact_scalar_value(
     parent_key: str | None,
     max_string_length: int | None,
     force_redact: bool,
-    tokens_only: bool,
+    token_placeholders: dict[str, str] | None,
 ) -> _RedactedValue:
     if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
         redacted: _RedactedValue = REDACTED
@@ -672,8 +689,8 @@ def _redact_scalar_value(
         redacted = "<bytes>"
     elif isinstance(value, Path):
         redacted = str(value)
-    elif isinstance(value, str) and tokens_only:
-        redacted = _redact_known_tokens(value, max_length=max_string_length)
+    elif isinstance(value, str) and token_placeholders is not None:
+        redacted = _redact_review_tokens(value, max_length=max_string_length, placeholders=token_placeholders)
     elif isinstance(value, str):
         if _is_query_container(parent_key):
             redacted = _redact_query_fragment(value, max_length=max_string_length)
@@ -681,11 +698,15 @@ def _redact_scalar_value(
             redacted = _redact_sensitive_text_fail_closed(value, max_length=max_string_length)
     elif isinstance(value, float):
         # JSON cannot carry infinities or NaN; a reviewer-facing copy names them instead of showing null.
-        redacted = value if math.isfinite(value) else (str(value) if tokens_only else None)
+        redacted = value if math.isfinite(value) else (str(value) if token_placeholders is not None else None)
     elif value is None or isinstance(value, bool | int):
         redacted = value
-    elif tokens_only:
-        redacted = _redact_known_tokens(_safe_repr(value), max_length=max_string_length)
+    elif token_placeholders is not None:
+        redacted = _redact_review_tokens(
+            _safe_repr(value),
+            max_length=max_string_length,
+            placeholders=token_placeholders,
+        )
     else:
         redacted = _redact_sensitive_text_fail_closed(_safe_repr(value), max_length=max_string_length)
     return redacted
@@ -697,7 +718,7 @@ def _redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
-    tokens_only: bool = False,
+    token_placeholders: dict[str, str] | None = None,
     _parent_key: str | None = None,
     _depth: int = 0,
     _force_redact: bool = False,
@@ -720,7 +741,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     value_id = id(value)
     if value_id in _ancestor_ids:
@@ -737,7 +758,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     elif isinstance(value, list | tuple | set | frozenset):
         redacted = _redact_sequence(
@@ -749,7 +770,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     else:
         redacted = _redact_scalar_value(
@@ -757,7 +778,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     return redacted
 
@@ -768,13 +789,14 @@ def redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
-    tokens_only: bool = False,
+    token_placeholders: dict[str, str] | None = None,
 ) -> _RedactedValue:
     """Redact structured data without letting redaction break its caller.
 
-    ``tokens_only`` still hides every field whose name marks it as secret, but inside text
-    hides only credentials in known token formats. Reviewer-facing copies such as tool
-    approval cards use it, because partly hiding free text can change how it reads.
+    With ``token_placeholders``, every field whose name marks it as secret is still hidden
+    whole, but inside text only credentials in known token formats are hidden, each distinct
+    token as a numbered placeholder recorded in the mapping. Reviewer-facing copies such as
+    tool approval cards use it, because hiding more of free text can hide what would run.
     """
     collection_limit = None if max_collection_items is None else max(max_collection_items, 0)
     depth_limit = _MAX_DEPTH if max_depth is None else min(max(max_depth, 0), _MAX_DEPTH)
@@ -784,7 +806,7 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=collection_limit,
             max_depth=depth_limit,
-            tokens_only=tokens_only,
+            token_placeholders=token_placeholders,
         )
     except Exception:
         if isinstance(value, Mapping):

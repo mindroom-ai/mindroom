@@ -115,8 +115,8 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     return text[: max_length - len(_SANITIZER_TRUNCATION_MARKER)] + _SANITIZER_TRUNCATION_MARKER
 
 
-def _build_event_arguments_preview(arguments: dict[str, Any]) -> dict[str, Any]:
-    sanitized = sanitize_failure_value(arguments, tokens_only=True)
+def _build_event_arguments_preview(arguments: dict[str, Any], placeholders: dict[str, str]) -> dict[str, Any]:
+    sanitized = sanitize_failure_value(arguments, token_placeholders=placeholders)
     if not isinstance(sanitized, dict):
         return {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
@@ -138,20 +138,19 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     return preview
 
 
-def _full_arguments_json_bytes(value: object) -> int:
-    # Tool arguments parsed from JSON may carry lone surrogates, which strict UTF-8 cannot encode.
-    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8", "surrogatepass"))
+def _raw_arguments_json_bytes(arguments: dict[str, Any]) -> int:
+    # Raw tool arguments may carry lone surrogates or values JSON cannot encode; only their size matters here.
+    return len(json.dumps(arguments, ensure_ascii=False, default=repr).encode("utf-8", "surrogatepass"))
 
 
-def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
-    if (
-        nests_beyond_redaction_depth(arguments)
-        or _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES
-    ):
+def _build_full_event_arguments(arguments: dict[str, Any], placeholders: dict[str, str]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them.
+
+    The size cap applies to the raw arguments, so redaction itself never makes a card unapprovable.
+    """
+    if nests_beyond_redaction_depth(arguments) or _raw_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
-    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, tokens_only=True))
-    return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
+    return cast("dict[str, Any]", redact_sensitive_data(arguments, token_placeholders=placeholders))
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,10 +168,10 @@ class _EventArguments:
 
 
 def _build_event_arguments(arguments: dict[str, Any]) -> _EventArguments:
-    return _EventArguments(
-        preview=_build_event_arguments_preview(arguments),
-        full=_build_full_event_arguments(arguments),
-    )
+    # One placeholder mapping per card, so a token has the same number in the preview and the full copy.
+    placeholders: dict[str, str] = {}
+    full = _build_full_event_arguments(arguments, placeholders)
+    return _EventArguments(preview=_build_event_arguments_preview(arguments, placeholders), full=full)
 
 
 @dataclass(frozen=True, slots=True)

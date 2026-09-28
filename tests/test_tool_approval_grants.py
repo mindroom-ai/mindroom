@@ -712,13 +712,13 @@ async def test_redacted_arguments_keep_timed_approval(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:
-        card = await _card(journal, manager, "redacted", command="api_key=sk-test-approval-value")
+        card = await _card(journal, manager, "redacted", command="api_key=" + "sk-" + "Ab3Z" * 6)
         stored = await journal.principal("router@shared").pending_approval_card(
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["arguments"] == {"command": "api_key=***redacted***"}
+        assert stored.card["content"]["arguments"] == {"command": "api_key=\u27e6secret-1\u27e7"}
         assert stored.card["content"].get("approvable", True) is True
         assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
 
@@ -736,8 +736,8 @@ async def test_redacted_arguments_keep_timed_approval(
     ("command", "shown"),
     [
         (
-            "export OPENAI_API_KEY=sk-live-abc123; rm -rf ~/important",
-            "export OPENAI_API_KEY=***redacted***; rm -rf ~/important",
+            "export OPENAI_API_KEY=" + "sk-" + "Ab3Z" * 6 + "; rm -rf ~/important",
+            "export OPENAI_API_KEY=\u27e6secret-1\u27e7; rm -rf ~/important",
         ),
         ("export TOKEN=abc; rm -rf ~/important", "export TOKEN=abc; rm -rf ~/important"),
         ("rm -rf ~/important # 'token:' ", "rm -rf ~/important # 'token:' "),
