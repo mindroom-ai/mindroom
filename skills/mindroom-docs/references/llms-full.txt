@@ -12711,10 +12711,12 @@ revoke_public_report("pub_...")
 `config_manager` exposes `get_info()`, `manage_config()`, `manage_agent()`, and `manage_team()`.
 `get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
 `tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
-`agent_config` returns the authored YAML for a specific agent.
+`agent_config` returns the redacted authored YAML for a specific agent.
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
 `manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
+Redaction masks every field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, and also masks credential-named keys elsewhere.
+Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
 `dry_run=True` validates a patch and returns its receipt without writing.
 Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
@@ -18547,6 +18549,8 @@ Changes are validated against the Pydantic config schema before applying.
 !config get agents.analyst.display_name
 ```
 
+Shown values are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
+
 **Modify configuration:**
 
 ```
@@ -19922,8 +19926,9 @@ Session IDs are derived from request headers:
 Agent memory and conversation history persist across requests with the same session ID.
 For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
-Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision.
-Two different API keys using the same `X-Session-Id` value will not share a session.
+Session IDs are namespaced internally with the full SHA-256 digest of the validated API key to prevent cross-key session collision.
+Two different API keys using the same `X-Session-Id` value will not share a session, and differently spaced `Authorization` headers carrying the same key share that key's sessions.
+Without configured API keys, the `Authorization` header authenticates nothing, so every caller shares one unauthenticated namespace.
 
 ### Claude Agent tool sessions
 
@@ -19951,6 +19956,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (usage stats are always zeros)
+- `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
 
 Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
 
