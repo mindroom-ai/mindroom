@@ -13,7 +13,31 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.tools.api import CustomApiTools
+
+_CREDENTIALS_NEED_BASE_URL = (
+    "custom_api sends its configured api_key, username and password, and headers only to base_url; "
+    "set base_url to call this API with them, or remove them to call arbitrary URLs"
+)
+_CROSS_ORIGIN_REDIRECT = "Refusing to follow a redirect to another origin with configured credentials"
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    """Return the scheme, host, and non-default port that bound where credentials may go."""
+    return url.scheme, url.host, url.port
+
+
+def _credential_origin_guard(base_url: str) -> Callable[[httpx.Request], None]:
+    """Return a request hook that refuses every hop outside the base_url origin before it is sent."""
+    credential_origin = _origin(httpx.URL(base_url))
+
+    def keep_credentials_on_origin(request: httpx.Request) -> None:
+        if _origin(request.url) != credential_origin:
+            raise httpx.RequestError(_CROSS_ORIGIN_REDIRECT, request=request)
+
+    return keep_credentials_on_origin
 
 
 @register_tool_with_metadata(
@@ -112,13 +136,20 @@ def custom_api_tools() -> type[CustomApiTools]:
             json_data: dict[str, Any] | None = None,
         ) -> str:
             """Make an HTTP request to a validated public HTTP(S) URL."""
+            auth = (self.username, self.password) if self.username and self.password else None
+            has_credentials = bool(self.api_key or auth or self.default_headers)
+            if has_credentials and not self.base_url:
+                return json.dumps({"error": _CREDENTIALS_NEED_BASE_URL}, indent=2)
             url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
             url = validate_server_fetch_url(url)
-            auth = (self.username, self.password) if self.username and self.password else None
+            event_hooks = (
+                {"request": [_credential_origin_guard(self.base_url)]} if has_credentials and self.base_url else None
+            )
             try:
                 with httpx.Client(
                     transport=ServerFetchHTTPTransport(verify=self.verify_ssl),
                     follow_redirects=True,
+                    event_hooks=event_hooks,
                 ) as client:
                     response = client.request(
                         method=method,

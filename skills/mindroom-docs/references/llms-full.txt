@@ -13619,6 +13619,9 @@ Localhost, loopback, private-network, metadata-service, and non-HTTP(S) destinat
 If both `username` and `password` are nonempty, the request uses HTTP Basic Auth.
 If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
 Per-call headers are merged on top of configured default headers.
+Configured credentials, meaning `api_key`, a `username` / `password` pair, or `headers`, are only sent to the `base_url` origin.
+Without `base_url`, a call on a tool with configured credentials returns an error and sends nothing, so the model cannot choose where they go.
+A credentialed request follows redirects within the `base_url` scheme, host, and port, and fails instead of following one anywhere else.
 The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
 Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
 
@@ -13626,7 +13629,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. |
+| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. Required for `api_key`, `username` / `password`, and `headers`. |
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
@@ -13656,7 +13659,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 ### Notes
 
-- If `base_url` is omitted, `endpoint` must be a full URL.
+- If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
 - `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 

