@@ -28,7 +28,7 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 
 `sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
-MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, `api_key`, and `openbb_pat` must go through the dashboard or credential store instead of inline YAML.
+MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, `api_key`, `db_url`, and `openbb_pat` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, and `obb`.
 `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
 `google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
@@ -45,13 +45,13 @@ Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_
 The toolkit can connect through `db_url`, an existing `db_engine`, or a URL assembled from `user`, `password`, `host`, `port`, `schema`, and `dialect`.
 `list_tables()` and `describe_table()` use SQLAlchemy inspection, and `run_sql_query()` returns JSON rows with a default limit of 10 unless you pass `limit=None`.
 If you pass a `tables` mapping, `list_tables()` returns that mapping directly instead of live database introspection.
-For dialects where database name and schema are distinct concepts, `db_url` is the safest authored configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
+For dialects where database name and schema are distinct concepts, `db_url` is the safest configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `db_url` | `url` | `no` | `null` | Preferred authored connection string. |
+| `db_url` | `password` | `no` | `null` | Preferred connection string, stored through the dashboard or credential store because it can carry a password. |
 | `db_engine` | `text` | `no` | `null` | Advanced programmatic SQLAlchemy `Engine` input, not the normal YAML path. |
 | `user` | `text` | `no` | `null` | Username for URL assembly when not using `db_url`. |
 | `password` | `password` | `no` | `null` | Database password stored through the dashboard or credential store. |
@@ -72,7 +72,6 @@ agents:
   analyst:
     tools:
       - sql:
-          db_url: sqlite:////tmp/analytics.db
           enable_run_sql_query: true
 ```
 
@@ -84,8 +83,7 @@ run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
 
 ### Notes
 
-- Use `db_url` for normal YAML authoring, because `db_engine` expects a live SQLAlchemy object rather than a string.
-- If you need passwords, store them through the dashboard or credential store instead of inline YAML.
+- Store `db_url` through the dashboard or credential store, because `db_engine` expects a live SQLAlchemy object rather than a string and connection strings often carry passwords.
 - This generic toolkit is useful for simple SQL inspection, but `postgres` and `redshift` expose richer warehouse-style helpers such as query inspection and exports.
 
 ## [`postgres`]
@@ -403,7 +401,7 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 | `dataset` | `text` | `yes` | `null` | BigQuery dataset name. |
 | `project` | `text` | `yes` | `null` | Google Cloud project ID. |
 | `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
-| `credentials` | `text` | `no` | `null` | Advanced Google credentials object passed directly to the BigQuery client. |
+| `credentials` | `text` | `no` | `null` | Advanced programmatic Google credentials object passed directly to the BigQuery client; not accepted as an inline override. |
 | `list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |

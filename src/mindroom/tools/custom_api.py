@@ -58,7 +58,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="headers",
             label="Headers",
-            type="text",
+            type="password",
             required=False,
             default=None,
         ),

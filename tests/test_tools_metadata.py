@@ -1617,12 +1617,23 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
             )
 
 
-def test_openbb_personal_access_token_cannot_be_authored_inline() -> None:
-    """The OpenBB PAT is a credential, so it is masked and only stored through the credential store."""
-    with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for password fields"):
+@pytest.mark.parametrize(
+    ("tool_name", "field_name"),
+    [
+        ("openbb", "openbb_pat"),
+        ("sql", "db_url"),
+        ("custom_api", "headers"),
+        ("daytona", "sandbox_env_vars"),
+        ("baidusearch", "headers"),
+        ("google_bigquery", "credentials"),
+    ],
+)
+def test_credential_bearing_tool_fields_cannot_be_authored_inline(tool_name: str, field_name: str) -> None:
+    """Fields that can carry credentials are only stored through the credential store, never inline in config."""
+    with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed"):
         validate_authored_tool_entry_overrides(
-            "openbb",
-            {"openbb_pat": "pat-sentinel"},
+            tool_name,
+            {field_name: "credential-sentinel"},
             config_path_prefix="agents.a.tools",
         )
 
