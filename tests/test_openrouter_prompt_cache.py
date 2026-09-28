@@ -138,6 +138,33 @@ def test_tool_loop_request_extends_the_previous_boundary() -> None:
     assert "cache_control" not in json.dumps(payload["messages"][2])
 
 
+def test_authored_tool_markers_share_the_request_budget() -> None:
+    """An authored tool marker counts toward the limit before automatic markers are added."""
+    authored_tools = deepcopy(_TOOLS)
+    authored_tools[0]["cache_control"] = _ONE_HOUR
+    model, requests = _model(request_params={"tools": authored_tools})
+
+    payload = _send(model, requests, _conversation(), tools=deepcopy(_TOOLS))
+
+    assert _markers(payload) == [_ONE_HOUR] * 4
+    assert payload["tools"][0]["cache_control"] == _ONE_HOUR
+    assert "cache_control" not in payload["tools"][1]
+    assert payload["messages"][-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
+
+
+def test_existing_message_markers_block_the_system_marker() -> None:
+    """Four authored message markers leave no budget for any automatic marker."""
+    model, requests = _model()
+    marked_content = [{"type": "text", "text": f"Part {index}.", "cache_control": _ONE_HOUR} for index in range(4)]
+    messages = [Message(role="system", content=_SHARED), Message(role="user", content=marked_content)]
+
+    payload = _send(model, requests, messages, tools=deepcopy(_TOOLS))
+
+    assert _markers(payload) == [_ONE_HOUR] * 4
+    assert payload["messages"][0]["content"] == _SHARED
+    assert all("cache_control" not in tool for tool in payload["tools"])
+
+
 def test_shared_prefix_is_independent_of_session_context() -> None:
     """Changing the date leaves the marked shared system part byte-identical."""
     model, requests = _model()
