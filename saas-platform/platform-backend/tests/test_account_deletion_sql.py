@@ -1,8 +1,10 @@
 """Account deletion SQL, run against a throwaway PostgreSQL with stand-ins for the Supabase `auth` objects.
 
-The tests need the PostgreSQL server binaries (`initdb`, `pg_ctl`, `psql`). They use the directory in
-`POSTGRES_BIN_DIR`, or the one holding `initdb` on PATH, and `POSTGRES_SHARE_DIR` when `initdb` cannot find its
-share directory; without a working installation they are skipped. The server listens only on a Unix socket.
+The tests need the PostgreSQL server binaries (`initdb`, `pg_ctl`, `psql`). They use `POSTGRES_BIN_DIR`, else the
+real directory of `initdb` on PATH (following links, which on NixOS keeps its share directory reachable), else
+`pg_config --bindir`, else the newest `/usr/lib/postgresql/<version>/bin` (Debian and Ubuntu), and pass
+`POSTGRES_SHARE_DIR` to `initdb` when set. Without a working installation they are skipped locally and fail in CI
+(`CI` set), so CI can never lose this coverage silently. The server listens only on a Unix socket.
 """
 
 from __future__ import annotations
@@ -125,22 +127,37 @@ class Postgres:
 def _bin_dir() -> Path | None:
     if configured := os.environ.get("POSTGRES_BIN_DIR"):
         return Path(configured)
-    initdb = shutil.which("initdb")
-    return Path(initdb).parent if initdb else None
+    candidates: list[Path] = []
+    if initdb := shutil.which("initdb"):
+        candidates.append(Path(initdb).resolve().parent)
+    if pg_config := shutil.which("pg_config"):
+        bindir = subprocess.run([pg_config, "--bindir"], capture_output=True, text=True, check=False).stdout.strip()
+        if bindir:
+            candidates.append(Path(bindir))
+    versions = [path for path in Path("/usr/lib/postgresql").glob("*/bin") if path.parent.name.isdigit()]
+    candidates += sorted(versions, key=lambda path: int(path.parent.name), reverse=True)
+    return next((path for path in candidates if (path / "initdb").exists() and (path / "pg_ctl").exists()), None)
+
+
+def _unavailable(reason: str) -> None:
+    """Skip locally, but fail in CI, where the workflow installs PostgreSQL."""
+    if os.environ.get("CI"):
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 @pytest.fixture(scope="module")
 def postgres(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Postgres]:
     bin_dir = _bin_dir()
-    if bin_dir is None or not (bin_dir / "pg_ctl").exists():
-        pytest.skip("PostgreSQL server binaries are not installed")
+    if bin_dir is None:
+        _unavailable("PostgreSQL server binaries are not installed")
     root = tmp_path_factory.mktemp("postgres")
     data_dir = root / "data"
     share = ["-L", os.environ["POSTGRES_SHARE_DIR"]] if os.environ.get("POSTGRES_SHARE_DIR") else []
     initdb = [bin_dir / "initdb", "-D", data_dir, "-U", "postgres", "--auth=trust", *share]
     initialized = subprocess.run(initdb, capture_output=True, text=True, check=False)
     if initialized.returncode != 0:
-        pytest.skip(f"initdb failed: {initialized.stderr.strip()[-300:]}")
+        _unavailable(f"initdb failed: {initialized.stderr.strip()[-300:]}")
     options = f"-c listen_addresses='' -c unix_socket_directories={root}"
     pg_ctl = [bin_dir / "pg_ctl", "-D", data_dir, "-w", "-l", root / "log", "-o", options]
     subprocess.run([*pg_ctl, "start"], check=True, capture_output=True)
