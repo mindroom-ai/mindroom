@@ -1,11 +1,4 @@
 {{- $workerBackend := .Values.workerBackend | default "static_runner" -}}
-{{- $instanceNamespace := "mindroom-instances" -}}
-{{- $workerManagerServiceAccountName := printf "mindroom-worker-manager-%s" .Values.customer -}}
-{{- $workerServiceAccountName := .Values.kubernetesWorkerServiceAccountName | default "default" -}}
-{{- $workerImage := .Values.kubernetesWorkerImage | default .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" -}}
-{{- $workerImagePullPolicy := .Values.kubernetesWorkerImagePullPolicy | default .Values.mindroom_image_pull_policy | default "Always" -}}
-{{- $storageAccessMode := .Values.storageAccessMode | default "ReadWriteOnce" -}}
-{{- $controlPlaneNodeName := .Values.controlPlaneNodeName | default "" -}}
 {{- $trustedUpstreamAuth := .Values.trustedUpstreamAuth | default (dict) -}}
 {{- $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) -}}
 {{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
@@ -15,8 +8,9 @@
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
 {{- $platformDomain := .Values.platformDomain | default .Values.baseDomain -}}
 {{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.userIdHeader | default "" | toString) ($trustedUpstreamAuth.emailHeader | default "" | toString) ($trustedUpstreamAuth.matrixUserIdHeader | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.requireJwt | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.administrators | default (list) | toJson) (.Values.roomDefaults | default (dict) | toJson) ($trustedUpstreamAuth.emailDomain | default "" | toString) | sha256sum -}}
-{{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
-{{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
+{{- /* RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in the shared namespace. */ -}}
+{{- if ne $workerBackend "static_runner" -}}
+{{- fail (printf "workerBackend must be static_runner, got %q: tenants share the mindroom-instances namespace, where a dedicated-worker manager could create and change other tenants' Deployments and Services; deploy dedicated workers with the runtime chart in their own namespace instead" $workerBackend) -}}
 {{- end -}}
 {{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
 {{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
@@ -43,7 +37,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mindroom-{{ .Values.customer }}
-  namespace: {{ $instanceNamespace }}
+  namespace: mindroom-instances
   labels:
     app: mindroom
     customer: {{ .Values.customer | quote }}
@@ -64,15 +58,8 @@ spec:
         mindroom.ai/config-hash: {{ $configHash | quote }}
         mindroom.ai/instance-secret-hash: {{ $instanceSecretHash | quote }}
     spec:
-      {{- if $controlPlaneNodeName }}
-      nodeName: {{ $controlPlaneNodeName }}
-      {{- end }}
-      {{- if eq $workerBackend "kubernetes" }}
-      serviceAccountName: {{ $workerManagerServiceAccountName }}
-      {{- else }}
-      # Only the dedicated-worker backend talks to the Kubernetes API from this pod.
+      # Nothing in this pod talks to the Kubernetes API.
       automountServiceAccountToken: false
-      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -96,7 +83,6 @@ spec:
         env:
         - name: SYNAPSE_READY_URL
           value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
-      {{- if eq $workerBackend "static_runner" }}
       # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
       - name: prepare-sandbox-runner-storage
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -115,7 +101,6 @@ spec:
           capabilities:
             drop:
               - ALL
-      {{- end }}
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -153,7 +138,8 @@ spec:
           value: {{ $workerBackend | quote }}
         - name: MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS
           value: {{ .Values.workerCleanupIntervalSeconds | quote }}
-{{ include "mindroom.workerBackendEnv" (dict "workerBackend" $workerBackend "instanceNamespace" $instanceNamespace "workerImage" $workerImage "workerImagePullPolicy" $workerImagePullPolicy "workerServiceAccountName" $workerServiceAccountName "controlPlaneNodeName" $controlPlaneNodeName "values" .Values) | nindent 8 }}
+        - name: MINDROOM_SANDBOX_PROXY_URL
+          value: "http://localhost:8766"
         - name: MINDROOM_SANDBOX_PROXY_TOKEN
           valueFrom:
             secretKeyRef:
@@ -289,9 +275,7 @@ spec:
           capabilities:
             drop:
               - ALL
-{{- if eq $workerBackend "static_runner" }}
 {{ include "mindroom.staticRunnerContainer" (dict "values" .Values) | nindent 6 }}
-      {{- end }}
       volumes:
       - name: storage
         persistentVolumeClaim:
@@ -303,6 +287,4 @@ spec:
         secret:
           secretName: {{ $instanceSecretName }}
           defaultMode: 0400
-      {{- if eq $workerBackend "static_runner" }}
 {{ include "mindroom.staticRunnerVolume" . | nindent 6 }}
-      {{- end }}
