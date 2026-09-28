@@ -65,6 +65,9 @@ interface KeyStatus {
   hasKey: boolean;
   source: string | null;
   maskedKey: string | null;
+  // Stored service the key resolved from when it differs from the requested
+  // one, e.g. a provider key saved under its env var name (ANTHROPIC_API_KEY).
+  credentialService: string | null;
 }
 
 interface KeyDisplayInfo {
@@ -137,10 +140,7 @@ function providerToService(provider: string): string {
   return provider === "gemini" ? "google" : provider;
 }
 
-function sourceToLabel(source: string | null, hasKey: boolean): string {
-  if (!hasKey) {
-    return "Not set";
-  }
+function sourceToLabel(source: string | null): string {
   if (source === "env") {
     return ".env";
   }
@@ -151,6 +151,16 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
     return source;
   }
   return ".env";
+}
+
+function keySourceLabel(key: KeyStatus | null): string {
+  if (!key?.hasKey) {
+    return "Not set";
+  }
+  const label = sourceToLabel(key.source);
+  return key.credentialService
+    ? `${label}, saved as ${key.credentialService}`
+    : label;
 }
 
 function getOpenAIBaseUrl(modelConfig: {
@@ -192,23 +202,36 @@ function parseOptionalPositiveInteger(value: string): number | null {
   return parsed;
 }
 
+const MISSING_KEY_STATUS: KeyStatus = {
+  hasKey: false,
+  source: null,
+  maskedKey: null,
+  credentialService: null,
+};
+
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key`,
     );
     if (!res.ok) {
-      return { hasKey: false, source: null, maskedKey: null };
+      return MISSING_KEY_STATUS;
     }
 
     const data = await res.json();
+    const credentialService =
+      typeof data.credential_service === "string" &&
+      data.credential_service !== service
+        ? data.credential_service
+        : null;
     return {
       hasKey: data.has_key,
       source: data.source || null,
       maskedKey: data.masked_key || null,
+      credentialService,
     };
   } catch {
-    return { hasKey: false, source: null, maskedKey: null };
+    return MISSING_KEY_STATUS;
   }
 }
 
@@ -273,7 +296,7 @@ function getKeyStatusDisplay(
       keyId: modelKey.maskedKey
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
-      sourceLabel: sourceToLabel(modelKey.source, true),
+      sourceLabel: keySourceLabel(modelKey),
     };
   }
 
@@ -286,7 +309,7 @@ function getKeyStatusDisplay(
       keyId: providerKey.maskedKey
         ? `key:${providerKey.maskedKey}`
         : `provider:${provider}`,
-      sourceLabel: sourceToLabel(providerKey.source, true),
+      sourceLabel: keySourceLabel(providerKey),
     };
   }
 
@@ -295,7 +318,7 @@ function getKeyStatusDisplay(
     label: "No API key",
     maskedKey: null,
     keyId: null,
-    sourceLabel: sourceToLabel(null, false),
+    sourceLabel: keySourceLabel(null),
   };
 }
 
@@ -1179,9 +1202,8 @@ export function ModelConfig() {
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
             {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${sourceToLabel(
-                  providerFallbackKey.source,
-                  true,
+              ? `No custom key provided. This model will use the provider key (${keySourceLabel(
+                  providerFallbackKey,
                 )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
               : "No custom key provided. This model will use the provider key (for example from .env) when available."}
           </p>

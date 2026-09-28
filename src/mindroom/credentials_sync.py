@@ -14,7 +14,7 @@ credentials can opt in with explicit credential seed declarations.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -33,6 +33,7 @@ _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 # Provider API-key services that also accept a dashboard credential saved under
 # the env var name (for example ``OPENROUTER_API_KEY`` for ``openrouter``).
 _PROVIDER_SERVICE_ENV_ALIASES = {k: v for k, v in PROVIDER_ENV_KEYS.items() if k != "ollama"}
+_ENV_NAMED_PROVIDER_SERVICES = {v: k for k, v in _PROVIDER_SERVICE_ENV_ALIASES.items()}
 
 # Dedicated credential service for the semantic-search embedder. Deliberately
 # not part of PROVIDER_ENV_KEYS: that map means "model provider" and feeds
@@ -414,20 +415,43 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return _get_provider_service_api_key(provider, runtime_paths)
 
 
-def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get a provider key from its canonical service, else its env-var-named service.
+def canonical_provider_service(service: str) -> str:
+    """Return the canonical provider service for an env-var-named provider service.
+
+    For example ``ANTHROPIC_API_KEY`` maps to ``anthropic``; any other service
+    name is returned unchanged.
+    """
+    return _ENV_NAMED_PROVIDER_SERVICES.get(service, service)
+
+
+def resolve_provider_service_api_key(
+    service: str,
+    load_api_key: Callable[[str], str | None],
+) -> tuple[str, str | None]:
+    """Resolve a provider key from its canonical service, else its env-var-named service.
 
     Users following env-var docs often save provider keys in the dashboard under
     the env var name (for example ``OPENROUTER_API_KEY``) instead of the canonical
     service (``openrouter``). The canonical service always wins; the env-var-named
     service is only a fallback for provider API-key services.
+
+    Returns the service the key was read from together with the key, so callers
+    such as the dashboard can report where the runtime actually finds it.
     """
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    api_key = creds_manager.get_api_key(service)
+    api_key = load_api_key(service)
     env_named_service = _PROVIDER_SERVICE_ENV_ALIASES.get(service)
-    if (api_key and api_key.strip()) or env_named_service is None:
-        return api_key
-    return creds_manager.get_api_key(env_named_service) or api_key
+    if env_named_service is None or (api_key and api_key.strip()):
+        return service, api_key
+    env_named_api_key = load_api_key(env_named_service)
+    if env_named_api_key:
+        return env_named_service, env_named_api_key
+    return service, api_key
+
+
+def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> str | None:
+    """Get a provider key from the shared store using runtime alias resolution."""
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    return resolve_provider_service_api_key(service, creds_manager.get_api_key)[1]
 
 
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:

@@ -1694,6 +1694,7 @@ depends_on = [
     "mindroom.api.credentials_target",
     "mindroom.credential_policy",
     "mindroom.credentials",
+    "mindroom.credentials_sync",
     "mindroom.embedder_health",
     "mindroom.embedding_factory",
     "mindroom.tool_system.worker_routing",
