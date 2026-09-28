@@ -328,6 +328,7 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["file", "workspace"])
 @pytest.mark.parametrize(
     ("probe", "resolver_module"),
     [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
@@ -340,15 +341,20 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
     outside: Path,
     probe: _ToolProbe,
     resolver_module: ModuleType,
+    swap: str,
 ) -> None:
-    """A file `file` or `coding` checked by resolution and then swapped for a link is never followed."""
+    """A file or workspace that `file` or `coding` checked and then swapped for a link is never followed."""
     resolve = resolver_module.resolve_base_dir_path
 
     def resolve_then_swap(*args: object, **kwargs: object) -> Path:
         resolved = resolve(*args, **kwargs)
-        checked = workspace / probe.filename
-        checked.unlink()
-        checked.symlink_to(outside / probe.filename)
+        if swap == "workspace":
+            workspace.rename(tmp_path / "moved-workspace")
+            workspace.symlink_to(outside, target_is_directory=True)
+        else:
+            checked = workspace / probe.filename
+            checked.unlink()
+            checked.symlink_to(outside / probe.filename)
         return resolved
 
     monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
@@ -379,7 +385,10 @@ def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_constructio
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
-    assert operation(file_tool, coding_tool).startswith("Error")
+    result = operation(file_tool, coding_tool)
+
+    assert result.startswith("Error")
+    assert "unrestricted" not in result
     assert sorted(entry.name for entry in outside.iterdir()) == ["doc.png", "doc.txt"]
     assert (outside / "doc.txt").read_text() == _TEXT
 
@@ -428,6 +437,7 @@ def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
 
     assert "openai.json" not in result
     assert "SECRET" not in result
+    assert "unrestricted" not in result
 
 
 @pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])

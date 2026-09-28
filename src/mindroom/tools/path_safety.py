@@ -23,8 +23,15 @@ def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
     return f"Path '{path}' resolves to '{resolved}', which is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
+def _moved_base_dir_message(base_dir: Path) -> str:
+    """Explain that a toolkit's pinned base dir was moved or replaced, without suggesting weaker access."""
+    return f"base_dir '{base_dir}' no longer resolves to itself; it was moved or replaced by a link."
+
+
 def blocked_file_action_message(action: str, requested_path: str, base_dir: Path) -> str:
     """Explain why a file-tool action was blocked."""
+    if not _base_dir_is_current(base_dir):
+        return f"Error {action}: {_moved_base_dir_message(base_dir)}"
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
@@ -87,13 +94,16 @@ def resolve_base_dir_path(base_dir: Path, path: str, restrict_to_base_dir: bool 
     if not restrict_to_base_dir:
         return candidate.resolve()
 
-    if not _base_dir_is_current(base_dir):
-        msg = f"base_dir '{base_dir}' no longer resolves to itself; it was moved or replaced by a link."
-        raise ValueError(msg)
     try:
-        return resolve_path_within_root(base_dir, requested, symlinks="internal")
+        resolved = resolve_path_within_root(base_dir, requested, symlinks="internal")
     except ValueError:
+        if not _base_dir_is_current(base_dir):
+            raise ValueError(_moved_base_dir_message(base_dir)) from None
         raise ValueError(_blocked_base_dir_message(path, candidate.resolve(), base_dir.resolve())) from None
+    # The resolver re-resolves its root, so check against the pinned base dir to refuse a root swapped meanwhile.
+    if not resolved.is_relative_to(base_dir):
+        raise ValueError(_moved_base_dir_message(base_dir))
+    return resolved
 
 
 def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
@@ -118,12 +128,12 @@ def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
 
 
 def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
-    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path.
+    """Return ``resolved`` below the pinned base dir, or ``None`` for an unrestricted outside path.
 
-    Callers open this path from ``base_dir`` as spelled, so a base dir replaced by a link is refused, not followed.
+    Workspace-mode paths always lie below the pinned base dir, so they never take the by-path branch;
+    callers open them from ``base_dir`` without following a link, so a replaced base dir is refused.
     """
-    canonical_base = base_dir.resolve()
-    return resolved.relative_to(canonical_base) if resolved.is_relative_to(canonical_base) else None
+    return resolved.relative_to(base_dir) if resolved.is_relative_to(base_dir) else None
 
 
 def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:

@@ -91,8 +91,8 @@ class _MindRoomFileTools(AgnoFileTools):
         del restrict_to_base_dir
         try:
             return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir)
-        except ValueError:
-            log_error(f"Path escapes base directory: {file_name}")
+        except ValueError as exc:
+            log_error(f"Refused path {file_name}: {exc}")
             return False, base_dir
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
@@ -255,7 +255,7 @@ class _MindRoomFileTools(AgnoFileTools):
         safe, search_dir = self._check_path(directory or ".", self.base_dir)
         if not safe:
             return blocked_file_action_message("searching content", directory or ".", self.base_dir)
-        if is_within_base_dir(search_dir, self.base_dir):
+        if self.restrict_to_base_dir or is_within_base_dir(search_dir, self.base_dir):
             return super().search_content(query, directory, limit)
         if not search_dir.is_dir():
             return f"Error: '{directory}' is not a directory"
