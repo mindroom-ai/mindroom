@@ -482,7 +482,7 @@ Run it from a repository checkout that has the tag (`git fetch --tags`), with `k
 ```bash
 cluster/scripts/deploy-release.sh v2026.9.351 --dry-run              # Show the plan and render the Helm upgrade
 cluster/scripts/deploy-release.sh v2026.9.351                        # Platform plus running instances
-cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Every instance that is not deprovisioned
+cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Running plus lifecycle-held instances
 cluster/scripts/deploy-release.sh v2026.9.351 --instances 1,7        # Only these instances
 cluster/scripts/deploy-release.sh v2026.9.351 --instances none       # Platform only
 ```
@@ -491,17 +491,18 @@ The script performs these steps:
 
 1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
 2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
-3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, `tier`, and `instance_id` from the `instances` table, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
-4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance.
+3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
+4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance, where `baseDomain` is `provisioner.instanceBaseDomain` or, when that is empty, `domain`.
 
-It reads the domain, Supabase URL, and platform Secret name from the release's Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret; secrets are never printed.
+It reads the domain, environment, Supabase URL, and platform Secret name from the release's computed Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret in the chart's `mindroom-{environment}` namespace; secrets are never printed.
 `--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
-`NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select a different platform release.
+`NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select the Helm release to upgrade.
 Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
-Re-provisioning starts an instance that a customer or admin stopped manually, so the script stops it again afterwards through `/system/instances/{id}/stop`.
-Deprovisioned instances are never re-provisioned, because that would recreate them empty.
+The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.
+Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it keeps running the old MindRoom image until it is re-provisioned; run the script with `--instances <id>` after it has been started.
+Deprovisioned instances are never re-provisioned either, because that would recreate them empty.
 A failed instance does not stop the run; the script reports every failure at the end and exits non-zero.
 When the node's memory requests are nearly full, rollout pods can stay `Pending`; stop idle instances or resize the node first.
 
@@ -516,7 +517,7 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
 ```
 
 The script prints the API response and exits non-zero when the query fails.
-Each migration runs in one transaction and every statement is idempotent, so a failed or repeated run leaves the same end state.
+Migrations `002` through `004` are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
 Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
 
 ## Multi-Tenant Architecture

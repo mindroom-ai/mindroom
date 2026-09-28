@@ -58,17 +58,20 @@ run() {
 }
 
 # --- Read configuration and secrets from the cluster ---
-VALUES_JSON=$(helm get values "$RELEASE" -n "$NAMESPACE" -o json)
+# All computed values, so chart defaults apply exactly as in the templates.
+VALUES_JSON=$(helm get values "$RELEASE" -n "$NAMESPACE" --all -o json)
 value() { jq -r "$1" <<<"$VALUES_JSON"; }
 DOMAIN=$(value '.domain // empty')
-INSTANCE_DOMAIN=$(value '.provisioner.instanceBaseDomain // .domain // empty')
+INSTANCE_DOMAIN=$(value 'if (.provisioner.instanceBaseDomain // "") != "" then .provisioner.instanceBaseDomain else .domain end')
 SUPABASE_URL=$(value '.supabase.url // empty')
 REGISTRY=$(value '.registry // "ghcr.io/mindroom-ai"')
 SECRET_NAME=$(value '.platformSecrets.name // "platform-secrets"')
+# The chart creates its resources in mindroom-<environment>, independent of the Helm release namespace.
+APP_NAMESPACE="mindroom-$(value '.environment')"
 [ -n "$DOMAIN" ] && [ -n "$SUPABASE_URL" ] || { echo "Helm values lack domain or supabase.url" >&2; exit 1; }
 
 secret() {
-  kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o "jsonpath={.data.$1}" | base64 -d
+  kubectl get secret "$SECRET_NAME" -n "$APP_NAMESPACE" -o "jsonpath={.data.$1}" | base64 -d
 }
 PROVISIONER_KEY=$(secret provisioner_api_key)
 SUPABASE_KEY=$(secret supabase_service_key)
@@ -94,18 +97,23 @@ provisioner_post() {
 }
 
 # --- Select instances ---
-ROWS=$(supabase_get 'instances?select=instance_id,subscription_id,account_id,tier,status,lifecycle_stopped_at&order=instance_id')
+# The tier comes from the subscription, like the portal and lifecycle provisioning paths.
+ROWS=$(supabase_get 'instances?select=instance_id,subscription_id,account_id,status,lifecycle_stopped_at,subscriptions(tier)&order=instance_id' |
+  jq -c 'map(. + {tier: .subscriptions.tier} | del(.subscriptions))')
+# Manually stopped instances (stopped without lifecycle_stopped_at) are never re-provisioned, because provisioning starts them.
+RUNNING='.status == "running" and .lifecycle_stopped_at == null'
+HELD='.lifecycle_stopped_at != null and .status != "deprovisioned"'
 case "$SELECT" in
   none) SELECTED='[]' ;;
-  running) SELECTED=$(jq -c '[.[] | select(.status == "running")]' <<<"$ROWS") ;;
-  all) SELECTED=$(jq -c '[.[] | select(.status != "deprovisioned")]' <<<"$ROWS") ;;
+  running) SELECTED=$(jq -c "[.[] | select($RUNNING)]" <<<"$ROWS") ;;
+  all) SELECTED=$(jq -c "[.[] | select(($RUNNING) or ($HELD))]" <<<"$ROWS") ;;
   *)
     [[ "$SELECT" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "--instances must be running, all, none, or comma-separated ids" >&2; exit 2; }
     SELECTED=$(jq -c --arg ids "$SELECT" '($ids | split(",") | map(tonumber)) as $want | [.[] | select(.instance_id as $id | $want | any(. == $id))]' <<<"$ROWS")
     missing=$(jq -r --arg ids "$SELECT" --argjson sel "$SELECTED" '$ids | split(",") | map(tonumber) - ($sel | map(.instance_id)) | join(",")' <<<"null")
     [ -z "$missing" ] || { echo "Unknown instance ids: $missing" >&2; exit 1; }
-    deprovisioned=$(jq -r '[.[] | select(.status == "deprovisioned") | .instance_id] | join(",")' <<<"$SELECTED")
-    [ -z "$deprovisioned" ] || { echo "Refusing to re-provision deprovisioned instances: $deprovisioned" >&2; exit 1; }
+    refused=$(jq -r '[.[] | select(.status == "deprovisioned" or (.status == "stopped" and .lifecycle_stopped_at == null)) | .instance_id] | join(",")' <<<"$SELECTED")
+    [ -z "$refused" ] || { echo "Refusing manually stopped or deprovisioned instances: $refused" >&2; exit 1; }
     ;;
 esac
 
@@ -160,7 +168,6 @@ count=0
 while read -r row; do
   [ -n "$row" ] || continue
   id=$(jq -r .instance_id <<<"$row")
-  status=$(jq -r .status <<<"$row")
   held=$(jq -r 'if .lifecycle_stopped_at then "true" else "false" end' <<<"$row")
   body=$(jq -c '{subscription_id, account_id, tier, instance_id}' <<<"$row")
   if $DRY_RUN; then
@@ -181,13 +188,6 @@ while read -r row; do
   fi
   if $held; then
     log "Instance $id is held by the subscription lifecycle; the provisioner kept it stopped"
-    continue
-  fi
-  if [ "$status" = "stopped" ]; then
-    # Re-provisioning starts a manually stopped instance, so stop it again.
-    log "Instance $id was stopped before the deploy; stopping it again"
-    response=$(provisioner_post "/system/instances/$id/stop") || true
-    [[ "$(tail -n1 <<<"$response")" == 2* ]] || FAILED+=("$id")
     continue
   fi
   if kubectl rollout status "deployment/synapse-$id" -n mindroom-instances --timeout=10m &&
