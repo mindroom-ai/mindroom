@@ -21,23 +21,27 @@ _CREDENTIALS_NEED_BASE_URL = (
     "custom_api sends its configured api_key, username and password, and headers only to base_url; "
     "set base_url to call this API with them, or remove them to call arbitrary URLs"
 )
-_CROSS_ORIGIN_REDIRECT = "Refusing to follow a redirect to another origin with configured credentials"
 
 
-def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
-    """Return the scheme, host, and non-default port that bound where credentials may go."""
-    return url.scheme, url.host, url.port
+def _keeps_credentials(base: httpx.URL, url: httpx.URL) -> bool:
+    """Mirror HTTPX's Authorization rule: the base_url origin, or its direct upgrade from http to https."""
+    if url.host != base.host:
+        return False
+    if (url.scheme, url.port) == (base.scheme, base.port):
+        return True
+    return (base.scheme, base.port, url.scheme, url.port) == ("http", None, "https", None)
 
 
-def _credential_origin_guard(base_url: str) -> Callable[[httpx.Request], None]:
-    """Return a request hook that refuses every hop outside the base_url origin before it is sent."""
-    credential_origin = _origin(httpx.URL(base_url))
+def _credential_header_guard(base_url: str, header_names: frozenset[str]) -> Callable[[httpx.Request], None]:
+    """Return a request hook that strips credential headers from every hop outside the base_url origin."""
+    base = httpx.URL(base_url)
 
-    def keep_credentials_on_origin(request: httpx.Request) -> None:
-        if _origin(request.url) != credential_origin:
-            raise httpx.RequestError(_CROSS_ORIGIN_REDIRECT, request=request)
+    def strip_credentials_off_origin(request: httpx.Request) -> None:
+        if not _keeps_credentials(base, request.url):
+            for name in header_names:
+                request.headers.pop(name, None)
 
-    return keep_credentials_on_origin
+    return strip_credentials_off_origin
 
 
 @register_tool_with_metadata(
@@ -142,9 +146,11 @@ def custom_api_tools() -> type[CustomApiTools]:
                 return json.dumps({"error": _CREDENTIALS_NEED_BASE_URL}, indent=2)
             url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
             url = validate_server_fetch_url(url)
-            event_hooks = (
-                {"request": [_credential_origin_guard(self.base_url)]} if has_credentials and self.base_url else None
-            )
+            event_hooks = None
+            if has_credentials and self.base_url:
+                # HTTPX already strips Authorization on these hops; configured headers need the same treatment.
+                credential_headers = frozenset({"Authorization", *self.default_headers})
+                event_hooks = {"request": [_credential_header_guard(self.base_url, credential_headers)]}
             try:
                 with httpx.Client(
                     transport=ServerFetchHTTPTransport(verify=self.verify_ssl),

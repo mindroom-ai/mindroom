@@ -13621,7 +13621,7 @@ If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to t
 Per-call headers are merged on top of configured default headers.
 Configured credentials, meaning `api_key`, a `username` / `password` pair, or `headers`, are only sent to the `base_url` origin.
 Without `base_url`, a call on a tool with configured credentials returns an error and sends nothing, so the model cannot choose where they go.
-A credentialed request follows redirects within the `base_url` scheme, host, and port, and fails instead of following one anywhere else.
+Redirects are followed, but a hop to another scheme, host, or port drops the configured headers and `Authorization`, except a direct upgrade from `http` to `https` on the same host, matching how HTTPX already treats `Authorization`.
 The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
 Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
 

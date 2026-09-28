@@ -295,39 +295,67 @@ def test_custom_api_tool_refuses_configured_credentials_without_base_url(
     assert sent == []
 
 
-def test_custom_api_tool_keeps_configured_credentials_on_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Credentialed requests follow redirects within the base_url origin and refuse a hop to any other origin."""
-    redirects = {
-        "/v1/moved": "https://api.example.com/v1/current",
-        "/v1/open-redirect": "https://other.example/collect",
-        "/v1/downgrade": "http://api.example.com/v1/current",
-    }
+@pytest.mark.parametrize(
+    ("base_url", "location", "keeps_credentials"),
+    [
+        ("https://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("http://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("https://api.example.com/v1", "https://cdn.example/object?signature=abc", False),
+        ("https://api.example.com/v1", "http://api.example.com/v1/current", False),
+        ("https://api.example.com/v1", "https://api.example.com:8443/v1/current", False),
+    ],
+)
+def test_custom_api_tool_strips_configured_credentials_from_hops_off_the_base_url_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    location: str,
+    *,
+    keeps_credentials: bool,
+) -> None:
+    """Redirects are followed; only the base_url origin and its direct https upgrade still receive credentials."""
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if location := redirects.get(request.url.path):
+        if request.url.path == "/v1/start":
             return httpx.Response(302, headers={"Location": location})
         return httpx.Response(200, json={"ok": True})
 
     sent = _install_custom_api_transport(monkeypatch, respond)
     tool = custom_api_tools()(
-        base_url="https://api.example.com/v1",
+        base_url=base_url,
         api_key="sk-operator",
-        headers={"X-Api-Key": "operator-secret"},
+        headers={"X-Api-Key": "operator-secret", "Accept": "application/json"},
     )
 
-    assert json.loads(tool.make_request("moved"))["data"] == {"ok": True}
-    assert [str(request.url) for request in sent] == [
-        "https://api.example.com/v1/moved",
-        "https://api.example.com/v1/current",
-    ]
-    assert all(request.headers["X-Api-Key"] == "operator-secret" for request in sent)
-    assert all(request.headers["Authorization"] == "Bearer sk-operator" for request in sent)
+    payload = json.loads(tool.make_request("start", headers={"X-Request-Id": "req-1"}))
 
-    for endpoint in ("open-redirect", "downgrade"):
-        sent.clear()
-        payload = json.loads(tool.make_request(endpoint))
-        assert "another origin" in payload["error"]
-        assert [str(request.url) for request in sent] == [f"https://api.example.com/v1/{endpoint}"]
+    assert payload["data"] == {"ok": True}
+    first, followed = sent
+    assert str(followed.url) == location
+    for request in (first, followed) if keeps_credentials else (first,):
+        assert request.headers["Authorization"] == "Bearer sk-operator"
+        assert request.headers["X-Api-Key"] == "operator-secret"
+    if not keeps_credentials:
+        assert "Authorization" not in followed.headers
+        assert "X-Api-Key" not in followed.headers
+        assert "Accept" not in followed.headers
+    assert followed.headers["X-Request-Id"] == "req-1"
+
+
+def test_custom_api_tool_strips_basic_auth_from_hops_off_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Basic auth pair reaches the base_url origin but not a presigned download on another host."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/object"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(base_url="https://api.example.com", username="operator", password="operator-password")  # noqa: S106
+
+    assert json.loads(tool.make_request("download"))["data"] == {"ok": True}
+    assert sent[0].headers["Authorization"].startswith("Basic ")
+    assert [request.url.host for request in sent] == ["api.example.com", "cdn.example"]
+    assert "Authorization" not in sent[1].headers
 
 
 def test_custom_api_tool_without_credentials_follows_redirects_anywhere_public(monkeypatch: pytest.MonkeyPatch) -> None:
