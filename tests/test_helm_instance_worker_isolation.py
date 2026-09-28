@@ -1218,7 +1218,11 @@ def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(works
     docs = _render_chart(Path("cluster/k8s/instance"), *set_args)
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
     synapse = _resource(docs, "Deployment", "synapse-demo")
-    containers = [_container(mindroom, "mindroom"), _container(mindroom, "sandbox-runner"), _container(synapse, "synapse")]
+    containers = [
+        _container(mindroom, "mindroom"),
+        _container(mindroom, "sandbox-runner"),
+        _container(synapse, "synapse"),
+    ]
 
     for container in containers:
         assert "ephemeral-storage" in container["resources"]["requests"], container["name"]

@@ -11,7 +11,6 @@
 # ruff: noqa: PLR0912  # complexity is acceptable for CLI commands
 
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -209,7 +208,12 @@ def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
         except OSError as e:
             # A non-root operator cannot chmod files the bridge container already owns.
             console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
-            console.print(f"  Run: sudo chmod 600 {shlex.quote(str(path))}", markup=False, highlight=False, soft_wrap=True)
+            console.print(
+                f"  Run: sudo chmod 600 {shlex.quote(str(path))}",
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
 
 
 def load_instances() -> dict[str, Any]:

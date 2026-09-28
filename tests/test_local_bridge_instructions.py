@@ -300,7 +300,12 @@ def test_unrestrictable_bridge_file_prints_the_exact_fix(
     config_file = tmp_path / "data" / "config.yaml"
     config_file.parent.mkdir()
     config_file.write_text("bridge: {}\n")
-    bridge = bridge_manager.BridgeConfig(bridge_type="telegram", instance_name="alpha", port=29317, data_dir=str(tmp_path))
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type="telegram",
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
 
     def _refuse_chmod(*_args: object) -> None:
         raise PermissionError(1, "Operation not permitted")
