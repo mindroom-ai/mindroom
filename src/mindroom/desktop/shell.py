@@ -448,18 +448,24 @@ class DesktopShell:
         *,
         offset: int | None = None,
     ) -> DesktopShellResult:
-        """Report the caller's own handle; a finished (completed or killed) handle is handed over once and forgotten.
+        """Report the caller's own handle; a finished one stays until ``hand_over`` confirms its output arrived.
 
-        An invalid output ``offset`` is rejected before the hand-over, so a corrected check still gets the output.
+        An invalid output ``offset`` is rejected without changing the handle, so a corrected check still gets the output.
         """
         record = self._caller_record(requester_id, agent_name, handle)
+        entry = self._handles[handle]
         if offset is not None:
-            self._handles[handle].output.check_offset(offset)
+            entry.output.check_offset(offset)
         if not record.finished:
-            return DesktopShellResult("running", handle, None, self._handles[handle].output)
-        self._records.pop(handle)
-        entry = self._handles.pop(handle)
+            return DesktopShellResult("running", handle, None, entry.output)
         return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)
+
+    def hand_over(self, result: DesktopShellResult) -> None:
+        """Forget a finished result's handle and release its output once the rest of it reached the caller."""
+        if result.handle is not None and result.handle in self._handles:
+            self._records.pop(result.handle, None)
+            self._handles.pop(result.handle)
+        result.output.release()
 
     def kill(
         self,

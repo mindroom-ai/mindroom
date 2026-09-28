@@ -196,7 +196,8 @@ Handles belong to the requester and agent that started them, and another caller 
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
 The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.
 A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with the exit code the process returned, instead of an unknown handle.
-A finished `check_shell` hands its output over once and then forgets the handle.
+A `check_shell` that returns a finished handle's remaining output in full, inline or as an attachment, hands it over and forgets the handle.
+If the attachment cannot be uploaded, the reply shows the part that fits from the requested offset with a `warning`, and the handle stays for a `check_shell` from `next_offset`.
 If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
 The bridge retains at most 16 handles.
 When all 16 are retained, a new command drops the oldest finished handle that nobody has checked, together with its output, and is refused before approval if all 16 are still running.
@@ -228,7 +229,8 @@ The bridge captures up to 10 MiB of combined output per command in private tempo
 Output beyond that limit is dropped, and the result reports `output_truncated: true`.
 Output that fits in one encrypted reply returns inline.
 Larger output travels as an encrypted Matrix media attachment whose key is only inside the encrypted reply, and the cloud tool downloads and verifies it within the tool's configured `timeout_seconds` before returning the full text.
-If the upload fails or takes longer than 30 seconds, the reply keeps the exit code, shows the newest output that fits, sets `output_truncated`, and adds a `warning`.
+If the upload fails or takes longer than 30 seconds, the reply keeps the exit code, shows the output that fits from the requested offset, sets `output_truncated` and `next_offset`, and adds a `warning`.
+A handle then stays so `check_shell` can continue from `next_offset`, while a command that finished within its inline wait has no handle, so the rest of its output is not kept.
 For agents with a workspace, MindRoom's normal [tool output files](execution-and-coding.md#common-setup-notes) apply.
 A result larger than the automatic-save threshold, 50 KiB by default, is saved as a plaintext file under `mindroom_tool_outputs/` in the agent workspace and returned as a preview, and the agent can pass `mindroom_output_path` to choose the file.
 

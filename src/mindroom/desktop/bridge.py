@@ -946,7 +946,7 @@ class DesktopBridge:
             handle = _required_str_parameter(parameters, "handle")
             offset = _optional_int_parameter(parameters, "offset")
             result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
-            return _Execution(await self._shell_result(command, result, offset=offset))
+            return _Execution(await self._shell_result(command, shell, result, offset=offset))
         if command.action == "kill_shell":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
             handle = _required_str_parameter(parameters, "handle")
@@ -965,11 +965,12 @@ class DesktopBridge:
             expires_at_ms=command.expires_at_ms,
             timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         )
-        return _Execution(await self._shell_result(command, await shell.execute(request)))
+        return _Execution(await self._shell_result(command, shell, await shell.execute(request)))
 
     async def _shell_result(
         self,
         command: DesktopCommand,
+        shell: DesktopShell,
         result: DesktopShellResult,
         *,
         offset: int | None = None,
@@ -998,36 +999,66 @@ class DesktopBridge:
             head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
             return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
         try:
-            content = output.read(offset or 0)
-            # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
-            if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-                inline = {**payload, "output": content.decode()}
-                if self._fits_inline(command, inline):
-                    return inline
-            try:
-                media = await upload_encrypted_media(
-                    self.client,
-                    content,
-                    mime_type=SHELL_OUTPUT_MIME_TYPE,
-                    filename=f"shell-{command.request_id}.txt",
-                    timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
-                )
-            except DesktopMediaError as exc:
-                error = str(exc)
-            except Exception:
-                logger.exception("shell_output_upload_failed", request_id=command.request_id)
-                error = "Shell output upload failed."
-            else:
-                return {**payload, "output_attachment": media.to_content()}
-            warning = f"The full output could not be attached ({error[:_MAX_WARNING_DETAIL]}); only its end is shown."
-            return self._fit_output_tail(
-                command,
-                {**payload, "warning": warning},
-                content[-MAX_INLINE_RESPONSE_BYTES:],
-                requested=len(content),
+            return await self._finished_shell_result(command, shell, result, payload, offset or 0)
+        except BaseException:
+            if result.handle is None:
+                # Without a handle nothing else owns this output.
+                output.release()
+            raise
+
+    async def _finished_shell_result(
+        self,
+        command: DesktopCommand,
+        shell: DesktopShell,
+        result: DesktopShellResult,
+        payload: dict[str, object],
+        start: int,
+    ) -> dict[str, object]:
+        """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
+        content = result.output.read(start)
+        # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
+        if len(content) <= MAX_INLINE_RESPONSE_BYTES:
+            inline = {**payload, "output": content.decode()}
+            if self._fits_inline(command, inline):
+                shell.hand_over(result)
+                return inline
+        try:
+            media = await upload_encrypted_media(
+                self.client,
+                content,
+                mime_type=SHELL_OUTPUT_MIME_TYPE,
+                filename=f"shell-{command.request_id}.txt",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
-        finally:
-            output.release()
+        except DesktopMediaError as exc:
+            error = str(exc)
+        except Exception:
+            logger.exception("shell_output_upload_failed", request_id=command.request_id)
+            error = "Shell output upload failed."
+        else:
+            shell.hand_over(result)
+            return {**payload, "output_attachment": media.to_content()}
+        detail = error[:_MAX_WARNING_DETAIL]
+        if result.handle is None:
+            # A command that finished inline has no handle to page from, so this page is all it can return.
+            shell.hand_over(result)
+            warning = (
+                f"The output could not be attached ({detail}); only its beginning is shown and the rest is not "
+                "kept. Do not run the command again automatically."
+            )
+        else:
+            warning = (
+                f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
+                "Continue with check_shell from next_offset."
+            )
+        head = content[:MAX_INLINE_RESPONSE_BYTES]
+        return self._fit_output_head(
+            command,
+            {**payload, "warning": warning},
+            head,
+            offset=start,
+            requested=len(content),
+        )
 
     def _leftmost_fitting(
         self,

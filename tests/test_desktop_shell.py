@@ -372,7 +372,10 @@ async def test_command_past_inline_wait_becomes_a_handle_with_full_output(tmp_pa
     assert shell.check(REQUESTER, AGENT, running.handle).state == "running"
     (tmp_path / "release").touch()
     completed = await check_until_finished(shell, running.handle)
-    assert (completed.exit_code, completed_output(completed)) == (7, "early\nlate")
+    assert (completed.state, completed.exit_code, completed.output.read()) == ("completed", 7, b"early\nlate")
+    # A finished handle stays until its caller confirms the output arrived.
+    assert shell.check(REQUESTER, AGENT, running.handle).state == "completed"
+    shell.hand_over(completed)
     assert shell.status()["handles"] == []
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.check(REQUESTER, AGENT, running.handle)
@@ -517,7 +520,7 @@ async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path:
     assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
     killed = shell.check(REQUESTER, AGENT, running.handle)
     assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGKILL, b"before")
-    killed.output.release()
+    shell.hand_over(killed)
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.kill_handle(running.handle)
     await shell.close()

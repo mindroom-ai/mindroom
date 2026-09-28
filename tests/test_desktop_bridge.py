@@ -1574,12 +1574,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
 
 
 @pytest.mark.asyncio
-async def test_failed_output_upload_keeps_exit_code_and_newest_output(
+async def test_failed_upload_of_an_inline_finished_command_keeps_exit_code_and_first_output(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An attachment failure never hides that the command completed or what it printed last."""
+    """Without a handle to page from, an attachment failure still shows the exit code and the output's start."""
     monkeypatch.setattr(
         "mindroom.desktop.bridge.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
@@ -1596,9 +1596,11 @@ async def test_failed_output_upload_keeps_exit_code_and_newest_output(
     assert response.ok
     result = response.result
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 4, None)
-    assert str(result["output"]).endswith("tail")
-    assert (result["output_bytes"], result["output_truncated"], result["next_offset"]) == (100_004, True, 100_004)
+    assert (result["handle"], result["output_start"], set(str(result["output"]))) == (None, 0, {"x"})
+    assert result["next_offset"] == len(str(result["output"]))
+    assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "Matrix media upload failed: offline" in str(result["warning"])
+    assert "the rest is not kept" in str(result["warning"])
     assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     await bridge.stop()
     bridge.close()
@@ -1652,14 +1654,60 @@ _LARGE_OUTPUT = "import sys; sys.stdout.write('x' * 100_000 + 'tail')"
 
 def _assert_upload_fallback(result: dict[str, object]) -> None:
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 0, None)
-    assert str(result["output"]).endswith("tail")
-    assert (result["output_bytes"], result["output_truncated"], result["next_offset"]) == (100_004, True, 100_004)
+    assert (result["output_start"], set(str(result["output"]))) == (0, {"x"})
+    assert result["next_offset"] == len(str(result["output"]))
+    assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "upload did not finish within 0.2 seconds" in str(result["warning"])
+
+
+@pytest.mark.parametrize("later_uploads", ["fail", "succeed"])
+@pytest.mark.asyncio
+async def test_failed_upload_keeps_a_finished_handle_until_its_output_is_delivered(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    later_uploads: str,
+) -> None:
+    """After a failed attachment the agent pages on from next_offset, and only a complete page consumes the handle."""
+    media = replace(MEDIA, mime_type="text/plain")
+    failure = DesktopMediaError("Matrix media upload failed: offline")
+    upload = AsyncMock(side_effect=[failure, *([failure] * 10 if later_uploads == "fail" else [media])])
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("while [ ! -f release ]; do sleep 0.05; done; cat log", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    received, offset = b"", 0
+    for sequence in range(2, 20):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+        page = _response(transport).result
+        assert (page["state"], page["exit_code"], page["output_start"]) == ("completed", 0, offset)
+        attached = page["output_attachment"] is not None
+        shown = upload.await_args.args[1] if attached else str(page["output"]).encode()
+        assert page["next_offset"] == offset + len(shown)
+        received, offset = received + shown, offset + len(shown)
+        if offset == len(content):
+            assert "warning" not in page
+            break
+        assert "could not be attached" in str(page["warning"])
+        assert [entry["handle"] for entry in bridge.local_status()["shell"]["handles"]] == [handle]
+    assert received == content
+    assert bridge.local_status()["shell"]["handles"] == []
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=30, offset=offset)))
+    assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    bridge.close()
 
 
 @pytest.mark.parametrize("action", ["run_shell", "check_shell"])
 @pytest.mark.asyncio
-async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_bound(
+async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1681,7 +1729,8 @@ async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_
         (tmp_path / "release").touch()
         result, _ = await asyncio.wait_for(_check_until_finished(bridge, transport, handle, first_sequence=2), 5)
     _assert_upload_fallback(result)
-    assert [output.closed for output in released] == [True]
+    # A handle keeps its output for the next page; a command that finished inline has nothing to keep it.
+    assert [output.closed for output in released] == ([True] if action == "run_shell" else [])
     await bridge.stop()
     bridge.close()
 
