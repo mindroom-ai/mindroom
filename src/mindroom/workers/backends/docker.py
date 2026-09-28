@@ -98,7 +98,7 @@ from mindroom.workers.models import (
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     class _DockerContainer(Protocol):
         attrs: dict[str, object]
@@ -216,6 +216,22 @@ def _container_root_filesystem_read_only(container: _DockerContainer | None) -> 
         return False
     host_config = container.attrs.get("HostConfig")
     return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
+
+
+def _container_bind_destinations(container: _DockerContainer) -> list[str]:
+    """Return the bind destinations Docker mounts again each time it starts this container."""
+    mounts = container.attrs.get("Mounts")
+    if not isinstance(mounts, list):
+        return []
+    destinations: list[str] = []
+    for mount in cast("list[object]", mounts):
+        if not isinstance(mount, dict):
+            continue
+        mount_data = cast("dict[str, object]", mount)
+        destination = mount_data.get("Destination")
+        if mount_data.get("Type") == "bind" and isinstance(destination, str):
+            destinations.append(destination)
+    return destinations
 
 
 def _docker_security_options_match(value: object) -> bool:
@@ -1276,7 +1292,7 @@ class DockerWorkerBackend:
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
             )
-            self._prepare_nested_storage_mount_targets(paths, volumes)
+            self._prepare_nested_storage_mount_targets(paths, (volume.rsplit(":", 2)[1] for volume in volumes))
             security_kwargs = (
                 {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
                 if self.config.security_policy == "computer"
@@ -1304,6 +1320,8 @@ class DockerWorkerBackend:
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
+            # Docker resolves every bind destination again on start, through whatever worker code left in its root.
+            self._prepare_nested_storage_mount_targets(paths, _container_bind_destinations(container))
             try:
                 container.start()
             except self._docker_errors.DockerException as exc:
@@ -1616,12 +1634,12 @@ class DockerWorkerBackend:
     def _prepare_nested_storage_mount_targets(
         self,
         paths: _DockerWorkerPaths,
-        volumes: list[str],
+        container_paths: Iterable[str],
     ) -> None:
-        """Create nested bind targets before the Docker daemon can create them as root."""
+        """Create nested bind targets as real directories, so the daemon neither creates them as root nor follows a link."""
         storage_root = PurePosixPath(self.config.storage_mount_path)
-        for mount in volumes:
-            container_path = PurePosixPath(mount.rsplit(":", 2)[1])
+        for raw_container_path in container_paths:
+            container_path = PurePosixPath(raw_container_path)
             if container_path == storage_root or storage_root not in container_path.parents:
                 continue
             relative_path = container_path.relative_to(storage_root)
