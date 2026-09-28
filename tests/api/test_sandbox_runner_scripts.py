@@ -972,7 +972,12 @@ _LIVE_SCRIPT_RUN_ID = f"script-{'e' * 32}"
 
 def _live_primary_script_snapshot(tmp_path: Path, *, private: bool) -> dict[str, object]:
     """Return what a Kubernetes primary sends for a `watcher` agent created after the worker was seeded."""
-    watcher: dict[str, object] = {"display_name": "Watcher", "tools": ["script"]}
+    # Realistic live configs carry long instructions, so launches must fit well past the old 16 KiB body limit.
+    watcher: dict[str, object] = {
+        "display_name": "Watcher",
+        "tools": ["script"],
+        "instructions": [f"Instruction {index}: {'watch carefully ' * 20}" for index in range(64)],
+    }
     if private:
         watcher["private"] = {"per": "user_agent", "root": "private-workspace"}
     else:
@@ -1078,10 +1083,12 @@ def test_worker_script_runs_agent_known_only_to_primary_config_snapshot(
     assert without_snapshot.status_code == 400
     assert without_snapshot.json()["detail"] == "Script state scope does not resolve an agent workspace."
 
+    snapshot = _live_primary_script_snapshot(tmp_path, private=True)
+    assert len(json.dumps(snapshot)) > 16 * 1024
     response = client.post(
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
-        json={**payload, "config_snapshot": _live_primary_script_snapshot(tmp_path, private=True)},
+        json={**payload, "config_snapshot": snapshot},
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
