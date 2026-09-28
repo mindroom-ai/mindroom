@@ -6,7 +6,7 @@ import asyncio
 import os
 import ssl
 import stat
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1105,6 +1105,54 @@ async def test_transient_transport_failure_logs_the_underlying_error_before_nio_
     assert transport_errors[0]["homeserver"] == "https://matrix.example.org"
     assert transport_errors[0]["error_type"] == "ClientConnectorError"
     assert "Connection refused" in transport_errors[0]["error"]
+
+
+def _password_login(runtime_paths: RuntimePaths) -> Coroutine[Any, Any, nio.AsyncClient]:
+    return client_session.login("https://matrix.example.org", "@mindroom_router:example.org", "password", runtime_paths)
+
+
+def _session_restore(runtime_paths: RuntimePaths) -> Coroutine[Any, Any, nio.AsyncClient]:
+    return client_session.restore_login(
+        "https://matrix.example.org",
+        "@mindroom_router:example.org",
+        "ROUTERDEVICE",
+        "access-token",
+        runtime_paths,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "failed"])
+@pytest.mark.parametrize("authenticate", [_password_login, _session_restore], ids=["login", "restore_login"])
+async def test_authentication_closes_the_client_it_does_not_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authenticate: Callable[[RuntimePaths], Coroutine[Any, Any, nio.AsyncClient]],
+    cancel: bool,
+) -> None:
+    """Ctrl+C during a startup retry, or any transport error, must not leave an unclosed HTTP session behind."""
+    _, blocked = _install_scripted_transport(monkeypatch, *([] if cancel else [RuntimeError("transport broke")]))
+    created: list[nio.AsyncClient] = []
+    create_client = client_session._create_matrix_client
+
+    def record_client(*args: Any, **kwargs: Any) -> nio.AsyncClient:  # noqa: ANN401
+        client = create_client(*args, **kwargs)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(client_session, "_create_matrix_client", record_client)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    attempt = asyncio.create_task(authenticate(runtime_paths))
+    if cancel:
+        await asyncio.wait_for(blocked.wait(), timeout=1.0)
+        attempt.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
+        await attempt
+
+    [client] = created
+    # nio drops its aiohttp session only in close().
+    assert client.client_session is None
 
 
 @pytest.mark.asyncio

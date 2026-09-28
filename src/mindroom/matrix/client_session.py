@@ -321,7 +321,11 @@ async def login(
         sync_storage=sync_storage,
     )
 
-    response = await client.login(password)
+    try:
+        response = await client.login(password)
+    except BaseException:
+        await client.close()
+        raise
     if isinstance(response, nio.LoginResponse):
         client.user_id = response.user_id
         client.device_id = response.device_id
@@ -372,9 +376,12 @@ async def restore_login(
         http_headers=http_headers,
         sync_storage=sync_storage,
     )
-    client.restore_login(user_id, device_id, access_token)
-
-    response = await client.whoami()
+    try:
+        client.restore_login(user_id, device_id, access_token)
+        response = await client.whoami()
+    except BaseException:
+        await client.close()
+        raise
     if isinstance(response, nio.WhoamiResponse):
         client.user_id = response.user_id
         if response.device_id:
