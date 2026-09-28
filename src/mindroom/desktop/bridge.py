@@ -8,6 +8,7 @@ import json
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -59,6 +60,7 @@ from mindroom.matrix.olm_to_device import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     import nio
     from nio import AuthenticatedToDeviceEvent
@@ -866,14 +868,19 @@ class DesktopBridge:
 
         app_id = _required_str_parameter(parameters, "app")
         state_id = _required_str_parameter(parameters, "state_id")
-        if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
-            await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
-        else:
-            await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
+        with self._agent_input():
+            if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
+                await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
+            else:
+                await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
         return _Execution(
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
         )
+
+    def _agent_input(self) -> AbstractContextManager[None]:
+        """Keep app input and a shell approval card or prompt from ever being live at the same time."""
+        return self.shell.agent_input() if self.shell is not None else nullcontext()
 
     def _required_gui_provider(self) -> DesktopProvider:
         provider = self.provider

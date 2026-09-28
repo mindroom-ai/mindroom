@@ -6,10 +6,11 @@ import asyncio
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -26,17 +27,25 @@ from mindroom.shell_execution import (
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
 _MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
+# Longer whitespace runs could push the rest of a command out of an approver's view.
+_WHITESPACE_RUN = re.compile(r"\s+")
+_MAX_WHITESPACE_RUN = 64
+_MAX_BLANK_LINES = 2
 _COMMAND_PREVIEW_CHARS = 200
 # Equal to the engine's background limit, so a start is refused before approval rather than killed later.
 _MAX_HANDLES = MAX_BACKGROUNDED
 _UNKNOWN_HANDLE = "Unknown shell handle."
 _NOT_STARTED = "The local shell request was cancelled before approval; the command did not run."
 _STOPPED = "The local shell command was stopped before it finished; it may have partially run."
+_INPUT_WHILE_PENDING = (
+    "A shell command is waiting for local approval, so desktop input is paused until the person at the "
+    "computer answers it."
+)
 
 
 class DesktopShellError(ValueError):
@@ -124,6 +133,25 @@ class _ShellHandle:
     output: DesktopShellOutput
 
 
+def _validate_command(command: object) -> None:
+    """Accept only a bounded command that every approval surface can show in full."""
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        message = "Shell command must be nonempty and contain no NUL."
+        raise DesktopShellError(message)
+    if len(command) > _MAX_COMMAND:
+        message = "Shell command is too long."
+        raise DesktopShellError(message)
+    if any(
+        len(run) > _MAX_WHITESPACE_RUN or run.count("\n") > _MAX_BLANK_LINES + 1
+        for run in _WHITESPACE_RUN.findall(command)
+    ):
+        message = (
+            f"Shell command must not contain more than {_MAX_WHITESPACE_RUN} whitespace characters or "
+            f"{_MAX_BLANK_LINES} blank lines in a row, which could hide part of it from the approver."
+        )
+        raise DesktopShellError(message)
+
+
 class DesktopShell:
     """Require a local decision or live local lease before each command starts, then track its handle."""
 
@@ -148,6 +176,9 @@ class DesktopShell:
         self._cancel_event = asyncio.Event()
         self._finished = asyncio.Event()
         self._finished.set()
+        self._agent_inputs = 0
+        self._agent_input_idle = asyncio.Event()
+        self._agent_input_idle.set()
         self._used_ids: set[str] = set()
         self._records: dict[str, ProcessRecord] = {}
         self._handles: dict[str, _ShellHandle] = {}
@@ -163,14 +194,10 @@ class DesktopShell:
             if not isinstance(field, str) or not field or "\x00" in field:
                 message = "Shell request identity is invalid."
                 raise DesktopShellError(message)
-        if not isinstance(request.command, str) or not request.command.strip() or "\x00" in request.command:
-            message = "Shell command must be nonempty and contain no NUL."
-            raise DesktopShellError(message)
-        if len(request.command) > _MAX_COMMAND:
-            message = "Shell command is too long."
-            raise DesktopShellError(message)
-        if not isinstance(request.cwd, str) or not Path(request.cwd).is_absolute() or not Path(request.cwd).is_dir():
-            message = "Shell working directory must be an existing absolute directory."
+        _validate_command(request.command)
+        # Only syntax is checked before approval, so the remote caller learns nothing about local directories.
+        if not isinstance(request.cwd, str) or "\x00" in request.cwd or not Path(request.cwd).is_absolute():
+            message = "Shell working directory must be an absolute path."
             raise DesktopShellError(message)
         if (
             not isinstance(request.timeout_seconds, int)
@@ -272,6 +299,8 @@ class DesktopShell:
         elif approved and auto_approve_seconds:
             self._lease_until = self._monotonic_clock() + auto_approve_seconds
         decision.set_result("approved" if approved else "denied")
+        # The reply to this decision already shows the request as settled, so no approval surface keeps it live.
+        self._pending = None
 
     def grant(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> None:
         """Auto-approve every locally allowed caller for a bounded duration or until revoked or stopped."""
@@ -291,7 +320,30 @@ class DesktopShell:
             raise DesktopShellError(message)
         self._lease_until = self._monotonic_clock() + duration_seconds
 
+    @contextmanager
+    def agent_input(self) -> Iterator[None]:
+        """Run agent-driven desktop input only while no request awaits approval, holding new approvals back.
+
+        Synthetic pointer and keyboard input could otherwise press an approval card's buttons or answer
+        the terminal prompt.
+        """
+        if self._pending is not None:
+            raise DesktopShellError(_INPUT_WHILE_PENDING)
+        self._agent_inputs += 1
+        self._agent_input_idle.clear()
+        try:
+            yield
+        finally:
+            self._agent_inputs -= 1
+            if not self._agent_inputs:
+                self._agent_input_idle.set()
+
     async def _await_approval(self, request: DesktopShellRequest, deadline: float) -> str:
+        # Another input can start between the wake-up and this task running, so recheck before presenting.
+        while not self._agent_input_idle.is_set():
+            await self._agent_input_idle.wait()
+        if self._cancel_event.is_set():
+            return "cancelled"
         self._pending = request
         self._pending_deadline = deadline
         self._decision = asyncio.get_running_loop().create_future()
@@ -351,6 +403,9 @@ class DesktopShell:
                 raise DesktopShellError(message)
             if self._cancel_event.is_set():
                 raise DesktopShellError(_NOT_STARTED)
+            if not Path(request.cwd).is_dir():
+                message = "Shell working directory must be an existing directory; the command did not run."
+                raise DesktopShellError(message)
             self._active_request_id = request.request_id
             self._active_owner = (request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.

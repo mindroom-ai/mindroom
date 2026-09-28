@@ -936,6 +936,115 @@ async def test_other_callers_see_shell_state_without_pending_command(transport: 
     bridge.close()
 
 
+_APP_INPUTS = [
+    ("click", {"x": 100, "y": 200, "button": "left"}),
+    ("double_click", {"x": 100, "y": 200, "button": "left"}),
+    ("hover", {"x": 100, "y": 200}),
+    ("drag", {"start_x": 100, "start_y": 200, "end_x": 400, "end_y": 500, "duration_ms": 500}),
+    ("scroll", {"direction": "down", "pages": 1}),
+    ("type_text", {"text": "a\n"}),
+    ("keypress", {"keys": ["enter"]}),
+    ("click_element", {"element_index": 0}),
+    ("set_value", {"element_index": 0, "value": "a"}),
+    ("scroll_element", {"element_index": 0, "direction": "down", "pages": 1}),
+    ("perform_action", {"element_index": 0, "action_name": "AXPress"}),
+]
+
+
+def _control_shell_bridge(provider: FakeProvider, shell: DesktopShell) -> DesktopBridge:
+    """Build a bridge with a live control lease and shell requests, as a Mac with both enabled runs."""
+    return DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=replace(_policy(allow_control=True), shell_enabled=True),
+        shell=shell,
+        clock=lambda: NOW_SECONDS,
+    )
+
+
+def _app_input(action: str, parameters: dict[str, object], *, sequence: int) -> DesktopCommand:
+    return _command(
+        action,
+        request_id=f"{action}-{sequence}",
+        sequence=sequence,
+        parameters={"app": APP_ID, "state_id": "state-1", **parameters},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "parameters"), _APP_INPUTS)
+async def test_app_input_is_refused_while_a_shell_command_awaits_approval(
+    transport: AsyncMock,
+    tmp_path: Path,
+    action: str,
+    parameters: dict[str, object],
+) -> None:
+    """Agent input could press the approval card's buttons or answer the terminal prompt, so it waits its turn."""
+    provider = FakeProvider()
+    bridge = _control_shell_bridge(provider, _local_shell())
+    await bridge.on_to_device_event(_event(_run_shell(PRIVATE_COMMAND, tmp_path, expires_at_ms=120_000)))
+    shell_lane = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+    await _wait_for_pending_shell(bridge)
+    await _handle(bridge, _event(_app_input(action, parameters, sequence=2)))
+    refused = _response(transport)
+    assert not refused.ok
+    assert "waiting for local approval" in str(refused.error)
+    assert provider.calls == []
+    bridge.decide_local_shell("run", approved=False, auto_approve_seconds=0)
+    await shell_lane
+    await _handle(bridge, _event(_app_input(action, parameters, sequence=3)))
+    assert _response(transport).ok
+    assert provider.calls[0][0] == action
+    assert not (tmp_path / "marker").exists()
+    bridge.close()
+
+
+@dataclass
+class _BlockingClickProvider(FakeProvider):
+    """Hold one click inside the provider until the test releases it."""
+
+    started: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+
+    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+        """Block like slow activation and input posting do on a real Mac."""
+        self.started.set()
+        assert self.release.wait(5)
+        super().click(app_id=app_id, state_id=state_id, x=x, y=y, button=button)
+
+
+@pytest.mark.asyncio
+async def test_shell_approval_is_shown_only_after_app_input_in_progress_finishes(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A request arriving mid-click waits, so the click cannot land on a card that appeared under it."""
+    provider = _BlockingClickProvider()
+    bridge = _control_shell_bridge(provider, _local_shell())
+    click = _app_input("click", {"x": 100, "y": 200, "button": "left"}, sequence=1)
+    bridge._observations.remember(replace(STATE, state_id="state-1"), click)
+    await bridge.on_to_device_event(_event(click))
+    input_lane = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(provider.started.wait, 5)
+        run = _run_shell(PRIVATE_COMMAND, tmp_path, sequence=2, expires_at_ms=120_000)
+        await bridge.on_to_device_event(_event(run))
+        shell_lane = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            assert bridge.local_status()["shell"]["pending"] is None
+    finally:
+        provider.release.set()
+    await input_lane
+    assert (await _wait_for_pending_shell(bridge))["request_id"] == "run"
+    bridge.decide_local_shell("run", approved=False, auto_approve_seconds=0)
+    await shell_lane
+    await bridge.deliver_pending()
+    assert _response(transport).error == "Shell command denied locally."
+    assert provider.calls[0][0] == "click"
+    bridge.close()
+
+
 @pytest.mark.asyncio
 async def test_other_callers_see_active_shell_without_its_request_id(transport: AsyncMock, tmp_path: Path) -> None:
     """A different allowed caller sees that a command is active, but never learns its request ID."""
