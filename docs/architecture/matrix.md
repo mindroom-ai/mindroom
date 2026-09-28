@@ -89,7 +89,10 @@ When deriving context for an incoming event, MindRoom:
 4. May start a new thread under a room-root event when agent thread mode requires it.
 
 A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 100 pages of 100 events.
-A root older than that is reported as unproven rather than missing, so those callers fail closed instead of treating the thread as room-level.
+A root older than that is reported as unproven rather than missing, so those callers fail closed instead of treating the thread as room-level, and each logs a warning.
+Automatic summaries stop for such a thread until the process restarts, because the pin check before delivery can never pass.
+Restart auto-resume skips an interrupted turn in such a thread.
+Tool calls that must place an event relative to such a root, for example a plain reply to a room-level message older than the bound, return an error instead of guessing.
 
 ```
 ├── User: @assistant help with this code

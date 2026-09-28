@@ -27,7 +27,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
+from mindroom.matrix.room_history_reads import ThreadRoomScanBoundError, fetch_thread_messages_from_source
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
@@ -82,6 +82,10 @@ _PREQUEUE_CONCURRENCY_MARGIN = 2
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
 _last_summary_counts: dict[str, int] = {}
 _thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+# Threads whose root lies beyond the bounded room scan, so the pin re-check
+# before delivery can never succeed. A root only grows older, so generating a
+# summary for one of them again would always be discarded.
+_threads_beyond_source_read: set[str] = set()
 
 
 class ThreadSummaryWriteError(RuntimeError):
@@ -726,6 +730,14 @@ async def _summary_delivery_timestamp(
             thread_id,
             trusted_sender_ids=trusted_sender_ids,
         )
+    except ThreadRoomScanBoundError:
+        logger.warning(
+            "Thread root is beyond the bounded room scan; stopping automatic summaries for this thread",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        _threads_beyond_source_read.add(_thread_summary_cache_key(room_id, thread_id))
+        return None
     except Exception:
         logger.exception(
             "Pin re-check before summary delivery failed; discarding automatic summary",
@@ -1219,6 +1231,9 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
         ):
             return
         if message_count < threshold:
+            return
+        if _thread_summary_cache_key(room_id, thread_id) in _threads_beyond_source_read:
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
         if await _thread_is_resolved(client, room_id, thread_id):
             logger.debug(

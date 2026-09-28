@@ -30,6 +30,7 @@ from mindroom.matrix.conversation_reads import DeliveredResponse, complete_threa
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
+from mindroom.matrix.room_history_reads import ThreadRoomScanBoundError
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _THREAD_SUMMARY_MAX_LENGTH,
@@ -41,6 +42,7 @@ from mindroom.thread_summary import (
     _generate_summary,
     _is_thread_summary_message,
     _last_summary_counts,
+    _threads_beyond_source_read,
     _next_thread_summary_threshold,
     _next_threshold,
     _normalize_thread_summary_text,
@@ -590,6 +592,7 @@ def _clear_summary_counts() -> Iterator[None]:
     """Reset in-memory state between tests."""
     _last_summary_counts.clear()
     _thread_locks.clear()
+    _threads_beyond_source_read.clear()
     with patch(
         "mindroom.thread_summary.current_internal_sender_ids",
         return_value=_TRUSTED_SUMMARY_SENDERS,
@@ -768,6 +771,32 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp)
 
         mock_gen.assert_not_awaited()
+
+    async def test_thread_beyond_the_room_scan_bound_stops_generating(self) -> None:
+        """Once the pin re-check cannot reach the root, later passes skip the model instead of discarding its work."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        self.source_read.side_effect = ThreadRoomScanBoundError("root beyond the bound")
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch("mindroom.thread_summary._load_thread_history", return_value=_full(_make_thread_history(12))),
+            patch("mindroom.thread_summary._generate_summary", return_value="Summary") as mock_gen,
+            patch("mindroom.thread_summary._send_thread_summary_event") as send,
+        ):
+            await self._maybe_generate(client, config, rp)
+            mock_gen.assert_awaited_once()
+            send.assert_not_awaited()
+            _last_summary_counts.clear()
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_awaited_once()
+        assert self.source_read.await_count == 1
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
     async def test_pinned_bail_advances_baseline(self) -> None:
         """Bailing must advance the baseline so the pre-check stops firing every turn."""

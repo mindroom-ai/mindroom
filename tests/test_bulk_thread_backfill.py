@@ -16,7 +16,7 @@ from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
     _MAX_THREAD_ROOM_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
-    _ThreadRoomScanBoundError,
+    ThreadRoomScanBoundError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
     find_outbox_delivery_event_id_via_room_messages,
@@ -514,7 +514,7 @@ async def test_thread_scan_stops_at_its_page_bound_without_calling_the_root_abse
 
     client.room_messages = AsyncMock(side_effect=endless_history)
 
-    with pytest.raises(_ThreadRoomScanBoundError) as caught:
+    with pytest.raises(ThreadRoomScanBoundError) as caught:
         await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
 
     assert not isinstance(caught.value, ThreadRoomScanRootNotFoundError)

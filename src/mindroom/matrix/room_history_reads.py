@@ -72,7 +72,7 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _MAX_THREAD_ROOM_SCAN_PAGES = 100
 
 
-class _ThreadRoomScanBoundError(RuntimeError):
+class ThreadRoomScanBoundError(RuntimeError):
     """Raised when a thread room scan reaches its page bound before seeing every requested root.
 
     Unlike ``ThreadRoomScanRootNotFoundError`` this proves nothing about the
@@ -607,7 +607,7 @@ async def bulk_scan_thread_event_sources(
                 f"thread room scan in {room_id} reached its {_MAX_THREAD_ROOM_SCAN_PAGES}-page bound "
                 "with history left, so the requested roots are unproven"
             )
-            raise _ThreadRoomScanBoundError(msg)
+            raise ThreadRoomScanBoundError(msg)
         response = await client.room_messages(
             room_id,
             start=from_token,
