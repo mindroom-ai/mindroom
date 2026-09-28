@@ -470,14 +470,50 @@ Admins see the last run, instances pending teardown, and stuck states on the adm
 Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
 The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 
-## Deployment Scripts
+## Release Deployment
+
+Every release tag publishes versioned images (`ghcr.io/mindroom-ai/{platform-backend,platform-frontend,mindroom}:vYYYY.M.N`), and `cluster/scripts/deploy-release.sh` rolls one of them out to the hosted cluster.
+Run it from a repository checkout that has the tag (`git fetch --tags`), with `kubectl` and `helm` pointed at the cluster, for example on the k3s node with `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`.
 
 ```bash
-cd saas-platform
-./deploy.sh platform-frontend          # Deploy platform frontend
-./deploy.sh platform-backend           # Deploy platform backend
-./redeploy-mindroom.sh         # Redeploy all customer MindRoom instances
+cluster/scripts/deploy-release.sh v2026.9.351 --dry-run              # Show the plan and render the Helm upgrade
+cluster/scripts/deploy-release.sh v2026.9.351                        # Platform plus running instances
+cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Every instance that is not deprovisioned
+cluster/scripts/deploy-release.sh v2026.9.351 --instances 1,7        # Only these instances
+cluster/scripts/deploy-release.sh v2026.9.351 --instances none       # Platform only
 ```
+
+The script performs these steps:
+
+1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
+2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
+3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, `tier`, and `instance_id` from the `instances` table, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
+4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance.
+
+It reads the domain, Supabase URL, and platform Secret name from the release's Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret; secrets are never printed.
+`--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
+`NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select a different platform release.
+Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
+`/system/provision` is rate limited to five requests per minute, so the script waits between instances.
+An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
+Re-provisioning starts an instance that a customer or admin stopped manually, so the script stops it again afterwards through `/system/instances/{id}/stop`.
+Deprovisioned instances are never re-provisioned, because that would recreate them empty.
+A failed instance does not stop the run; the script reports every failure at the end and exits non-zero.
+When the node's memory requests are nearly full, rollout pods can stay `Pending`; stop idle instances or resize the node first.
+
+### Database Migrations
+
+Apply any new files from `saas-platform/supabase/migrations` before deploying a release whose backend depends on them.
+Operators have no database password, so `cluster/scripts/db/apply-migration.sh` sends the SQL through the Supabase Management API (`POST https://api.supabase.com/v1/projects/{ref}/database/query`) with a personal access token:
+
+```bash
+SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
+  cluster/scripts/db/apply-migration.sh saas-platform/supabase/migrations/004_instance_lifecycle.sql
+```
+
+The script prints the API response and exits non-zero when the query fails.
+Each migration runs in one transaction and every statement is idempotent, so a failed or repeated run leaves the same end state.
+Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
 
 ## Multi-Tenant Architecture
 
