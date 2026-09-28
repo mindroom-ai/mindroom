@@ -2844,6 +2844,42 @@ def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_prompt_bu
     shrunk = current.content.replace("x" * 50_000, "x")
     library.write_skill_file(root, names[0], "SKILL.md", shrunk, expected_digest=current.digest, learner=False)
     assert loaded <= set(workspace_skills_module.workspace_skill_load(root).skills)
+    # A skill that crosses the budget itself is told to shrink, whether it is new or the one that crosses now.
+    with pytest.raises(library.SkillEditError, match=r"'s-085' itself would cross .* prompt budget"):
+        library.create_skill(
+            root,
+            "s-085",
+            f"---\nname: s-085\ndescription: d\n---\n{'x' * 80_000}\n",
+            reserved_names=frozenset(),
+            learner=False,
+        )
+    library.create_skill(
+        root,
+        "s-085",
+        "---\nname: s-085\ndescription: d\n---\nSteps.\n",
+        reserved_names=frozenset(),
+        learner=False,
+    )
+    current = library.read_skill_file(root, names[-1])
+    assert current is not None
+    with pytest.raises(library.SkillEditError, match=rf"'{names[-1]}' itself would cross .* prompt budget"):
+        library.write_skill_file(
+            root,
+            names[-1],
+            "SKILL.md",
+            f"---\nname: {names[-1]}\ndescription: d\n---\n{'x' * 90_000}\n",
+            expected_digest=current.digest,
+            learner=False,
+        )
+    library.write_skill_file(
+        root,
+        names[-1],
+        "SKILL.md",
+        f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n",
+        expected_digest=current.digest,
+        learner=False,
+    )
+    assert {*loaded, "s-085", names[-1]} <= set(workspace_skills_module.workspace_skill_load(root).skills)
 
 
 def test_skill_manage_refuses_a_change_past_the_read_budget(tmp_path: Path) -> None:

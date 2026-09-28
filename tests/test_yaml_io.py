@@ -124,6 +124,15 @@ def test_untrusted_loads_refuse_what_grows_beyond_the_input(document: str) -> No
     assert yaml_io.safe_load(document) is not None
 
 
+@pytest.mark.parametrize("document", ['s: "x \\ud800"', '"\\U0000dc00": v'], ids=["value", "key"])
+def test_untrusted_loads_refuse_lone_surrogates_like_libyaml(document: str) -> None:
+    """An escape that decodes to a lone surrogate is not text any encoding can write, and libyaml refuses it too."""
+    with pytest.raises(yaml.YAMLError):
+        yaml_io.safe_load_untrusted(document)
+    with pytest.raises(yaml.YAMLError):
+        yaml_io.safe_load(document)
+
+
 def test_untrusted_loads_keep_ordinary_integers() -> None:
     """Integers of ordinary size and base still load."""
     assert yaml_io.safe_load_untrusted("a: 42\nb: 0x1f\nc: -7") == {"a": 42, "b": 31, "c": -7}

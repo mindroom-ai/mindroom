@@ -9,6 +9,7 @@ import threading
 import time
 import tracemalloc
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +24,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
+from mindroom.skill_learning import library
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
@@ -893,13 +895,43 @@ def test_a_pass_that_reads_a_proposed_change_logs_no_budget_warning(tmp_path: Pa
         references=[],
     )
     with capture_logs() as logs:
-        assert workspace_skills_module.workspace_skill_load(root, proposed).stop == "parse"
+        stopped = workspace_skills_module.workspace_skill_load(root, proposed).stopped
+    assert stopped is not None
+    assert stopped.stop == "parse"
     assert not [entry for entry in logs if entry["event"].endswith("skipping the rest")]
     with capture_logs() as logs:
-        assert workspace_skills_module.workspace_skill_load(root).stop == "parse"
+        workspace_skills_module.workspace_skill_load(root)
     assert [entry["event"] for entry in logs if entry["event"].endswith("skipping the rest")] == [
         "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
     ]
+
+
+@pytest.mark.parametrize("field", ["name", "description", "metadata"])
+def test_a_planted_surrogate_escape_never_hides_other_skills(tmp_path: Path, field: str) -> None:
+    """A YAML escape of a lone surrogate is not text, so it fails its own skill's strict parse and nothing else."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "good-one", "Good one")
+    fields = {"name": "planted", "description": "Planted", "metadata": "{}"}
+    fields[field] = '"x \\ud800"'
+    frontmatter = "\n".join(f"{key}: {value}" for key, value in fields.items())
+    (workspace_skills / "planted").mkdir()
+    (workspace_skills / "planted" / "SKILL.md").write_text(f"---\n{frontmatter}\n---\nbody\n", encoding="utf-8")
+    _write_skill(workspace_skills, "good-two", "Good two")
+    names = _skill_names(_load_agent_skills(tmp_path, storage))
+    assert {"good-one", "good-two"} <= set(names)
+    assert set(workspace_skills_module.workspace_skill_load(workspace_skills).skills) >= {"good-one", "good-two"}
+    assert library.archive_unused_skills(workspace_skills, archive_after_days=30, now=datetime.now(UTC)) == []
+    current = library.read_skill_file(workspace_skills, "good-one")
+    assert current is not None
+    edited = current.content.replace("# Body", "# Steps")
+    library.write_skill_file(
+        workspace_skills,
+        "good-one",
+        "SKILL.md",
+        edited,
+        expected_digest=current.digest,
+        learner=False,
+    )
 
 
 def test_json5_metadata_counts_at_its_parse_weight() -> None:

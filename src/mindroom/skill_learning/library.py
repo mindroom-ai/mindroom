@@ -369,25 +369,32 @@ def _require_loadable(
     if added is not None:
         kind, filename = added
         listings[kind] = [*listings[kind], filename]
-    before = workspace_skill_load(skills_root)
-    required = set(before.skills) | ({name} if added is None else set())
+    required = set(workspace_skill_load(skills_root).skills) | ({name} if added is None else set())
     proposed = ProposedSkill(name, markdown, scripts=listings["scripts"], references=listings["references"])
     after = workspace_skill_load(skills_root, proposed)
     missing = sorted(required - set(after.skills))
     if not missing:
         return
-    if after.stop is None:
+    if after.stopped is None:
         msg = f"Skill loading would not load {_skill_names(missing)} after this change."
         raise SkillEditError(msg)
-    budget, remedy = _LOADING_BUDGETS[after.stop]
-    if missing == [name] and name not in before.skills and before.stop == after.stop:
-        # The skills ahead of this one already spend the budget, so no change to this skill alone can make it load.
+    budget, remedy = _LOADING_BUDGETS[after.stopped.stop]
+    # Loading reads directories in sorted order, so one it stops before is never reached, whatever the change says.
+    if after.stopped.directory < name:
         msg = (
             f"Skill loading already stops at {budget} before it reaches {name!r}, because the skills it loads first "
             f"spend it; {remedy} among those first."
         )
-        raise SkillEditError(msg)
-    msg = f"After this change, skill loading would stop at {budget} and skip {_skill_names(missing)}; {remedy} instead."
+    elif after.stopped.directory == name:
+        msg = (
+            f"After this change, {name!r} itself would cross {budget}, and skill loading would skip "
+            f"{_skill_names(missing)}; {remedy} in {name!r}."
+        )
+    else:
+        msg = (
+            f"After this change, skill loading would stop at {budget} and skip {_skill_names(missing)}; "
+            f"{remedy} instead."
+        )
     raise SkillEditError(msg)
 
 

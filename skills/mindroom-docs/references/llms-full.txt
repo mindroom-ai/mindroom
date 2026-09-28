@@ -14721,7 +14721,7 @@ Frontmatter counts toward the workspace budget once it is parsed, including for 
 A pass stops reading `SKILL.md` files once it has read more than 16 MiB, counting refused and non-UTF-8 ones, and `skill_manage` refuses a change that would cross that limit.
 Parses of unchanged frontmatter and metadata are reused across loads from a cache that keeps at most 8 MiB.
 Reading which skills the learner owns, for a skill catalog or for archival, is a pass with its own read and parse budgets of the same sizes, and a skill past them reads as user-owned, so a pin in it still holds.
-Workspace frontmatter may not use YAML aliases, merge keys, flow collections nested more than 32 levels deep, base-60 integers, or integer literals over 1000 characters, which can expand or take superlinear time to parse; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
+Workspace frontmatter may not use YAML aliases, merge keys, flow collections nested more than 32 levels deep, base-60 integers, integer literals over 1000 characters, or escapes of lone surrogates, which can expand, take superlinear time to parse, or fail to encode; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
 Each workspace skill lives in its own directory, `skills/<name>/SKILL.md`; a `SKILL.md` placed directly in `skills/` is ignored with a warning.

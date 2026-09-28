@@ -12,7 +12,8 @@ process, where the pure-Python loader raises ``RecursionError``. It also
 refuses aliases, because a few hundred bytes of nested aliases expand to
 gigabytes once anything serializes the result, merge keys and base-60 or
 oversized integers, which take quadratic time to build or cannot be written
-back, and flow collections nested deeper than a few dozen levels.
+back, flow collections nested deeper than a few dozen levels, and escapes of
+lone surrogates, which libyaml refuses and no text encoding can write.
 
 ``SafeLoader`` is also the base for custom safe loaders, so they share the
 same libyaml preference and pure-Python fallback.
@@ -71,8 +72,8 @@ class _UntrustedSafeLoader(yaml.SafeLoader):
     """Pure-Python safe loader for input untrusted code can write, refusing what grows beyond the input's size.
 
     Aliases can nest into an expansion bomb, merge keys and YAML 1.1 base-60 integers take quadratic time to build,
-    deep flow nesting multiplies scanning time, and an integer too long to convert back to text fails whatever
-    serializes the result.
+    deep flow nesting multiplies scanning time, and an integer too long to convert back to text, or a lone surrogate
+    that no encoding can write, fails whatever serializes the result.
     """
 
     def fetch_flow_collection_start(self, TokenClass: type[yaml.Token]) -> None:  # noqa: N803 - PyYAML's name
@@ -93,6 +94,16 @@ class _UntrustedSafeLoader(yaml.SafeLoader):
             message = "YAML aliases are not accepted in untrusted input"
             raise ComposerError(None, None, message, event.start_mark)
         return super().compose_node(parent, index)
+
+    def construct_scalar(self, node: yaml.ScalarNode) -> str:
+        value = super().construct_scalar(node)
+        # Like libyaml, refuse escapes such as "\ud800" that decode to a lone surrogate instead of Unicode text.
+        try:
+            value.encode()
+        except UnicodeEncodeError:
+            message = "escapes of lone surrogates are not accepted in untrusted input"
+            raise ConstructorError(None, None, message, node.start_mark) from None
+        return value
 
     def construct_yaml_int(self, node: yaml.ScalarNode) -> int:
         value = str(self.construct_scalar(node))
