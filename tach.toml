@@ -1708,6 +1708,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.model_loading",
 ]
 

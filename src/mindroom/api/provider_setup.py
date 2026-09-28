@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import save_dashboard_api_key
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
 from mindroom.model_loading import missing_model_api_key_provider
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ class _ProviderKeyCheck:
 _PROVIDER_KEY_CHECKS: dict[_ConnectableProvider, _ProviderKeyCheck] = {
     "openrouter": _ProviderKeyCheck(
         label="OpenRouter",
-        url="https://openrouter.ai/api/v1/key",
+        url=f"{OPENROUTER_BASE_URL_DEFAULT}/key",
         header_name="Authorization",
         header_prefix="Bearer ",
     ),
