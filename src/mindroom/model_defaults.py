@@ -127,7 +127,21 @@ KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT, OPENAI_GPT_SOL, OPENAI_GPT_LUNA)
+# Chat Completions sampling controls each model rejects: GPT-6 Astra always rejects
+# both, GPT-6 Sol and Luna reject both at their default (non-`none`) reasoning effort,
+# and GPT-5.6 Terra and Luna reject top_p.
+OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        _OPENAI_GPT: frozenset({"temperature", "top_p"}),
+        OPENAI_GPT_SOL: frozenset({"temperature", "top_p"}),
+        OPENAI_GPT_LUNA: frozenset({"temperature", "top_p"}),
+        "gpt-5.6-terra": frozenset({"top_p"}),
+        "gpt-5.6-luna": frozenset({"top_p"}),
+    },
+)
+OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = tuple(
+    model for model, controls in OPENAI_UNSUPPORTED_SAMPLING_CONTROLS.items() if "temperature" in controls
+)
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
@@ -136,16 +150,6 @@ OPENAI_IMAGE_PATCH_MODEL_PREFIXES = (*OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREF
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.
 OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
-# Chat Completions sampling controls each model rejects: GPT-6 Sol and Luna reject
-# both at their default (non-`none`) reasoning effort; GPT-5.6 Terra and Luna reject top_p.
-OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        OPENAI_GPT_SOL: frozenset({"temperature", "top_p"}),
-        OPENAI_GPT_LUNA: frozenset({"temperature", "top_p"}),
-        "gpt-5.6-terra": frozenset({"top_p"}),
-        "gpt-5.6-luna": frozenset({"top_p"}),
-    },
-)
 OPENAI_AVATAR_PROMPT = _OPENAI_GPT
 AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 

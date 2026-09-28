@@ -223,6 +223,8 @@ models:
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
 Their [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide) match Fable 5.1's: `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
+Both reject `thinking: {type: disabled}` and manual `budget_tokens`; lower the effort on Opus 5.5, or use `thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
+On Fable 5.1, Opus 5.5, and Sonnet 5.5, longer notes the model writes between tool calls arrive as `thinking` blocks that are empty by default, so MindRoom responses show tool traces without that narration.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro.
@@ -277,14 +279,14 @@ models:
       reasoning_effort: high
 ```
 
-[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model).
+[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Sol and Luna support function calling in Chat Completions only with `reasoning_effort: none`.
 Responses continuation works independently of the model ID, including custom aliases.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 `extra_kwargs.store: false` remains respected; selecting Responses does not override it.
 
 When `api` is unset, GPT 5.4 and newer models on the first-party OpenAI endpoint use Responses.
 Other routes, including all custom OpenAI-compatible endpoints, default to Chat Completions.
-If you previously relied on automatic Astra routing through a proxy, add `api: responses` before upgrading.
+If you previously relied on automatic GPT-6 routing through a proxy, add `api: responses` before upgrading, or tool calls on Astra, Sol, and Luna fail at their default reasoning effort.
 Explicit Chat Completions disables native deferred-tool search and keeps MindRoom's dynamic-tool discovery.
 Selecting Responses on a custom endpoint does not enable OpenAI's hosted tool search; only supported first-party OpenAI and Codex routes use it.
 
@@ -447,8 +449,8 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Bedrock lists Fable 5.1 as open access, while Opus 5.5 access can depend on the AWS account and region.
-The generated Bedrock starter config defaults to Opus 5.5, so confirm access or choose Fable 5.1 or Sonnet 5.5 instead.
+Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5.5, so confirm access or choose Fable 5.1 or Sonnet 5 instead.
 
 ```yaml
 models:
@@ -561,7 +563,7 @@ MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Ge
 [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters); omit these from authored model options.
 GPT-6 Sol and Luna reject the same controls unless reasoning effort is `none`.
 Automatic thread summaries omit their temperature override for GPT-6 Astra, Sol, and Luna, including their OpenRouter routes.
-For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 Sol and Luna reject.
+For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 Astra, Sol, and Luna reject.
 
 ## Environment Variables
 

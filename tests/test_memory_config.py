@@ -132,6 +132,7 @@ class TestMemoryConfig:
     @pytest.mark.parametrize(
         ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
         [
+            ("gpt-6-astra", None, None, False),
             (OPENAI_GPT_LUNA, None, None, False),
             (OPENAI_GPT_SOL, None, None, False),
             ("gpt-5.6-luna", 0.1, None, False),
@@ -140,7 +141,7 @@ class TestMemoryConfig:
             ("gpt-4", 0.1, 0.8, False),
             (OPENAI_GPT_SOL, None, None, True),
         ],
-        ids=["luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
+        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
     )
     async def test_mem0_openai_sampling_support_is_model_specific(
         self,
@@ -200,8 +201,10 @@ class TestMemoryConfig:
             instance.llm.generate_response(messages)
 
         request_params = create_completion.call_args.kwargs
-        assert request_params.get("temperature") == expected_temperature
-        assert request_params.get("top_p") == expected_top_p
+        expected_sampling = {"temperature": expected_temperature, "top_p": expected_top_p}
+        assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
+            name: value for name, value in expected_sampling.items() if value is not None
+        }
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
