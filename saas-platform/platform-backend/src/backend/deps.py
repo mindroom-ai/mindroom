@@ -175,12 +175,16 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return parts[1]
 
 
-async def _authenticate_user(authorization: str | None, request: Request | None) -> dict:  # noqa: C901, PLR0912
-    """Authenticate a Supabase JWT and load its account row.
+async def _authenticate_user(  # noqa: C901, PLR0912
+    authorization: str | None, request: Request | None, *, allow_pending_deletion: bool
+) -> dict:
+    """Authenticate a Supabase JWT and load its account row, refusing accounts `_require_account_access` rejects.
 
     With the current schema, `account.id == auth.user.id`.
     Ensures the `accounts` row exists, creating it if necessary.
-    Only active accounts are cached, so a restored account is re-read on its next request.
+    Only active accounts are cached, so a cache hit passes either access check,
+    and a restored account is re-read on its next request.
+    A refused account is not recorded as a successful authentication.
     """
     # Get client IP for monitoring
     client_ip = client_ip_from_request(request) if request is not None else "unknown"
@@ -217,9 +221,6 @@ async def _authenticate_user(authorization: str | None, request: Request | None)
 
         account_id = user.user.id
         sb = ensure_supabase()
-
-        # Record successful auth
-        auth_monitor.record_success(client_ip, str(account_id))
 
         # Ensure account exists
         try:
@@ -258,6 +259,9 @@ async def _authenticate_user(authorization: str | None, request: Request | None)
                     raise HTTPException(status_code=404, detail=msg) from None
                 account = result.data
 
+        _require_account_access(account, allow_pending_deletion=allow_pending_deletion)
+        auth_monitor.record_success(client_ip, str(account_id))
+
         # Prepare response data
         user_data = {
             "user_id": user.user.id,
@@ -293,8 +297,7 @@ def _record_audit_actor(request: Request | None, account_id: object, email: str 
 
 async def verify_user(authorization: str = Header(None), request: Request = None) -> dict:
     """Verify a user via Supabase JWT whose account is active."""
-    user_data = await _authenticate_user(authorization, request)
-    _require_account_access(user_data["account"], allow_pending_deletion=False)
+    user_data = await _authenticate_user(authorization, request, allow_pending_deletion=False)
     _record_audit_actor(request, user_data["account_id"], user_data["email"])
     return user_data
 
@@ -305,8 +308,7 @@ async def verify_user_allow_deleted(authorization: str = Header(None), request: 
     Only GDPR self-service routes use this, so an account pending deletion can read itself, export its data,
     and cancel the deletion; suspended and unverified accounts are still rejected.
     """
-    user_data = await _authenticate_user(authorization, request)
-    _require_account_access(user_data["account"], allow_pending_deletion=True)
+    user_data = await _authenticate_user(authorization, request, allow_pending_deletion=True)
     _record_audit_actor(request, user_data["account_id"], user_data["email"])
     return user_data
 

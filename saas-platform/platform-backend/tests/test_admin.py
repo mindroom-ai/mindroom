@@ -331,9 +331,9 @@ class TestAdminEndpoints:
     @pytest.mark.parametrize(
         ("method", "path", "body"),
         [
-            ("PUT", "/admin/accounts/acc_123/status", {"status": "suspended"}),
-            ("PUT", "/admin/accounts/acc_123", {"status": "suspended"}),
-            ("DELETE", "/admin/accounts/acc_123/complete", None),
+            ("PUT", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F/status", {"status": "suspended"}),
+            ("PUT", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F", {"status": "suspended"}),
+            ("DELETE", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F/complete", None),
         ],
     )
     def test_admin_account_changes_drop_cached_auth(
@@ -345,18 +345,19 @@ class TestAdminEndpoints:
         path: str,
         body: dict | None,
     ):
-        """Admin account changes must take effect on the account's next request, not after the auth cache TTL."""
+        """Admin account changes take effect on the account's next request, whatever spelling the path id uses."""
         from backend.deps import AuthCacheEntry, _auth_cache  # noqa: PLC0415
 
-        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "acc_123", "status": "suspended"}])
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": "acc_123", "email": "u@x.test"}])
+        account_id = "5f0b2c1e-8c3d-4f7a-9b21-6e4d3a2c1b0f"
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": account_id, "status": "suspended"}])
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": account_id, "email": "u@x.test"}])
         _auth_cache.clear()
         expires_at = datetime.now(UTC) + timedelta(minutes=5)
-        for account_id in ("acc_123", "acc_other"):
-            _auth_cache[account_id] = AuthCacheEntry(
+        for cached_id in (account_id, "acc_other"):
+            _auth_cache[cached_id] = AuthCacheEntry(
                 expires_at=expires_at,
-                account_id=account_id,
-                user_data={"user_id": account_id, "account_id": account_id, "account": {"status": "active"}},
+                account_id=cached_id,
+                user_data={"user_id": cached_id, "account_id": cached_id, "account": {"status": "active"}},
             )
 
         with patch("backend.routes.admin.instances_data.get_instances_for_account", return_value=[]):

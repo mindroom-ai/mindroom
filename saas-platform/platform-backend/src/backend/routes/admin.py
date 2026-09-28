@@ -294,7 +294,8 @@ async def update_account_status(
 
         if not result.data:
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
-        invalidate_account_auth_cache(account_id)
+        # The database's id spelling is the one cached auth entries carry.
+        invalidate_account_auth_cache(result.data[0]["id"])
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -538,8 +539,8 @@ async def admin_update(
     try:
         data.pop("id", None)
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
-        if resource == "accounts":
-            invalidate_account_auth_cache(resource_id)
+        if resource == "accounts" and result.data:
+            invalidate_account_auth_cache(result.data[0]["id"])
 
         # Log admin update
         audit_log_entry(
@@ -610,7 +611,7 @@ async def admin_delete_account_complete(
     # 4. Delete the account (cascade deletion will handle related records)
     try:
         sb.table("accounts").delete().eq("id", account_id).execute()
-        invalidate_account_auth_cache(account_id)
+        invalidate_account_auth_cache(account["id"])
 
         # Log the complete deletion
         audit_log_entry(

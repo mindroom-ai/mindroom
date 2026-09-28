@@ -17,7 +17,7 @@ from backend.deps import (
     verify_user,
     verify_user_allow_deleted,
 )
-from backend.metrics import get_admin_metric, reset_security_metrics
+from backend.metrics import get_admin_metric, get_auth_metric, reset_security_metrics
 from main import app
 
 
@@ -498,6 +498,21 @@ async def test_verify_user_allow_deleted_still_rejects_blocked_accounts(
         await verify_user_allow_deleted("Bearer token")
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_refused_account_is_not_recorded_as_a_successful_authentication(auth_backend) -> None:
+    """A valid token for a suspended account neither counts as a success nor clears the address's failures."""
+    reset_security_metrics()
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=_account_row(status="suspended"))
+    auth_monitor.failed_attempts["unknown"].append(datetime.now(UTC))
+
+    with pytest.raises(HTTPException):
+        await verify_user("Bearer token")
+
+    assert get_auth_metric(actor="user", outcome="success") == 0
+    assert auth_monitor.failed_attempts["unknown"]
 
 
 @pytest.mark.asyncio
