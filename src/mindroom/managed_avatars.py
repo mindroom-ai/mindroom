@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import os
+import time
 import warnings
 from typing import TYPE_CHECKING, Literal
 
@@ -40,6 +42,7 @@ _STOCK_AVATAR_NAMES = (
     "helper",
     "home",
     "mind",
+    "mind-logo",
     "news",
     "phone",
     "planner",
@@ -52,11 +55,12 @@ _STOCK_AVATAR_NAMES = (
     "writer",
 )
 # These stock avatars belong to one identity and are never handed out as stable picks.
-_IDENTITY_AVATARS = frozenset({"mind", "router"})
+_IDENTITY_AVATARS = frozenset({"mind", "mind-logo", "router"})
 _STOCK_POOL = tuple(name for name in _STOCK_AVATAR_NAMES if name not in _IDENTITY_AVATARS)
 _MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 20.0
 _AVATAR_SIZE = (256, 256)
+_NEGATIVE_CACHE_HOURS = 24
 
 
 def _stock_avatar_url(name: str) -> str:
@@ -110,17 +114,56 @@ def _write_cache_file(path: Path, payload: bytes) -> None:
         os.close(directory_fd)
 
 
+def _negative_cache_marker(cache_path: Path) -> Path:
+    """Return the marker file path for a failed download."""
+    return cache_path.with_suffix(".failed")
+
+
+def _is_download_recently_failed(cache_path: Path) -> bool:
+    """Check if a download failed within the negative cache window."""
+    marker = _negative_cache_marker(cache_path)
+    if not marker.is_file():
+        return False
+    try:
+        mtime = marker.stat().st_mtime
+        age_hours = (time.time() - mtime) / 3600
+    except OSError:
+        return False
+    else:
+        return age_hours < _NEGATIVE_CACHE_HOURS
+
+
+def _record_download_failure(cache_path: Path) -> None:
+    """Record that a download failed for negative caching."""
+    marker = _negative_cache_marker(cache_path)
+    with contextlib.suppress(OSError):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+
+
+def _clear_download_failure(cache_path: Path) -> None:
+    """Clear a negative cache marker after a successful download."""
+    with contextlib.suppress(OSError):
+        _negative_cache_marker(cache_path).unlink(missing_ok=True)
+
+
 async def _stock_avatar_path(name: str, runtime_paths: RuntimePaths) -> Path | None:
     """Return the cached stock image, downloading it once; avatars are cosmetic, so failures return None."""
     path = runtime_paths.storage_root / "avatars" / "stock" / f"{_STOCK_AVATAR_COMMIT[:12]}-{name}.png"
     if path.is_file():
         return path
+    if _is_download_recently_failed(path):
+        # The failure was already reported when it happened; retry after the negative-cache window.
+        logger.debug("stock_avatar_unavailable_cached", avatar=name)
+        return None
     try:
         data = await _download_stock_avatar(_stock_avatar_url(name))
         payload = await asyncio.to_thread(_normalized_png, data)
         await asyncio.to_thread(_write_cache_file, path, payload)
+        _clear_download_failure(path)
     except (httpx.HTTPError, ByteLimitExceededError, ValueError, OSError) as exc:
         logger.warning("stock_avatar_unavailable", avatar=name, error=str(exc))
+        _record_download_failure(path)
         return None
     return path
 
@@ -165,6 +208,12 @@ async def room_avatar_path(room_key: str, config: Config, runtime_paths: Runtime
 
 
 async def root_space_avatar_path(runtime_paths: RuntimePaths) -> Path | None:
-    """Return the root-space avatar: a workspace override or the bundled file, which checkouts without Git LFS may lack."""
+    """Return the root-space avatar: a workspace override, the bundled file, or the stock mind-logo fallback.
+
+    Source checkouts and Docker images ship with avatars/spaces/root_space.png.
+    Wheel installs (uvx) lack bundled files and fall back to the stock mind-logo image.
+    """
     avatar_path = resolve_avatar_path("spaces", "root_space", runtime_paths)
-    return avatar_path if avatar_path.exists() else None
+    if avatar_path.exists():
+        return avatar_path
+    return await _stock_avatar_path("mind-logo", runtime_paths)

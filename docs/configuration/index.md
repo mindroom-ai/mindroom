@@ -1084,9 +1084,10 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
+The optional root Matrix Space shows the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images; wheel installs (`uvx`) lack bundled files and fall back to the stock `mind-logo` image.
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
-Machines without internet access simply get no stock avatar.
+Machines without internet access skip stock downloads and log a warning; failed downloads are retried daily.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
 To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 
