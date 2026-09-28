@@ -385,6 +385,7 @@ class EditRegenerator:
                 record=record,
                 driving_revision_id=driving_edit.revision[1],
                 edit_receipt_order=active_receipt_order,
+                pending_source_event_ids=frozenset(map(record.prompt_source_event_id, mailbox.pending)),
                 consumed_revision_ids=tuple(message.latest_event_id for message in history),
                 thread_history=history,
             )

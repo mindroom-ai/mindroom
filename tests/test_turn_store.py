@@ -499,6 +499,7 @@ async def test_response_preparation_does_not_sanitize_unrelated_turns(
                 record=current,
                 driving_revision_id="$edit",
                 edit_receipt_order=1,
+                pending_source_event_ids=("$user_msg",),
             )
         else:
             suppressed = await store.prepare_pending_response_source(
@@ -3817,6 +3818,7 @@ async def test_newer_registration_during_refill_invalidates_older_selected_snaps
         record=snapshot,
         driving_revision_id="$older",
         edit_receipt_order=1,
+        pending_source_event_ids=("$user_msg",),
     )
     assert result is EditPreparation.REBUILD
 
@@ -3848,7 +3850,12 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
 
     with patch.object(store, "_prepare_edit_response_source", delayed_prepare):
         task = asyncio.create_task(
-            store.prepare_edit_snapshot(record=record, driving_revision_id="$driving-edit", edit_receipt_order=1),
+            store.prepare_edit_snapshot(
+                record=record,
+                driving_revision_id="$driving-edit",
+                edit_receipt_order=1,
+                pending_source_event_ids=("$user_msg",),
+            ),
         )
         await preparation_started.wait()
         if mutation == "newer":

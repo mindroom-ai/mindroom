@@ -848,10 +848,15 @@ class TurnStore:
         record: TurnRecord,
         driving_revision_id: str,
         edit_receipt_order: int,
+        pending_source_event_ids: Collection[str],
         consumed_revision_ids: tuple[str, ...] = (),
         thread_history: Sequence[ResolvedVisibleMessage] = (),
     ) -> bool | EditPreparation:
-        """Check an immutable edit snapshot after cleanup under the response lock."""
+        """Check an immutable edit snapshot after cleanup under the response lock.
+
+        ``pending_source_event_ids`` are the sources whose edits the caller
+        still holds, so a rebuild can fold or discard their newer revisions.
+        """
         assert record.conversation_target is not None
         await self._register_context_revisions(record.source_event_ids[0], thread_history)
         if await self._prepare_edit_response_source(
@@ -872,15 +877,15 @@ class TurnStore:
             if latest is None:
                 continue
             replay = (current.revision_replay or {}).get(latest[1])
-            selected = next(
-                (
-                    revision
-                    for key, revision in (record.source_event_revisions or {}).items()
-                    if record.prompt_source_event_id(key) == source
-                ),
-                None,
-            )
-            if replay is not None and not replay.redacted and selected != latest:
+            selected = _selected_revision(record, source)
+            if replay is None or replay.redacted or selected == latest:
+                continue
+            # A rebuild can pick up a newer revision only from the caller's
+            # pending edits or from a selection committed since this snapshot.
+            # A sibling revision known only from thread history waits for its
+            # own edit callback, which regenerates again; demanding a rebuild
+            # for it would rebuild the same request forever.
+            if source in pending_source_event_ids or _selected_revision(current, source) != selected:
                 return EditPreparation.REBUILD
         if sanitized.source_event_prompts != record.source_event_prompts or any(
             current_revision > snapshot_revision
@@ -1341,6 +1346,18 @@ def _merged_redaction_markers(
         event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
     )
     return merged_redacted_event_ids, merged_pending_event_ids
+
+
+def _selected_revision(turn_record: TurnRecord, source_event_id: str) -> SourceEventRevision | None:
+    """Return the revision one turn selected for a physical source, whichever key recorded it."""
+    return next(
+        (
+            revision
+            for key, revision in (turn_record.source_event_revisions or {}).items()
+            if turn_record.prompt_source_event_id(key) == source_event_id
+        ),
+        None,
+    )
 
 
 def _recorded_in_room(turn_record: TurnRecord, room_id: str) -> bool:

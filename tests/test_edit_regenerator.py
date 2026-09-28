@@ -230,10 +230,11 @@ def _harness(
         record: TurnRecord,
         driving_revision_id: str,
         edit_receipt_order: int,
+        pending_source_event_ids: frozenset[str],
         consumed_revision_ids: tuple[str, ...],
         thread_history: object,
     ) -> bool:
-        del driving_revision_id, consumed_revision_ids, thread_history
+        del driving_revision_id, pending_source_event_ids, consumed_revision_ids, thread_history
         return await turn_store._prepare_edit_response_source(
             target=record.conversation_target,
             source_event_ids=record.replay_source_event_ids,
@@ -2512,3 +2513,99 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
     assert owner is not None
     assert owner.source_event_revisions[first] == (10, "$first-edit")
     assert owner.revision_replay["$driving-edit"].response_event_id is None
+
+@pytest.mark.asyncio
+async def test_lane_serialized_sibling_edits_regenerate_without_spinning(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A sibling edit projected but still queued behind the driving edit cannot make the drain spin."""
+    first, second = "$first", "$second"
+    original = _turn_record(
+        source_event_ids=(first, second),
+        source_event_prompts={first: "first original", second: "second original"},
+        source_event_metadata=_source_metadata(first, second),
+    )
+    harness = _harness(tmp_path, turn_record=original)
+    writer = MagicMock()
+    writer.supports_run_recovery.return_value = False
+    writer.history_scope.return_value = original.history_scope
+    writer.session_type_for_scope.return_value = SessionType.AGENT
+    writer.create_storage.side_effect = lambda *_args, **_kwargs: create_state_storage(
+        AGENT_NAME,
+        tmp_path,
+        subdir="sessions",
+        session_table="sibling_edit_sessions",
+    )
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name=AGENT_NAME,
+            turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            legacy_responses_file=None,
+            state_writer=writer,
+            resolver=harness.resolver,
+            tool_runtime=MagicMock(),
+        ),
+    )
+    await store.warm()
+    await store.record_responded_turn(original)
+    # Both edits were admitted and projected together, so the thread history the
+    # first edit's callback reads already shows the second source's edit.
+    edited_sibling = make_visible_message(event_id=second, body="second original", sender=USER_ID, thread_id=THREAD_ID)
+    edited_sibling.apply_edit(body="SECOND_EDITED", timestamp=20, latest_event_id="$second-edit", content=None)
+    history = (
+        make_visible_message(event_id=first, body="first original", sender=USER_ID, thread_id=THREAD_ID),
+        edited_sibling,
+    )
+    harness.resolver.extract_message_context.return_value = replace(harness.context, thread_history=history)
+    harness.resolver.resolve_exact_source.return_value = edited_sibling
+    attempts = 0
+    generated: list[str] = []
+
+    async def generate(request: ResponseRequest) -> str | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts > 10:
+            msg = "Edit regeneration kept rebuilding the same request"
+            raise AssertionError(msg)
+        assert request.prepare_source_turn is not None
+        if await request.prepare_source_turn(request.thread_history):
+            return None
+        generated.append(request.prompt)
+        await _acknowledge_test_edit(
+            tmp_path,
+            request,
+            RESPONSE_EVENT_ID,
+            harness.regenerator.deps.turn_store,
+            journal_store=journal_store,
+        )
+        return RESPONSE_EVENT_ID
+
+    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=generate)
+    first_event, first_info = _edit_event(
+        original_event_id=first,
+        new_body="FIRST_EDITED",
+        event_id="$first-edit",
+        server_timestamp=10,
+    )
+    await _handle_edit(harness, first_event, first_info)
+    assert len(generated) == 1
+    assert "FIRST_EDITED" in generated[0]
+    assert "second original" in generated[0]
+
+    # The lane then dispatches the sibling's own edit, which regenerates with both.
+    second_event, second_info = _edit_event(
+        original_event_id=second,
+        new_body="SECOND_EDITED",
+        event_id="$second-edit",
+        server_timestamp=20,
+    )
+    await _handle_edit(harness, second_event, second_info)
+    assert len(generated) == 2
+    assert "FIRST_EDITED" in generated[1]
+    assert "SECOND_EDITED" in generated[1]
+    owner = store.get_turn_record(first)
+    assert owner is not None
+    assert owner.source_event_revisions == {first: (10, "$first-edit"), second: (20, "$second-edit")}
+    assert harness.regenerator._mailboxes == {}
