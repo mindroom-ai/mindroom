@@ -2990,15 +2990,9 @@ async def _finish_runtime_shutdown(
     finally:
         for task in auxiliary_tasks:
             task.cancel()
-        for task in auxiliary_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # Auxiliary tasks are non-critical, so a failed one must not skip the remaining cleanup
-                # or replace the error that ended the runtime.
-                logger.exception("Auxiliary task failed", task_name=task.get_name())
+        # Auxiliary tasks are non-critical and log their own failures, so none may skip the remaining cleanup
+        # or replace the error that ended the runtime.
+        await asyncio.gather(*auxiliary_tasks, return_exceptions=True)
         if stall_detector is not None:
             stall_detector.stop()
         reset_matrix_sync_health()
@@ -3068,8 +3062,9 @@ def _start_auxiliary_tasks(
         )
         for task_name, operation, supervisor_name in auxiliary_specs
     ]
-    # The heartbeat ends by itself for unpaired or revoked installs, so it must not be restarted.
-    tasks.append(asyncio.create_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
+    # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
+    # create_background_task logs an unexpected failure as soon as it happens.
+    tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
     return tasks
 
 

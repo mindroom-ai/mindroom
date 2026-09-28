@@ -1476,35 +1476,44 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_cleanup_survives_failed_heartbeat(self, tmp_path: Path) -> None:
-        """A heartbeat that died with an error neither skips cleanup nor replaces the runtime's error."""
+        """A failed heartbeat is logged when it dies, then neither skips cleanup nor replaces the runtime's error."""
         reset_runtime_state()
-        heartbeat_failed = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.stop = AsyncMock()
+        shutdown_worker_manager = MagicMock()
+        background_logger = MagicMock()
+        failure_logged = asyncio.Event()
+        background_logger.exception.side_effect = lambda *_args, **_kwargs: failure_logged.set()
 
         async def _heartbeat(_paths: RuntimePaths) -> None:
-            heartbeat_failed.set()
             msg = "stale SSL_CERT_FILE"
             raise FileNotFoundError(msg)
 
         async def _start() -> None:
-            await asyncio.wait_for(heartbeat_failed.wait(), timeout=1)
+            await asyncio.wait_for(failure_logged.wait(), timeout=1)
+            assert not shutdown_worker_manager.called
             msg = "orchestrator failed"
             raise RuntimeError(msg)
 
         mock_orchestrator.start = AsyncMock(side_effect=_start)
 
         with (
+            patch("mindroom.background_tasks.logger", new=background_logger),
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
             patch("mindroom.orchestrator.run_provisioning_heartbeat", side_effect=_heartbeat),
-            patch("mindroom.orchestrator.shutdown_primary_worker_manager") as shutdown_worker_manager,
+            patch("mindroom.orchestrator.shutdown_primary_worker_manager", new=shutdown_worker_manager),
             pytest.raises(RuntimeError, match="orchestrator failed"),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
+        background_logger.exception.assert_called_once_with(
+            "Background task failed",
+            task_name="provisioning_heartbeat",
+            error="stale SSL_CERT_FILE",
+        )
         mock_orchestrator.stop.assert_awaited_once()
         shutdown_worker_manager.assert_called_once_with()
 

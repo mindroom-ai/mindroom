@@ -42,7 +42,9 @@ reach their per-user limits, which apply after verification. Polls for a
 known device secret are limited to 30 per minute per secret, so one client
 cannot starve the others; unknown secrets get no per-secret state. All device
 polls then count against 300 per minute per client address, leaving room for
-many CLIs behind one NAT.
+many CLIs behind one NAT. The service refuses to start with a
+MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS short enough for the per-secret
+limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
@@ -134,6 +136,9 @@ HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
 # Many CLIs polling every few seconds may share one NAT address; each device secret is limited separately.
 DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE = 300
 DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE = 30
+# The rate-limit window includes both ends, so a client polling exactly every 60 / limit seconds sends one poll
+# too many per window; the advertised interval must be strictly longer to stay within the per-device limit.
+MIN_PAIR_POLL_INTERVAL_SECONDS = 60 // DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE + 1
 
 
 @dataclass(slots=True)
@@ -453,7 +458,7 @@ def _load_service_config_from_env() -> ServiceConfig:
     poll_interval = _env_int(
         "MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS",
         default=DEFAULT_PAIR_POLL_INTERVAL_SECONDS,
-        minimum=1,
+        minimum=MIN_PAIR_POLL_INTERVAL_SECONDS,
     )
 
     raw_origins = os.getenv("MINDROOM_PROVISIONING_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)

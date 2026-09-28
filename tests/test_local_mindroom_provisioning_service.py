@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
 
@@ -1319,6 +1320,49 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
         monkeypatch.delenv(name, raising=False)
 
     assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
+
+
+def _throttled_polls(monkeypatch: pytest.MonkeyPatch, interval_seconds: int) -> int:
+    """Count polls the per-device limit rejects for one client polling at a fixed interval for two minutes."""
+    state = provisioning._new_runtime_state()
+    now = [1000.0]
+    monkeypatch.setattr(provisioning, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    throttled = 0
+    for _ in range(120 // interval_seconds + 1):
+        try:
+            provisioning._enforce_rate_limit_unlocked(
+                state,
+                key="pair:device:poll:secret:hash",
+                limit=provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+                window_seconds=60,
+            )
+        except HTTPException:
+            throttled += 1
+        now[0] += interval_seconds
+    return throttled
+
+
+def test_minimum_poll_interval_stays_within_device_poll_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clients polling at the shortest allowed interval are never throttled; one second less would be."""
+    minimum = provisioning.MIN_PAIR_POLL_INTERVAL_SECONDS
+    assert minimum <= provisioning.DEFAULT_PAIR_POLL_INTERVAL_SECONDS
+    assert _throttled_polls(monkeypatch, minimum) == 0
+    assert _throttled_polls(monkeypatch, minimum - 1) > 0
+
+
+def test_service_config_rejects_poll_interval_below_device_poll_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service refuses to start when it would advertise a poll interval its own device limit throttles."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    minimum = provisioning.MIN_PAIR_POLL_INTERVAL_SECONDS
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS", str(minimum))
+    assert provisioning._load_service_config_from_env().pair_poll_interval_seconds == minimum
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS", str(minimum - 1))
+    with pytest.raises(ValueError, match=f"MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS must be >= {minimum}"):
+        provisioning._load_service_config_from_env()
 
 
 def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
