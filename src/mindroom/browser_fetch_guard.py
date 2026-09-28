@@ -17,8 +17,9 @@ if TYPE_CHECKING:
 
 _BROWSER_INTERNAL_SCHEMES = frozenset({"about", "blob", "data"})
 # A page can open many connections to hostnames whose nameservers never answer. Browser lookups therefore
-# run on their own few threads, so they cannot exhaust the default executor the rest of the runtime shares.
-_BROWSER_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mindroom-browser-dns")
+# run on their own threads, so they cannot exhaust the default executor the rest of the runtime shares, and each
+# destination relay holds at most a few of them at once.
+_BROWSER_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="mindroom-browser-dns")
 
 
 async def run_browser_dns_lookup[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
@@ -32,6 +33,7 @@ def validate_browser_fetch_url(
     *,
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
+    resolve_hostnames: bool = True,
 ) -> str:
     """Validate a browser request URL while allowing non-network browser internals."""
     try:
@@ -40,7 +42,12 @@ def validate_browser_fetch_url(
         raise ServerFetchUrlError(reason="invalid_host") from exc
     if scheme in _BROWSER_INTERNAL_SCHEMES:
         return url
-    return validate_server_fetch_url(url, allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
+    return validate_server_fetch_url(
+        url,
+        allow_private_networks=allow_private_networks,
+        allow_loopback=allow_loopback,
+        resolve_hostnames=resolve_hostnames,
+    )
 
 
 async def continue_or_abort_browser_fetch(
@@ -49,13 +56,17 @@ async def continue_or_abort_browser_fetch(
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
 ) -> None:
-    """Continue public browser fetches and abort unsafe server-side destinations."""
+    """Continue public browser fetches and abort unsafe server-side destinations.
+
+    The destination relay resolves and validates every address Chromium dials, so this first filter checks schemes,
+    address literals, and local or metadata names without a DNS lookup that a page could stall.
+    """
     try:
-        await run_browser_dns_lookup(
-            validate_browser_fetch_url,
+        validate_browser_fetch_url(
             route.request.url,
             allow_private_networks=allow_private_networks,
             allow_loopback=allow_loopback,
+            resolve_hostnames=False,
         )
     except ServerFetchUrlError:
         await route.abort("blockedbyclient")

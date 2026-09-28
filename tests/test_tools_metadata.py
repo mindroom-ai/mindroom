@@ -70,8 +70,10 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
 )
+from mindroom.tools import crawl4ai as crawl4ai_module
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_socks_helpers import socks5_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
@@ -527,13 +529,29 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
         await asyncio.open_connection(endpoint.hostname, endpoint.port)
 
 
+_UPSTREAM = _UpstreamProxy(host="127.0.0.1", port=3128, tls=False)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("proxy_env", "runner", "expected"),
     [
-        ({"ALL_PROXY": "http://127.0.0.1:3128"}, False, "http://127.0.0.1:3128"),
-        ({"HTTP_PROXY": "http://127.0.0.1:3128/"}, True, "http://127.0.0.1:3128"),
-        ({"HTTP_PROXY": "http://one:3128", "HTTPS_PROXY": "http://two:3128"}, False, "socks5://127.0.0.1:"),
+        ({}, False, BrowserEgress()),
+        ({"ALL_PROXY": "http://127.0.0.1:3128"}, False, BrowserEgress(http=_UPSTREAM, https=_UPSTREAM)),
+        (
+            {"HTTP_PROXY": "http://127.0.0.1:3128/"},
+            True,
+            BrowserEgress(http=_UPSTREAM, https=_UPSTREAM, by_hostname=True),
+        ),
+        (
+            {
+                "HTTP_PROXY": "http://127.0.0.1:3128",
+                "HTTPS_PROXY": "http://127.0.0.1:3128",
+                "ALL_PROXY": "socks5://x:1",
+            },
+            False,
+            BrowserEgress(http=_UPSTREAM, https=_UPSTREAM),
+        ),
         ({"HTTP_PROXY": "http://one:3128", "HTTPS_PROXY": "http://two:3128"}, True, None),
     ],
 )
@@ -541,15 +559,21 @@ async def test_crawl4ai_browser_egress_route(
     monkeypatch: pytest.MonkeyPatch,
     proxy_env: dict[str, str],
     runner: bool,
-    expected: str | None,
+    expected: BrowserEgress | None,
 ) -> None:
-    """One operator egress proxy is Crawl4AI's only route; an ambiguous one falls back to the relay only off runners."""
+    """Crawl4AI's relay chains the operator egress proxy, and a runner refuses an ambiguous one."""
     for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
     for name, value in proxy_env.items():
         monkeypatch.setenv(name, value)
     servers: list[str] = []
+    relays: list[BrowserDestinationProxy] = []
+
+    class RecordingRelay(BrowserDestinationProxy):
+        def __init__(self, **kwargs: BrowserEgress) -> None:
+            super().__init__(**kwargs)
+            relays.append(self)
 
     class FakeAsyncWebCrawler:
         def __init__(self, *, config: object) -> None:
@@ -567,6 +591,7 @@ async def test_crawl4ai_browser_egress_route(
             return _crawl_result("public content")
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    monkeypatch.setattr(crawl4ai_module, "BrowserDestinationProxy", RecordingRelay)
     runtime_paths = resolve_runtime_paths(
         config_path=Path("config.yaml"),
         process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"} if runner else {},
@@ -579,8 +604,9 @@ async def test_crawl4ai_browser_egress_route(
         assert servers == []
     else:
         assert result == "public content"
-        assert len(servers) == 1
-        assert servers[0].startswith(expected)
+        assert len(relays) == 1
+        assert servers == [relays[0].endpoint]
+        assert relays[0]._egress == expected
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.

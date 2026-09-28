@@ -44,6 +44,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
+from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
@@ -1165,12 +1166,12 @@ async def test_local_preview_requires_computer_binding(
 
 
 @pytest.mark.asyncio
-async def test_computer_browser_upstream_preserves_http_and_local_preview(  # noqa: PLR0915 - complete browser/proxy lifecycle
+async def test_computer_browser_upstream_preserves_http_and_local_preview(
     local_preview_server: tuple[int, str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Chromium owns proxy transport; redirects cannot bypass its upstream policy."""
+    """The relay tunnels external destinations through the worker proxy by name and dials local previews itself."""
     executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
     if executable is None:
         pytest.skip("Chromium required for proxy integration")
@@ -1180,7 +1181,9 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(  # no
         try:
             headers = await reader.readuntil(b"\r\n\r\n")
             requests.append(headers.split(b"\r\n", 1)[0])
-            if headers.startswith(b"GET http://8.8.8.8/preview "):
+            if headers.startswith(b"CONNECT 8.8.8.8:80 "):
+                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                await reader.readuntil(b"\r\n\r\n")
                 body = b"<title>Forwarded HTTP</title>"
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
             else:
@@ -1192,31 +1195,10 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(  # no
             writer.close()
             await writer.wait_closed()
 
+    tool = _headless_real_browser("computer", monkeypatch, tmp_path)
     proxy = await asyncio.start_server(upstream, "127.0.0.1", 0)
     monkeypatch.setenv("all_proxy", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
-    paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={"BROWSER_EXECUTABLE_PATH": executable},
-    )
-    original_launch = _persistent_launch_kwargs
-
-    def headless_launch(
-        runtime_paths: RuntimePaths,
-        user_data_dir: Path,
-        *,
-        headless: bool,
-        executable_override: str | None = None,
-    ) -> dict[str, Any]:
-        assert not headless
-        options = original_launch(runtime_paths, user_data_dir, headless=True, executable_override=executable_override)
-        options.setdefault("args", []).append(f"--host-resolver-rules=MAP localhost.localdomain {private_host}")
-        return options
-
-    monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
-    tool = BrowserTools(paths)
-    tool.bind_worker_display(":99", tmp_path / "workspace")
-    port, private_host, hits = local_preview_server
+    port, _private_host, hits = local_preview_server
     try:
         for host in ["localhost", "127.0.0.1", "[::ffff:127.0.0.1]", "localhost."]:
             result = json.loads(await tool.browser(action="open", targetUrl=f"http://{host}:{port}/redirect"))
@@ -1225,16 +1207,15 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(  # no
         assert not any(b"localhost" in request or b"127.0.0.1" in request for request in requests)
         result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/preview"))
         assert result["title"] == "Forwarded HTTP"
-        assert b"GET http://8.8.8.8/preview HTTP/1.1" in requests
-        with pytest.raises(PlaywrightError, match="ERR_TUNNEL_CONNECTION_FAILED"):
+        assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in requests
+        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
             await tool.browser(action="open", targetUrl="https://8.8.8.8/denied")
         assert b"CONNECT 8.8.8.8:443 HTTP/1.1" in requests
-        with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
-            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/metadata-redirect")
-        assert b"GET http://169.254.169.254/blocked HTTP/1.1" in requests
-        with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
-            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/alias-redirect")
-        assert any(request.startswith(b"GET http://localhost.localdomain:") for request in requests)
+        # Redirects the page route never sees are still refused at dial time, before any proxy.
+        for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
+            with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                await tool.browser(action="open", targetUrl=f"http://localhost:{port}/{redirect}")
+        assert not any(b"169.254.169.254" in request or b"localhost.localdomain" in request for request in requests)
         assert "/blocked" not in hits
         with pytest.raises(ServerFetchUrlError):
             await tool.browser(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
@@ -1638,7 +1619,7 @@ async def test_host_browser_keeps_configured_upstream_proxy_for_every_destinatio
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An operator egress proxy stays the only route, including for loopback destinations."""
+    """An operator egress proxy sits behind the relay, which stays Chromium's only proxy, loopback included."""
     _clear_proxy_env(monkeypatch)
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:3128")
     runtime_paths = resolve_primary_runtime_paths(
@@ -1651,20 +1632,167 @@ async def test_host_browser_keeps_configured_upstream_proxy_for_every_destinatio
 
     state = await tool._ensure_profile("mindroom")
     try:
-        assert state.destination_proxy is None
-        assert launch_kwargs["proxy"] == {"server": "http://127.0.0.1:3128", "bypass": "<-loopback>"}
+        relay = state.destination_proxy
+        assert relay is not None
+        assert launch_kwargs["proxy"] == {"server": relay.endpoint, "bypass": "<-loopback>"}
+        upstream = _UpstreamProxy(host="127.0.0.1", port=3128, tls=False)
+        assert relay._egress == BrowserEgress(http=upstream, https=upstream)
     finally:
         await tool.aclose()
 
 
+class _LocalForwardingProxy:
+    """An upstream HTTP proxy that resolves names itself, the way a local forwarding proxy reaches internal services.
+
+    It forwards CONNECT tunnels and absolute-form requests for ``internal_names`` to the loopback service,
+    serves a fixed page inside CONNECT tunnels to 8.8.8.8:80, and refuses everything else.
+    """
+
+    def __init__(self, loopback_port: int, internal_names: frozenset[str]) -> None:
+        self.requests: list[bytes] = []
+        self._loopback_port = loopback_port
+        self._internal_names = internal_names
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> str:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        return f"http://127.0.0.1:{self._server.sockets[0].getsockname()[1]}"
+
+    async def close(self) -> None:
+        assert self._server is not None
+        self._server.close()
+        await self._server.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with suppress(ConnectionError, asyncio.IncompleteReadError, OSError):
+            head = await reader.readuntil(b"\r\n\r\n")
+            request_line = head.split(b"\r\n", 1)[0]
+            self.requests.append(request_line)
+            method, target, _version = request_line.decode("ascii").split(" ", 2)
+            authority = target if method == "CONNECT" else urlsplit(target).netloc
+            host = authority.rsplit(":", 1)[0].strip("[]")
+            if method == "CONNECT" and authority == "8.8.8.8:80":
+                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                await reader.readuntil(b"\r\n\r\n")
+                body = b"<title>Via egress proxy</title>"
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+                await writer.drain()
+            elif host in self._internal_names:
+                remote_reader, remote_writer = await asyncio.open_connection("127.0.0.1", self._loopback_port)
+                if method == "CONNECT":
+                    writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                else:
+                    path = urlsplit(target).path or "/"
+                    remote_writer.write(head.replace(target.encode(), path.encode(), 1))
+                await asyncio.gather(_pipe(reader, remote_writer), _pipe(remote_reader, writer))
+            else:
+                writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+        writer.close()
+
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    with suppress(ConnectionError, OSError):
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+        writer.write_eof()
+
+
+@pytest.mark.asyncio
+async def test_egress_proxy_cannot_rebind_a_validated_hostname_to_loopback(
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary tunnels to the address it validated, so a proxy resolving the name itself reaches nothing internal."""
+    tool = _headless_real_browser("unbound", monkeypatch, tmp_path)
+    port, hits = loopback_service
+    real_getaddrinfo = socket.getaddrinfo
+
+    def public_getaddrinfo(
+        host: str | bytes | None,
+        service: str | bytes | int | None,
+        *args: int,
+        **kwargs: int,
+    ) -> object:
+        if host != _REBINDING_HOST:
+            return real_getaddrinfo(host, service, *args, **kwargs)
+        # MindRoom's lookups see a public answer; only the forwarding proxy's own lookup would see loopback.
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", service))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", public_getaddrinfo)
+    forwarder = _LocalForwardingProxy(port, frozenset({_REBINDING_HOST}))
+    monkeypatch.setenv("ALL_PROXY", await forwarder.start())
+    try:
+        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+            await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
+        assert hits == []
+        # Chromium's own background connections share the proxy; the page's tunnels name only the pinned address.
+        page_requests = [request for request in forwarder.requests if f":{port} ".encode() in request]
+        assert page_requests
+        assert all(request.startswith(f"CONNECT 93.184.216.34:{port} ".encode()) for request in page_requests)
+        assert not any(_REBINDING_HOST.encode() in request for request in forwarder.requests)
+    finally:
+        await tool.aclose()
+        await forwarder.close()
+
+
+@pytest.mark.asyncio
+async def test_page_websocket_to_loopback_is_refused_beside_an_egress_proxy(
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Loopback goes through the relay, so an egress proxy never tunnels a page's WebSocket to its own loopback."""
+    tool = _headless_real_browser("unbound", monkeypatch, tmp_path)
+    port, hits = loopback_service
+    forwarder = _LocalForwardingProxy(port, frozenset({"127.0.0.1", "localhost"}))
+    monkeypatch.setenv("ALL_PROXY", await forwarder.start())
+    try:
+        await tool.browser(action="start")
+        result = json.loads(
+            await tool.browser(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
+        )
+        assert result["result"] == "error"
+        assert hits == []
+        assert not any(b"127.0.0.1" in request for request in forwarder.requests)
+    finally:
+        await tool.aclose()
+        await forwarder.close()
+
+
+@pytest.mark.asyncio
+async def test_primary_browser_uses_scheme_proxies_beside_an_unused_socks_all_proxy(
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Proxy clients such as Clash export http(s)_proxy plus a SOCKS all_proxy; curl precedence never uses the latter."""
+    tool = _headless_real_browser("unbound", monkeypatch, tmp_path)
+    port, _hits = loopback_service
+    forwarder = _LocalForwardingProxy(port, frozenset())
+    upstream = await forwarder.start()
+    monkeypatch.setenv("http_proxy", upstream)
+    monkeypatch.setenv("https_proxy", upstream)
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
+    try:
+        result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/clash"))
+        assert result["title"] == "Via egress proxy"
+        assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in forwarder.requests
+    finally:
+        await tool.aclose()
+        await forwarder.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("binding", ["unbound", "runner"])
-async def test_ambiguous_proxy_env_uses_the_relay_only_outside_sandbox_runners(
+async def test_per_scheme_proxies_are_chained_only_outside_sandbox_runners(
     binding: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The primary falls back to the policy-enforcing relay, while a runner refuses to bypass its egress proxy."""
+    """The primary chains each scheme's proxy behind the relay, while a runner refuses to guess its egress route."""
     _clear_proxy_env(monkeypatch)
     monkeypatch.setenv("HTTP_PROXY", "http://one:3128")
     monkeypatch.setenv("HTTPS_PROXY", "http://two:3128")
@@ -1682,8 +1810,13 @@ async def test_ambiguous_proxy_env_uses_the_relay_only_outside_sandbox_runners(
             assert not launch_kwargs
         else:
             state = await tool._ensure_profile("mindroom")
-            assert state.destination_proxy is not None
-            assert launch_kwargs["proxy"] == {"server": state.destination_proxy.endpoint, "bypass": "<-loopback>"}
+            relay = state.destination_proxy
+            assert relay is not None
+            assert launch_kwargs["proxy"] == {"server": relay.endpoint, "bypass": "<-loopback>"}
+            assert relay._egress == BrowserEgress(
+                http=_UpstreamProxy(host="one", port=3128, tls=False),
+                https=_UpstreamProxy(host="two", port=3128, tls=False),
+            )
     finally:
         await tool.aclose()
 
@@ -1722,8 +1855,6 @@ async def test_private_network_browser_reaches_loopback_directly_beside_an_egres
         assert hits == ["/app"]
         # Chromium's own background requests still use the proxy; the loopback page never does.
         assert not any(b"127.0.0.1" in request or b"/app" in request for request in proxied)
-        state = tool._profiles["mindroom"]
-        assert state.destination_proxy is None
     finally:
         await tool.aclose()
         proxy.close()
@@ -1872,11 +2003,11 @@ async def test_ensure_profile_installs_server_fetch_route(
     context.route.assert_awaited_once()
     route_pattern, route_handler = context.route.await_args.args
     assert route_pattern == "**/*"
-    lookup_threads: list[str] = []
+    lookups: list[bool] = []
     original_validate = browser_fetch_guard.validate_browser_fetch_url
 
     def validate(url: str, **kwargs: bool) -> str:
-        lookup_threads.append(threading.current_thread().name)
+        lookups.append(kwargs["resolve_hostnames"])
         return original_validate(url, **kwargs)
 
     monkeypatch.setattr(browser_fetch_guard, "validate_browser_fetch_url", validate)
@@ -1890,7 +2021,7 @@ async def test_ensure_profile_installs_server_fetch_route(
 
     unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
     unsafe_route.continue_.assert_not_called()
-    assert len(lookup_threads) == 1
+    assert lookups == [False]
 
     malformed_route = SimpleNamespace(
         request=SimpleNamespace(url="http://[::1"),
@@ -1901,9 +2032,8 @@ async def test_ensure_profile_installs_server_fetch_route(
 
     malformed_route.abort.assert_awaited_once_with("blockedbyclient")
     malformed_route.continue_.assert_not_called()
-    # Page-driven lookups run on the threads reserved for browser DNS, never on the loop or default executor.
-    assert len(lookup_threads) == 2
-    assert all(name.startswith("mindroom-browser-dns") for name in lookup_threads)
+    # The relay validates every dialed address, so page requests never wait on a DNS lookup here.
+    assert lookups == [False, False]
 
 
 @pytest.mark.asyncio

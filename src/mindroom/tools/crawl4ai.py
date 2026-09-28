@@ -19,8 +19,9 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
+    RELAY_ONLY_PROXY_BYPASS,
     BrowserDestinationProxy,
-    browser_upstream_proxy,
+    browser_egress,
 )
 
 if TYPE_CHECKING:
@@ -163,26 +164,23 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
             """Crawl one validated URL with connect-time destination checks on every browser connection."""
             destination_proxy: BrowserDestinationProxy | None = None
             try:
-                # Chromium inherits this environment, so an operator egress proxy stays its only route.
-                upstream = browser_upstream_proxy(
-                    self._runtime_paths.process_env,
-                    os.environ,
-                    egress_control=self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
+                # Page routes see neither WebSockets, service-worker fetches, nor the address Chromium resolves for
+                # itself, so the relay is Chromium's only proxy and validates every connection at dial time before
+                # it goes direct or through the operator's egress proxy, which Chromium would otherwise read here.
+                destination_proxy = BrowserDestinationProxy(
+                    egress=browser_egress(
+                        self._runtime_paths.process_env,
+                        os.environ,
+                        egress_control=self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
+                    ),
                 )
-                if upstream is not None:
-                    proxy_server = upstream.server
-                else:
-                    # Page routes see neither WebSockets, service-worker fetches, nor the address Chromium
-                    # resolves for itself, so every TCP connection dials an address validated at connect time.
-                    destination_proxy = BrowserDestinationProxy()
-                    await destination_proxy.start()
-                    proxy_server = destination_proxy.endpoint
+                await destination_proxy.start()
                 browser_config = agno_crawl4ai.BrowserConfig(
                     headless=self.headless,
                     verbose=False,
-                    proxy_config={"server": proxy_server},
+                    proxy_config={"server": destination_proxy.endpoint},
                     # Playwright forces loopback through the proxy only unless an environment switch disables it.
-                    extra_args=[PROXIED_WEBRTC_ONLY_ARG, "--proxy-bypass-list=<-loopback>"],
+                    extra_args=[PROXIED_WEBRTC_ONLY_ARG, f"--proxy-bypass-list={RELAY_ONLY_PROXY_BYPASS}"],
                 )
 
                 async with agno_crawl4ai.AsyncWebCrawler(config=browser_config) as crawler:

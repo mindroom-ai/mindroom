@@ -281,7 +281,9 @@ async def test_headless_environment_rotation_closes_old_profile(
         launch = browser_processes[-1].launch
         assert launch["headless"] is True
         assert launch["env"]["HTTP_PROXY"] == proxy
-        assert launch["proxy"] == {"server": proxy, "bypass": "<-loopback>"}
+        # The destination relay stays Chromium's only proxy and tunnels through the worker's egress proxy.
+        assert launch["proxy"]["server"].startswith("socks5://127.0.0.1:")
+        assert launch["proxy"]["bypass"] == "<-loopback>"
         assert "UNRELATED_CONTROL_SECRET" not in launch["env"]
     assert not browser_processes[0].live_resources
     assert len(browser_processes) == 2

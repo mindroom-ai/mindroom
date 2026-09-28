@@ -54,8 +54,9 @@ from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
+    RELAY_ONLY_PROXY_BYPASS,
     BrowserDestinationProxy,
-    browser_upstream_proxy,
+    browser_egress,
 )
 
 if TYPE_CHECKING:
@@ -1730,21 +1731,12 @@ class BrowserTools(Toolkit):
                 ),
             )
             # A headless worker browser runs with its prepared environment, so that is where its route is set.
-            upstream = browser_upstream_proxy(
+            egress = browser_egress(
                 self._runtime_paths.process_env,
                 os.environ if self._worker_process_env is None else self._worker_process_env,
                 egress_control=self._worker_workspace is not None
                 or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
-            if upstream is not None:
-                # The operator's egress proxy owns every destination Chromium does not dial itself.
-                launch_kwargs["proxy"] = {
-                    "server": upstream.server,
-                    "bypass": upstream.bypass(
-                        allow_loopback=allow_loopback,
-                        allow_private_networks=self._allow_private_networks,
-                    ),
-                }
             if self._worker_process_env is not None:
                 launch_kwargs["env"] = self._worker_process_env
             if self._worker_display is not None:
@@ -1764,15 +1756,16 @@ class BrowserTools(Toolkit):
                 # The public manager cannot stop its transport during subprocess
                 # creation. Let acquisition settle before attempting cleanup.
                 playwright = await asyncio.shield(acquisition)
-                if upstream is None:
-                    # Page routes see neither WebSockets nor the address Chromium resolves for itself, so every
-                    # TCP connection, including redirects and service-worker fetches, dials a validated address.
-                    destination_proxy = BrowserDestinationProxy(
-                        allow_private_networks=self._allow_private_networks,
-                        allow_loopback=allow_loopback,
-                    )
-                    await destination_proxy.start()
-                    launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": "<-loopback>"}
+                # Page routes see neither WebSockets nor the address Chromium resolves for itself, so the relay is
+                # Chromium's only proxy: every TCP connection, including redirects and service-worker fetches, is
+                # validated at dial time before it goes direct or through the operator's egress proxy.
+                destination_proxy = BrowserDestinationProxy(
+                    allow_private_networks=self._allow_private_networks,
+                    allow_loopback=allow_loopback,
+                    egress=egress,
+                )
+                await destination_proxy.start()
+                launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS}
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
