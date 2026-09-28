@@ -8,7 +8,7 @@ import re
 import secrets
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
@@ -18,8 +18,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_runner_token,
-    app_runtime_config,
     app_runtime_paths,
+    request_runtime_config,
     resolve_script_state_workspace,
     validate_runner_token,
 )
@@ -44,12 +44,14 @@ from mindroom.shell_supervisor import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
-    from typing import Any
 
     from starlette.responses import Response
     from starlette.types import Message
 
-_MAX_REQUEST_BYTES = 16 * 1024
+    from mindroom.config.main import Config
+
+# Launch requests carry the primary's live config snapshot, which dominates their size.
+_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_TOKEN_BYTES = 4096
 _RUN_ID_PATTERN = r"script-[0-9a-f]{32}"
@@ -171,6 +173,7 @@ class SandboxScriptRunRequest(BaseModel):
     gateway_url: str = Field(min_length=1, max_length=2048)
     max_runtime_seconds: int = Field(gt=0, strict=True)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
+    config_snapshot: dict[str, Any] | None = None
 
 
 class SandboxScriptControlRequest(BaseModel):
@@ -236,6 +239,7 @@ def _normalized_worker_key(request: Request, worker_key: str) -> str:
 
 def _prepare_worker(
     request: Request,
+    config: Config,
     *,
     worker_key: str,
     private_agent_names: list[str] | None,
@@ -247,7 +251,7 @@ def _prepare_worker(
             worker_key=normalized_worker_key,
             tool_init_overrides={},
             runtime_paths=runtime_paths,
-            agent_policies=app_runtime_config(request.app).get_agent_policies(),
+            agent_policies=config.get_agent_policies(),
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),
             runner_token=app_runner_token(request.app),
         )
@@ -307,6 +311,7 @@ def _script_snapshot_paths(workspace: Path, run_id: str) -> tuple[Path, Path]:
 
 def _script_execution_workspace(
     request: Request,
+    config: Config,
     payload: SandboxScriptRunRequest,
     *,
     snapshot_workspace: Path,
@@ -324,6 +329,7 @@ def _script_execution_workspace(
     try:
         return resolve_script_state_workspace(
             request.app,
+            config,
             state_scope_worker_key=state_scope_worker_key,
             agent_name=state_scope_worker_key.rsplit(":", maxsplit=1)[-1],
             private_agent_names=frozenset(payload.private_agent_names or ()),
@@ -403,15 +409,17 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
             error="Background scripts require Linux process-group containment.",
             failure_kind="worker",
         )
+    config = request_runtime_config(request.app, payload.config_snapshot)
     prepared = _prepare_worker(
         request,
+        config,
         worker_key=payload.worker_key,
         private_agent_names=payload.private_agent_names,
     )
     snapshot_workspace = prepared.paths.workspace.resolve()
     source_path, token_path = _script_snapshot_paths(snapshot_workspace, payload.run_id)
     _validate_source_digest(source_path, payload.source_digest)
-    workspace = _script_execution_workspace(request, payload, snapshot_workspace=snapshot_workspace)
+    workspace = _script_execution_workspace(request, config, payload, snapshot_workspace=snapshot_workspace)
     script_environment = _script_environment(
         payload,
         workspace=workspace,

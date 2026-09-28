@@ -96,7 +96,8 @@ class _SubscriptionFields(TypedDict):
 
 def _subscription_fields(subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
+    price_data = item["price"] if item else {}
     tier = _get_tier_from_price(price_data)
     _get_billing_cycle_from_price(price_data)
     limits = get_plan_limits_from_metadata(tier)
@@ -112,10 +113,11 @@ def _subscription_fields(subscription: dict) -> _SubscriptionFields:
         "updated_at": datetime.now(UTC).isoformat(),
     }
 
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
+    # Since Stripe API version 2025-03-31.basil the billing period lives on each subscription item, not on the
+    # subscription; our subscriptions have a single item.
+    if start := item.get("current_period_start"):
         subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
+    if end := item.get("current_period_end"):
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
     return subscription_data
 
@@ -264,6 +266,42 @@ def _invoice_subscription_id(invoice: dict) -> str | None:
     return details.get("subscription")
 
 
+def payment_row(sb: Any, invoice: dict) -> dict[str, Any] | None:
+    """Build the ``payments`` row for a paid invoice, or None for a one-off invoice or one no account owns.
+
+    Shared by the ``invoice.payment_succeeded`` webhook and ``backend.scripts.backfill_payments``.
+    """
+    # Skip if no subscription (one-time payments)
+    subscription_id = _invoice_subscription_id(invoice)
+    if not subscription_id:
+        return None
+
+    # Get account from customer, falling back to the account bound to the subscription
+    customer_id = invoice["customer"]
+    accounts = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).limit(1).execute().data
+    account_id = accounts[0]["id"] if accounts else _account_id_for_stripe_subscription(sb, subscription_id)
+    if account_id is None:
+        logger.warning("No account found for customer %s in payment %s", customer_id, invoice["id"])
+        return None
+
+    paid_at = (invoice.get("status_transitions") or {}).get("paid_at") or invoice["created"]
+    return {
+        "invoice_id": invoice["id"],
+        "subscription_id": subscription_id,
+        "customer_id": customer_id,
+        "account_id": account_id,  # Tenant isolation
+        "amount": invoice["amount_paid"] / 100,
+        "currency": invoice["currency"],
+        "status": "succeeded",
+        "created_at": _timestamp_to_iso(paid_at),
+    }
+
+
+def upsert_payment(sb: Any, row: dict[str, Any]) -> None:
+    """Write a payment row; upserting on ``invoice_id`` keeps one row per invoice however often it is written."""
+    sb.table("payments").upsert(row, on_conflict="invoice_id").execute()
+
+
 def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
     """Handle successful Stripe payment events.
 
@@ -272,37 +310,12 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
 
     """
     logger.info("Payment succeeded: %s", invoice["id"])
-
-    # Skip if no subscription (one-time payments)
-    subscription_id = _invoice_subscription_id(invoice)
-    if not subscription_id:
-        return False, None
-
     sb = ensure_supabase()
-
-    # Get account from customer, falling back to the account bound to the subscription
-    customer_id = invoice["customer"]
-    accounts = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).limit(1).execute().data
-    account_id = accounts[0]["id"] if accounts else _account_id_for_stripe_subscription(sb, subscription_id)
-    if account_id is None:
-        logger.warning("No account found for customer %s in payment %s", customer_id, invoice["id"])
+    row = payment_row(sb, invoice)
+    if row is None:
         return False, None
-
-    # Upsert so a redelivered invoice keeps one row
-    sb.table("payments").upsert(
-        {
-            "invoice_id": invoice["id"],
-            "subscription_id": subscription_id,
-            "customer_id": customer_id,
-            "account_id": account_id,  # Tenant isolation
-            "amount": invoice["amount_paid"] / 100,
-            "currency": invoice["currency"],
-            "status": "succeeded",
-        },
-        on_conflict="invoice_id",
-    ).execute()
-
-    return True, account_id
+    upsert_payment(sb, row)
+    return True, row["account_id"]
 
 
 def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:

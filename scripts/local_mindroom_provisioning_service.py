@@ -25,9 +25,10 @@ with the same homeserver (for example the MatrixRTC lk-jwt-service or an
 identity server) accepts it as proof of the user's identity.
 
 Pairing is device-initiated: the CLI starts at
-``/v1/local-mindroom/pair/device/start``, the signed-in browser user inspects
-and approves the code at ``/v1/local-mindroom/pair/device/inspect`` and
-``/v1/local-mindroom/pair/device/approve``, and the CLI polls
+``/v1/local-mindroom/pair/device/start``, the signed-in browser user reads
+``/v1/local-mindroom/pair/device/inspect``, which names the client and the
+address that started the session, before approving the code at
+``/v1/local-mindroom/pair/device/approve``, and the CLI then polls
 ``/v1/local-mindroom/pair/device/poll`` for its credentials.
 
 Rate limits: every OpenID token that the service must resolve through the
@@ -170,6 +171,7 @@ class PairSession:
     completed_at: datetime | None = None
     connection_id: str | None = None
     approved_at: datetime | None = None
+    client_ip: str | None = None
 
 
 @dataclass(slots=True)
@@ -281,6 +283,7 @@ class DevicePairSessionOut(BaseModel):
     """What the approving browser user sees about the waiting machine."""
 
     client_name: str
+    client_ip: str | None
     created_at: datetime
     expires_at: datetime
     status: Literal["pending", "approved"]
@@ -479,6 +482,7 @@ def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | Non
             "client_name": session.client_name,
             "fingerprint": session.fingerprint,
             "approved_at": _as_utc_iso(session.approved_at),
+            "client_ip": session.client_ip,
         }
         for session in state.pair_sessions.values()
     ]
@@ -548,6 +552,12 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             completed_at=_from_utc_iso(item.get("completed_at")),
             connection_id=item.get("connection_id"),
             approved_at=_from_utc_iso(item.get("approved_at")),
+            # LEGACY_COMPAT: pair sessions persisted before requester addresses were recorded lack client_ip
+            # Legacy format: state written by the provisioning service before this change; client_ip is missing.
+            # Last legacy release: unversioned service state; replaced by this change.
+            # Handling: a missing client_ip loads as None, which the approval page shows as an unknown address.
+            # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_device_sessions_without_client_ip.
+            client_ip=item.get("client_ip"),
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
@@ -895,6 +905,7 @@ def _device_session_out(session: PairSession) -> DevicePairSessionOut:
         raise HTTPException(status_code=500, detail="Corrupt pair session")
     return DevicePairSessionOut(
         client_name=session.client_name,
+        client_ip=session.client_ip,
         created_at=session.created_at,
         expires_at=session.expires_at,
         status=session.status,
@@ -910,7 +921,8 @@ async def start_device_pair(
 ) -> DevicePairStartResponse:
     """Start pairing from a local client; a signed-in browser user approves it later."""
     now = _now_utc()
-    remote = request.client.host if request.client else "unknown"
+    client_ip = request.client.host if request.client else None
+    remote = client_ip or "unknown"
     device_secret = secrets.token_urlsafe(32)
     async with state.lock:
         _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
@@ -926,6 +938,7 @@ async def start_device_pair(
             device_secret_hash=_hash_token(device_secret),
             client_name=payload.client_name.strip(),
             fingerprint=payload.client_pubkey_or_fingerprint.strip(),
+            client_ip=client_ip,
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
