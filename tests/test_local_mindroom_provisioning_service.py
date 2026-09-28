@@ -952,6 +952,7 @@ def test_device_pairing_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         )
         assert inspected.status_code == 200
         assert inspected.json()["client_name"] == "alice-macbook"
+        assert inspected.json()["client_ip"] == "testclient"
         assert inspected.json()["status"] == "pending"
 
         approved = client.post(
@@ -1314,6 +1315,12 @@ def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: p
     assert started["device_secret"] not in json.dumps(persisted)
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        inspected = restarted.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        ).json()
+        assert inspected["client_ip"] == "testclient"
         body = restarted.post(
             "/v1/local-mindroom/pair/device/poll",
             json={"device_secret": started["device_secret"]},
@@ -1618,6 +1625,28 @@ def test_legacy_state_loads_browser_sessions(tmp_path: Path, monkeypatch: pytest
         assert session.client_name is None
         assert session.fingerprint is None
         assert session.approved_at is None
+
+
+def test_legacy_state_loads_device_sessions_without_client_ip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device sessions persisted before requester addresses were recorded still load and show no address."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        started = _start_device_pairing(client)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    for item in payload["pair_sessions"]:
+        del item["client_ip"]
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        inspected = restarted.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+
+    assert inspected.status_code == 200
+    assert inspected.json()["client_ip"] is None
 
 
 def _install_homeserver(

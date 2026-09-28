@@ -896,6 +896,48 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
     assert calls == [(["$img", "$caption"], "$img")]
 
 
+@pytest.mark.parametrize("caption_in_upload_thread", [True, False])
+@pytest.mark.asyncio
+async def test_router_keeps_a_caption_that_names_an_agent_with_its_upload(
+    tmp_path: Path,
+    caption_in_upload_thread: bool,
+) -> None:
+    """A caption naming an agent must not leave the router routing its upload alone."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000, agent_name=ROUTER_AGENT_NAME)
+    room = _make_room()
+    image_event = _image_event(event_id="$img", server_timestamp=1000)
+    caption = _text_event(
+        event_id="$caption",
+        body="@mindroom_test_agent:localhost review this",
+        server_timestamp=1001,
+        thread_id=image_event.event_id if caption_in_upload_thread else None,
+    )
+    content = caption.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": ["@mindroom_test_agent:localhost"]}
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
+        await bot._turn_controller.handle_media_event(room, image_event)
+        await bot._turn_controller.handle_text_event(room, caption)
+        await bot._coalescing_gate.drain_all()
+
+    assert calls == [["$img", "$caption"]]
+
+
 @pytest.mark.asyncio
 async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path) -> None:
     """Uploads arrive first and the trailing caption closes the batch into one dispatch."""

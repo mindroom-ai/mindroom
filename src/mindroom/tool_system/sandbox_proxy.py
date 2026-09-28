@@ -16,7 +16,7 @@ from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
 
@@ -463,8 +463,8 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
     )
 
 
-def _runner_config_snapshot_payload(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object]:
-    """Return the request field carrying the primary's live config, without secrets, to the runner.
+def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object] | None:
+    """Return the primary's live config, without secrets, for one runner or worker request.
 
     The static runner and Kubernetes workers only mount a seed config file, so agents added or
     edited after seeding exist only in the config the primary hot-reloads.  Docker workers read a
@@ -472,10 +472,11 @@ def _runner_config_snapshot_payload(runtime_paths: RuntimePaths, runtime_config:
     container, so they get no request snapshot.
     """
     if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
-        return {}
-    return {
-        "config_snapshot": strip_sensitive_config_values(to_json_compatible(runtime_config.authored_model_dump())),
-    }
+        return None
+    return cast(
+        "dict[str, object]",
+        strip_sensitive_config_values(to_json_compatible(runtime_config.authored_model_dump())),
+    )
 
 
 def _get_worker_manager(
@@ -626,7 +627,7 @@ def save_attachment_to_worker(
             **attachment_fields,
             "mime_type": mime_type,
             "filename": filename,
-            **_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config),
+            "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
         }
 
         data = post_worker_proxy_json(
@@ -726,7 +727,7 @@ def view_file_from_worker(
             payload={
                 **worker_payload,
                 "path": path,
-                **_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config),
+                "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
             },
             worker_handle=worker_handle,
             worker_manager=worker_manager,
@@ -973,7 +974,7 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
         )
         payload.update(worker_payload)
-        payload.update(_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config))
+        payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:
