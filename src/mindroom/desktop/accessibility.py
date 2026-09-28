@@ -214,7 +214,11 @@ class AccessibilityBackend(Protocol):
         ...
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Validate a fresh state and focus its app before coordinate or keyboard fallback."""
+        """Validate a fresh state and focus its app before coordinate fallback."""
+        ...
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Validate a fresh state, focus its app, and return a guard to run before each keyboard input."""
         ...
 
     def element_for_action(
@@ -387,11 +391,28 @@ class MacAccessibilityBackend:
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Revalidate exact state before focusing an allowed target."""
+        return self._focused_fallback_state(app_id, state_id).public
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Focus a revalidated target and return a guard that keys still go to that exact app."""
+        application = self._focused_fallback_state(app_id, state_id).application
+        if application is None:
+            return _primary_screen_keyboard_guard
+
+        # Keyboard events go to whichever app is frontmost when they are posted, not to the validated one.
+        def guard() -> None:
+            if not application.isActive():
+                msg = "The allowed application lost keyboard focus; input stopped and its outcome may be partial."
+                raise AccessibilityActionOutcomeUnknownError(msg)
+
+        return guard
+
+    def _focused_fallback_state(self, app_id: str, state_id: str) -> _StoredMacState:
         stored = self._fresh_state(app_id, state_id)
         self._activate(stored.application)
         if stored.application is None:
-            return stored.public
-        return self._fresh_state(app_id, state_id).public
+            return stored
+        return self._fresh_state(app_id, state_id)
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Revalidate app identity and window geometry around foreground capture."""
@@ -970,6 +991,11 @@ class ScreenshotOnlyAccessibilityBackend:
         """Validate that coordinate fallback still targets the latest screen geometry."""
         return self.prepare_capture(app_id, state_id).state
 
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Validate that keyboard fallback still targets the latest screen geometry."""
+        self.prepare_fallback(app_id, state_id)
+        return _primary_screen_keyboard_guard
+
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Validate that capture still targets the latest screen geometry."""
         self._require_primary(app_id)
@@ -1021,6 +1047,10 @@ class ScreenshotOnlyAccessibilityBackend:
         if app_id != PRIMARY_SCREEN_APP_ID:
             msg = "Semantic application accessibility is currently available only on macOS."
             raise AccessibilityError(msg)
+
+
+def _primary_screen_keyboard_guard() -> None:
+    """Accept any focused app: the primary-screen target already covers the whole screen."""
 
 
 def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> bool:

@@ -6,12 +6,17 @@ import io
 import sys
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 from PIL import Image
 
-from mindroom.desktop.accessibility import AccessibilityCapture, AccessibilityState, DesktopRect
+from mindroom.desktop.accessibility import (
+    AccessibilityActionOutcomeUnknownError,
+    AccessibilityCapture,
+    AccessibilityState,
+    DesktopRect,
+)
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
 from mindroom.desktop.provider import (
     DesktopEmergencyStopError,
@@ -23,6 +28,9 @@ from mindroom.desktop.provider import (
     _type_macos_unicode,
     request_macos_desktop_permissions,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +145,7 @@ class FakeAccessibilityBackend:
 
     window: DesktopRect = field(default_factory=lambda: DesktopRect(100, 50, 800, 600))
     calls: list[tuple[str, object]] = field(default_factory=list)
+    keyboard_focus_checks_left: int | None = None
 
     def launch_app(self, app_id: str) -> None:
         """Record one allowlisted application launch."""
@@ -152,6 +161,20 @@ class FakeAccessibilityBackend:
         """Record validation and return the current app window."""
         self.calls.append(("prepare_fallback", (app_id, state_id)))
         return AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
+
+    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+        """Record validation and return a focus guard that fails once its allowed checks run out."""
+        self.calls.append(("prepare_keyboard", (app_id, state_id)))
+
+        def guard() -> None:
+            self.calls.append(("keyboard_focus", app_id))
+            if self.keyboard_focus_checks_left is not None:
+                if not self.keyboard_focus_checks_left:
+                    msg = "The allowed application lost keyboard focus."
+                    raise AccessibilityActionOutcomeUnknownError(msg)
+                self.keyboard_focus_checks_left -= 1
+
+        return guard
 
     def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Record semantic values, including the empty string used to clear a field."""
@@ -302,14 +325,20 @@ def test_mid_action_pyautogui_fail_safe_is_translated() -> None:
 
 def test_macos_type_text_uses_layout_independent_unicode(monkeypatch: pytest.MonkeyPatch) -> None:
     """MacOS fallback typing does not use PyAutoGUI's ASCII and keyboard-layout mapping."""
-    provider, pyautogui, _ = _provider()
+    provider, pyautogui, accessibility = _provider()
     typed: list[str] = []
+
+    def type_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
+        before_chunk()
+        typed.append(text)
+
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
-    monkeypatch.setattr("mindroom.desktop.provider._type_macos_unicode", typed.append)
+    monkeypatch.setattr("mindroom.desktop.provider._type_macos_unicode", type_unicode)
 
     provider.type_text(app_id="com.example.Editor", state_id="state-1", text="café — 漢字 🙂")
 
     assert typed == ["café — 漢字 🙂"]
+    assert accessibility.calls[-1] == ("keyboard_focus", "com.example.Editor")
     assert pyautogui.calls == []
 
 
@@ -335,7 +364,7 @@ def test_macos_unicode_events_use_utf16_lengths(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
 
-    _type_macos_unicode("a🙂b")
+    _type_macos_unicode("a🙂b", before_chunk=lambda: None)
 
     assert configured == [(True, 4, "a🙂b"), (False, 4, "a🙂b")]
     assert posted == [True, False]
@@ -461,7 +490,10 @@ def test_keypress_accepts_explicit_edit_chord_after_focus() -> None:
     provider, pointer, accessibility = _provider()
     provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["ctrl", "a"])
     assert pointer.calls == [("hotkey", ("ctrl", "a"))]
-    assert accessibility.calls == [("prepare_fallback", ("com.example.Editor", "state-1"))]
+    assert accessibility.calls == [
+        ("prepare_keyboard", ("com.example.Editor", "state-1")),
+        ("keyboard_focus", "com.example.Editor"),
+    ]
 
 
 def test_secondary_retina_capture_emits_negative_logical_origin_and_scale() -> None:
@@ -550,6 +582,52 @@ def test_unicode_stops_before_next_chunk_if_focus_changes(monkeypatch: pytest.Mo
     with pytest.raises(DesktopProviderError, match="focus changed"):
         _type_macos_unicode("a" * 21, before_chunk=guard)
     assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
+
+
+def test_untargeted_macos_typing_stops_once_the_allowed_app_loses_keyboard_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text without an element target never continues into whichever app took focus mid-typing."""
+    provider, pyautogui, accessibility = _provider()
+    posted = []
+    quartz = SimpleNamespace(
+        CGEventCreateKeyboardEvent=lambda _source, _code, down: {"down": down},
+        CGEventKeyboardSetUnicodeString=lambda event, _length, text: event.update(text=text),
+        CGEventPost=lambda _tap, event: posted.append(event),
+        kCGHIDEventTap=0,
+    )
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    accessibility.keyboard_focus_checks_left = 1
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 21 + "\n")
+
+    assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
+    assert accessibility.calls[0] == ("prepare_keyboard", ("com.example.Editor", "state-1"))
+    assert pyautogui.calls == []
+
+
+def test_untargeted_typing_checks_keyboard_focus_before_writing() -> None:
+    """The portable typing path checks the same app focus right before its input."""
+    provider, pyautogui, accessibility = _provider()
+    accessibility.keyboard_focus_checks_left = 0
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="rm -rf ~\n")
+
+    assert pyautogui.calls == []
+
+
+def test_keypress_is_not_sent_after_the_allowed_app_loses_keyboard_focus() -> None:
+    """A chord such as Enter reaches only the allowlisted app that was checked."""
+    provider, pyautogui, accessibility = _provider()
+    accessibility.keyboard_focus_checks_left = 0
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
+        provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["enter"])
+
+    assert pyautogui.calls == []
 
 
 def test_capture_rejects_display_replacement_during_capture() -> None:
