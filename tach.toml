@@ -4081,6 +4081,7 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.http_error_detail",
+    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -4113,6 +4114,7 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.matrix.client_session",
     "mindroom.matrix.health",
+    "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
 ]
 

@@ -1007,6 +1007,9 @@ Use `--no-confirm` for non-interactive setup.
 
 Show MindRoom service status and recent logs.
 
+While the running service still waits for pairing, the status adds a `pairing: required` line.
+This decision uses the config and storage paths saved in the installed service, so it reflects the service even when you run the command from another config directory.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -1077,6 +1080,7 @@ Runs a series of checks in one pass:
 - **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
+- **Pairing** — on hosted installs, reports whether this machine is paired with MindRoom Chat; before the first run it passes with a `Not paired yet` line instead of warning, because `mindroom run` pairs automatically
 - **Storage** — confirms the storage directory is writable
 - **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
@@ -1413,7 +1417,27 @@ Open the link or scan the QR code while signed in to MindRoom Chat and approve t
 Add `--open-browser` to open the approval link in your default browser.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+The 10-minute limit also applies while the provisioning service is unreachable, with one extra minute of grace for an approval made just before expiry.
+When the service rate-limits polling, for example because several machines share one public address, `connect` and `run` wait longer between polls, up to 30 seconds.
 You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
+
+After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
+Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
+Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
+If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+
+If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
+`connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
+You can revoke the unused entry in MindRoom Chat.
+
+Pairing is only for hosted mindroom.chat or your own provisioning service.
+When no provisioning URL is configured and the effective homeserver is not mindroom.chat, `connect` refuses without contacting anything or writing files.
+This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+Self-hosted servers register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead.
+Pass `--provisioning-url` to pair with your own provisioning service anyway.
 
 If this machine is already connected, pairing again creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
 In a terminal, `connect` asks before pairing again.

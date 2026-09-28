@@ -94,6 +94,28 @@ WantedBy=default.target
 """
 
 
+def _get_service_environment() -> dict[str, str]:
+    """Return the Environment= assignments saved in the installed unit, or nothing when it is absent."""
+    try:
+        lines = _get_unit_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    environment: dict[str, str] = {}
+    for line in lines:
+        key, separator, raw_assignments = line.partition("=")
+        if key.strip() != "Environment" or not separator:
+            continue
+        try:
+            assignments = shlex.split(raw_assignments)
+        except ValueError:
+            continue
+        for assignment in assignments:
+            name, separator, value = assignment.partition("=")
+            if separator:
+                environment[name] = value.replace("%%", "%")
+    return environment
+
+
 def _get_service_status() -> ServiceStatus:
     """Return the installed/running status of the systemd user service."""
     if not _get_unit_path().exists():
@@ -245,6 +267,7 @@ manager = ServiceManager(
     stop_service=_stop_service,
     restart_service=_restart_service,
     get_service_status=_get_service_status,
+    get_service_environment=_get_service_environment,
     get_log_command=_get_log_command,
     get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,

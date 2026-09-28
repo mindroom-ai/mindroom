@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import stat
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -36,7 +37,7 @@ _START = {
     "pair_code": "ABCD-EFGH",
     "device_secret": "device-secret",
     "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
-    "expires_at": "2026-09-26T12:10:00Z",
+    "expires_at": "2099-09-26T12:10:00Z",
     "poll_interval_seconds": 3,
 }
 _CONNECTED = {
@@ -169,7 +170,7 @@ def test_run_device_pairing_retries_transient_start_failures_when_renewing() -> 
         announce=lambda _session: None,
         post_request=_post,
         sleep=sleeps.append,
-        report_retry=retries.append,
+        warn=retries.append,
     )
 
     assert result is not None
@@ -898,3 +899,294 @@ def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_
     assert "Could not update owner placeholder(s)" in output
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+
+
+def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    return resolve_primary_runtime_paths(config_path=config_path, process_env={}), config_path
+
+
+def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_user(tmp_path: Path) -> None:
+    """Declining the approving account saves nothing and explains that the connection is unusable."""
+    runtime_paths, config_path = _approval_install(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    with pytest.raises(
+        ValueError,
+        match=r"Credentials discarded.*revoke it in MindRoom Chat → Settings → Local MindRoom",
+    ):
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=200),
+            provisioning_url="https://provisioning.example",
+            post_request=post,
+            sleep=lambda _seconds: None,
+            confirm_approver=lambda: False,
+        )
+
+    assert "Approved by @alice:mindroom.chat." in out.getvalue()
+    assert "secret-123" not in out.getvalue()
+    assert not (tmp_path / ".env").exists()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+
+
+def test_pair_local_install_asks_about_the_approver_before_saving(tmp_path: Path) -> None:
+    """The approving account is confirmed before any credential or config change is written."""
+    runtime_paths, config_path = _approval_install(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+    env_existed_when_asked: list[bool] = []
+
+    def _confirm() -> bool:
+        env_existed_when_asked.append((tmp_path / ".env").exists())
+        return True
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+        confirm_approver=_confirm,
+    )
+
+    assert result is not None
+    assert env_existed_when_asked == [False]
+    assert "Approved by @alice:mindroom.chat." in out.getvalue()
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+    assert "@alice:mindroom.chat" in config_path.read_text()
+
+
+def test_pair_local_install_names_the_approver_without_a_terminal(tmp_path: Path) -> None:
+    """Services and the macOS app cannot answer a prompt, so the approving account is shown with how to revoke it."""
+    runtime_paths, _config_path = _approval_install(tmp_path)
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    output = out.getvalue()
+    assert "Approved by @alice:mindroom.chat." in output
+    assert "If this is not your account" in output
+    assert "MindRoom Chat → Settings → Local MindRoom" in output
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+
+
+_CLAIMED = httpx.Response(410, json={"detail": "Pair session already claimed"})
+
+
+def test_run_device_pairing_starts_over_when_the_approval_was_lost() -> None:
+    """A lost `connected` response leaves the session claimed, so an unattended run warns and pairs again."""
+    announced: list[cli_connect.DevicePairSession] = []
+    warnings: list[str] = []
+    post = _fake_transport(
+        [
+            httpx.Response(200, json=_START),
+            _CLAIMED,
+            httpx.Response(200, json={**_START, "pair_code": "WXYZ-2345", "device_secret": "second"}),
+            httpx.Response(200, json=_CONNECTED),
+        ],
+        [],
+    )
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=announced.append,
+        post_request=post,
+        sleep=lambda _seconds: None,
+        warn=warnings.append,
+    )
+
+    assert result is not None
+    assert [session.pair_code for session in announced] == ["ABCD-EFGH", "WXYZ-2345"]
+    assert warnings == [
+        "The previous approval could not be received; starting a new pairing. "
+        "You can revoke the unused entry in MindRoom Chat.",
+    ]
+
+
+def test_run_device_pairing_explains_a_lost_approval_without_renewal() -> None:
+    """`mindroom connect` exits with an explanation instead of a generic 410 error."""
+    post = _fake_transport([httpx.Response(200, json=_START), _CLAIMED], [])
+
+    with pytest.raises(ValueError, match="approval could not be received") as exc_info:
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=post,
+            sleep=lambda _seconds: None,
+            renew_expired=False,
+        )
+
+    message = str(exc_info.value)
+    assert "410" not in message
+    assert "revoke the unused entry in MindRoom Chat" in message
+    assert "Run the command again" in message
+
+
+def test_run_device_pairing_backs_off_while_rate_limited() -> None:
+    """Many installs behind one NAT share a poll budget: 429 doubles the wait up to 30s and success resets it."""
+    sleeps: list[float] = []
+    rate_limited = httpx.Response(429, json={"detail": "Rate limit exceeded"})
+    post = _fake_transport(
+        [
+            httpx.Response(200, json=_START),
+            *[rate_limited] * 5,
+            httpx.Response(200, json={"status": "pending"}),
+            httpx.Response(200, json=_CONNECTED),
+        ],
+        [],
+    )
+
+    result = cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=post,
+        sleep=sleeps.append,
+    )
+
+    assert result is not None
+    assert sleeps == [3, 6, 12, 24, 30, 30, 3]
+
+
+def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable() -> None:
+    """`mindroom connect` stops a grace period after the session's expiry even if no poll gets through."""
+    expires_at = datetime(2026, 9, 26, 12, 10, tzinfo=UTC)
+    clock = [expires_at - timedelta(minutes=10)]
+    polls: list[str] = []
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += timedelta(seconds=seconds)
+
+    def _post(url: str, **_kwargs: object) -> httpx.Response:
+        if url.endswith("/start"):
+            return httpx.Response(200, json={**_START, "expires_at": "2026-09-26T12:10:00Z"})
+        polls.append(url)
+        msg = "Network is unreachable"
+        raise httpx.ConnectError(msg)
+
+    with pytest.raises(ValueError, match=r"Approval timed out\. Run the command again to get a new link\."):
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=_post,
+            sleep=_sleep,
+            renew_expired=False,
+            now=lambda: clock[0],
+        )
+
+    assert clock[0] == expires_at + timedelta(seconds=60)
+    assert len(polls) == 220
+
+
+def test_local_credentials_saved_reads_the_current_env_file(tmp_path: Path) -> None:
+    """Another process's saved credentials are seen without resolving the runtime again."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    env_path = tmp_path / ".env"
+
+    assert cli_connect.local_credentials_saved(runtime_paths) is False
+    env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=id\n")
+    assert cli_connect.local_credentials_saved(runtime_paths) is False
+    env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=id\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n")
+    assert cli_connect.local_credentials_saved(runtime_paths) is True
+
+
+def test_local_credentials_saved_keeps_waiting_when_the_env_file_is_unreadable(tmp_path: Path) -> None:
+    """A malformed or undecodable .env mid-pairing keeps the run waiting instead of raising."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    (tmp_path / ".env").write_bytes(b"MINDROOM_LOCAL_CLIENT_ID=\xff\xfe\n")
+
+    assert cli_connect.local_credentials_saved(runtime_paths) is False
+
+
+@pytest.mark.parametrize(
+    ("env", "refused_homeserver"),
+    [
+        ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, "https://matrix.example.org"),
+        ({}, "http://localhost:8008"),
+        ({"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_PROVISIONING_URL": "https://p.example"}, None),
+        ({"MATRIX_HOMESERVER": "https://mindroom.chat"}, None),
+        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, None),
+    ],
+)
+def test_self_hosted_pairing_error(tmp_path: Path, env: dict[str, str], refused_homeserver: str | None) -> None:
+    """Pairing is refused for any effective non-hosted homeserver, including the localhost default, without a provisioning URL."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n")
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env=env)
+
+    error = cli_connect.self_hosted_pairing_error(runtime_paths)
+
+    if refused_homeserver is None:
+        assert error is None
+    else:
+        assert error is not None
+        assert refused_homeserver in error
+        assert "MATRIX_REGISTRATION_TOKEN" in error
+        assert "--provisioning-url" in error
+
+
+def test_run_device_pairing_treats_other_410s_as_permanent_errors() -> None:
+    """Only the service's exact already-claimed detail means a lost approval; other 410s are not retried."""
+    post = _fake_transport(
+        [httpx.Response(200, json=_START), httpx.Response(410, json={"detail": "Gone"})],
+        [],
+    )
+
+    with pytest.raises(ValueError, match=r"Pairing failed \(410\): Gone"):
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=post,
+            sleep=lambda _seconds: None,
+        )
+
+
+def test_pair_local_install_does_not_ask_about_an_unidentified_approver(tmp_path: Path) -> None:
+    """Nobody can recognize an account the service did not name, so the prompt is skipped and the revoke hint shown."""
+    runtime_paths = _runtime_with_config(tmp_path)
+    out = io.StringIO()
+    connected = {key: value for key, value in _CONNECTED.items() if key != "owner_user_id"}
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=connected)], [])
+
+    def _unexpected_prompt() -> bool:
+        msg = "confirm_approver must not be called without an identified approver"
+        raise AssertionError(msg)
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+        confirm_approver=_unexpected_prompt,
+    )
+
+    assert result is not None
+    output = out.getvalue()
+    assert "Approved by an account the provisioning service did not identify." in output
+    assert "If this is not your account, revoke this connection in MindRoom Chat → Settings → Local MindRoom." in output
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()

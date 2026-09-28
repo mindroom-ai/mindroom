@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import signal
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
@@ -12,6 +13,8 @@ from rich.console import Console
 from rich.panel import Panel
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.services.config import ServiceActionResult, ServiceManager
 
 _console = Console()
@@ -167,13 +170,23 @@ def restart_service() -> None:
     _print_service_action_result(manager.restart_service())
 
 
-def _service_pairing_required() -> bool:
-    """Whether the service's runtime still waits for this machine to be paired, so its API is not up yet."""
+def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
+    """Whether the installed service's runtime still waits for this machine to be paired, so its API is not up yet.
+
+    The service runs with the environment saved in its unit (config and storage paths), not with the caller's.
+    Only a unit without a saved absolute config path falls back to the caller's runtime.
+    """
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
+    config_path = Path(service_environment.get("MINDROOM_CONFIG_PATH", ""))
+    runtime_paths = (
+        resolve_primary_runtime_paths(config_path=config_path, process_env=dict(service_environment))
+        if config_path.is_absolute()
+        else resolve_primary_runtime_paths()
+    )
     try:
-        return local_pairing_required(resolve_primary_runtime_paths())
+        return local_pairing_required(runtime_paths)
     except ValueError:
         # Incomplete credentials or an unreadable secret file stop the service with its own error.
         return False
@@ -191,7 +204,7 @@ def service_status(
         _console.print("MindRoom service: [dim]not installed[/dim]")
     elif status.running:
         _console.print(f"MindRoom service: [green]running[/green] (pid {status.pid})")
-        if _service_pairing_required():
+        if _service_pairing_required(manager.get_service_environment()):
             _console.print(
                 "pairing: [yellow]required[/yellow] "
                 "(open the approval link from `mindroom service logs`, or run `mindroom connect`)",

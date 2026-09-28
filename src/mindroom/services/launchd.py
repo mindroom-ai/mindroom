@@ -8,6 +8,7 @@ import plistlib
 import shlex
 import subprocess
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from mindroom.services.config import (
     SERVICE_NOT_INSTALLED_MESSAGE,
@@ -83,6 +84,19 @@ def _generate_plist(
         "StandardOutPath": str(log_dir / "stdout.log"),
         "StandardErrorPath": str(log_dir / "stderr.log"),
     }
+
+
+def _get_service_environment() -> dict[str, str]:
+    """Return the EnvironmentVariables saved in the installed plist, or nothing when it is absent or unreadable."""
+    try:
+        with _get_plist_path().open("rb") as plist_file:
+            plist = plistlib.load(plist_file)
+    except (OSError, ValueError, ExpatError):
+        return {}
+    environment = plist.get("EnvironmentVariables") if isinstance(plist, dict) else None
+    if not isinstance(environment, dict):
+        return {}
+    return {name: value for name, value in environment.items() if isinstance(name, str) and isinstance(value, str)}
 
 
 def _get_service_status() -> ServiceStatus:
@@ -265,6 +279,7 @@ manager = ServiceManager(
     stop_service=_stop_service,
     restart_service=_restart_service,
     get_service_status=_get_service_status,
+    get_service_environment=_get_service_environment,
     get_log_command=_get_log_command,
     get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,

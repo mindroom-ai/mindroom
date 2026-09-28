@@ -20,7 +20,6 @@ graph pulls in.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -283,10 +282,14 @@ def test_service_status_pairing_check_does_not_load_matrix_or_http_clients(tmp_p
     """The macOS app polls `mindroom service status` every few seconds, so its pairing check must stay env-only."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    service_environment = {"MINDROOM_CONFIG_PATH": str(config_path), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")}
     probe = (
         "import json, sys\n"
         "from mindroom.cli.service import _service_pairing_required\n"
-        "required = _service_pairing_required()\n"
+        "from mindroom.services.manager import get_service_manager\n"
+        "get_service_manager().get_service_environment()\n"
+        f"required = _service_pairing_required({service_environment!r})\n"
         "loaded = sorted(n for n in sys.modules if n.split('.')[0] in {'nio', 'httpx'})\n"
         "print(json.dumps({'required': required, 'loaded': loaded}))\n"
     )
@@ -296,17 +299,6 @@ def test_service_status_pairing_check_does_not_load_matrix_or_http_clients(tmp_p
         text=True,
         check=True,
         timeout=120,
-        env={
-            **os.environ,
-            "MINDROOM_CONFIG_PATH": str(config_path),
-            "MINDROOM_STORAGE_PATH": str(tmp_path / "data"),
-            "MINDROOM_PROVISIONING_URL": "https://mindroom.chat",
-            "MATRIX_REGISTRATION_TOKEN": "",
-            "MATRIX_REGISTRATION_SHARED_SECRET": "",
-            "MATRIX_REGISTRATION_SHARED_SECRET_FILE": "",
-            "MINDROOM_LOCAL_CLIENT_ID": "",
-            "MINDROOM_LOCAL_CLIENT_SECRET": "",
-        },
     )
     payload = json.loads(result.stdout)
     assert payload == {"required": True, "loaded": []}

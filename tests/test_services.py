@@ -23,6 +23,7 @@ from mindroom.services.config import (
 from mindroom.services.launchd import _generate_plist
 from mindroom.services.launchd import _get_log_args as _get_launchd_log_args
 from mindroom.services.launchd import _get_log_command as _get_launchd_log_command
+from mindroom.services.launchd import _get_service_environment as _get_launchd_service_environment
 from mindroom.services.launchd import _restart_service as _restart_launchd_service
 from mindroom.services.launchd import _start_service as _start_launchd_service
 from mindroom.services.launchd import _stop_service as _stop_launchd_service
@@ -30,6 +31,7 @@ from mindroom.services.manager import get_service_manager
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
 from mindroom.services.systemd import _get_log_args as _get_systemd_log_args
+from mindroom.services.systemd import _get_service_environment as _get_systemd_service_environment
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
@@ -527,6 +529,7 @@ def test_service_status_reports_pending_pairing(
     (tmp_path / ".env").write_text(f"MINDROOM_PROVISIONING_URL=https://mindroom.chat\n{env_file}", encoding="utf-8")
     mock_manager = MagicMock(spec=ServiceManager)
     mock_manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=123)
+    mock_manager.get_service_environment.return_value = {}
     mock_manager.get_recent_logs.return_value = []
     mock_manager.get_log_command.return_value = "tail logs"
     mock_get_manager.return_value = mock_manager
@@ -540,6 +543,95 @@ def test_service_status_reports_pending_pairing(
     assert result.exit_code == 0, result.output
     assert "MindRoom service: running (pid 123)" in result.output
     assert ("pairing: required" in result.output) is pairing_line
+
+
+@pytest.mark.parametrize(("service_paired", "pairing_line"), [(False, True), (True, False)])
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_status_decides_pairing_from_the_installed_service_runtime(
+    mock_get_manager: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    service_paired: bool,
+    pairing_line: bool,
+) -> None:
+    """The service's saved config and storage decide pairing, not the runtime of whoever runs `service status`."""
+    for name in (
+        "MINDROOM_PROVISIONING_URL",
+        "MATRIX_REGISTRATION_TOKEN",
+        "MATRIX_REGISTRATION_SHARED_SECRET",
+        "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
+        "MINDROOM_LOCAL_CLIENT_ID",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    paired_credentials = "MINDROOM_LOCAL_CLIENT_ID=id\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n"
+    config_paths: dict[str, Path] = {}
+    for name, paired in (("service", service_paired), ("caller", not service_paired)):
+        config_dir = tmp_path / name
+        config_dir.mkdir()
+        config_paths[name] = config_dir / "config.yaml"
+        config_paths[name].write_text("agents: {}\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_PROVISIONING_URL=https://mindroom.chat\n{paired_credentials if paired else ''}",
+            encoding="utf-8",
+        )
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=123)
+    mock_manager.get_service_environment.return_value = {
+        "MINDROOM_CONFIG_PATH": str(config_paths["service"]),
+        "MINDROOM_STORAGE_PATH": str(tmp_path / "service" / "data"),
+        "PATH": "/usr/bin",
+    }
+    mock_manager.get_recent_logs.return_value = []
+    mock_manager.get_log_command.return_value = "tail logs"
+    mock_get_manager.return_value = mock_manager
+
+    result = runner.invoke(
+        app,
+        ["service", "status"],
+        env={"MINDROOM_CONFIG_PATH": str(config_paths["caller"]), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ("pairing: required" in result.output) is pairing_line
+
+
+def test_systemd_service_environment_reads_the_installed_unit(tmp_path: Path) -> None:
+    """The unit's Environment= assignments round-trip, including spaces, quotes, and percent signs."""
+    service_environment = {
+        "MINDROOM_CONFIG_PATH": '/home/test/Mind Room/"quoted"/config.yaml',
+        "MINDROOM_STORAGE_PATH": "/home/test/Mind Room/data%root",
+        "PATH": "/home/test/.local/bin:/usr/bin",
+    }
+    unit_path = tmp_path / "mindroom.service"
+    with patch("mindroom.services.config.distribution_version", return_value="2026.8.1"):
+        unit_path.write_text(_generate_unit_file(Path("/usr/bin/uv"), service_environment), encoding="utf-8")
+
+    with patch("mindroom.services.systemd._get_unit_path", return_value=unit_path):
+        assert _get_systemd_service_environment() == service_environment
+    with patch("mindroom.services.systemd._get_unit_path", return_value=tmp_path / "missing.service"):
+        assert _get_systemd_service_environment() == {}
+
+
+def test_launchd_service_environment_reads_the_installed_plist(tmp_path: Path) -> None:
+    """The plist's EnvironmentVariables are the service's saved runtime, the same source the macOS app reads."""
+    service_environment = {
+        "MINDROOM_CONFIG_PATH": str(tmp_path / "config.yaml"),
+        "MINDROOM_STORAGE_PATH": str(tmp_path / "mindroom_data"),
+    }
+    plist_path = tmp_path / "chat.mindroom.local.plist"
+    with patch("mindroom.services.config.distribution_version", return_value="2026.8.1"):
+        plist_path.write_bytes(
+            plistlib.dumps(_generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs", service_environment)),
+        )
+
+    with patch("mindroom.services.launchd._get_plist_path", return_value=plist_path):
+        assert _get_launchd_service_environment() == service_environment
+    plist_path.write_bytes(b"not a plist")
+    with patch("mindroom.services.launchd._get_plist_path", return_value=plist_path):
+        assert _get_launchd_service_environment() == {}
+    with patch("mindroom.services.launchd._get_plist_path", return_value=tmp_path / "missing.plist"):
+        assert _get_launchd_service_environment() == {}
 
 
 @patch("mindroom.cli.service._get_service_manager")

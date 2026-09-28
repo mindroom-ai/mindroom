@@ -538,10 +538,15 @@ def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
     env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
     observed: list[bool] = []
 
-    def fake_pair_local_install(_runtime_paths: object, *, console: object, stop_waiting: Callable[[], bool]) -> None:  # noqa: ARG001
+    def fake_pair_local_install(_runtime_paths: object, *, stop_waiting: Callable[[], bool], **_kwargs: object) -> None:
+        observed.append(stop_waiting())
+        # A half-written or undecodable .env mid-pairing keeps the run waiting instead of escaping as a traceback.
+        env_path.write_bytes(b"MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMINDROOM_LOCAL_CLIENT_ID=\xff\n")
+        observed.append(stop_waiting())
+        env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMINDROOM_LOCAL_CLIENT_ID=other_id\n")
         observed.append(stop_waiting())
         with env_path.open("a", encoding="utf-8") as env_file:
-            env_file.write("MINDROOM_LOCAL_CLIENT_ID=other_id\nMINDROOM_LOCAL_CLIENT_SECRET=other_secret\n")
+            env_file.write("MINDROOM_LOCAL_CLIENT_SECRET=other_secret\n")
         observed.append(stop_waiting())
 
     with (
@@ -551,7 +556,7 @@ def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
         result = runner.invoke(app, ["run", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
-    assert observed == [False, True]
+    assert observed == [False, False, False, True]
     mock_run.assert_called_once()
 
 
@@ -592,6 +597,73 @@ def test_run_exits_with_printed_credentials_when_env_is_read_only(
     assert result.exit_code == 1
     assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
     assert "Could not save credentials" in result.output
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_run_confirms_the_approving_account_only_in_a_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interactive: bool,
+) -> None:
+    """A terminal run asks whether the approver is the user; services only print the approving account."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    confirmers: list[object] = []
+    monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: interactive)
+
+    def fake_pair_local_install(_runtime_paths: object, *, confirm_approver: object, **_kwargs: object) -> None:
+        confirmers.append(confirm_approver)
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", new_callable=AsyncMock),
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert (confirmers[0] is not None) is interactive
+
+
+def test_run_stops_when_the_approving_account_is_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declining the approver in a terminal discards the credentials and does not start MindRoom."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "pair_code": "ABCD-EFGH",
+                "device_secret": "device-secret",
+                "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                "poll_interval_seconds": 3,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "status": "connected",
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "namespace": "",
+                "owner_user_id": "@mallory:mindroom.chat",
+            },
+        ),
+    ]
+    monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+    monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+    with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
+        result = runner.invoke(app, ["run", "--config", str(config_path)], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Approved by @mallory:mindroom.chat." in result.output
+    assert "Credentials discarded" in result.output
+    assert env_path.read_text(encoding="utf-8") == "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
     mock_run.assert_not_called()
 
 

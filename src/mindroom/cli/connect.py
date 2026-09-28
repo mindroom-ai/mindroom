@@ -9,9 +9,12 @@ import socket
 import time
 import webbrowser
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlparse
 
 import yaml
+from dotenv import dotenv_values
 from rich.markup import escape
 
 from mindroom import constants
@@ -19,6 +22,7 @@ from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeho
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
+from mindroom.logging_config import get_logger
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -35,17 +39,31 @@ __all__ = [
     "DevicePairSession",
     "PairCompleteResult",
     "local_client_fingerprint",
+    "local_credentials_saved",
     "pair_local_install",
     "persist_local_provisioning_env",
     "render_qr",
     "replace_owner_placeholders_in_config",
     "run_device_pairing",
+    "self_hosted_pairing_error",
 ]
+
+logger = get_logger(__name__)
 
 _API_PATH = "/v1/local-mindroom/pair/device"
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
 _DEFAULT_POLL_INTERVAL_SECONDS = 3
-_MAX_START_RETRY_SECONDS = 30
+_MAX_BACKOFF_SECONDS = 30
+# An approval near expiry may still be handed out, so outages get this grace before timing out locally.
+_EXPIRY_GRACE_SECONDS = 60
+# Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract test.
+_PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
+_HOSTED_MATRIX_DOMAIN = "mindroom.chat"
+_REVOKE_LOCATION = "MindRoom Chat → Settings → Local MindRoom"
+_LOST_APPROVAL_WARNING = (
+    "The previous approval could not be received; starting a new pairing. "
+    "You can revoke the unused entry in MindRoom Chat."
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +86,7 @@ class DevicePairSession:
     device_secret: str
     approve_url: str
     poll_interval_seconds: int
+    expires_at: datetime | None = None
 
 
 class _ServiceError(ValueError):
@@ -80,6 +99,7 @@ class _ServiceError(ValueError):
             message = f"Pairing failed ({status_code}): {detail}"
         super().__init__(message)
         self.status_code = status_code
+        self.detail = detail
 
     @property
     def transient(self) -> bool:
@@ -154,6 +174,21 @@ def _validate_poll_interval(raw_value: object) -> int:
     return raw_value
 
 
+def _parse_expires_at(raw_value: object) -> datetime | None:
+    """Return the session expiry as an aware datetime, or None when the service sent none."""
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        expires_at = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+    return expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _start_session(
     post_request: Callable[..., httpx.Response],
     base_url: str,
@@ -174,6 +209,7 @@ def _start_session(
         device_secret=_required_non_empty_string(started, "device_secret"),
         approve_url=_required_non_empty_string(started, "approve_url"),
         poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds")),
+        expires_at=_parse_expires_at(started.get("expires_at")),
     )
 
 
@@ -185,7 +221,7 @@ def _start_session_with_retry(
     client_fingerprint: str,
     verify: bool,
     sleep: Callable[[float], None],
-    report_retry: Callable[[str], None] | None,
+    warn: Callable[[str], None] | None,
     stopped: Callable[[], bool],
 ) -> DevicePairSession | None:
     """Start a session, retrying transient failures with doubling backoff so unattended services survive boot.
@@ -205,12 +241,12 @@ def _start_session_with_retry(
         except _ServiceError as exc:
             if not exc.transient:
                 raise
-            if report_retry is not None:
-                report_retry(f"{exc} (retrying in {delay}s)")
+            if warn is not None:
+                warn(f"{exc} (retrying in {delay}s)")
         sleep(delay)
         if stopped():
             return None
-        delay = min(delay * 2, _MAX_START_RETRY_SECONDS)
+        delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
 
 
 def _wait_for_approval(
@@ -221,10 +257,16 @@ def _wait_for_approval(
     verify: bool,
     sleep: Callable[[float], None],
     stopped: Callable[[], bool],
-) -> PairCompleteResult | Literal["expired", "stopped"]:
-    """Poll until the session is approved, has expired, or stopped() reports that waiting is pointless."""
+    now: Callable[[], datetime],
+) -> PairCompleteResult | Literal["expired", "claimed", "stopped"]:
+    """Poll until the session is approved, has expired, or stopped() reports that waiting is pointless.
+
+    Returns "claimed" when the service already handed out this session's credentials in a response that never arrived.
+    """
+    interval = session.poll_interval_seconds
+    delay = interval
     while True:
-        sleep(session.poll_interval_seconds)
+        sleep(delay)
         if stopped():
             return "stopped"
         try:
@@ -238,22 +280,60 @@ def _wait_for_approval(
             # The service prunes expired sessions, so an unknown device secret means expired.
             if exc.status_code == 404:
                 return "expired"
-            if exc.transient:
-                continue
-            raise
-
-        status = polled.get("status")
-        if status == "connected":
-            return _parse_pair_complete(polled)
-        if status == "expired":
-            return "expired"
-        if status == "pending":
+            if exc.status_code == 410 and exc.detail == _PAIR_SESSION_ALREADY_CLAIMED_DETAIL:
+                return "claimed"
+            if not exc.transient:
+                raise
+            # The service decides expiry while it answers; this local deadline only covers outages.
+            grace = timedelta(seconds=max(interval, _EXPIRY_GRACE_SECONDS))
+            if session.expires_at is not None and now() >= session.expires_at + grace:
+                return "expired"
+            # Installs behind one NAT share the service's per-address poll budget, so back off while limited.
+            delay = max(interval, min(delay * 2, _MAX_BACKOFF_SECONDS)) if exc.status_code == 429 else interval
             continue
-        if status is None:
-            msg = "Poll response missing status."
-            raise ValueError(msg)
-        msg = f"Unexpected poll status: {status}"
+
+        delay = interval
+        outcome = _parse_poll(polled)
+        if outcome != "pending":
+            return outcome
+
+
+def _parse_poll(polled: dict[str, object]) -> PairCompleteResult | Literal["expired", "pending"]:
+    """Read one successful poll response."""
+    status = polled.get("status")
+    if status == "connected":
+        return _parse_pair_complete(polled)
+    if status == "expired":
+        return "expired"
+    if status == "pending":
+        return "pending"
+    if status is None:
+        msg = "Poll response missing status."
         raise ValueError(msg)
+    msg = f"Unexpected poll status: {status}"
+    raise ValueError(msg)
+
+
+def _raise_or_warn_before_renewal(
+    outcome: Literal["expired", "claimed"],
+    *,
+    renew_expired: bool,
+    warn: Callable[[str], None] | None,
+) -> None:
+    """Explain an unapproved session to an interactive caller, or warn an unattended run that it starts over."""
+    if renew_expired:
+        if outcome == "claimed" and warn is not None:
+            warn(_LOST_APPROVAL_WARNING)
+        return
+    if outcome == "claimed":
+        msg = (
+            "The approval could not be received: its credentials were issued but never arrived, "
+            "so that connection is unusable and you can revoke the unused entry in MindRoom Chat. "
+            "Run the command again to get a new link."
+        )
+        raise ValueError(msg)
+    msg = "Approval timed out. Run the command again to get a new link."
+    raise ValueError(msg)
 
 
 def run_device_pairing(
@@ -264,18 +344,20 @@ def run_device_pairing(
     matrix_ssl_verify: bool,
     announce: Callable[[DevicePairSession], None],
     post_request: Callable[..., httpx.Response] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     renew_expired: bool = True,
     stop_waiting: Callable[[], bool] | None = None,
-    report_retry: Callable[[str], None] | None = None,
+    warn: Callable[[str], None] | None = None,
+    now: Callable[[], datetime] = _utc_now,
 ) -> PairCompleteResult | None:
     """Wait until a signed-in user approves this machine.
 
-    When renew_expired is True, expired sessions start a new code and announce it again, and transient failures to start a session are retried with backoff.
-    When False, expiry and start failures raise ValueError (prevents indefinite waiting in interactive flows).
+    When renew_expired is True, expired sessions and approvals whose credentials never arrived start a new code and announce it again, and transient failures to start a session are retried with backoff.
+    When False, these outcomes and start failures raise ValueError (prevents indefinite waiting in interactive flows).
     Returns None when stop_waiting, checked before each session start, start retry, and poll, reports that pairing is no longer needed.
     """
     post = post_request or _httpx_post
+    sleep = sleep or time.sleep
     base_url = f"{provisioning_url.rstrip('/')}{_API_PATH}"
 
     def stopped() -> bool:
@@ -292,7 +374,7 @@ def run_device_pairing(
                 client_fingerprint=client_fingerprint,
                 verify=matrix_ssl_verify,
                 sleep=sleep,
-                report_retry=report_retry,
+                warn=warn,
                 stopped=stopped,
             )
             if session is None:
@@ -313,14 +395,13 @@ def run_device_pairing(
             verify=matrix_ssl_verify,
             sleep=sleep,
             stopped=stopped,
+            now=now,
         )
         if outcome == "stopped":
             return None
         if isinstance(outcome, PairCompleteResult):
             return outcome
-        if not renew_expired:
-            msg = "Approval timed out. Run the command again to get a new link."
-            raise ValueError(msg)
+        _raise_or_warn_before_renewal(outcome, renew_expired=renew_expired, warn=warn)
 
 
 def render_qr(text: str) -> str:
@@ -383,13 +464,16 @@ def pair_local_install(
     persist_env: bool = True,
     open_browser: bool = False,
     post_request: Callable[..., httpx.Response] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     renew_expired: bool = True,
     stop_waiting: Callable[[], bool] | None = None,
+    confirm_approver: Callable[[], bool] | None = None,
 ) -> PairCompleteResult | None:
     """Pair this install with the hosted provisioning service and save its credentials.
 
+    The approving account is always printed; confirm_approver, given only when a person can answer, asks whether it is theirs before anything is saved.
     Returns None without saving anything when stop_waiting reports that another process paired this machine.
+    Raises ValueError without saving when the approver is declined.
     Raises ValueError after printing the credentials when they cannot be saved, because the service issues them only once.
     """
     resolved_url = (
@@ -417,7 +501,7 @@ def pair_local_install(
         sleep=sleep,
         renew_expired=renew_expired,
         stop_waiting=stop_waiting,
-        report_retry=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
+        warn=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
     )
     if result is None:
         console.print("This machine was paired by another MindRoom process; continuing.")
@@ -430,8 +514,8 @@ def pair_local_install(
         console.print(
             "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
         )
-    owner_text = f" as {result.owner_user_id}" if result.owner_user_id else ""
-    console.print(f"[green]Connected{owner_text}.[/green]")
+    _confirm_approver_or_raise(console, result, confirm_approver)
+    console.print("[green]Connected.[/green]")
     if persist_env:
         try:
             env_path = persist_local_provisioning_env(
@@ -459,6 +543,29 @@ def pair_local_install(
     return result
 
 
+def _confirm_approver_or_raise(
+    console: Console,
+    result: PairCompleteResult,
+    confirm_approver: Callable[[], bool] | None,
+) -> None:
+    """Show who approved this machine and, when someone can answer, discard the credentials unless it was them.
+
+    A pair code or link can be approved by whoever sees it, so the approving account is the one agents will trust.
+    """
+    approver = result.owner_user_id or "an account the provisioning service did not identify"
+    console.print(f"\n[bold]Approved by {escape(approver)}.[/bold]")
+    # Nobody can recognize an unnamed account, so it gets the same revoke hint as an unattended run.
+    if confirm_approver is None or result.owner_user_id is None:
+        console.print(f"If this is not your account, revoke this connection in {_REVOKE_LOCATION}.")
+        return
+    if not confirm_approver():
+        msg = (
+            "Credentials discarded; nothing was saved. "
+            f"The connection approved by {approver} is unusable; revoke it in {_REVOKE_LOCATION}."
+        )
+        raise ValueError(msg)
+
+
 def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, owner_user_id: str) -> None:
     """Fill owner placeholders after credentials are saved; a failure here must not lose the pairing."""
     try:
@@ -471,6 +578,48 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
         return
     if replaced:
         console.print(f"  Updated owner placeholder(s) in: {config_path}")
+
+
+def local_credentials_saved(runtime_paths: RuntimePaths) -> bool:
+    """Whether another process saved pairing credentials for this install since its runtime was resolved.
+
+    Only the two credential values are read, from the exported environment and the current `.env`.
+    An unreadable `.env` keeps the caller waiting because its writer may not have finished.
+    """
+    try:
+        env_file_values = dotenv_values(runtime_paths.env_path)
+    except (OSError, ValueError) as exc:
+        logger.debug(
+            "Could not read .env while waiting for pairing",
+            env_path=str(runtime_paths.env_path),
+            error=str(exc),
+        )
+        return False
+    return all(
+        (runtime_paths.process_env.get(name, env_file_values.get(name)) or "").strip()
+        for name in ("MINDROOM_LOCAL_CLIENT_ID", "MINDROOM_LOCAL_CLIENT_SECRET")
+    )
+
+
+def _is_hosted_homeserver(homeserver: str) -> bool:
+    hostname = urlparse(homeserver if "://" in homeserver else f"https://{homeserver}").hostname or ""
+    return hostname == _HOSTED_MATRIX_DOMAIN or hostname.endswith(f".{_HOSTED_MATRIX_DOMAIN}")
+
+
+def self_hosted_pairing_error(runtime_paths: RuntimePaths) -> str | None:
+    """Explain why pairing does not apply to a self-hosted homeserver with no provisioning service configured."""
+    if (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip():
+        return None
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths).strip()
+    if _is_hosted_homeserver(homeserver):
+        return None
+    return (
+        f"The Matrix homeserver is {homeserver} (MATRIX_HOMESERVER), not hosted {_HOSTED_MATRIX_DOMAIN}. "
+        f"Pairing is for hosted {_HOSTED_MATRIX_DOMAIN}; self-hosted servers register agents with "
+        "MATRIX_REGISTRATION_TOKEN or MATRIX_REGISTRATION_SHARED_SECRET instead. "
+        "For hosted defaults, run `mindroom config init --matrix-server mindroom.chat`; "
+        "to pair with your own provisioning service, pass --provisioning-url."
+    )
 
 
 def persist_local_provisioning_env(
