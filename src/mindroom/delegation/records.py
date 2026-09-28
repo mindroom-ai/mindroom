@@ -66,7 +66,7 @@ _MAX_INLINE_VALUE_BYTES = 64 * 1024
 _MAX_RUN_BYTES = 4 << 20
 _MAX_EVENT_LINE_BYTES = 4 << 20
 _MAX_EVENT_LOG_BYTES = 64 << 20
-_MAX_EVENTS = 16384
+_MAX_EVENTS = 65536
 # Other events stop this far short of the log cap, so the terminal event, four inline values at most, always fits.
 _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -848,7 +848,7 @@ def _write_transcript(
     ]
     with atomic_write_file_at(record_fd, "transcript.md") as transcript:
         transcript.write("\n".join(header).encode("utf-8"))
-        for event in _iter_events(handle, record_fd):
+        for index, event in enumerate(_iter_events(handle, record_fd)):
             section = [
                 f"### {event.get('sequence')}. {event.get('kind')}",
                 "",
@@ -859,6 +859,6 @@ def _write_transcript(
                 json.dumps(event.get("data"), ensure_ascii=False, sort_keys=True),
                 "```",
                 "",
-                "",
             ]
-            transcript.write("\n".join(section).encode("utf-8"))
+            separator = "\n" if index else ""
+            transcript.write((separator + "\n".join(section)).encode("utf-8"))
