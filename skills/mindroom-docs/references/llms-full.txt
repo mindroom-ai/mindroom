@@ -24799,10 +24799,12 @@ The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an 
 | Subscription state | Instance | Platform OpenRouter key | Data |
 |--------------------|----------|-------------------------|------|
 | `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
-| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, free tier, or account pending deletion | Stopped | Disabled | Kept until the teardown date |
 | Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
-| Entitled again while stopped | Started | Re-enabled | Kept |
+| Entitled again while stopped | Started, or re-provisioned when its key does not match the tier | Re-enabled, or replaced by the tier's key | Kept |
 | Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
+| Entitled on a different tier while running | Re-provisioned with the tier's resources | Replaced by the tier's key, or deleted when the tier has no included budget | Kept |
+| Entitled on a cheaper tier while stopped by the customer | Stays stopped | Deleted when larger than the tier includes | Kept |
 
 The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
 Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
@@ -24811,12 +24813,24 @@ Before stopping or resuming a Stripe-billed instance, and for every Stripe-bille
 A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
 A delayed creation event for a Stripe subscription older than the account's current one is ignored.
 Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+An instance's platform OpenRouter key must match its subscription tier's included budget (`included_ai_budget_usd` in `pricing-config.yaml`), so a plan change or a resubscription on another tier never hands back a key from a pricier tier.
+Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses to shrink a PVC; a downgrade from `pro` keeps its larger volumes.
+Checkout grants a plan's trial only to a Stripe customer who never had a trial, so cancelling and checking out again starts a paid subscription.
+The database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
 The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
 Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
 Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
 The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
+
+### Account Deletion
+
+A customer's deletion request (`POST /my/gdpr/request-deletion`) marks the account pending deletion, stops its instances with their platform OpenRouter keys disabled, and cancels every Stripe subscription of its customer that still bills.
+An account pending deletion never runs instances, whatever Stripe reports, so the nightly run keeps them stopped even while Stripe is unreachable.
+Cancelling the deletion (`POST /my/gdpr/cancel-deletion`) restores only the account; its instances restart once a subscription is entitled again, which for a cancelled Stripe subscription means a new checkout.
+After the 7-day grace period the nightly job cancels any remaining Stripe subscription and uninstalls every instance of the account (Helm release, PVCs, instance Secrets, and the platform OpenRouter key) before `hard_delete_account` deletes the account's rows.
+If a teardown or the hard delete fails, the account keeps its rows, the run is recorded as failed with the error, and the next run retries.
 
 ## Release Deployment
 
@@ -24861,7 +24875,8 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
 ```
 
 The script prints the API response and exits non-zero when the query fails.
-Migrations `002` through `004` are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
+Migrations `002` through `005` are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
+Migration `005` fails without changing anything while a subscription still has more than one instance row; resolve those rows first, because each maps to a live Helm release and OpenRouter key.
 Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
 
 ## Multi-Tenant Architecture
