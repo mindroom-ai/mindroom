@@ -5062,16 +5062,95 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
     assert captured_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})
 
 
+# Credentials and tenant settings in fields no secret-name heuristic recognizes; none may reach a runner.
+_LIVE_CONFIG_SECRETS = (
+    "sk-live-model-key",
+    "live-model-extra-kwarg-secret",
+    "live-mcp-env-secret",
+    "live-mcp-arg-secret",
+    "live-mcp-url-secret",
+    "live-mcp-header-secret",
+    "live-journal-dsn-secret",
+    "live-git-url-secret",
+    "live-private-git-url-secret",
+    "live-plugin-setting-secret",
+    "live-tool-override-secret",
+    "live-embedder-secret",
+    "live-agent-instructions",
+    "@live-owner:example.org",
+)
+
+
 def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
-    """Return a primary config whose `mind` agent and model key exist only in the live config."""
+    """Return a primary config whose `mind` agent and secrets exist only in the live config."""
     return Config.validate_with_runtime(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra", "api_key": "sk-live-model-key"}},
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-6-astra",
+                    "api_key": "sk-live-model-key",
+                    "extra_kwargs": {"aws_secret_access_key": "live-model-extra-kwarg-secret"},
+                },
+            },
             "router": {"model": "default"},
-            "agents": {"mind": {"display_name": "Mind", "memory_backend": "file", "tools": ["shell"]}},
+            "mcp_servers": {
+                "files": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["--api-key", "live-mcp-arg-secret"],
+                    "env": {"AWS_SECRET_ACCESS_KEY": "live-mcp-env-secret"},
+                },
+                "remote": {
+                    "transport": "streamable-http",
+                    "url": "https://user:live-mcp-url-secret@mcp.example.org/mcp",
+                    "headers": {"X-Upstream-Key": "live-mcp-header-secret"},
+                },
+            },
+            "event_journal": {
+                "backend": "postgres",
+                "database_url": "postgresql://mindroom:live-journal-dsn-secret@db/x",
+            },
+            "knowledge_bases": {
+                "docs": {
+                    "path": "./docs",
+                    "git": {"repo_url": "https://oauth2:live-git-url-secret@git.example.org/docs.git"},
+                },
+            },
+            "plugins": [
+                {"path": "./plugins/live", "enabled": False, "settings": {"key": "live-plugin-setting-secret"}},
+            ],
+            "memory": {
+                "backend": "mem0",
+                "embedder": {"provider": "openai", "config": {"api_key": "live-embedder-secret"}},
+            },
+            "administrators": ["@live-owner:example.org"],
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "memory_backend": "file",
+                    "instructions": ["live-agent-instructions"],
+                    "tools": ["shell", {"google_bigquery": {"credentials": "live-tool-override-secret"}}],
+                },
+                "vault": {
+                    "display_name": "Vault",
+                    "private": {
+                        "per": "user",
+                        "knowledge": {
+                            "path": "notes",
+                            "git": {"repo_url": "https://oauth2:live-private-git-url-secret@git.example.org/notes.git"},
+                        },
+                    },
+                },
+            },
         },
         runtime_paths,
     )
+
+
+def _assert_no_live_config_secrets(sent: object) -> None:
+    body = json.dumps(sent)
+    assert [secret for secret in _LIVE_CONFIG_SECRETS if secret in body] == []
 
 
 def _mind_tool_runtime_context(runtime_paths: RuntimePaths, config: Config) -> object:
@@ -5096,7 +5175,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     worker_backend: str,
     sends_snapshot: bool,
 ) -> None:
-    """Runners that mount only a seed config get the primary's live config, minus secrets, with each call."""
+    """Runners that mount only a seed config get only the live config fields they resolve with each call."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", worker_backend)
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8766")
     live_config = _live_primary_config(runtime_paths)
@@ -5120,11 +5199,17 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
         )
 
     assert (captured["json"]["config_snapshot"] is not None) is sends_snapshot
-    assert "sk-live-model-key" not in json.dumps(captured["json"])
+    _assert_no_live_config_secrets(captured["json"])
     if sends_snapshot:
-        snapshot = captured["json"]["config_snapshot"]
-        assert snapshot["agents"]["mind"]["tools"] == ["shell"]
-        assert snapshot["models"]["default"] == {"provider": "openai", "id": "gpt-6-astra"}
+        assert captured["json"]["config_snapshot"] == {
+            "agents": {
+                "mind": {"display_name": "Mind", "memory_backend": "file", "tools": ["shell", "google_bigquery"]},
+                "vault": {"display_name": "Vault", "private": {"per": "user", "knowledge": {"path": "notes"}}},
+            },
+            "plugins": [{"path": "./plugins/live", "enabled": False}],
+            "memory": {"backend": "mem0"},
+            "knowledge_bases": {"docs": {"path": "./docs"}},
+        }
 
 
 def _forward_proxy_to_seeded_runner(
@@ -5204,7 +5289,7 @@ async def test_static_runner_runs_shell_for_agent_added_after_seeding(
 
     assert isinstance(result, str)
     assert result.endswith("from-mind-workspace")
-    assert "sk-live-model-key" not in json.dumps(sent_payloads)
+    _assert_no_live_config_secrets(sent_payloads)
 
 
 def test_static_runner_saves_attachment_for_agent_added_after_seeding(
@@ -5230,7 +5315,7 @@ def test_static_runner_saves_attachment_for_agent_added_after_seeding(
     assert receipt is not None
     assert (workspace / "inputs" / "live.bin").read_bytes() == payload_bytes
     assert sent_payloads[0]["config_snapshot"] is not None
-    assert "sk-live-model-key" not in json.dumps(sent_payloads)
+    _assert_no_live_config_secrets(sent_payloads)
 
 
 def test_static_runner_views_file_for_agent_added_after_seeding(
@@ -5254,7 +5339,7 @@ def test_static_runner_views_file_for_agent_added_after_seeding(
     assert result.images is not None
     assert result.images[0].mime_type == "image/png"
     assert sent_payloads[0]["config_snapshot"] is not None
-    assert "sk-live-model-key" not in json.dumps(sent_payloads)
+    _assert_no_live_config_secrets(sent_payloads)
 
 
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
 
+from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.sensitivity import strip_sensitive_config_values
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
@@ -464,18 +464,18 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
 
 
 def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object] | None:
-    """Return the primary's live config, without secrets, for one runner or worker request.
+    """Return the live config fields runners resolve, for one runner or worker request.
 
     The static runner and Kubernetes workers only mount a seed config file, so agents added or
     edited after seeding exist only in the config the primary hot-reloads.  Docker workers read a
-    per-worker projection of the live config whose config-relative paths are rewritten for the
+    per-worker projection of the same fields whose config-relative paths are rewritten for the
     container, so they get no request snapshot.
     """
     if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
         return None
     return cast(
         "dict[str, object]",
-        strip_sensitive_config_values(to_json_compatible(runtime_config.authored_model_dump())),
+        to_json_compatible(worker_config_data(runtime_config.authored_model_dump())),
     )
 
 

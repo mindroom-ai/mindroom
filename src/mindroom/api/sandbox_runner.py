@@ -448,7 +448,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution after the lease has been resolved.
     ``execution_env`` is reserved for execution tools such as ``shell`` and
     sandboxed ``python`` that intentionally receive runtime env during execution.
-    ``config_snapshot`` is the primary's live config without secrets; when present
+    ``config_snapshot`` holds the live config fields runners resolve; when present
     it replaces the runner's startup config for this request.
     """
 

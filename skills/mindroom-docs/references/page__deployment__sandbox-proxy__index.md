@@ -36,8 +36,11 @@ MindRoom currently ships three worker backend shapes:
 ## Live config snapshots
 
 A runner's own config file holds only what it loaded at startup, and hosted deployments mount a seed config that never follows the live config the primary hot-reloads and the dashboard edits.
-With the `static_runner` and `kubernetes` backends, the primary therefore sends its live config with every execute, attachment-save, file-view, and background-script launch request.
-Before sending, it removes sensitive keys such as `api_key`, `password`, and names ending in `_token` or `_secret`, plus credential headers, with the same redaction the Docker worker projection applies.
+With the `static_runner` and `kubernetes` backends, the primary therefore sends the part of its live config that runners resolve with every execute, attachment-save, file-view, and background-script launch request.
+The snapshot is built by allowlist, because worker code runs in the process that holds it.
+It keeps each agent's display name, tool names, `include_default_tools`, `memory_backend`, `knowledge_bases`, `worker_scope`, `file_access`, `delegate_to`, and `private` scope, root, template, and knowledge path.
+It also keeps the `defaults` for `file_access`, `worker_scope`, `worker_grantable_credentials`, `tool_output_auto_save_threshold_bytes`, and tool names, plus `memory.backend`, knowledge base paths, and plugin paths.
+Everything else stays in the primary, including models, MCP servers, plugin settings, inline tool overrides, memory provider settings, Git sources, instructions, rooms, teams, and access policy.
 The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately and a stale startup config cannot widen an agent's settings.
 The runner rejects an invalid snapshot with HTTP 400 instead of falling back to its startup config.
 Requests without a snapshot, such as those from runtimes without a tool context, use the runner's startup config.
@@ -291,11 +294,9 @@ That most commonly means `shell`, `file`, and `python`, but other worker-safe to
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
-MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
-Control-plane-only sections that a worker never reads are cleared from that snapshot as well, including `teams`, `calls`, `room_models`, `bot_accounts`, `authorization`, and the Matrix room and space settings.
-Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
+The projected worker `config.yaml` holds only the allowlisted fields of a [live config snapshot](#live-config-snapshots), so credentials and control-plane sections never reach the container.
+Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent and its assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
-Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 Everything under that state root is writable by the code running inside the container, so MindRoom keeps each worker's lifecycle record in a control directory beside the worker roots that is never mounted into a container.
 Worker containers are addressed by a name derived from the worker key, and MindRoom only starts, stops, or removes a container that carries its own worker labels and worker-key environment.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
@@ -417,7 +418,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and removes sensitive config values plus auth headers from the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and writes only the allowlisted [live config snapshot](#live-config-snapshots) fields into the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
@@ -649,7 +650,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
-- [Live config snapshots](#live-config-snapshots) carry no sensitive config keys or credential headers, and runners accept them only on requests authenticated with the sandbox token.
+- [Live config snapshots](#live-config-snapshots) and Docker worker config projections carry only the allowlisted fields runners resolve, and runners accept snapshots only on requests authenticated with the sandbox token.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
   `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.

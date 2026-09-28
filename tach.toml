@@ -2832,6 +2832,10 @@ visibility = [
     "mindroom.turn_policy",
 ]
 
+[[modules]]
+path = "mindroom.config.worker_projection"
+depends_on = ["mindroom.config.models"]
+
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
@@ -4624,6 +4628,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
