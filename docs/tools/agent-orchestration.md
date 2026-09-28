@@ -287,8 +287,12 @@ After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is 
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
+`run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
 Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
+Because the workspace is writable by the child's worker, each record is capped: 4 MiB per event, 64 MiB and 65,536 events per event log, and 4 MiB for `run.json`.
+The event log cap was 256 MiB before; a child whose record reaches a cap fails instead of running on, so very long delegations that keep large tool results inline now stop sooner.
+A record already above these caps, such as one left in flight across the upgrade, is unreadable, so that delegation fails when it resumes.
 The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
 Completed task results include a reference to the child's record.
 
