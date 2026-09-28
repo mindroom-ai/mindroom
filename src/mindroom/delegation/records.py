@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -21,7 +22,6 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.path_confinement import (
     open_directory_within_root,
     open_regular_file_at,
-    open_regular_file_within_root,
     read_regular_file_within_root,
     write_file_within_root,
 )
@@ -57,15 +57,19 @@ type _DelegationEventKind = Literal[
 ]
 type _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
 type _DelegationStatus = _DelegationActiveStatus | DelegationTerminalStatus
+# Device, inode, size, and change time of the event log as the primary last left it.
+type _LogIdentity = tuple[int, int, int, int]
 
 _SCHEMA_VERSION = 1
 _DELEGATION_DIRECTORY = Path(".mindroom/delegations")
 _RECEIPT_DIRECTORY = Path(".mindroom/delegation_receipts")
 _MAX_INLINE_VALUE_BYTES = 64 * 1024
-# Every write folds the whole worker-writable record, so these caps bound what one planted record costs.
-# Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real records stay far below them.
+# The first use of a record in a process and each finish read the whole worker-writable record,
+# so these caps bound what one planted record costs.
+# Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real records stay far below them,
+# and a real event line carries at most five such values.
 _MAX_RUN_BYTES = 4 << 20
-_MAX_EVENT_LINE_BYTES = 4 << 20
+_MAX_EVENT_LINE_BYTES = 1 << 20
 _MAX_EVENT_LOG_BYTES = 64 << 20
 _MAX_EVENTS = 65536
 # Other events stop this far short of the log cap, so the terminal event, four inline values at most, always fits.
@@ -73,9 +77,17 @@ _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 _STATUSES = frozenset({"running", "paused", *_TERMINAL_STATUSES})
+# Records whose folded view stays in memory; a record pushed out folds its log again when next used.
+_MAX_CACHED_RECORDS = 256
 # Worker code can lock any file in the record directory, so writers of one record exclude each other in this process.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
-_RECORD_LOCKS_GUARD = threading.Lock()
+# Each record's view as the primary last wrote it, so a write never parses what worker code can plant in the log.
+_RECORD_STATES: OrderedDict[Path, _RecordState] = OrderedDict()
+_RECORDS_GUARD = threading.Lock()
+
+
+class DelegationRecordLimitError(ValueError):
+    """An event the record's size limits refuse before anything is written."""
 
 
 @dataclass(frozen=True)
@@ -271,6 +283,40 @@ class _DelegationRun:
         }
 
 
+@dataclass
+class _RecordState:
+    """The primary's view of one record as of its last write to the event log."""
+
+    run: _DelegationRun
+    log_identity: _LogIdentity | None = None
+    event_count: int = 0
+    last_sequence: int | None = None
+    event_ids: set[bytes] = field(default_factory=set)
+
+    def has_event(self, event_id: str) -> bool:
+        """Return whether a committed event carries this stable ID."""
+        return _event_id_digest(event_id) in self.event_ids
+
+    def observe(self, event: Mapping[str, object]) -> None:
+        """Account for one committed event in the view."""
+        _apply_event(self.run, event)
+        sequence = event.get("sequence")
+        event_id = event.get("event_id")
+        self.event_count += 1
+        self.last_sequence = sequence if type(sequence) is int else None
+        if isinstance(event_id, str):
+            self.event_ids.add(_event_id_digest(event_id))
+
+    def next_sequence(self, delegation_id: str) -> int:
+        """Return the sequence the next committed event takes."""
+        if self.event_count == 0:
+            return 1
+        if self.last_sequence is None:
+            msg = f"Delegation event sequence is malformed: {delegation_id}"
+            raise ValueError(msg)
+        return self.last_sequence + 1
+
+
 @dataclass(frozen=True)
 class DelegationRecordOwner:
     """Resolve scoped workspaces and durably maintain delegation audit exports."""
@@ -374,37 +420,38 @@ class DelegationRecordOwner:
                 ),
             )
             _write_run(record_fd, run)
-            event = _event_payload(
-                sequence=1,
-                timestamp=timestamp,
-                kind="delegation_started",
-                data={},
-                status="running",
-                event_id="delegation_started",
+            state = _RecordState(run)
+            _append_jsonl(
+                record_fd,
+                state,
+                _event_payload(
+                    sequence=1,
+                    timestamp=timestamp,
+                    kind="delegation_started",
+                    data={},
+                    status="running",
+                    event_id="delegation_started",
+                ),
             )
-            _append_jsonl(record_fd, event, committed_events=0)
-            run.event_count = 1
+            _cache_record_state(_record_key(handle), state)
             _write_record_views(handle, record_fd, run)
         return handle
 
     def _reopen(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         handle = self._resolve_handle(locator)
-        with _record_directory(handle) as record_fd:
-            run = _load_run(handle, record_fd)
-        _validate_run_identity(run, locator)
+        with _record_lock(handle), _record_directory(handle) as record_fd:
+            _record_state(handle, record_fd)
         return handle
 
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
         with _record_lock(handle), _record_directory(handle) as record_fd:
-            run = _load_run(handle, record_fd)
-            _validate_run_identity(run, handle.locator)
-            log = _fold_event_log(handle, record_fd, run, event_id=event.event_id)
-            if log.contains_event_id:
-                _write_record_views(handle, record_fd, run)
+            state = _record_state(handle, record_fd)
+            if event.event_id is not None and state.has_event(event.event_id):
+                _write_record_views(handle, record_fd, state.run)
                 return
-            _ensure_active(run)
-            sequence = _next_sequence(handle, log)
+            _ensure_active(state.run)
+            sequence = state.next_sequence(handle.locator.delegation_id)
             timestamp = event.timestamp or _utc_timestamp()
             redacted_data = _redacted_event_data(
                 record_fd,
@@ -419,12 +466,8 @@ class DelegationRecordOwner:
                 status=event.status,
                 event_id=event.event_id,
             )
-            _append_jsonl(record_fd, payload, committed_events=log.event_count)
-            run.event_count = sequence
-            run.updated_at = timestamp
-            if event.status is not None:
-                run.status = event.status
-            _write_record_views(handle, record_fd, run)
+            _append_jsonl(record_fd, state, payload)
+            _write_record_views(handle, record_fd, state.run)
 
     def _finish(
         self,
@@ -440,42 +483,32 @@ class DelegationRecordOwner:
             raise ValueError(msg)
         handle = self._validated_handle(handle)
         with _record_lock(handle), _record_directory(handle) as record_fd:
-            run = _load_run(handle, record_fd)
-            _validate_run_identity(run, handle.locator)
-            log = _fold_event_log(handle, record_fd, run)
-            if run.status == status:
-                _write_record_views(handle, record_fd, run)
-                return
-            _ensure_active(run)
-            sequence = _next_sequence(handle, log)
-            timestamp = _utc_timestamp()
-            terminal_data = _redacted_event_data(
-                record_fd,
-                sequence=sequence,
-                data={
-                    "status": status,
-                    "output": output,
-                    "error": error,
-                    "usage": usage,
-                },
-            )
-            event = _event_payload(
-                sequence=sequence,
-                timestamp=timestamp,
-                kind="delegation_finished",
-                data=terminal_data,
-                status=None,
-                event_id="delegation_finished",
-            )
-            _append_jsonl(record_fd, event, committed_events=log.event_count, terminal=True)
-            run.status = status
-            run.updated_at = timestamp
-            run.finished_at = timestamp
-            run.output = terminal_data["output"]
-            run.error = terminal_data["error"]
-            run.usage = terminal_data["usage"]
-            run.event_count = sequence
-            _write_record_views(handle, record_fd, run)
+            state = _record_state(handle, record_fd)
+            if state.run.status != status:
+                _ensure_active(state.run)
+                sequence = state.next_sequence(handle.locator.delegation_id)
+                terminal_data = _redacted_event_data(
+                    record_fd,
+                    sequence=sequence,
+                    data={
+                        "status": status,
+                        "output": output,
+                        "error": error,
+                        "usage": usage,
+                    },
+                )
+                event = _event_payload(
+                    sequence=sequence,
+                    timestamp=_utc_timestamp(),
+                    kind="delegation_finished",
+                    data=terminal_data,
+                    status=None,
+                    event_id="delegation_finished",
+                )
+                _append_jsonl(record_fd, state, event, terminal=True)
+            _write_record_views(handle, record_fd, state.run)
+            # Rendering reads the whole log again, so only a finish, or a replayed one repairing it, renders it.
+            _write_transcript(handle, record_fd, state.run)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
@@ -590,17 +623,71 @@ def _receipt_relative_path(locator: DelegationRecordLocator) -> Path:
     return _RECEIPT_DIRECTORY / _validated_date(locator.started_date) / f"{_validated_id(locator.delegation_id)}.json"
 
 
+def _record_key(handle: DelegationRecordHandle) -> Path:
+    return handle.child_workspace / handle.scoped_path
+
+
 @contextmanager
 def _record_lock(handle: DelegationRecordHandle) -> Iterator[None]:
     """Serialize the writers of one record without taking a lock worker code could hold."""
-    record_path = handle.child_workspace / handle.scoped_path
-    with _RECORD_LOCKS_GUARD:
+    record_path = _record_key(handle)
+    with _RECORDS_GUARD:
         lock = _RECORD_LOCKS.get(record_path)
         if lock is None:
             lock = threading.Lock()
             _RECORD_LOCKS[record_path] = lock
     with lock:
         yield
+
+
+def _cache_record_state(key: Path, state: _RecordState) -> None:
+    with _RECORDS_GUARD:
+        _RECORD_STATES[key] = state
+        _RECORD_STATES.move_to_end(key)
+        while len(_RECORD_STATES) > _MAX_CACHED_RECORDS:
+            _RECORD_STATES.popitem(last=False)
+
+
+def _cached_record_state(key: Path) -> _RecordState | None:
+    with _RECORDS_GUARD:
+        state = _RECORD_STATES.get(key)
+        if state is not None:
+            _RECORD_STATES.move_to_end(key)
+        return state
+
+
+def _record_state(handle: DelegationRecordHandle, record_fd: int) -> _RecordState:
+    """Return the record's view under its lock, reading the log only when this process holds no view of it.
+
+    Only the primary writes the log, so a log whose identity differs from the one the
+    primary last left was changed by worker code and is refused without being read.
+    """
+    key = _record_key(handle)
+    state = _cached_record_state(key)
+    if state is None:
+        run = _load_run(handle, record_fd)
+        _validate_run_identity(run, handle.locator)
+        state = _fold_record(handle, record_fd, run)
+        _cache_record_state(key, state)
+        return state
+    msg = f"Delegation event log was changed outside the primary: {handle.locator.delegation_id}"
+    try:
+        identity = _log_identity(os.stat("events.jsonl", dir_fd=record_fd, follow_symlinks=False))
+    except OSError as exc:
+        raise ValueError(msg) from exc
+    if identity != state.log_identity:
+        raise ValueError(msg)
+    _validate_run_identity(state.run, handle.locator)
+    return state
+
+
+def _log_identity(status: os.stat_result) -> _LogIdentity:
+    return (status.st_dev, status.st_ino, status.st_size, status.st_ctime_ns)
+
+
+def _event_id_digest(event_id: str) -> bytes:
+    # Fixed-size digests keep a planted log's long IDs from growing the cached view.
+    return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
 @contextmanager
@@ -621,8 +708,8 @@ def _record_entry_exists(record_fd: int, filename: str) -> bool:
 
 
 def _json_bytes(payload: object) -> bytes:
-    # Compact, because indenting deeply nested data a worker planted would multiply its size.
-    return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    # Compact, because indenting deeply nested data a worker planted would multiply its size by its depth.
+    return (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
 
 
 def _string_field(run: Mapping[str, object], name: str) -> str:
@@ -670,21 +757,22 @@ def _write_run(record_fd: int, run: _DelegationRun) -> None:
 
 def _append_jsonl(
     record_fd: int,
+    state: _RecordState,
     payload: Mapping[str, object],
     *,
-    committed_events: int,
     terminal: bool = False,
 ) -> None:
+    """Commit one event and advance the record's view to the log this append left."""
     line = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     log_limit = _MAX_EVENT_LOG_BYTES if terminal else _MAX_EVENT_LOG_BYTES - _FINISH_EVENT_HEADROOM_BYTES
     event_limit = _MAX_EVENTS if terminal else _MAX_EVENTS - 1
     descriptor = open_regular_file_at(record_fd, "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     try:
         committed = os.fstat(descriptor).st_size
-        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > log_limit or committed_events >= event_limit:
+        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > log_limit or state.event_count >= event_limit:
             # Refused before writing, so the log never holds what its readers refuse.
             msg = "Delegation event exceeds its size limit"
-            raise ValueError(msg)
+            raise DelegationRecordLimitError(msg)
         try:
             remaining = memoryview(line)
             while remaining:
@@ -694,8 +782,12 @@ def _append_jsonl(
             # Like the rewrite this append replaces, a failed append leaves only committed events.
             os.ftruncate(descriptor, committed)
             raise
+        finally:
+            # Either way the view must match the log this descriptor left behind.
+            state.log_identity = _log_identity(os.fstat(descriptor))
     finally:
         os.close(descriptor)
+    state.observe(payload)
 
 
 def _load_run(handle: DelegationRecordHandle, record_fd: int) -> _DelegationRun:
@@ -724,41 +816,20 @@ def _ensure_active(run: _DelegationRun) -> None:
         raise ValueError(msg)
 
 
-@dataclass
-class _EventLogSummary:
-    """What one pass over the committed event log found besides the run view it folded."""
-
-    event_count: int = 0
-    last_sequence: int | None = None
-    contains_event_id: bool = False
-
-
-def _fold_event_log(
-    handle: DelegationRecordHandle,
-    record_fd: int,
-    run: _DelegationRun,
-    *,
-    event_id: str | None = None,
-) -> _EventLogSummary:
-    """Fold append-first durable events into the rebuildable run view, one event at a time."""
-    summary = _EventLogSummary()
-    for event in _iter_events(handle, record_fd):
-        _apply_event(run, event)
-        sequence = event.get("sequence")
-        summary.event_count += 1
-        summary.last_sequence = sequence if type(sequence) is int else None
-        if event_id is not None and event.get("event_id") == event_id:
-            summary.contains_event_id = True
-    return summary
-
-
-def _next_sequence(handle: DelegationRecordHandle, log: _EventLogSummary) -> int:
-    if log.event_count == 0:
-        return 1
-    if log.last_sequence is None:
-        msg = f"Delegation event sequence is malformed: {handle.locator.delegation_id}"
-        raise ValueError(msg)
-    return log.last_sequence + 1
+def _fold_record(handle: DelegationRecordHandle, record_fd: int, run: _DelegationRun) -> _RecordState:
+    """Fold the committed log into the record's view, one event at a time."""
+    state = _RecordState(run)
+    descriptor = _open_event_log(handle, record_fd)
+    try:
+        state.log_identity = _log_identity(os.fstat(descriptor))
+        for event in _iter_events(handle, descriptor):
+            state.observe(event)
+        if _log_identity(os.fstat(descriptor)) != state.log_identity:
+            msg = f"Delegation event log changed while it was read: {handle.locator.delegation_id}"
+            raise ValueError(msg)
+    finally:
+        os.close(descriptor)
+    return state
 
 
 def _read_event_values(descriptor: int) -> Iterator[object]:
@@ -778,17 +849,24 @@ def _read_event_values(descriptor: int) -> Iterator[object]:
             yield json.loads(line)
 
 
-def _iter_event_values(handle: DelegationRecordHandle, record_fd: int) -> Iterator[object]:
+def _open_event_log(handle: DelegationRecordHandle, record_fd: int) -> int:
     try:
-        with open_regular_file_within_root(record_fd, "events.jsonl") as descriptor:
-            yield from _read_event_values(descriptor)
+        return open_regular_file_at(record_fd, "events.jsonl")
+    except (OSError, ValueError) as exc:
+        msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
+        raise ValueError(msg) from exc
+
+
+def _iter_event_values(handle: DelegationRecordHandle, descriptor: int) -> Iterator[object]:
+    try:
+        yield from _read_event_values(descriptor)
     except (OSError, RecursionError, ValueError) as exc:
         msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
 
 
-def _iter_events(handle: DelegationRecordHandle, record_fd: int) -> Iterator[dict[str, object]]:
-    for event in _iter_event_values(handle, record_fd):
+def _iter_events(handle: DelegationRecordHandle, descriptor: int) -> Iterator[dict[str, object]]:
+    for event in _iter_event_values(handle, descriptor):
         if not isinstance(event, dict):
             msg = f"Delegation event stream is malformed: {handle.locator.delegation_id}"
             raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
@@ -847,13 +925,8 @@ def _write_record_views(
     record_fd: int,
     run: _DelegationRun,
 ) -> None:
-    """Rewrite the run summary and the caller's receipt, and render the transcript once the run is terminal.
-
-    Rendering reads the whole log again, so a running record keeps its events in events.jsonl only.
-    """
+    """Rewrite the run summary and the caller's receipt."""
     _write_run(record_fd, run)
-    if run.status in _TERMINAL_STATUSES:
-        _write_transcript(handle, record_fd, run)
     _write_receipt(handle, run)
 
 
@@ -938,19 +1011,23 @@ def _write_transcript(
         "",
         "",
     ]
-    with atomic_write_file_at(record_fd, "transcript.md") as transcript:
-        transcript.write("\n".join(header).encode("utf-8"))
-        for index, event in enumerate(_iter_events(handle, record_fd)):
-            section = [
-                f"### {event.get('sequence')}. {event.get('kind')}",
-                "",
-                f"Timestamp: {event.get('timestamp')}",
-                "",
-                "```json",
-                # Compact, because indenting deeply nested data a planted line holds would multiply its size.
-                json.dumps(event.get("data"), ensure_ascii=False, sort_keys=True),
-                "```",
-                "",
-            ]
-            separator = "\n" if index else ""
-            transcript.write((separator + "\n".join(section)).encode("utf-8"))
+    descriptor = _open_event_log(handle, record_fd)
+    try:
+        with atomic_write_file_at(record_fd, "transcript.md") as transcript:
+            transcript.write("\n".join(header).encode("utf-8"))
+            for index, event in enumerate(_iter_events(handle, descriptor)):
+                section = [
+                    f"### {event.get('sequence')}. {event.get('kind')}",
+                    "",
+                    f"Timestamp: {event.get('timestamp')}",
+                    "",
+                    "```json",
+                    # Compact for the same reason as run.json.
+                    json.dumps(event.get("data"), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                    "```",
+                    "",
+                ]
+                separator = "\n" if index else ""
+                transcript.write((separator + "\n".join(section)).encode("utf-8"))
+    finally:
+        os.close(descriptor)
