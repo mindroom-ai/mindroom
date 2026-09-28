@@ -74,7 +74,8 @@ class PairCompleteResult:
     namespace: str
     owner_user_id: str | None = None
     namespace_invalid: bool = False
-    owner_user_id_invalid: bool = False
+    # The owner the service named when it is not a current-grammar Matrix user ID; it is shown, never saved.
+    rejected_owner_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,9 +145,10 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
     """Read credentials from a connected poll response."""
     raw_owner_user_id = data.get("owner_user_id")
     parsed_owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
-    owner_user_id_invalid = (
-        isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
-    )
+    rejected_owner_user_id = None
+    if parsed_owner_user_id is None and raw_owner_user_id is not None:
+        named_owner = raw_owner_user_id.strip() if isinstance(raw_owner_user_id, str) else str(raw_owner_user_id)
+        rejected_owner_user_id = named_owner or None
     client_id = _required_client_credential(data, "client_id")
     raw_namespace = data.get("namespace")
     parsed_namespace = _parse_namespace(raw_namespace)
@@ -160,7 +162,7 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
         namespace=parsed_namespace,
         owner_user_id=parsed_owner_user_id,
         namespace_invalid=namespace_invalid,
-        owner_user_id_invalid=owner_user_id_invalid,
+        rejected_owner_user_id=rejected_owner_user_id,
     )
 
 
@@ -504,7 +506,7 @@ def pair_local_install(
     if result is None:
         console.print("This machine was paired by another MindRoom process; continuing.")
         return None
-    if result.owner_user_id_invalid:
+    if result.rejected_owner_user_id is not None:
         console.print(
             "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
         )
@@ -550,10 +552,15 @@ def _confirm_approver_or_raise(
 
     A pair code or link can be approved by whoever sees it, so the approving account is the one agents will trust.
     """
-    approver = result.owner_user_id or "an account the provisioning service did not identify"
-    console.print(f"\n[bold]Approved by {escape(approver)}.[/bold]")
+    approver = result.owner_user_id
+    description = approver or "an account the provisioning service did not identify"
+    if result.rejected_owner_user_id is not None:
+        # A named account stays named even when it cannot be saved; repr keeps control characters visible.
+        approver = repr(result.rejected_owner_user_id)
+        description = f"{approver}, which is not a valid Matrix user ID"
+    console.print(f"\n[bold]Approved by {escape(description)}.[/bold]")
     # Nobody can recognize an unnamed account, so it gets the same revoke hint as an unattended run.
-    if confirm_approver is None or result.owner_user_id is None:
+    if confirm_approver is None or approver is None:
         console.print(f"If this is not your account, revoke this connection in {_LOCAL_MINDROOM_SETTINGS}.")
         return
     if not confirm_approver():

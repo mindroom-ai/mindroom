@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 
 from mindroom import constants
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 console = Console()
+# Warnings go to stderr so `config init --print` output stays valid YAML.
+_err_console = Console(stderr=True)
 
 config_app = typer.Typer(
     name="config",
@@ -141,11 +144,19 @@ _FIRST_RUN_PROVIDER_STEPS: dict[_ProviderPreset, str] = {
 
 
 def _config_init_owner_user_id(config_path: Path) -> str | None:
-    """Return the paired owner MXID available to config init, if one was persisted."""
+    """Return the paired owner MXID available to config init, warning when a persisted one cannot be used."""
     from mindroom.cli.owner import parse_owner_matrix_user_id  # noqa: PLC0415
 
     runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-    return parse_owner_matrix_user_id(runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV))
+    raw_owner_user_id = (runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV) or "").strip()
+    owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
+    if raw_owner_user_id and owner_user_id is None:
+        _err_console.print(
+            f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(str(runtime_paths.env_path))} "
+            f"is not a valid Matrix user ID ({escape(repr(raw_owner_user_id))}), "
+            "so the owner placeholders in config.yaml were left for you to replace.",
+        )
+    return owner_user_id
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:

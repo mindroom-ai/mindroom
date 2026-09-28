@@ -763,6 +763,35 @@ class TestConfigInit:
         assert config["room_defaults"]["invite_users"] == ["@alice:mindroom.chat"]
         assert config["room_defaults"]["admins"] == ["@alice:mindroom.chat"]
 
+    def test_init_mindroom_chat_warns_about_a_saved_owner_it_cannot_use(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A saved owner outside the current Matrix grammar is reported, not silently dropped."""
+        target = tmp_path / "config.yaml"
+        (tmp_path / ".env").write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        output = normalize_console_output(result.output)
+        assert f"{OWNER_MATRIX_USER_ID_ENV} in" in output
+        assert "is not a valid Matrix user ID ('@Alice:selfhosted.example')" in output
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
+
     def test_init_mindroom_chat_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex config should use Codex defaults and hosted Matrix settings."""
         target = tmp_path / "config.yaml"

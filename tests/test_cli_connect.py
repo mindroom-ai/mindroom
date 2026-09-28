@@ -312,7 +312,7 @@ def test_run_device_pairing_flags_malformed_owner_user_id() -> None:
     )
 
     assert result.owner_user_id is None
-    assert result.owner_user_id_invalid is True
+    assert result.rejected_owner_user_id == "alice"
 
 
 def _pair_once(responses: list[httpx.Response]) -> cli_connect.PairCompleteResult | None:
@@ -346,7 +346,7 @@ def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path:
     )
     assert result is not None
     assert result.owner_user_id is None
-    assert result.owner_user_id_invalid is True
+    assert result.rejected_owner_user_id == owner_user_id
 
     config_path = tmp_path / "config.yaml"
     original = f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
@@ -1073,6 +1073,55 @@ def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_u
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "secret-123" not in out.getvalue()
     assert not (tmp_path / ".env").exists()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("owner_user_id", "shown"),
+    [("@Alice:selfhosted.example", "'@Alice:selfhosted.example'"), (42, "'42'")],
+)
+def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
+    tmp_path: Path,
+    owner_user_id: object,
+    shown: str,
+) -> None:
+    """A named approver outside the Matrix grammar is shown and confirmed like any other, never treated as unnamed."""
+    runtime_paths, config_path = _approval_install(tmp_path)
+    out = io.StringIO()
+    connected = {**_CONNECTED, "owner_user_id": owner_user_id}
+    asked: list[bool] = []
+
+    def _decline() -> bool:
+        asked.append(True)
+        return False
+
+    with pytest.raises(ValueError, match=rf"approved by {shown} is unusable"):
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=200),
+            provisioning_url="https://provisioning.example",
+            post_request=_fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=connected)], []),
+            sleep=lambda _seconds: None,
+            confirm_approver=_decline,
+        )
+
+    assert asked == [True]
+    assert f"Approved by {shown}, which is not a valid Matrix user ID." in out.getvalue()
+    assert not (tmp_path / ".env").exists()
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=io.StringIO(), width=200),
+        provisioning_url="https://provisioning.example",
+        post_request=_fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=connected)], []),
+        sleep=lambda _seconds: None,
+        confirm_approver=lambda: True,
+    )
+
+    assert result is not None
+    env_content = (tmp_path / ".env").read_text()
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+    assert OWNER_MATRIX_USER_ID_ENV not in env_content
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
 
 
