@@ -289,3 +289,26 @@ def test_start_refuses_bridges_with_the_legacy_open_permission_map(
     assert f"@admin:{domain}: admin" in output
     assert f"{domain}: user" in output
     assert "--admin" in output
+
+
+def test_unrestrictable_bridge_file_prints_the_exact_fix(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge file the operator cannot chmod, such as one the container owns, gets the command that can."""
+    config_file = tmp_path / "data" / "config.yaml"
+    config_file.parent.mkdir()
+    config_file.write_text("bridge: {}\n")
+    bridge = bridge_manager.BridgeConfig(bridge_type="telegram", instance_name="alpha", port=29317, data_dir=str(tmp_path))
+
+    def _refuse_chmod(*_args: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(bridge_manager.Path, "chmod", _refuse_chmod)
+
+    bridge_manager._protect_bridge_secret_files(bridge)
+
+    output = bridge_manager.console.export_text()
+    assert f"sudo chmod 600 {shlex.quote(str(config_file))}" in output
+    assert "registration.yaml" not in output

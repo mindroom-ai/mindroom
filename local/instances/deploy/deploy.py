@@ -213,11 +213,28 @@ def _write_private_file(path: Path, content: str) -> None:
         f.write(content)
 
 
+def _restrict_to_container_user(path: Path) -> None:
+    """Give a secret-bearing file to the container user and make it readable by nobody else.
+
+    The owner changes first, so a file this process cannot hand over stays readable by its container.
+    """
+    try:
+        os.chown(path, CONTAINER_UID, CONTAINER_GID)
+        path.chmod(0o600)
+    except OSError as e:
+        quoted = shlex.quote(str(path))
+        console.print(f"[yellow]Warning:[/yellow] Could not restrict {path} to UID {CONTAINER_UID}: {e}")
+        console.print(
+            f"  Run: sudo chown {CONTAINER_UID}:{CONTAINER_GID} {quoted} && sudo chmod 600 {quoted}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
+
 def _protect_synapse_config(config_path: Path) -> None:
     """Keep homeserver.yaml, which holds datastore passwords and the macaroon key, readable only by Synapse's user."""
-    with contextlib.suppress(OSError):
-        config_path.chmod(0o600)
-        os.chown(config_path, CONTAINER_UID, CONTAINER_GID)
+    _restrict_to_container_user(config_path)
 
 
 def _prepare_matrix_config(
@@ -902,9 +919,7 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
         target_file = target_dir / cred_file.name
         if not target_file.exists():
             shutil.copy2(cred_file, target_file)
-        with contextlib.suppress(OSError):
-            target_file.chmod(0o600)
-            os.chown(target_file, CONTAINER_UID, CONTAINER_GID)
+        _restrict_to_container_user(target_file)
 
 
 def _copy_config_to_instance(instance: Instance) -> None:

@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -201,9 +202,14 @@ def _refuse_legacy_open_permissions(bridges: list[BridgeConfig]) -> None:
 def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
     """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
     for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
-        # A non-root operator cannot chmod files the bridge container already owns.
-        with contextlib.suppress(OSError):
+        if not path.exists():
+            continue
+        try:
             path.chmod(0o600)
+        except OSError as e:
+            # A non-root operator cannot chmod files the bridge container already owns.
+            console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
+            console.print(f"  Run: sudo chmod 600 {shlex.quote(str(path))}", markup=False, highlight=False, soft_wrap=True)
 
 
 def load_instances() -> dict[str, Any]:
