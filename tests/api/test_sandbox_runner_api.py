@@ -2011,23 +2011,26 @@ def test_subprocess_worker_encodes_browser_media_results(
 
 
 def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() -> None:
-    """Built-in tools should receive required effective policy without unrelated agent definitions."""
+    """Built-in tools should receive required effective policy without agents, MCP servers, or plugin settings."""
     config = Config.model_validate(
         {
             "agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)},
             "defaults": {"worker_grantable_credentials": ["github_private"]},
+            "plugins": [{"path": "./plugins/demo", "settings": {"key": "plugin-setting-secret"}}],
+            "mcp_servers": {
+                "files": {"transport": "stdio", "command": "npx", "env": {"AWS_SECRET_ACCESS_KEY": "mcp-secret"}},
+            },
         },
     )
 
-    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "calculator"))
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "python"))
 
     assert payload == {
-        "plugins": [],
+        "plugins": [{"path": "./plugins/demo", "enabled": True}],
         "defaults": {
             "worker_grantable_credentials": ["github_private"],
             "tool_output_auto_save_threshold_bytes": 51200,
         },
-        "mcp_servers": {},
     }
 
 
