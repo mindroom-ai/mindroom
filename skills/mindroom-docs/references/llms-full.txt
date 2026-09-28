@@ -21534,8 +21534,9 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
-The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths; models, MCP servers, plugin settings, inline tool overrides, and every other section stay in the primary.
-A static runner or Kubernetes worker also reads the seed config file its deployment mounts at startup, so that seed must not hold secrets either.
+Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, or a ConfigMap holding it.
+The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
+Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
 Which workspaces a worker mounts follows its scope.
@@ -23438,19 +23439,22 @@ MindRoom currently ships three worker backend shapes:
 
 ## Live config snapshots
 
-A runner's own config file holds only what it loaded at startup, and hosted deployments mount a seed config that never follows the live config the primary hot-reloads and the dashboard edits.
-With the `static_runner` and `kubernetes` backends, the primary therefore sends the part of its live config that runners resolve with every execute, attachment-save, file-view, and background-script launch request.
-The snapshot is built by allowlist, because worker code runs in the process that holds it.
+Worker code runs in the runner process, so a runner never receives the primary's config file, the directory around it, its `.env`, or a ConfigMap holding it.
+The runtime and instance charts mount none of them into the `static_runner` sidecar, and the Kubernetes worker manager mounts none of them into dedicated workers.
+Runners keep the primary's config path in `MINDROOM_CONFIG_PATH` only so config-relative paths resolve the same way; nothing is mounted there.
+With the `static_runner` and `kubernetes` backends, the primary instead sends the part of its live config that runners resolve with every execute, attachment-save, file-view, and background-script launch request.
+The snapshot is built by allowlist.
 It keeps each agent's display name, tool names, `include_default_tools`, `memory_backend`, `knowledge_bases`, `worker_scope`, `file_access`, `delegate_to`, and `private` scope, root, template, and knowledge path.
-It also keeps the `defaults` for `file_access`, `worker_scope`, `worker_grantable_credentials`, `tool_output_auto_save_threshold_bytes`, and tool names, plus `memory.backend`, knowledge base paths, and plugin paths.
-Everything else stays in the primary, including models, MCP servers, plugin settings, inline tool overrides, memory provider settings, Git sources, instructions, rooms, teams, and access policy.
-The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately and a stale startup config cannot widen an agent's settings.
-The runner rejects an invalid snapshot with HTTP 400 instead of falling back to its startup config.
-Requests without a snapshot, such as those from runtimes without a tool context, use the runner's startup config.
-Config-relative paths in the snapshot, such as knowledge base and plugin paths, still resolve against the runner's own config directory, and the runner skips plugins it cannot find there.
+It also keeps the `defaults` for `file_access`, `worker_scope`, `worker_grantable_credentials`, `tool_output_auto_save_threshold_bytes`, and tool names, plus `memory.backend`, knowledge base paths, and plugin paths and enabled flags.
+Everything else stays in the primary, including models, MCP servers, plugin settings, memory provider settings, Git sources, instructions, rooms, teams, access policy, and the inline overrides of every tool other than the one being called.
+A worker-routed call still carries the called tool's own inline overrides, and saved tool settings reach the runner as [credential leases](#credential-leases).
+The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately.
+The runner rejects an invalid snapshot with HTTP 400 instead of falling back to another config.
+Requests without a snapshot, such as those from runtimes without a tool context, run under the config the runner loaded at startup from its own `MINDROOM_CONFIG_PATH`; the charts mount nothing there, so that is an empty config or the example `config.yaml` bundled in the image.
+The runner registers plugin tools from the snapshot's plugin paths and skips plugins it cannot find, so plugin code must be present in the runner's filesystem.
+Because the charts mount no config directory, plugin directories that sit beside the primary's config are not visible to the `static_runner` sidecar or Kubernetes workers; install such plugins as Python packages in the runner image instead.
 Private `template_dir` paths belong to the primary, which validates them and seeds requester workspaces from them, so runners skip templates they cannot find.
-Plugin tool registration still uses the runner's startup config, so proxied plugin tools still need that config mounted into the runner.
-Docker workers get no request snapshot; they read a per-worker projection of the live config whose config-relative paths are rewritten for the container, as described in [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
+Docker workers get no request snapshot; they read a per-worker projection with the same allowlisted fields, whose config-relative plugin and knowledge paths are copied into the projection, as described in [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
 
 ## Where Agent Data Lives
 
@@ -23561,12 +23565,10 @@ The sidecar gets:
 
 - Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
 - The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
-- Read-only access to config for plugin tool registration.
-  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
 - The sandbox proxy token that authenticates requests from the primary runtime.
 
-The hosted instance chart mounts only the seed ConfigMap into the sidecar, not the live config that the primary hot-reloads and the dashboard edits.
-The sidecar resolves agents and their settings from the [live config snapshot](#live-config-snapshots) that the primary sends with each request, so agents added or changed after the pod started work immediately.
+The sidecar gets no config: neither the chart's config ConfigMap, nor a file-sourced config or the storage directory holding it.
+It resolves agents and their settings from the [live config snapshot](#live-config-snapshots) that the primary sends with each request, so agents added or changed after the pod started work immediately.
 
 The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
 It never receives the credentials-encryption key.
@@ -23634,7 +23636,8 @@ Upgrading from a release whose workers mounted whole agent state roots stops tho
 If any cannot be stopped, startup fails and the primary restarts until none remain.
 Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](https://docs.mindroom.chat/architecture/migrations/#workspace-only-worker-mounts) describes.
 
-Dedicated Kubernetes workers, including background-script workers, also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
+Dedicated Kubernetes workers, including background-script workers, mount no config and resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request.
+Assigned knowledge that sits beside a file-sourced config reaches a worker only through its own read-only knowledge mount.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
@@ -23675,20 +23678,9 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP]
-> If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them:
-> ```bash
-> docker run -d \
->   --name mindroom-sandbox-runner \
->   -p 127.0.0.1:8766:8766 \
->   -v ./config.yaml:/app/config.yaml:ro \
->   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
->   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
->   -e MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token> \
->   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
->   ghcr.io/mindroom-ai/mindroom:latest \
->   /app/run-sandbox-runner.sh
-> ```
+The runner container needs no config file: the primary sends the fields it resolves with every request.
+Do not mount your `config.yaml` or its `.env` into the runner container, because tool code there can read everything the container can.
+Proxied plugin tools register from the snapshot's plugin paths, so install their code in the runner image or mount only the plugin directory where the runner resolves the snapshot's plugin entry.
 
 ### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
 
@@ -24054,7 +24046,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - [Live config snapshots](#live-config-snapshots) and Docker worker config projections carry only the allowlisted fields runners resolve, and runners accept snapshots only on requests authenticated with the sandbox token.
-- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories, never the primary's config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
   `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
   `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces of `private.per: user` agents, since it shares one runtime across those agents, and never mounts agents on other scopes.
@@ -24581,7 +24573,7 @@ This keeps the deployment simple, but all proxied tool calls share the same runn
 The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
 It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
 The primary leases each proxied tool's saved settings to the runner per call.
-The runner's own config file is only the seed the pod started with, so each call also carries the primary's [live config snapshot](https://docs.mindroom.chat/deployment/sandbox-proxy/#live-config-snapshots), limited to the fields runners resolve, and the runner resolves the requesting agent and its settings from it.
+The runner mounts no config, so each call carries the primary's [live config snapshot](https://docs.mindroom.chat/deployment/sandbox-proxy/#live-config-snapshots), limited to the fields runners resolve, and the runner resolves the requesting agent and its settings from it.
 Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
 When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
 See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
