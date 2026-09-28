@@ -105,11 +105,7 @@ def _get_service_environment() -> dict[str, str]:
         key, separator, raw_assignments = line.partition("=")
         if key.strip() != "Environment" or not separator:
             continue
-        try:
-            assignments = shlex.split(raw_assignments)
-        except ValueError:
-            continue
-        for assignment in assignments:
+        for assignment in shlex.split(raw_assignments):
             name, separator, value = assignment.partition("=")
             if separator:
                 environment[name] = value.replace("%%", "%")

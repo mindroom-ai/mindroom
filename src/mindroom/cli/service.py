@@ -174,21 +174,20 @@ def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
     """Whether the installed service's runtime still waits for this machine to be paired, so its API is not up yet.
 
     The service runs with the environment saved in its unit (config and storage paths), not with the caller's.
-    Only a unit without a saved absolute config path falls back to the caller's runtime.
     """
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
-    config_path = Path(service_environment.get("MINDROOM_CONFIG_PATH", ""))
-    runtime_paths = (
-        resolve_primary_runtime_paths(config_path=config_path, process_env=dict(service_environment))
-        if config_path.is_absolute()
-        else resolve_primary_runtime_paths()
-    )
+    config_path = service_environment.get("MINDROOM_CONFIG_PATH")
+    if config_path is None:
+        # The unit or plist disappeared after the status check.
+        return False
     try:
-        return local_pairing_required(runtime_paths)
+        return local_pairing_required(
+            resolve_primary_runtime_paths(config_path=Path(config_path), process_env=dict(service_environment)),
+        )
     except ValueError:
-        # Incomplete credentials or an unreadable secret file stop the service with its own error.
+        # An undecodable .env, incomplete credentials, or an unreadable secret file stop the service with its own error.
         return False
 
 

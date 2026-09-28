@@ -162,7 +162,7 @@ def run(
                 runtime_paths,
                 console=console,
                 # `mindroom connect` or the macOS app may pair this machine while the run waits.
-                stop_waiting=lambda: cli_connect.local_credentials_saved(runtime_paths),
+                stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
                 confirm_approver=_approver_confirmation(),
             )
     except (TypeError, ValueError) as exc:
@@ -646,6 +646,17 @@ def connect(
 def _stdin_is_interactive() -> bool:
     """Whether a person can answer prompts; the macOS app and services run without a terminal."""
     return sys.stdin.isatty()
+
+
+def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
+    """Whether another process made pairing unnecessary since this run resolved its runtime."""
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    try:
+        return not local_pairing_required(activate_cli_runtime(path=config_path, storage_path=storage_path))
+    except ValueError:
+        # A half-written or undecodable .env keeps the run waiting because its writer may not have finished.
+        return False
 
 
 def _approver_confirmation() -> Callable[[], bool] | None:

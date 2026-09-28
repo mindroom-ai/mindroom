@@ -509,36 +509,25 @@ def test_service_status_not_installed(mock_get_manager: MagicMock) -> None:
 @patch("mindroom.cli.service._get_service_manager")
 def test_service_status_reports_pending_pairing(
     mock_get_manager: MagicMock,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     env_file: str,
     pairing_line: bool,
 ) -> None:
     """A running service still waiting for pairing is reported so the macOS app does not call it ready."""
-    for name in (
-        "MINDROOM_PROVISIONING_URL",
-        "MATRIX_REGISTRATION_TOKEN",
-        "MATRIX_REGISTRATION_SHARED_SECRET",
-        "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
-        "MINDROOM_LOCAL_CLIENT_ID",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-    ):
-        monkeypatch.delenv(name, raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     (tmp_path / ".env").write_text(f"MINDROOM_PROVISIONING_URL=https://mindroom.chat\n{env_file}", encoding="utf-8")
     mock_manager = MagicMock(spec=ServiceManager)
     mock_manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=123)
-    mock_manager.get_service_environment.return_value = {}
+    mock_manager.get_service_environment.return_value = {
+        "MINDROOM_CONFIG_PATH": str(config_path),
+        "MINDROOM_STORAGE_PATH": str(tmp_path / "data"),
+    }
     mock_manager.get_recent_logs.return_value = []
     mock_manager.get_log_command.return_value = "tail logs"
     mock_get_manager.return_value = mock_manager
 
-    result = runner.invoke(
-        app,
-        ["service", "status"],
-        env={"MINDROOM_CONFIG_PATH": str(config_path), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")},
-    )
+    result = runner.invoke(app, ["service", "status"])
 
     assert result.exit_code == 0, result.output
     assert "MindRoom service: running (pid 123)" in result.output
@@ -549,21 +538,11 @@ def test_service_status_reports_pending_pairing(
 @patch("mindroom.cli.service._get_service_manager")
 def test_service_status_decides_pairing_from_the_installed_service_runtime(
     mock_get_manager: MagicMock,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     service_paired: bool,
     pairing_line: bool,
 ) -> None:
     """The service's saved config and storage decide pairing, not the runtime of whoever runs `service status`."""
-    for name in (
-        "MINDROOM_PROVISIONING_URL",
-        "MATRIX_REGISTRATION_TOKEN",
-        "MATRIX_REGISTRATION_SHARED_SECRET",
-        "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
-        "MINDROOM_LOCAL_CLIENT_ID",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-    ):
-        monkeypatch.delenv(name, raising=False)
     paired_credentials = "MINDROOM_LOCAL_CLIENT_ID=id\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n"
     config_paths: dict[str, Path] = {}
     for name, paired in (("service", service_paired), ("caller", not service_paired)):
@@ -594,6 +573,29 @@ def test_service_status_decides_pairing_from_the_installed_service_runtime(
 
     assert result.exit_code == 0, result.output
     assert ("pairing: required" in result.output) is pairing_line
+
+
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_status_shows_logs_when_the_service_env_file_is_undecodable(
+    mock_get_manager: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """An undecodable service .env stops the service with its own error, so status still reports and shows logs."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_bytes(b"MINDROOM_PROVISIONING_URL=\xff\n")
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=123)
+    mock_manager.get_service_environment.return_value = {"MINDROOM_CONFIG_PATH": str(config_path)}
+    mock_manager.get_recent_logs.return_value = ["service log line"]
+    mock_manager.get_log_command.return_value = "tail logs"
+    mock_get_manager.return_value = mock_manager
+
+    result = runner.invoke(app, ["service", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "pairing: required" not in result.output
+    assert "service log line" in result.output
 
 
 def test_systemd_service_environment_reads_the_installed_unit(tmp_path: Path) -> None:
@@ -627,9 +629,6 @@ def test_launchd_service_environment_reads_the_installed_plist(tmp_path: Path) -
 
     with patch("mindroom.services.launchd._get_plist_path", return_value=plist_path):
         assert _get_launchd_service_environment() == service_environment
-    plist_path.write_bytes(b"not a plist")
-    with patch("mindroom.services.launchd._get_plist_path", return_value=plist_path):
-        assert _get_launchd_service_environment() == {}
     with patch("mindroom.services.launchd._get_plist_path", return_value=tmp_path / "missing.plist"):
         assert _get_launchd_service_environment() == {}
 

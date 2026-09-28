@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 import yaml
-from dotenv import dotenv_values
 from rich.markup import escape
 
 from mindroom import constants
@@ -22,7 +21,6 @@ from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeho
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
-from mindroom.logging_config import get_logger
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -39,7 +37,6 @@ __all__ = [
     "DevicePairSession",
     "PairCompleteResult",
     "local_client_fingerprint",
-    "local_credentials_saved",
     "pair_local_install",
     "persist_local_provisioning_env",
     "render_qr",
@@ -48,13 +45,12 @@ __all__ = [
     "self_hosted_pairing_error",
 ]
 
-logger = get_logger(__name__)
-
 _API_PATH = "/v1/local-mindroom/pair/device"
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
 _DEFAULT_POLL_INTERVAL_SECONDS = 3
 _MAX_BACKOFF_SECONDS = 30
 # An approval near expiry may still be handed out, so outages get this grace before timing out locally.
+# Kept at least APPROVED_CLAIM_GRACE_SECONDS in scripts/local_mindroom_provisioning_service.py by a contract test.
 _EXPIRY_GRACE_SECONDS = 60
 # Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract test.
 _PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
@@ -86,7 +82,7 @@ class DevicePairSession:
     device_secret: str
     approve_url: str
     poll_interval_seconds: int
-    expires_at: datetime | None = None
+    expires_at: datetime
 
 
 class _ServiceError(ValueError):
@@ -174,14 +170,9 @@ def _validate_poll_interval(raw_value: object) -> int:
     return raw_value
 
 
-def _parse_expires_at(raw_value: object) -> datetime | None:
-    """Return the session expiry as an aware datetime, or None when the service sent none."""
-    if not isinstance(raw_value, str):
-        return None
-    try:
-        expires_at = datetime.fromisoformat(raw_value)
-    except ValueError:
-        return None
+def _parse_expires_at(raw_value: str) -> datetime:
+    """Return the session expiry as an aware datetime."""
+    expires_at = datetime.fromisoformat(raw_value)
     return expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
 
 
@@ -209,7 +200,7 @@ def _start_session(
         device_secret=_required_non_empty_string(started, "device_secret"),
         approve_url=_required_non_empty_string(started, "approve_url"),
         poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds")),
-        expires_at=_parse_expires_at(started.get("expires_at")),
+        expires_at=_parse_expires_at(_required_non_empty_string(started, "expires_at")),
     )
 
 
@@ -286,7 +277,7 @@ def _wait_for_approval(
                 raise
             # The service decides expiry while it answers; this local deadline only covers outages.
             grace = timedelta(seconds=max(interval, _EXPIRY_GRACE_SECONDS))
-            if session.expires_at is not None and now() >= session.expires_at + grace:
+            if now() >= session.expires_at + grace:
                 return "expired"
             # Installs behind one NAT share the service's per-address poll budget, so back off while limited.
             delay = max(interval, min(delay * 2, _MAX_BACKOFF_SECONDS)) if exc.status_code == 429 else interval
@@ -578,27 +569,6 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
         return
     if replaced:
         console.print(f"  Updated owner placeholder(s) in: {config_path}")
-
-
-def local_credentials_saved(runtime_paths: RuntimePaths) -> bool:
-    """Whether another process saved pairing credentials for this install since its runtime was resolved.
-
-    Only the two credential values are read, from the exported environment and the current `.env`.
-    An unreadable `.env` keeps the caller waiting because its writer may not have finished.
-    """
-    try:
-        env_file_values = dotenv_values(runtime_paths.env_path)
-    except (OSError, ValueError) as exc:
-        logger.debug(
-            "Could not read .env while waiting for pairing",
-            env_path=str(runtime_paths.env_path),
-            error=str(exc),
-        )
-        return False
-    return all(
-        (runtime_paths.process_env.get(name, env_file_values.get(name)) or "").strip()
-        for name in ("MINDROOM_LOCAL_CLIENT_ID", "MINDROOM_LOCAL_CLIENT_SECRET")
-    )
 
 
 def _is_hosted_homeserver(homeserver: str) -> bool:

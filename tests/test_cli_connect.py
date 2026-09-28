@@ -1099,26 +1099,6 @@ def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable
     assert len(polls) == 220
 
 
-def test_local_credentials_saved_reads_the_current_env_file(tmp_path: Path) -> None:
-    """Another process's saved credentials are seen without resolving the runtime again."""
-    runtime_paths = _runtime_with_config(tmp_path)
-    env_path = tmp_path / ".env"
-
-    assert cli_connect.local_credentials_saved(runtime_paths) is False
-    env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=id\n")
-    assert cli_connect.local_credentials_saved(runtime_paths) is False
-    env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=id\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n")
-    assert cli_connect.local_credentials_saved(runtime_paths) is True
-
-
-def test_local_credentials_saved_keeps_waiting_when_the_env_file_is_unreadable(tmp_path: Path) -> None:
-    """A malformed or undecodable .env mid-pairing keeps the run waiting instead of raising."""
-    runtime_paths = _runtime_with_config(tmp_path)
-    (tmp_path / ".env").write_bytes(b"MINDROOM_LOCAL_CLIENT_ID=\xff\xfe\n")
-
-    assert cli_connect.local_credentials_saved(runtime_paths) is False
-
-
 @pytest.mark.parametrize(
     ("env", "refused_homeserver"),
     [
