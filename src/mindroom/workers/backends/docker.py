@@ -211,9 +211,7 @@ def _docker_seccomp_profile_matches(options: list[str]) -> bool:
         return False
 
 
-def _container_root_filesystem_read_only(container: _DockerContainer | None) -> bool:
-    if container is None:
-        return False
+def _container_root_filesystem_read_only(container: _DockerContainer) -> bool:
     host_config = container.attrs.get("HostConfig")
     return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
 
@@ -1232,9 +1230,7 @@ class DockerWorkerBackend:
         mount_checks.extend(config_mount_specs)
         return mount_checks if self._container_mount_layout_matches(container, expected_mounts=mount_checks) else None
 
-    def _container_runtime_security_matches(self, container: _DockerContainer | None) -> bool:
-        if container is None:
-            return False
+    def _container_runtime_security_matches(self, container: _DockerContainer) -> bool:
         host_config = container.attrs.get("HostConfig")
         if not isinstance(host_config, dict):
             return False
@@ -1795,13 +1791,10 @@ class DockerWorkerBackend:
 
     def _container_mount_layout_matches(
         self,
-        container: _DockerContainer | None,
+        container: _DockerContainer,
         *,
         expected_mounts: list[tuple[Path, str, bool]],
     ) -> bool:
-        if container is None:
-            return False
-
         attrs = container.attrs
         mounts = attrs.get("Mounts", [])
         if not isinstance(mounts, list):
