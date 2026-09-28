@@ -73,7 +73,7 @@ from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
 )
-from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint
+from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_secret_hinted_values
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -105,6 +105,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.redaction import REDACTED, redact_sensitive_data
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.thread_models import resolve_thread_model_override
@@ -1150,6 +1151,15 @@ class Config(BaseModel):
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
         )
         return _strip_empty_root_sections(payload)
+
+    def redacted_authored_model_dump(self) -> dict[str, Any]:
+        """Serialize authored config for display, masking schema-marked secrets and credential-named keys."""
+        masked = redact_secret_hinted_values(
+            self.authored_model_dump(),
+            dashboard_config_schema(),
+            replacement=REDACTED,
+        )
+        return cast("dict[str, Any]", redact_sensitive_data(masked))
 
     def with_runtime_knowledge_base_overlay(
         self,

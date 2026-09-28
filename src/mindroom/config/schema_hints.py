@@ -1,5 +1,6 @@
-"""JSON-schema annotations that let the dashboard render config fields."""
+"""JSON-schema annotations that let the dashboard render config fields and let displays mask secrets."""
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic.json_schema import GenerateJsonSchema, JsonDict
@@ -36,6 +37,62 @@ def dashboard_hint(
     if multiline:
         hint["multiline"] = True
     return {_HINT_KEY: hint}
+
+
+def _is_secret_schema(schema: Mapping[str, Any]) -> bool:
+    hint = schema.get(_HINT_KEY)
+    return isinstance(hint, dict) and hint.get("secret") is True
+
+
+def _mask_secret_value(value: object, replacement: str) -> object:
+    """Replace every value inside one secret subtree, keeping mapping keys and list shape."""
+    if isinstance(value, Mapping):
+        return {key: _mask_secret_value(item, replacement) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_mask_secret_value(item, replacement) for item in value]
+    return None if value is None else replacement
+
+
+def _redact_secret_hints(
+    value: object,
+    schema: Mapping[str, Any],
+    defs: Mapping[str, Mapping[str, Any]],
+    replacement: str,
+) -> object:
+    if _is_secret_schema(schema):
+        return _mask_secret_value(value, replacement)
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        return _redact_secret_hints(value, defs[ref.removeprefix("#/$defs/")], defs, replacement)
+    # A value matches one union member, but checking every member keeps a secret field of any of them masked.
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        for member in schema.get(keyword, ()):
+            value = _redact_secret_hints(value, member, defs, replacement)
+    if isinstance(value, Mapping):
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties")
+        redacted: dict[object, object] = {}
+        for key, item in value.items():
+            item_schema = properties.get(key, additional)
+            redacted[key] = (
+                _redact_secret_hints(item, item_schema, defs, replacement) if isinstance(item_schema, Mapping) else item
+            )
+        return redacted
+    items = schema.get("items")
+    if isinstance(value, list) and isinstance(items, Mapping):
+        return [_redact_secret_hints(item, items, defs, replacement) for item in value]
+    return value
+
+
+def redact_secret_hinted_values(value: object, schema: Mapping[str, Any], *, replacement: str) -> object:
+    """Mask every value whose schema field carries ``dashboard_hint(secret=True)``.
+
+    ``schema`` is a root JSON schema with its ``$defs``, such as the dashboard
+    config schema, and ``value`` is data it describes. Secret subtrees keep their
+    mapping keys and list shape so readers still see which entries exist, the
+    same way the dashboard masks them.
+    """
+    return _redact_secret_hints(value, schema, schema.get("$defs", {}), replacement)
 
 
 class DashboardJsonSchema(GenerateJsonSchema):
