@@ -69,6 +69,7 @@ As with a local development browser, pages opened in Computer mode can make requ
 
 Both providers make a worker-local destination relay Chromium's only proxy, loopback included, so every connection, including redirects and WebSockets, is validated before it is dialed.
 The relay dials allowed loopback previews itself and, when the worker sets an HTTP(S) egress proxy through `all_proxy`, `http_proxy`, or `https_proxy`, tunnels every other destination through that proxy with HTTP `CONNECT`.
+The proxy must therefore allow `CONNECT` to ports 80 and 443 for the allowed hostnames, because plain-HTTP pages are tunneled too.
 All set proxy variables must name the same proxy without embedded credentials; differing, SOCKS, or automatic proxy configurations are rejected with a configuration error rather than silently bypassed.
 The tunnel names the destination hostname, so the upstream proxy resolves it and enforces its own network restrictions, including blocking private and metadata addresses and resisting DNS rebinding against its own lookups.
 The relay still validates each hostname against the worker's DNS first, so proxy-only DNS names are not supported.

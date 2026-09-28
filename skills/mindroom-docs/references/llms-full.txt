@@ -7260,7 +7260,9 @@ WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages
 An operator egress proxy sits behind the relay: after validating a destination, the relay dials it directly or opens an HTTP `CONNECT` tunnel through that proxy.
 In the primary process, the tunnel names the address the relay validated, so the proxy cannot resolve the hostname to anything else, and the proxy variables follow curl precedence: `http_proxy` for port 80, `https_proxy` for every other port, and `all_proxy` for either when its own variable is unset.
 Loopback destinations the policy allows are always dialed directly, because a proxy's loopback is another host, and with `allow_private_networks` so are destinations `no_proxy` names, whether by hostname suffix or address range; `no_proxy` can never make a destination the policy refuses, such as a metadata address, reachable.
-The proxy must allow `CONNECT` to each destination port, including port 80 for plain HTTP.
+The proxy must allow `CONNECT` to ports 80 and 443, port 80 carrying plain-HTTP pages; Squid's default `http_access deny CONNECT !SSL_ports` rule refuses plain HTTP.
+In the primary it must also allow `CONNECT` to IP addresses, so egress proxies that allow only hostnames are unsupported for the primary browser.
+A refused tunnel fails that connection without any direct fallback and logs `browser_egress_proxy_refused_tunnel` with the requirement it failed.
 A SOCKS proxy, credentials inside a proxy URL, a proxy URL with a path, `auto_proxy`, or `socks_server` cannot be followed; the primary logs a warning and the relay dials those destinations directly within the same policy.
 In a sandbox runner, where the proxy may be what enforces approved egress, every set proxy variable must name one such HTTP(S) proxy, spellings that differ only in letter case, a trailing slash, an omitted default port, or a missing `http://` counting as one, and anything else stops the browser from starting.
 The tunnel there names the hostname, because an approved-egress proxy decides by name, so that proxy's own resolution and any rebinding against it are its responsibility; the relay still validates the name against the worker's DNS first.
@@ -7419,6 +7421,7 @@ As with a local development browser, pages opened in Computer mode can make requ
 
 Both providers make a worker-local destination relay Chromium's only proxy, loopback included, so every connection, including redirects and WebSockets, is validated before it is dialed.
 The relay dials allowed loopback previews itself and, when the worker sets an HTTP(S) egress proxy through `all_proxy`, `http_proxy`, or `https_proxy`, tunnels every other destination through that proxy with HTTP `CONNECT`.
+The proxy must therefore allow `CONNECT` to ports 80 and 443 for the allowed hostnames, because plain-HTTP pages are tunneled too.
 All set proxy variables must name the same proxy without embedded credentials; differing, SOCKS, or automatic proxy configurations are rejected with a configuration error rather than silently bypassed.
 The tunnel names the destination hostname, so the upstream proxy resolves it and enforces its own network restrictions, including blocking private and metadata addresses and resisting DNS rebinding against its own lookups.
 The relay still validates each hostname against the worker's DNS first, so proxy-only DNS names are not supported.
@@ -21147,7 +21150,8 @@ Primary-process host browser profiles moved from `<storage>/browser-profiles` in
 Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
 A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
 Chromium in the host, headless worker, and Computer browsers and in `crawl4ai` no longer reads proxy settings from the environment; its only proxy is MindRoom's destination relay, which opens HTTP `CONNECT` tunnels through the configured egress proxy.
-That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests.
+That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests; for the chart-managed approved egress proxy, pin an image that includes this before upgrading.
+The primary's egress proxy must also allow `CONNECT` to IP addresses on ports 80 and 443, because the primary tunnels to the address it validated; egress proxies that allow only hostnames are no longer supported for the primary browser.
 In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
 A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
 Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
@@ -24371,6 +24375,7 @@ Use `workers.backend: kubernetes`.
 Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
 Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
+Browser tools tunnel every connection, plain HTTP included, with `CONNECT`, so pin an approved egress proxy build that allows `CONNECT` to port 80; older images refuse plain-HTTP pages with `TCP_DENIED/403`.
 Keep `request_network_access` behind `tool_approval`.
 Use a static allowlist for hostnames that should never require approval.
 Use short `approvedEgress.maxTtlSeconds` values for temporary grants.

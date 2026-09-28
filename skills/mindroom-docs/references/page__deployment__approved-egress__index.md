@@ -166,6 +166,7 @@ Use `workers.backend: kubernetes`.
 Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
 Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
+Browser tools tunnel every connection, plain HTTP included, with `CONNECT`, so pin an approved egress proxy build that allows `CONNECT` to port 80; older images refuse plain-HTTP pages with `TCP_DENIED/403`.
 Keep `request_network_access` behind `tool_approval`.
 Use a static allowlist for hostnames that should never require approval.
 Use short `approvedEgress.maxTtlSeconds` values for temporary grants.
