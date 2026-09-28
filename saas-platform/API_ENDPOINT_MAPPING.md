@@ -102,7 +102,7 @@ User routes accept only accounts whose `status` is `active` and whose `deleted_a
 Suspending an account blocks its platform API calls and new instance and Matrix sign-ins, but its running instances and existing instance and Matrix sessions continue, so stop its instances separately.
 The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
 Rows hold the method, path, status, client IP, and the account and email that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified; the middleware never reads request bodies, and the admin routes record their request data in their own audit entries.
-Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account awaiting deletion answers 409, because the account has to be restored instead.
+Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account awaiting deletion answers 409, because `deleted_at` would stay set; set its status to `deleted` so the owner can cancel the deletion, or clear `deleted_at` and set the status through `PUT /admin/accounts/{account_id}`.
 
 ## SSO and Matrix OIDC
 

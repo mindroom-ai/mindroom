@@ -331,13 +331,15 @@ class TestAdminEndpoints:
     def test_admin_refuses_to_activate_an_account_awaiting_deletion(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
     ):
-        """Setting active would leave deleted_at set, so the admin is told to restore the account instead."""
+        """Setting active would leave deleted_at set, so the admin is pointed at the routes that restore access."""
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": "2026-09-01T00:00:00Z"}])
 
         response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
 
         assert response.status_code == 409
-        assert "restore" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "Set its status to deleted" in detail
+        assert "PUT /admin/accounts/{account_id}" in detail
         mock_supabase.table().update.assert_not_called()
 
     def test_admin_activates_an_account_not_awaiting_deletion(

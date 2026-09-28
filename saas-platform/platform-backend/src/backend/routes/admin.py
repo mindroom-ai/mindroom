@@ -291,7 +291,11 @@ async def update_account_status(
             account = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
             if account.data and account.data[0].get("deleted_at") is not None:
                 raise HTTPException(  # noqa: TRY301
-                    status_code=409, detail="Account is awaiting deletion; restore it instead of setting it active"
+                    status_code=409,
+                    detail=(
+                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the "
+                        "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
+                    ),
                 )
         result = (
             sb.table("accounts")

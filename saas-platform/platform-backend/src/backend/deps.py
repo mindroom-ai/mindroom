@@ -26,8 +26,9 @@ if TYPE_CHECKING:
 AUTH_CACHE_MAX_ENTRIES = 100
 AUTH_CACHE_MAX_TTL_SECONDS = 300
 ACTIVE_ACCOUNT_STATUS = "active"
-# Status the soft-delete RPC sets alongside deleted_at; only such accounts keep GDPR self-service access,
-# because restore_account restores only them.
+# Status the soft-delete RPC sets alongside deleted_at; only such accounts keep GDPR self-service access.
+# Limiting the allowance to this status is what stops a suspended account awaiting deletion from lifting
+# its suspension through cancel-deletion.
 PENDING_DELETION_ACCOUNT_STATUS = "deleted"
 
 
