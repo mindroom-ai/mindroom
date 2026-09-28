@@ -89,7 +89,7 @@ app.kubernetes.io/component: runtime
 
 {{- /*
 First path component below storage.mountPath that holds a file-sourced config, or "" when there is none.
-The static runner sidecar mounts it read-only, matching the config subtree dedicated Kubernetes workers mount.
+The static runner sidecar mounts the agents and private_instances directories, so the config must stay outside them.
 */ -}}
 {{- define "mindroom-runtime.fileConfigStorageSubpath" -}}
 {{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
@@ -166,28 +166,6 @@ The static runner sidecar mounts it read-only, matching the config subtree dedic
 {{- .Values.workers.sandbox.proxyToken.existingSecret -}}
 {{- else if .Values.workers.sandbox.proxyToken.value -}}
 {{- printf "%s-sandbox-proxy" (include "mindroom-runtime.fullname" .) -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.workerConfigMapName" -}}
-{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
-{{- else -}}
-{{- default (include "mindroom-runtime.configMapName" .) .Values.workers.kubernetes.configMapName -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.workerConfigKey" -}}
-{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
-{{- else -}}
-{{- default .Values.config.key .Values.workers.kubernetes.configKey -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.workerConfigPath" -}}
-{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
-{{- include "mindroom-runtime.configPath" . -}}
-{{- else -}}
-{{- default .Values.config.mountPath .Values.workers.kubernetes.configPath -}}
 {{- end -}}
 {{- end -}}
 

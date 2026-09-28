@@ -365,9 +365,6 @@ workers:
     # Optional node-installed profile applied only to the main worker container.
     # Example: {type: Localhost, localhostProfile: profiles/worker-computer.json}
     seccompProfile: {}
-    configMapName: ""
-    configKey: ""
-    configPath: ""
     ownerDeploymentName: ""
     nodeName: ""
     colocateWithControlPlaneNode: false

@@ -67,12 +67,6 @@
   value: {{ $values.storagePath | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
   value: {{ $values.kubernetesWorkerStorageSubpathPrefix | quote }}
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
-  value: "mindroom-config-{{ $values.customer }}"
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
-  value: "config.yaml"
-- name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
-  value: "/app/config.yaml"
 {{- if $controlPlaneNodeName }}
 - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
   value: {{ $controlPlaneNodeName | quote }}
@@ -106,10 +100,11 @@
 {{- $values := .values -}}
 {{- /*
 The runner executes agent tool code, so it must not see the tenant credential store, Matrix state,
-the live config the primary hot-reloads, or the credentials encryption key.
+the tenant config or its seed ConfigMap, or the credentials encryption key.
 It mounts only agent state from the PVC over its own private storage root,
 and saved tool settings reach it as per-call leases from the primary.
-Its /app/config.yaml is only the seed; each request carries the primary's live config without secrets.
+Each request carries the allowlisted fields runners resolve from the primary's live config.
+Its config path matches the primary's only so config-relative snapshot paths resolve alike; nothing is mounted there.
 */ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -126,16 +121,12 @@ Its /app/config.yaml is only the seed; each request carries the primary's live c
         name: {{ include "mindroom.instanceSecretName" $values }}
         key: sandbox_proxy_token
   - name: MINDROOM_CONFIG_PATH
-    value: "/app/config.yaml"
+    value: "{{ $values.storagePath }}/config/config.yaml"
   - name: MINDROOM_STORAGE_PATH
     value: {{ $values.storagePath }}
   - name: HOME
     value: {{ $values.storagePath }}
   volumeMounts:
-  - name: config
-    mountPath: /app/config.yaml
-    subPath: config.yaml
-    readOnly: true
   - name: storage
     mountPath: {{ $values.storagePath }}
     subPath: sandbox-runner
