@@ -12715,9 +12715,10 @@ revoke_public_report("pub_...")
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
 `manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
-Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names.
+Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
 Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
 Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
+A patch whose value contains the `***redacted***` marker is refused, so copying inspected output back never replaces a hidden real value.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
 `dry_run=True` validates a patch and returns its receipt without writing.
 Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
@@ -14027,7 +14028,7 @@ Use `stdio` for local subprocess servers.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
-Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value but show `args` as written, and `args` support no placeholders.
+Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value except whole `${ENV_VAR}` placeholders, but show `args` as written, and `args` support no placeholders.
 Static `headers` are process-global and shared by every requester.
 Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
 Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
@@ -18554,7 +18555,7 @@ Changes are validated against the Pydantic config schema before applying.
 ```
 
 Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
-Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs.
+Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
 Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
 
 **Modify configuration:**
@@ -18585,6 +18586,7 @@ Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
 Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
 It stores the new value only when redaction leaves that value unchanged.
+`!config set` refuses a value containing the `***redacted***` marker, which only appears in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
 A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 Unconfirmed changes expire after 24 hours.
 
