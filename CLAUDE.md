@@ -223,7 +223,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `matrix/provisioning_heartbeat.py` | Best-effort startup and periodic "last seen" heartbeat from paired installs to the hosted provisioning service |
-| `matrix/provisioning_env.py` | Slim environment readers deciding whether a hosted install registers by token, shared secret, or pairing (no Matrix/HTTP imports) |
+| `matrix/provisioning_env.py` | Slim environment readers deciding whether a hosted install registers by token, shared secret, or pairing, plus the paired-install client-credential headers (no Matrix/HTTP imports) |
 | `matrix/image_handler.py` | Image message download, decryption, and AI processing |
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |

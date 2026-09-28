@@ -2991,8 +2991,14 @@ async def _finish_runtime_shutdown(
         for task in auxiliary_tasks:
             task.cancel()
         for task in auxiliary_tasks:
-            with suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # Auxiliary tasks are non-critical, so a failed one must not skip the remaining cleanup
+                # or replace the error that ended the runtime.
+                logger.exception("Auxiliary task failed", task_name=task.get_name())
         if stall_detector is not None:
             stall_detector.stop()
         reset_matrix_sync_health()
