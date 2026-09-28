@@ -17,6 +17,7 @@ from agno.run.base import RunStatus
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delegation import records
 from mindroom.delegation.audit import (
     child_audit_context,
     finish_child_record,
@@ -24,7 +25,7 @@ from mindroom.delegation.audit import (
     record_child_response,
 )
 from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
-from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
+from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
@@ -285,6 +286,54 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     assert child.result == "final response"
     assert run["usage"]["input_tokens"] == 8
     assert run["usage"]["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.completed, RunStatus.paused])
+async def test_settlement_finishes_a_full_record_with_its_reserved_terminal_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: RunStatus,
+) -> None:
+    """A finished child still settles when its record is full; a paused one still reports the full record."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    # The start event and one ordinary event fill the record, leaving the slot reserved for the terminal event.
+    monkeypatch.setattr(records, "_MAX_EVENTS", 3)
+    response = RunOutput(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        status=status,
+        content="final response",
+        tools=[ToolExecution(tool_call_id="lookup-call", tool_name="lookup", tool_args={}, result="found")],
+        metrics=RunMetrics(input_tokens=8, output_tokens=4),
+    )
+
+    if status == RunStatus.paused:
+        with pytest.raises(DelegationRecordLimitError):
+            await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+        return
+    await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+
+    record_dir = await _record_dir(child, config, runtime_paths)
+    assert [event["kind"] for event in _events(record_dir)] == [
+        "delegation_started",
+        "tool_call",
+        "delegation_finished",
+    ]
+    run = json.loads((record_dir / "run.json").read_text(encoding="utf-8"))
+    assert run["status"] == "completed"
+    assert run["output"] == "final response"
+    assert run["usage"]["input_tokens"] == 8
+    assert child.status == "completed"
 
 
 @pytest.mark.asyncio

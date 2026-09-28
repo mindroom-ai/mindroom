@@ -6812,6 +6812,7 @@ path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.error_handling",
     "mindroom.delegation.audit",
+    "mindroom.delegation.records",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
