@@ -21,7 +21,7 @@ from rich.syntax import Syntax
 
 from mindroom import constants
 from mindroom.cli.agent_docs import ensure_config_agent_docs
-from mindroom.cli.env_file import comment_out_env_value, upsert_env_values, write_private_env_text
+from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
@@ -40,7 +40,9 @@ from mindroom.model_defaults import (
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
+    ENV_TEMPLATE_PLACEHOLDERS,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
+    is_unset_env_value,
 )
 
 if TYPE_CHECKING:
@@ -140,20 +142,9 @@ _FIRST_RUN_PROVIDER_STEPS: dict[_ProviderPreset, str] = {
 }
 
 
-# Values the starter `.env` template writes for credentials the user must replace; they never count as set.
-_ENV_TEMPLATE_PLACEHOLDERS: dict[str, str] = {
-    "ANTHROPIC_API_KEY": "your-anthropic-key-here",
-    "OPENAI_API_KEY": "your-openai-key-here",
-    "OPENROUTER_API_KEY": "your-openrouter-key-here",
-    AZURE_OPENAI_ENV_BY_KEY["api_key"]: "your-azure-openai-key-here",
-    AZURE_OPENAI_ENV_BY_KEY["endpoint"]: "https://your-resource.openai.azure.com",
-    VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]: "your-gcp-project-id",
-}
-
-
 @dataclass(frozen=True)
 class _ProviderKey:
-    """First-run answer for the preset's API key; `value=None` writes no key and disables a leftover template placeholder."""
+    """First-run answer for the preset's API key; `value=None` writes no key into `.env`."""
 
     value: str | None
 
@@ -226,15 +217,11 @@ def _write_env_file(
             title="Hosted Matrix defaults for mindroom.chat",
         )
         env_key = _preset_api_key_env(selected_preset)
-        if provider_key is None or env_key is None:
-            return changed
-        if provider_key.value is not None:
+        if provider_key is not None and provider_key.value is not None and env_key is not None:
             upsert_env_values(env_path, {env_key: provider_key.value})
-        elif not comment_out_env_value(env_path, env_key, _ENV_TEMPLATE_PLACEHOLDERS[env_key]):
-            # A skipped key leaves real values alone; only an unedited template placeholder is disabled.
-            return changed
-        console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
-        return True
+            console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
+            changed = True
+        return changed
 
     write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_key))
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
@@ -314,12 +301,10 @@ def _print_config_init_next_steps(
 ) -> None:
     """Print post-init guidance for the selected Matrix server and provider."""
     console.print("\nNext steps:")
-    _print_provider_setup_steps(
-        env_path,
-        env_changed=env_changed,
-        matrix_server=matrix_server,
-        selected_preset=selected_preset,
-    )
+    if env_changed:
+        env_hint = _config_init_env_hint(matrix_server, selected_preset)
+        console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
+    _print_local_model_commands(selected_preset)
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
@@ -327,17 +312,8 @@ def _print_config_init_next_steps(
         console.print("  On first run, MindRoom prints a link to approve with your MindRoom Chat account.")
 
 
-def _print_provider_setup_steps(
-    env_path: Path,
-    *,
-    env_changed: bool,
-    matrix_server: _MatrixServerPreset,
-    selected_preset: _ProviderPreset,
-) -> None:
-    """Print the env edits and local model commands the selected provider still needs."""
-    if env_changed:
-        env_hint = _config_init_env_hint(matrix_server, selected_preset)
-        console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
+def _print_local_model_commands(selected_preset: _ProviderPreset) -> None:
+    """Print the commands that start the local model server for local presets."""
     if selected_preset == "ollama":
         console.print(f"  [cyan]ollama pull {OLLAMA_GEMMA}[/cyan]         Pull the default local model")
         console.print(f"  [cyan]ollama pull {OLLAMA_QWEN}[/cyan]   Pull the larger local model option")
@@ -533,7 +509,7 @@ def config_init(
 def create_first_run_config(runtime_paths: RuntimePaths) -> None:
     """Ask for a provider and its key, then write the hosted starter config that `mindroom run` found missing."""
     config_path = runtime_paths.config_path
-    env_path = config_path.parent / ".env"
+    env_path = runtime_paths.env_path
     console.print(f"[yellow]No MindRoom config found at {config_path}.[/yellow]")
     console.print(
         "Let's create one for MindRoom Chat (mindroom.chat). "
@@ -546,7 +522,7 @@ def create_first_run_config(runtime_paths: RuntimePaths) -> None:
         "mindroom.chat",
         selected_preset,
         force=False,
-        replace_env_file=not env_path.exists(),
+        replace_env_file=False,
         provider_key=provider_key,
         storage_path=runtime_paths.storage_root,
     )
@@ -558,12 +534,7 @@ def create_first_run_config(runtime_paths: RuntimePaths) -> None:
     if provider_key is None:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
         console.print(f"  {_FIRST_RUN_PROVIDER_STEPS[selected_preset].format(env_path=env_path)}")
-        _print_provider_setup_steps(
-            env_path,
-            env_changed=False,
-            matrix_server="mindroom.chat",
-            selected_preset=selected_preset,
-        )
+        _print_local_model_commands(selected_preset)
     console.print()
 
 
@@ -901,9 +872,7 @@ def _configured_env_value(env_key: str, runtime_paths: RuntimePaths) -> str | No
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     value = get_secret_from_env(env_key, runtime_paths=runtime_paths)
-    if value is None or value == _ENV_TEMPLATE_PLACEHOLDERS.get(env_key):
-        return None
-    return value
+    return None if value is None or is_unset_env_value(env_key, value) else value
 
 
 def _find_missing_env_keys(
@@ -1321,7 +1290,7 @@ def _provider_env_template(  # noqa: PLR0911
     if provider_preset == "vertexai_claude":
         return textwrap.dedent(f"""\
         # Vertex AI Claude configuration
-        {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}={_ENV_TEMPLATE_PLACEHOLDERS[VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]]}
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}={ENV_TEMPLATE_PLACEHOLDERS[VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]]}
         {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=global
 
         # Authenticate with Google Application Default Credentials before running:
@@ -1332,8 +1301,8 @@ def _provider_env_template(  # noqa: PLR0911
     if provider_preset == "azure":
         return textwrap.dedent(f"""\
         # Azure OpenAI configuration
-        {AZURE_OPENAI_ENV_BY_KEY["api_key"]}={_ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["api_key"]]}
-        {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}={_ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["endpoint"]]}
+        {AZURE_OPENAI_ENV_BY_KEY["api_key"]}={ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["api_key"]]}
+        {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}={ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["endpoint"]]}
 
         # Optional: override Agno's Azure OpenAI default API version.
         # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}=2024-10-21
@@ -1382,7 +1351,7 @@ def _provider_env_template(  # noqa: PLR0911
     any_active = False
     for env_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         active = env_key == required_env_key
-        value = _ENV_TEMPLATE_PLACEHOLDERS[env_key]
+        value = ENV_TEMPLATE_PLACEHOLDERS[env_key]
         if active and provider_key is not None:
             active = provider_key.value is not None
             value = provider_key.value or value

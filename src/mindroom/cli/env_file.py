@@ -49,21 +49,13 @@ def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
     return env_path
 
 
-def comment_out_env_value(env_path: Path, key: str, value: str) -> bool:
-    """Comment out active `KEY=value` lines with exactly this value and return whether any changed."""
-    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=\s*([\"']?){re.escape(value)}\1\s*$")
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    updated = [f"# {line}" if pattern.match(line) else line for line in lines]
-    if updated == lines:
-        return False
-    write_private_env_text(env_path, f"{'\n'.join(updated)}\n")
-    return True
-
-
 def _upsert_env_value(lines: list[str], key: str, value: str) -> None:
+    """Set the first assignment of `key` and drop later ones, which dotenv would otherwise let win."""
     pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
-    for idx, line in enumerate(lines):
-        if pattern.match(line):
-            lines[idx] = f"{key}={value}"
-            return
-    lines.append(f"{key}={value}")
+    matches = [idx for idx, line in enumerate(lines) if pattern.match(line)]
+    if not matches:
+        lines.append(f"{key}={value}")
+        return
+    lines[matches[0]] = f"{key}={value}"
+    for idx in reversed(matches[1:]):
+        del lines[idx]

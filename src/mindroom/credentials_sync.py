@@ -23,7 +23,7 @@ from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
-from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
+from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
 
 logger = get_logger(__name__)
 
@@ -349,7 +349,7 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
         env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
 
-        if not env_value:
+        if env_value is None or is_unset_env_value(env_var, env_value):
             logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 

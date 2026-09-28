@@ -18,6 +18,7 @@ __all__ = [
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
+    "ENV_TEMPLATE_PLACEHOLDERS",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
     "MATRIX_APPSERVICE_TOKEN_ENV",
@@ -41,6 +42,7 @@ __all__ = [
     "is_shell_passthrough_allowed_env_name",
     "is_trusted_tool_runtime_env_file_name",
     "is_trusted_tool_runtime_process_env_name",
+    "is_unset_env_value",
     "is_worker_backend_config_env_name",
     "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
@@ -87,6 +89,24 @@ AZURE_OPENAI_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "deployment": "AZURE_OPENAI_DEPLOYMENT",
     },
 )
+# Values the starter `.env` template writes for credentials the user must replace.
+ENV_TEMPLATE_PLACEHOLDERS: Mapping[str, str] = MappingProxyType(
+    {
+        "ANTHROPIC_API_KEY": "your-anthropic-key-here",
+        "OPENAI_API_KEY": "your-openai-key-here",
+        "OPENROUTER_API_KEY": "your-openrouter-key-here",
+        AZURE_OPENAI_ENV_BY_KEY["api_key"]: "your-azure-openai-key-here",
+        AZURE_OPENAI_ENV_BY_KEY["endpoint"]: "https://your-resource.openai.azure.com",
+        VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]: "your-gcp-project-id",
+    },
+)
+
+
+def is_unset_env_value(name: str, value: str) -> bool:
+    """Return whether an env value is blank or an unedited starter-template placeholder, so it counts as unset."""
+    return not value.strip() or value == ENV_TEMPLATE_PLACEHOLDERS.get(name)
+
+
 AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",

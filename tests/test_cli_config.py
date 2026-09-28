@@ -2211,24 +2211,36 @@ class TestRunFirstRunSetup:
         assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
         assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
 
-    def test_skipped_key_comments_out_template_placeholder(self, tmp_path: Path) -> None:
-        """Skipping the key disables a leftover placeholder so it never counts as a configured credential."""
+    def test_skipped_key_leaves_template_placeholder_unset(self, tmp_path: Path) -> None:
+        """A skipped key leaves a leftover placeholder in `.env`, and it still never counts as a configured key."""
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
-        env_path.write_text("OPENAI_API_KEY=your-openai-key-here\nANTHROPIC_API_KEY=sk-real\n", encoding="utf-8")
+        env_path.write_text("OPENAI_API_KEY=your-openai-key-here # replace this\n", encoding="utf-8")
 
         result, _paired, started = self._invoke_run(config_path, "openai\n\n")
 
         assert result.exit_code == 0, result.output
-        env_content = env_path.read_text(encoding="utf-8")
-        assert "# OPENAI_API_KEY=your-openai-key-here\n" in env_content
-        assert re.search(r"^\s*OPENAI_API_KEY=", env_content, re.MULTILINE) is None
-        assert "ANTHROPIC_API_KEY=sk-real\n" in env_content
-        assert started[0].env_value("OPENAI_API_KEY") is None
+        assert "OpenAI API key" in result.output
+        assert "Skipped" in result.output
+        assert "OPENAI_API_KEY=your-openai-key-here # replace this\n" in env_path.read_text(encoding="utf-8")
         # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
         sync_env_to_credentials(started[0])
         config = load_config_yaml(config_path)
         assert missing_model_api_key_provider(config, started[0], "default") == "openai"
+
+    def test_typed_key_replaces_every_existing_assignment(self, tmp_path: Path) -> None:
+        """Duplicate assignments in an existing `.env` cannot override the typed key, since dotenv reads the last one."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=\nOPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\nsk-typed\n")
+
+        assert result.exit_code == 0, result.output
+        assert re.findall(r"^OPENAI_API_KEY=.*$", env_path.read_text(encoding="utf-8"), re.MULTILINE) == [
+            "OPENAI_API_KEY=sk-typed",
+        ]
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
 
     def test_skipped_key_keeps_real_env_value(self, tmp_path: Path) -> None:
         """Only a template placeholder is disabled on skip; a real key in `.env` is used and left alone."""
