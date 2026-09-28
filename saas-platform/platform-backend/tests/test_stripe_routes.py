@@ -185,6 +185,38 @@ class TestStripeRoutesEndpoints:
             call_args = mock_stripe.checkout.Session.create.call_args.kwargs
             assert call_args["line_items"] == [{"price": "price_test_123", "quantity": 1}]
 
+    @pytest.mark.parametrize(
+        ("history", "expects_trial"),
+        [
+            ([], True),
+            ([Mock(status="canceled", trial_start=None)], True),
+            ([Mock(status="canceled", trial_start=1_780_000_000)], False),
+        ],
+    )
+    def test_checkout_grants_a_trial_only_to_a_customer_who_never_had_one(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        history: list[Mock],
+        expects_trial: bool,
+    ):
+        """A cancelled trial stays in the customer's Stripe history, so checking out again starts without one."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = history
+        mock_stripe.checkout.Session.create.return_value = Mock(url="https://checkout.stripe.com/pay/cs_test_123")
+
+        with patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"):
+            response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "monthly"})
+
+        assert response.status_code == 200
+        mock_stripe.Subscription.list.assert_called_once_with(customer="cus_test_123", status="all", limit=100)
+        subscription_data = mock_stripe.checkout.Session.create.call_args.kwargs["subscription_data"]
+        assert ("trial_period_days" in subscription_data) is expects_trial
+
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):

@@ -126,7 +126,7 @@ class TestCheckoutEndpoint:
             mock_stripe.checkout.Session.create.return_value = mock_session
             # Mock other required methods
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
-            mock_stripe.Subscription.list.return_value = Mock(data=[])
+            mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = []
 
             response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
@@ -168,7 +168,7 @@ class TestCheckoutEndpoint:
             mock_session.url = "https://checkout.stripe.com/test_session"
             mock_stripe.checkout.Session.create.return_value = mock_session
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
-            mock_stripe.Subscription.list.return_value = Mock(data=[])
+            mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = []
 
             response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "yearly"})
 

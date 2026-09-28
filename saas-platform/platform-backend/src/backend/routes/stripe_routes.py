@@ -44,9 +44,10 @@ async def create_checkout_session(
         customer_id = customer.id
         sb.table("accounts").update({"stripe_customer_id": customer_id}).eq("id", user["account_id"]).execute()
 
-    # Check if customer already has an active subscription
-    subscriptions = stripe.Subscription.list(customer=customer_id, status="all", limit=10)
-    for sub in subscriptions.data:
+    # Check if customer already has an active subscription, and whether any past one had a trial
+    had_trial = False
+    for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
+        had_trial = had_trial or sub.trial_start is not None
         if sub.status in ["active", "trialing"]:
             # Customer already has a subscription - they should use the portal to manage it
             logger.warning(
@@ -74,8 +75,8 @@ async def create_checkout_session(
         },
     }
 
-    # Add trial period if enabled for this plan
-    if is_trial_enabled_for_plan(payload.tier):
+    # Add trial period if enabled for this plan; each customer gets one trial, since cancelling keeps it in Stripe
+    if is_trial_enabled_for_plan(payload.tier) and not had_trial:
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
 
     checkout_params["customer"] = customer_id
