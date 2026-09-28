@@ -121,15 +121,11 @@ def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
         )
 
 
-def _readable_size(directory_fd: int, path: Path) -> bool:
+def _file_size(directory_fd: int, filename: str) -> int | None:
     try:
-        size = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False).st_size
+        return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_size
     except FileNotFoundError:
-        return False
-    if size > MAX_SKILL_FILE_BYTES:
-        logger.warning("Refused a workspace skill file", path=str(path), size=size)
-        return False
-    return True
+        return None
 
 
 def list_support_files(skill_fd: int, skill_path: Path, directory: str) -> list[str]:
@@ -144,12 +140,18 @@ def list_support_files(skill_fd: int, skill_path: Path, directory: str) -> list[
                     limit=MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
                     found=len(filenames),
                 )
-            # A file too large to read is not offered.
-            return [
-                filename
-                for filename in filenames[:MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
-                if _readable_size(support_fd, skill_path / directory / filename)
-            ]
+            sizes = {name: _file_size(support_fd, name) for name in filenames[:MAX_WORKSPACE_SKILL_LISTING_ENTRIES]}
+            # A file too large to read is not offered; worker code can plant many, so the directory warns once.
+            oversized = [name for name, size in sizes.items() if size is not None and size > MAX_SKILL_FILE_BYTES]
+            if oversized:
+                logger.warning(
+                    "Not listing workspace skill files over the size limit",
+                    path=str(skill_path / directory),
+                    limit=MAX_SKILL_FILE_BYTES,
+                    refused=len(oversized),
+                    first=oversized[0],
+                )
+            return [name for name, size in sizes.items() if size is not None and size <= MAX_SKILL_FILE_BYTES]
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -354,14 +356,24 @@ def _each_skill_directory[Result](
 # extension point, so workspace roots build the same Skill fields from descriptor-bound reads.
 # Upstream issue: tracking gap; no Agno issue or PR proposes caller-owned file access for LocalSkills.
 # Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
-# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery; the
-# workspace count, budget, name, description, listing, and file-size limits remain MindRoom policy.
+# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery, and a
+# caller-supplied frontmatter parser, since its own regex and yaml.safe_load are unbounded for worker-writable text; the
+# workspace count, budget, name, description, listing, and file-size limits, the per-skill frontmatter cap, the per-pass
+# read and parse budgets, the untrusted YAML loader, the fence check that keeps matching linear, and the parse cache
+# remain MindRoom policy.
 # Coverage: tests/test_skills.py::test_a_linked_support_directory_lists_nothing,
 # tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno,
 # tests/test_skills.py::test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning,
-# tests/test_skills.py::test_workspace_skills_stay_within_a_file_cap_and_a_total_budget, and
-# tests/test_skills.py::test_workspace_skill_names_and_listings_cannot_bloat_the_prompt.
+# tests/test_skills.py::test_workspace_skills_stay_within_a_file_cap_and_a_total_budget,
+# tests/test_skills.py::test_workspace_skill_names_and_listings_cannot_bloat_the_prompt,
+# tests/test_skills.py::test_workspace_frontmatter_stays_within_its_parse_caps,
+# tests/test_skills.py::test_refused_skills_spend_the_frontmatter_budget,
+# tests/test_skills.py::test_planted_skill_files_stay_within_the_read_budget,
+# tests/test_skills.py::test_frontmatter_aliases_neither_stall_loading_nor_hide_other_skills,
+# tests/test_skills.py::test_planted_frontmatter_never_stalls_loading_or_hides_other_skills,
+# tests/test_skills.py::test_oversized_support_files_are_unlisted_with_one_warning_per_directory, and
+# tests/test_yaml_io.py::test_untrusted_loads_refuse_what_grows_beyond_the_input.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries.
 

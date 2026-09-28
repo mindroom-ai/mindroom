@@ -846,6 +846,29 @@ def test_the_read_budget_counts_bytes(tmp_path: Path, body: str) -> None:
     assert "Workspace skill files exceed their read budget; skipping the rest" in events
 
 
+def test_oversized_support_files_are_unlisted_with_one_warning_per_directory(tmp_path: Path) -> None:
+    """Worker code can plant many oversized support files, so each directory warns once instead of once per file."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "planted", "Planted support files")
+    for directory in ("references", "scripts"):
+        (workspace_skills / "planted" / directory).mkdir()
+        for index in range(50):
+            with (workspace_skills / "planted" / directory / f"big-{index:02d}.md").open("wb") as handle:
+                handle.truncate(MAX_SKILL_FILE_BYTES + 1)
+        (workspace_skills / "planted" / directory / "small.md").write_text("small")
+    with capture_logs() as logs:
+        skills = _load_agent_skills(tmp_path, storage)
+        assert skills is not None
+    skill = skills.get_skill("planted")
+    assert skill is not None
+    assert (skill.references, skill.scripts) == (["small.md"], ["small.md"])
+    warnings = [entry for entry in logs if entry["event"] == "Not listing workspace skill files over the size limit"]
+    assert sorted((entry["path"].rsplit("/", 1)[-1], entry["refused"]) for entry in warnings) == [
+        ("references", 50),
+        ("scripts", 50),
+    ]
+
+
 def test_chat_finds_only_skill_directories_loading_reads(tmp_path: Path) -> None:
     """Directories past the skill count never load, and a SKILL.md that is not a regular file never names a skill."""
     root = tmp_path / "skills"
@@ -895,7 +918,7 @@ def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_
 
 
 def test_workspace_support_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
-    """A support file over the read limit is not offered, with a warning that names it."""
+    """A support file over the read limit is not offered, with a warning that names its directory and the file."""
     storage, root = _workspace_skills(tmp_path)
     skill_path = _write_skill(root, "guide", "Guide")
     (skill_path.parent / "references").mkdir()
@@ -907,8 +930,8 @@ def test_workspace_support_files_too_large_to_read_are_left_out(tmp_path: Path) 
     skill = skills.get_skill("guide")
     assert skill is not None
     assert skill.references == ["notes.md"]
-    refused = [str(entry.get("path", "")) for entry in logs if entry["log_level"] == "warning"]
-    assert any(path.endswith("guide/references/manual.md") for path in refused)
+    refused = [entry for entry in logs if entry["event"] == "Not listing workspace skill files over the size limit"]
+    assert [(entry["path"].endswith("guide/references"), entry["first"]) for entry in refused] == [(True, "manual.md")]
 
 
 def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:

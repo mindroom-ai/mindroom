@@ -90,7 +90,7 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 Workspace skills are read through no-follow descriptors because worker code can share the workspace.
-Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed.
+Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed, with one warning for each support directory that holds any.
 A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
 `skill_manage` refuses a change that would cross one of these limits, so a skill it writes always loads.
 The primary parses workspace frontmatter, which worker code can write, with bounded work: at most 8 KiB of frontmatter per skill and 128 KiB per workspace, with JSON5 metadata counting three times its size because it parses that much slower, so a skill with larger frontmatter is refused and skills past the workspace budget are skipped, each with a warning.
