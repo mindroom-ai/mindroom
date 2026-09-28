@@ -353,7 +353,21 @@ def map_backed_thread_membership_access(
     event_infos: Mapping[str, EventInfo],
     resolved_thread_ids: dict[str, str],
 ) -> ThreadMembershipAccess:
-    """Return one thread-membership access adapter backed by in-memory event maps."""
+    """Return one thread-membership access adapter backed by in-memory event maps.
+
+    ``event_infos`` is a fixed snapshot: root proofs answer from one index of
+    the roots its events prove, so proving every candidate costs one sweep.
+    """
+    proven_root_ids = frozenset(
+        event_info.thread_id
+        for event_id, event_info in event_infos.items()
+        if event_info.thread_id is not None
+        and _page_event_info_counts_as_thread_child_proof(
+            event_info.thread_id,
+            event_id=event_id,
+            event_info=event_info,
+        )
+    )
 
     async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
         return resolved_thread_ids.get(event_id)
@@ -362,15 +376,9 @@ def map_backed_thread_membership_access(
         return event_infos.get(event_id)
 
     async def prove_thread_root(_room_id: str, thread_root_id: str) -> _ThreadRootProof:
-        has_children = any(
-            _page_event_info_counts_as_thread_child_proof(
-                thread_root_id,
-                event_id=event_id,
-                event_info=event_info,
-            )
-            for event_id, event_info in event_infos.items()
-        )
-        return _ThreadRootProof.proven() if has_children else _ThreadRootProof.not_a_thread_root()
+        if thread_root_id in proven_root_ids:
+            return _ThreadRootProof.proven()
+        return _ThreadRootProof.not_a_thread_root()
 
     return _conversation_relation_thread_membership_access(
         ThreadMembershipAccess(

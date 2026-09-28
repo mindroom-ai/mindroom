@@ -263,6 +263,42 @@ async def test_resolve_event_thread_membership_proves_current_root_when_allowed(
     assert resolution == ThreadResolution._threaded("$thread-root:localhost")
 
 
+class _CountingEventInfos(dict[str, EventInfo]):
+    """An event map that counts full sweeps over its entries."""
+
+    sweeps = 0
+
+    def items(self):  # noqa: ANN202 - dict's own item view
+        type(self).sweeps += 1
+        return super().items()
+
+
+@pytest.mark.asyncio
+async def test_map_backed_root_proofs_answer_from_one_index_over_the_scanned_events() -> None:
+    """Proving many candidate roots must not sweep every scanned event once per candidate."""
+    event_infos = _CountingEventInfos(
+        {
+            f"$root-{index}:localhost": _message_event_info({"body": f"root {index}", "msgtype": "m.text"})
+            for index in range(50)
+        },
+    )
+    event_infos["$reply:localhost"] = _message_event_info(
+        {
+            "body": "thread reply",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root-7:localhost"},
+        },
+    )
+    _CountingEventInfos.sweeps = 0
+    access = map_backed_thread_membership_access(event_infos=event_infos, resolved_thread_ids={})
+
+    proofs = [await access.prove_thread_root("!room:localhost", event_id) for event_id in list(event_infos)]
+
+    assert [proof == _ThreadRootProof.proven() for proof in proofs].count(True) == 1
+    assert (await access.prove_thread_root("!room:localhost", "$root-7:localhost")) == _ThreadRootProof.proven()
+    assert _CountingEventInfos.sweeps <= 1
+
+
 @pytest.mark.asyncio
 async def test_resolve_related_event_thread_membership_terminates_on_relation_cycle() -> None:
     """A reply cycle must terminate as room-level instead of walking relations forever."""

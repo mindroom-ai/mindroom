@@ -14,7 +14,9 @@ from mindroom.event_journal import replacement_target
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
+    _MAX_THREAD_ROOM_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
+    ThreadRoomScanBoundError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
     find_outbox_delivery_event_id_via_room_messages,
@@ -483,6 +485,37 @@ async def test_scan_failure_log_names_the_acting_client() -> None:
     assert failures[0]["user_id"] == "@agent:localhost"
     assert failures[0]["room_id"] == _ROOM_ID
     assert "M_FORBIDDEN" in failures[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_stops_at_its_page_bound_without_calling_the_root_absent() -> None:
+    """A root older than the scan bound is unproven, not missing, and the walk stops at the bound.
+
+    The homeserver stub serves history without end, so an unbounded walk would
+    never return; the stub fails the test instead once the walk passes the bound.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    pages_served = 0
+
+    async def endless_history(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        if pages_served > _MAX_THREAD_ROOM_SCAN_PAGES + 5:
+            msg = "the room scan kept paging past its bound"
+            raise AssertionError(msg)
+        return _messages_response(
+            [_message_event(f"$filler-{pages_served}-{index}:localhost", "filler", timestamp=index) for index in range(3)],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=endless_history)
+
+    with pytest.raises(ThreadRoomScanBoundError) as caught:
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert not isinstance(caught.value, ThreadRoomScanRootNotFoundError)
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_PAGES
 
 
 @pytest.mark.asyncio
