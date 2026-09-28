@@ -75,7 +75,7 @@ def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, 
 
 
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Read a secret from NAME or NAME_FILE, returning None when neither supplies a non-blank value."""
+    """Read a secret from NAME or NAME_FILE; None when NAME is empty and NAME_FILE supplies no non-blank contents."""
     secret = _read_secret_from_env(name, runtime_paths)
     return secret[0] if secret else None
 
@@ -168,7 +168,7 @@ def _sync_service_credentials(
         source=_env_source(env_var, runtime_paths),
         to_stop=(
             "remove the variable (and any _FILE variant) from the process environment and .env, "
-            f"or this service's entry from its seed declaration, then DELETE /api/credentials/{service}"
+            f"or this service's entry from every seed declaration that lists it, then DELETE /api/credentials/{service}"
         ),
     )
     return True
