@@ -1002,11 +1002,29 @@ def _connection_key(host: str, port: int) -> aiohttp.client_reqrep.ConnectionKey
 
 
 def _certificate_failure() -> aiohttp.ClientConnectorCertificateError:
+    """Build the error aiohttp raises, chained from the verification error like aiohttp's connector does."""
     verification_error = ssl.SSLCertVerificationError(
         1,
         "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate",
     )
-    return aiohttp.ClientConnectorCertificateError(_connection_key("matrix.example.org", 443), verification_error)
+    with pytest.raises(aiohttp.ClientConnectorCertificateError) as raised:
+        raise aiohttp.ClientConnectorCertificateError(
+            _connection_key("matrix.example.org", 443),
+            verification_error,
+        ) from verification_error
+    return raised.value
+
+
+def _suppressed_certificate_failure() -> RuntimeError:
+    """Build an error raised `from None` while handling a certificate failure."""
+    try:
+        try:
+            raise _certificate_failure()
+        except aiohttp.ClientConnectorCertificateError:
+            msg = "unrelated failure"
+            raise RuntimeError(msg) from None
+    except RuntimeError as exc:
+        return exc
 
 
 def _connection_refused() -> aiohttp.ClientConnectorError:
@@ -1047,38 +1065,10 @@ def _install_scripted_transport(
 
 
 @pytest.mark.asyncio
-async def test_certificate_verification_failure_fails_login_fast_with_actionable_message(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An untrusted homeserver certificate is a permanent startup error, not an endless nio timeout retry."""
-    requests, _blocked = _install_scripted_transport(monkeypatch, _certificate_failure())
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-
-    with pytest.raises(PermanentMatrixStartupError) as raised:
-        await asyncio.wait_for(
-            client_session.login(
-                "https://matrix.example.org",
-                "@mindroom_router:example.org",
-                "password",
-                runtime_paths,
-            ),
-            timeout=1.0,
-        )
-
-    message = str(raised.value)
-    assert "https://matrix.example.org" in message
-    assert "self-signed certificate" in message
-    assert "SSL_CERT_FILE" in message
-    assert "MATRIX_SSL_VERIFY=false" in message
-    assert requests == [1]
-
-
-@pytest.mark.asyncio
-async def test_certificate_failure_after_authentication_keeps_retrying_and_names_the_cause(
+async def test_certificate_failure_keeps_nio_retrying_and_logs_the_aiohttp_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mid-run certificate failure (captive portal, TLS interception) may heal, so nio keeps retrying."""
+    """A certificate failure (captive portal, TLS interception) may heal, so nio retries and the log names it."""
     requests, blocked = _install_scripted_transport(monkeypatch, _certificate_failure())
     client = MindRoomAsyncClient("https://matrix.example.org", "@mindroom_router:example.org")
     client.access_token = "token"  # noqa: S105
@@ -1093,8 +1083,9 @@ async def test_certificate_failure_after_authentication_keeps_retrying_and_names
     assert requests == [1, 1]
     [failure] = [entry for entry in logs if entry["event"] == "matrix_request_transport_failed"]
     assert failure["log_level"] == "warning"
-    assert "Could not verify the TLS certificate" in failure["error"]
+    assert failure["error_type"] == "ClientConnectorCertificateError"
     assert "self-signed certificate" in failure["error"]
+    assert "SSL_CERT_FILE" not in failure["error"]
 
 
 @pytest.mark.asyncio
@@ -1152,6 +1143,15 @@ async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch
     assert failures[1]["error"] == "TimeoutError"
 
 
+def test_certificate_verification_failure_finds_a_wrapped_certificate_failure() -> None:
+    """A certificate failure that caused a higher-level error is still found."""
+    transport_error = _certificate_failure()
+    msg = "login failed"
+    with pytest.raises(RuntimeError) as raised:
+        raise RuntimeError(msg) from transport_error
+    assert client_session.certificate_verification_failure(raised.value) is transport_error
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -1164,8 +1164,9 @@ async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch
             _connection_key("matrix.example.org", 443),
             ConnectionRefusedError(111, "Connection refused"),
         ),
+        _suppressed_certificate_failure(),
     ],
 )
-def test_matrix_certificate_error_ignores_other_tls_and_connection_failures(error: BaseException) -> None:
-    """Only certificate verification failures are classified as permanent."""
-    assert client_session.matrix_certificate_error("https://matrix.example.org", error) is None
+def test_certificate_verification_failure_ignores_other_and_suppressed_failures(error: BaseException) -> None:
+    """Other TLS and connection failures, and contexts hidden with `from None`, are not certificate failures."""
+    assert client_session.certificate_verification_failure(error) is None

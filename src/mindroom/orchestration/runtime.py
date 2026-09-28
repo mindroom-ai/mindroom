@@ -25,7 +25,7 @@ from mindroom.cancellation import (
     request_task_cancel,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_session import matrix_certificate_error, maybe_ssl_context
+from mindroom.matrix.client_session import certificate_verification_failure, maybe_ssl_context
 from mindroom.matrix.health import (
     MATRIX_INGESTION_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
@@ -597,9 +597,15 @@ async def wait_for_matrix_homeserver(
             try:
                 response = await client.get(versions_url)
             except httpx.TransportError as exc:
-                certificate_error = matrix_certificate_error(homeserver, exc)
-                if certificate_error is not None:
-                    raise certificate_error from exc
+                # An untrusted certificate is a setup problem that waiting cannot fix.
+                verification_error = certificate_verification_failure(exc)
+                if verification_error is not None:
+                    msg = (
+                        f"Could not verify the TLS certificate of Matrix homeserver {homeserver}: {verification_error}. "
+                        "Make sure the system CA store trusts the homeserver's certificate, or set SSL_CERT_FILE "
+                        "to a CA bundle that does. Set MATRIX_SSL_VERIFY=false only for local testing."
+                    )
+                    raise PermanentStartupError(msg) from exc
                 if attempt == 1 or attempt % 5 == 0:
                     logger.info(
                         "Matrix homeserver not ready yet",

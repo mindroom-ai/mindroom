@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
-from urllib.parse import urlsplit
 
 import aiohttp
 import certifi
@@ -35,29 +34,19 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 )
 
 
-# Login, login flows, registration, and session restore: the requests that establish a Matrix session.
-_AUTHENTICATION_PATH_SUFFIXES = ("/login", "/register", "/account/whoami")
-
-
 class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
-def matrix_certificate_error(homeserver: str, error: BaseException) -> PermanentMatrixStartupError | None:
-    """Return an actionable permanent error when a Matrix connection failed certificate verification."""
-    cause: BaseException | None = error
+def certificate_verification_failure(error: BaseException) -> ssl_module.SSLCertVerificationError | None:
+    """Return the first certificate verification error in an exception's cause chain, if any."""
     seen: list[BaseException] = []
+    cause: BaseException | None = error
     while cause is not None and cause not in seen:
-        if isinstance(cause, aiohttp.ClientConnectorCertificateError):
-            cause = cause.certificate_error
         if isinstance(cause, ssl_module.SSLCertVerificationError):
-            return PermanentMatrixStartupError(
-                f"Could not verify the TLS certificate of Matrix homeserver {homeserver}: {cause}. "
-                "Make sure the system CA store trusts the homeserver's certificate, or set SSL_CERT_FILE "
-                "to a CA bundle that does. Set MATRIX_SSL_VERIFY=false only for local testing.",
-            )
+            return cause
         seen.append(cause)
-        cause = cause.__cause__ or cause.__context__
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     return None
 
 
@@ -96,7 +85,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
         """Return whether orderly shutdown permanently closed new transport."""
         return self._process_shutdown_transport_fenced
 
-    async def send(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
@@ -105,33 +94,24 @@ class MindRoomAsyncClient(nio.AsyncClient):
             await headers.prepare()
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
-        # nio retries every aiohttp connection error forever, logging only "Timed out".
-        # An untrusted certificate while establishing a session is a setup problem, so authentication fails fast.
-        # Later requests keep nio's retry, because a captive portal or TLS interception can clear up on its own.
+        # nio retries connection errors while logging only "Timed out", so name the real cause here.
         try:
-            response = await super().send(method, path, *args, **kwargs)
+            response = await super().send(*args, **kwargs)
         except (aiohttp.ClientConnectionError, TimeoutError) as exc:
-            certificate_error = matrix_certificate_error(self.homeserver, exc)
-            if certificate_error is not None and urlsplit(path).path.endswith(_AUTHENTICATION_PATH_SUFFIXES):
-                raise certificate_error from exc
-            self._log_transport_failure(exc, certificate_error)
+            self._log_transport_failure(exc)
             raise
         self._transport_failure_logged = False
         return response
 
-    def _log_transport_failure(
-        self,
-        error: BaseException,
-        certificate_error: PermanentMatrixStartupError | None,
-    ) -> None:
-        """Warn once per outage with the real cause; repeats stay at debug until a request succeeds."""
+    def _log_transport_failure(self, error: BaseException) -> None:
+        """Warn once per outage with the real cause; repeats stay at debug until the homeserver answers."""
         log = logger.debug if self._transport_failure_logged else logger.warning
         self._transport_failure_logged = True
         log(
             "matrix_request_transport_failed",
             homeserver=self.homeserver,
             error_type=type(error).__name__,
-            error=str(certificate_error or error) or type(error).__name__,
+            error=str(error) or type(error).__name__,
         )
 
     def begin_process_shutdown_transport_fence(self) -> None:
@@ -428,11 +408,11 @@ __all__ = [
     "MatrixSyncStorage",
     "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
+    "certificate_verification_failure",
     "create_authenticated_client",
     "create_matrix_http_client",
     "login",
     "login_flows",
-    "matrix_certificate_error",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",

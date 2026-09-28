@@ -3255,7 +3255,7 @@ class TestMultiAgentOrchestrator:
             process_env={"MATRIX_HOMESERVER": "https://matrix.example.org"},
         )
 
-        with pytest.raises(PermanentMatrixStartupError) as raised:
+        with pytest.raises(PermanentStartupError) as raised:
             await wait_for_matrix_homeserver(
                 runtime_paths=runtime_paths,
                 timeout_seconds=1.0,

@@ -28,11 +28,10 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
 
-The startup readiness probe and every Matrix client trust the same certificates: the system store plus certifi's roots, or only `SSL_CERT_FILE`/`SSL_CERT_DIR` when either is set.
-A homeserver certificate that fails verification during the startup probe, login, registration, or session restore stops startup with a permanent error naming the homeserver and the verification failure.
-After a session is established, the same failure keeps retrying, because a captive portal or TLS interception can clear up on its own.
-Other connection failures of Matrix client requests keep retrying under nio's backoff, capped at 60 seconds.
-Each client logs the first failure of an outage as a `matrix_request_transport_failed` warning with the underlying error type and message, and repeats at debug level until a request succeeds.
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: the system store plus certifi's roots, or only `SSL_CERT_FILE`/`SSL_CERT_DIR` when either is set.
+A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
+Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
+Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 

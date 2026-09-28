@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import ssl
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import aiohttp
 import pytest
-from aiohttp.client_reqrep import ConnectionKey
 from nio import LocalProtocolError
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError, Transport
@@ -25,7 +22,6 @@ from mindroom.desktop.protocol import (
 )
 from mindroom.desktop.session import DesktopSessionError
 from mindroom.desktop.transport import DesktopTransport
-from mindroom.matrix.client_session import MindRoomAsyncClient
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -200,46 +196,6 @@ async def test_desktop_runner_retries_real_nio_connection_exhaustion(monkeypatch
         pass
 
     monkeypatch.setattr("nio.durable.transport.asyncio.sleep", no_delay)
-    source = Source()
-    with pytest.raises(DesktopSessionError, match="permanent authentication"):
-        await DesktopTransport(source)._run_source()
-    assert source.runs == 2
-    assert len(attempts) == 5
-
-
-@pytest.mark.asyncio
-async def test_desktop_runner_survives_mid_run_certificate_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A certificate failure after sign-in (captive portal, TLS interception) is retried like any outage."""
-    attempts = []
-
-    class CertificateFailingSession:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            self.connector = SimpleNamespace(connect=lambda: None)
-
-        async def request(self, *_args: object, **_kwargs: object) -> object:
-            attempts.append("request")
-            verification_error = ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")
-            connection_key = ConnectionKey("matrix.example.org", 443, True, True, None, None, None)
-            raise aiohttp.ClientConnectorCertificateError(connection_key, verification_error)
-
-    monkeypatch.setattr("nio.client.async_client.ClientSession", CertificateFailingSession)
-    client = MindRoomAsyncClient("https://matrix.example.org", "@desktop:example.org")
-    client.access_token = "test-token"  # noqa: S105
-
-    class Source:
-        runs = 0
-
-        async def run(self) -> None:
-            self.runs += 1
-            if self.runs == 1:
-                await Transport(client, 1024).request("GET", "/_matrix/client/v3/sync")
-            raise HttpError(401, "M_UNKNOWN_TOKEN")
-
-    async def no_delay(_delay: float) -> None:
-        pass
-
-    monkeypatch.setattr("nio.durable.transport.asyncio.sleep", no_delay)
-    monkeypatch.setattr("mindroom.desktop.transport._RETRY_DELAY_SECONDS", 0)
     source = Source()
     with pytest.raises(DesktopSessionError, match="permanent authentication"):
         await DesktopTransport(source)._run_source()

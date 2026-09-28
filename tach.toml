@@ -3343,6 +3343,7 @@ visibility = [
     "mindroom.cli.doctor",
     "mindroom.desktop.identity",
     "mindroom.desktop.session",
+    "mindroom.desktop.startup_errors",
     "mindroom.matrix.appservice",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.client",
@@ -5617,7 +5618,6 @@ expose = [
     "create_matrix_http_client",
     "login",
     "login_flows",
-    "matrix_certificate_error",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
@@ -5630,6 +5630,7 @@ from = ["mindroom.matrix.client_session"]
 [[interfaces]]
 expose = [
     "MindRoomAsyncClient",
+    "certificate_verification_failure",
     "maybe_ssl_context",
     "require_runtime_paths_arg",
 ]
@@ -5638,6 +5639,7 @@ visibility = [
     "mindroom.matrix._owned_session",
     "mindroom.matrix.typing",
     "mindroom.desktop.session",
+    "mindroom.desktop.startup_errors",
     "mindroom.orchestration.runtime",
 ]
 
@@ -6990,7 +6992,7 @@ visibility = ["mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.startup_errors"
-depends_on = ["mindroom.desktop.native_protocol", "mindroom.desktop.session"]
+depends_on = ["mindroom.desktop.native_protocol", "mindroom.desktop.session", "mindroom.matrix.client_session"]
 
 [[modules]]
 path = "mindroom.desktop.native_protocol"
