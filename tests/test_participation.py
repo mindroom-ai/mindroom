@@ -189,7 +189,7 @@ async def test_openai_decision_disables_function_selection_before_answering() ->
 
 
 @pytest.mark.asyncio
-async def test_gemini_decision_requests_reason_first_json_while_keeping_declarations() -> None:
+async def test_gemini_decision_requests_json_while_keeping_declarations() -> None:
     """Gemini can call functions under mode NONE, which would silence an otherwise useful answer."""
     requests: list[dict[str, Any]] = []
     executions: list[tuple[int, int]] = []
@@ -206,7 +206,7 @@ async def test_gemini_decision_requests_reason_first_json_while_keeping_declarat
         if len(requests) == 1:
             return gemini_decision_response(
                 payload,
-                '{"reason":"An unanswered math question.","action":"respond"}',
+                '{"action":"respond","reason":"An unanswered math question."}',
                 leaked_call=multiply_call,
             )
         if len(requests) == 2:
@@ -232,14 +232,8 @@ async def test_gemini_decision_requests_reason_first_json_while_keeping_declarat
     assert decision["tools"][0]["functionDeclarations"][0]["name"] == "multiply"
     assert decision["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert primary["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
-    output_schema = decision["generationConfig"]["responseJsonSchema"]
-    assert decision["generationConfig"]["responseMimeType"] == "application/json"
-    # Constrained decoding that commits to the action first biased small Gemini models toward silence.
-    assert list(output_schema["properties"]) == ["reason", "action"]
-    assert output_schema["propertyOrdering"] == ["reason", "action"]
-    assert output_schema["properties"]["action"]["enum"] == ["respond", "stay_silent"]
+    assert decision["generationConfig"] == {"responseMimeType": "application/json"}
     assert "responseMimeType" not in primary.get("generationConfig", {})
-    assert "responseJsonSchema" not in primary.get("generationConfig", {})
     # Gemini merges the appended decision prompt into the final user turn.
     assert decision["contents"][0]["parts"][:-1] == primary["contents"][0]["parts"]
 
