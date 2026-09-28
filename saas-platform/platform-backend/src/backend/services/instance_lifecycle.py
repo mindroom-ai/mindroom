@@ -22,12 +22,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from backend.config import INSTANCE_TEARDOWN_GRACE_DAYS, logger
+import anyio
+from backend.config import INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
 from backend.deps import ensure_supabase
-from backend.entitlements import is_expired_trial, is_subscription_service_active, parse_timestamp
+from backend.entitlements import (
+    db_subscription_status,
+    is_expired_trial,
+    is_subscription_service_active,
+    parse_timestamp,
+)
 from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
+from backend.openrouter import OpenRouterKeyNotFoundError
 from backend.services.instances_data import get_instance, update_instance
 from backend.services.provisioner_service import (
+    CLEARED_OPENROUTER_KEY_METADATA,
     provision_instance,
     set_instance_openrouter_key_disabled,
     start_instance,
@@ -85,6 +93,10 @@ async def reconcile_subscription_instances(
             or []
         )
         entitled = is_subscription_service_active(subscription, now=now)
+        if not entitled and any(instance.get("status") != "deprovisioned" for instance in instances):
+            # Never stop or tear down on a stored status alone: a lost or out-of-order webhook can leave it stale.
+            subscription = await _sync_status_from_stripe(sb, subscription)
+            entitled = is_subscription_service_active(subscription, now=now)
         for instance in instances:
             try:
                 if entitled:
@@ -131,6 +143,32 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
             logger.exception("Instance lifecycle reconcile failed for subscription %s", subscription_id)
             summary.errors.append(f"subscription {subscription_id}: {exc}")
     return summary
+
+
+async def _sync_status_from_stripe(sb: Client, subscription: dict[str, Any]) -> dict[str, Any]:
+    """Return the subscription with its status refreshed from Stripe, storing any correction.
+
+    Subscriptions without a Stripe id (platform trials, free tier) and deployments without Stripe keep the
+    stored status. Any Stripe API error propagates so no instance is stopped on an unverified status.
+    """
+    stripe_subscription_id = subscription.get("stripe_subscription_id")
+    if not stripe_subscription_id or not stripe.api_key:
+        return subscription
+    remote = await anyio.to_thread.run_sync(stripe.Subscription.retrieve, stripe_subscription_id)
+    status = db_subscription_status(str(remote["status"]))
+    trial_end = remote.get("trial_end")
+    trial_ends_at = datetime.fromtimestamp(trial_end, tz=UTC).isoformat() if trial_end else None
+    if status == subscription.get("status") and trial_ends_at == subscription.get("trial_ends_at"):
+        return subscription
+    logger.warning(
+        "Subscription %s was stored as %s but Stripe reports %s; correcting it",
+        subscription["id"],
+        subscription.get("status"),
+        status,
+    )
+    fields = {"status": status, "trial_ends_at": trial_ends_at, "updated_at": datetime.now(UTC).isoformat()}
+    sb.table("subscriptions").update(fields).eq("id", subscription["id"]).execute()
+    return {**subscription, **fields}
 
 
 def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -195,9 +233,9 @@ def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
             .data
             or []
         )
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
+        if not page:
             return rows
+        rows.extend(page)
 
 
 async def _resume(
@@ -208,24 +246,34 @@ async def _resume(
         return
     instance_id = instance["instance_id"]
     if instance.get("status") == "deprovisioned" or not await check_deployment_exists(str(instance_id)):
-        await provision_instance(
-            sb,
-            data={
-                "subscription_id": subscription["id"],
-                "account_id": subscription["account_id"],
-                "tier": subscription["tier"],
-                "instance_id": instance_id,
-            },
-            background_tasks=None,
-        )
+        await _reprovision(sb, instance_id, subscription)
     else:
         await start_instance(instance_id)
     # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
     current = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
-    await set_instance_openrouter_key_disabled(current, disabled=False)
+    try:
+        await set_instance_openrouter_key_disabled(current, disabled=False)
+    except OpenRouterKeyNotFoundError:
+        # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one.
+        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+        await _reprovision(sb, instance_id, subscription)
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
+
+
+async def _reprovision(sb: Client, instance_id: Any, subscription: dict[str, Any]) -> None:
+    await provision_instance(
+        sb,
+        data={
+            "subscription_id": subscription["id"],
+            "account_id": subscription["account_id"],
+            "tier": subscription["tier"],
+            "instance_id": instance_id,
+        },
+        background_tasks=None,
+        resume_lifecycle_hold=True,
+    )
 
 
 async def _hold(

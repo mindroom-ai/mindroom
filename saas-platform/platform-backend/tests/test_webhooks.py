@@ -73,6 +73,8 @@ class TestWebhookEndpoints:
         """Mock Supabase client."""
         with patch("backend.routes.webhooks.ensure_supabase") as mock:
             sb = MagicMock()
+            # No stored Stripe subscription id, so update events are never treated as superseded.
+            sb.table.return_value.select.return_value.eq.return_value.execute.return_value = Mock(data=[])
             mock.return_value = sb
             yield sb
 

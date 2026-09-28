@@ -103,7 +103,7 @@ class TestGetOwnedInstance:
         assert instances_data.get_owned_instance(sb, 123, "acc-1") == ROW_A
         assert sb.calls == [
             ("table", "instances"),
-            ("select", "id,instance_id,subscription_id,account_id"),
+            ("select", "id,instance_id,subscription_id,account_id,lifecycle_stopped_at"),
             ("eq", ("instance_id", "123")),
             ("eq", ("account_id", "acc-1")),
             ("limit", 1),

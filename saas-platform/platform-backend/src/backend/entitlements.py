@@ -15,6 +15,11 @@ PAID_TIERS = frozenset({"byok", "hobby", "pro", "enterprise"})
 SERVICE_STATUSES = frozenset({"active", "past_due"})
 
 
+def db_subscription_status(stripe_status: str) -> str:
+    """Map a Stripe subscription status to the stored status; the database spells it `cancelled`."""
+    return "cancelled" if stripe_status == "canceled" else stripe_status
+
+
 def parse_timestamp(value: str | None) -> datetime | None:
     """Parse a Supabase ISO timestamp into an aware UTC datetime."""
     if not value:

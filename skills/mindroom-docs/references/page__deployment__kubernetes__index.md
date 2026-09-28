@@ -456,10 +456,12 @@ The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an 
 | Entitled again while stopped | Started | Re-enabled | Kept |
 | Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
 
-The grace period defaults to 30 days and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
+The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
 Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
 A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+Before stopping or tearing down a Stripe-billed instance, the lifecycle asks Stripe for the subscription's current status and corrects a stale stored status, so a lost or out-of-order webhook never stops a paying customer; if Stripe cannot be reached, nothing is stopped.
 Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
 The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
 Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).

@@ -272,6 +272,11 @@ async def _verify_instance_ownership_and_run(
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")
         assert_instance_entitlement(sub_result.data[0], "run")
+        if instance.get("lifecycle_stopped_at"):
+            # Resuming also re-enables the OpenRouter key and clears the teardown schedule.
+            summary = await instance_lifecycle.reconcile_subscription_instances(instance["subscription_id"])
+            if summary.errors:
+                raise HTTPException(status_code=500, detail=f"Failed to resume instance: {summary.errors[0]}")
 
     return await instance_action(instance_id)
 

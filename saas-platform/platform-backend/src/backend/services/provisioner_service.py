@@ -433,7 +433,7 @@ def _stored_openrouter_key_hash(row: Mapping[str, Any] | None) -> str | None:
     return None
 
 
-_CLEARED_OPENROUTER_KEY_METADATA = {
+CLEARED_OPENROUTER_KEY_METADATA = {
     "openrouter_key_hash": None,
     "openrouter_key_label": None,
     "openrouter_key_limit_usd": None,
@@ -474,7 +474,7 @@ async def _revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> No
         await anyio.to_thread.run_sync(delete_key)
     except OpenRouterKeyNotFoundError:
         logger.info("OpenRouter key %s for instance %s was already deleted", key_hash, instance_id)
-    update_instance(sb, instance_id, _CLEARED_OPENROUTER_KEY_METADATA)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
 
 
 async def _delete_resources_outside_release(instance_id: str | int) -> None:
@@ -573,9 +573,13 @@ async def _provision_openrouter_key(
 
 
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
-    sb: Any, *, data: dict, background_tasks: BackgroundTasks | None
+    sb: Any, *, data: dict, background_tasks: BackgroundTasks | None, resume_lifecycle_hold: bool = False
 ) -> dict[str, Any]:
-    """Provision (or re-provision) a tenant instance and return the portal response payload."""
+    """Provision (or re-provision) a tenant instance and return the portal response payload.
+
+    An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
+    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
+    """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
@@ -815,6 +819,22 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Failed to deploy instance")
         _mark_instance_provision_error(sb, customer_id, "deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
+
+    if existing_instance_row.get("lifecycle_stopped_at") and not resume_lifecycle_hold:
+        await _scale_tenant_deployments(
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+        )
+        held_row = get_instance(sb, customer_id, columns="instance_id,openrouter_key_hash") or {}
+        await set_instance_openrouter_key_disabled(held_row, disabled=True)
+        update_instance(sb, customer_id, {"status": "stopped"})
+        return {
+            "customer_id": customer_id,
+            "frontend_url": frontend_url,
+            "api_url": api_url,
+            "matrix_url": matrix_url,
+            "success": True,
+            "message": "Instance redeployed but kept stopped because its subscription is inactive",
+        }
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)

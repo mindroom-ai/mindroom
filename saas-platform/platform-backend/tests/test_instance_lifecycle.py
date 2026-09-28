@@ -13,7 +13,7 @@ import pytest
 from backend.deps import verify_admin, verify_user
 from backend.openrouter import OpenRouterKeyNotFoundError
 from backend.services.instance_lifecycle import LifecycleSummary, reconcile_subscription_instances
-from backend.services.provisioner_service import set_instance_openrouter_key_disabled
+from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
 from backend.tasks.cleanup import run_cleanup_job
 from fastapi.testclient import TestClient
 from main import app
@@ -35,6 +35,7 @@ class Platform:
     provision: AsyncMock
     uninstall: AsyncMock
     set_key_disabled: AsyncMock
+    stripe: Mock
 
     def instance(self) -> dict[str, Any]:
         return self.db.row("instances", instance_id=7)
@@ -96,7 +97,14 @@ def platform() -> Iterator[Platform]:
 
         return AsyncMock(side_effect=side_effect)
 
-    async def provision(_sb: Any, *, data: dict[str, Any], background_tasks: Any) -> dict[str, Any]:  # noqa: ANN401, ARG001
+    async def provision(
+        _sb: Any,  # noqa: ANN401
+        *,
+        data: dict[str, Any],
+        background_tasks: Any,  # noqa: ANN401, ARG001
+        resume_lifecycle_hold: bool,
+    ) -> dict[str, Any]:
+        assert resume_lifecycle_hold
         db.row("instances", instance_id=data["instance_id"]).update(
             {"status": "running", "openrouter_key_hash": "key_hash_new"}
         )
@@ -110,6 +118,7 @@ def platform() -> Iterator[Platform]:
         provision=AsyncMock(side_effect=provision),
         uninstall=mark("deprovisioned"),
         set_key_disabled=AsyncMock(),
+        stripe=Mock(api_key=""),
     )
     with (
         patch(f"{lifecycle}.ensure_supabase", return_value=db),
@@ -121,6 +130,7 @@ def platform() -> Iterator[Platform]:
         patch(f"{lifecycle}.provision_instance", platform.provision),
         patch(f"{lifecycle}.uninstall_instance", platform.uninstall),
         patch(f"{lifecycle}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
+        patch(f"{lifecycle}.stripe", platform.stripe),
         patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
     ):
         yield platform
@@ -425,6 +435,129 @@ async def test_disabling_a_missing_key_succeeds_but_reenabling_it_raises() -> No
         await set_instance_openrouter_key_disabled({"instance_id": 7, "openrouter_key_hash": None}, disabled=False)
 
     assert missing.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_stored_status_is_corrected_from_stripe_instead_of_stopping(platform: Platform) -> None:
+    # A late subscription.created (incomplete) overwrote the row after the customer paid again.
+    platform.db.tables["subscriptions"].append(_subscription("incomplete"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.stripe.Subscription.retrieve.assert_called_once_with("sub_stripe_1")
+    assert platform.subscription()["status"] == "active"
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["teardown_after"] is None
+    assert summary.errors == []
+
+
+@pytest.mark.asyncio
+async def test_stripe_outage_stops_nothing(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.side_effect = RuntimeError("stripe unavailable")
+
+    with pytest.raises(RuntimeError, match="stripe unavailable"):
+        await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_resume_replaces_a_key_that_openrouter_deleted(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.start.assert_awaited_once_with(7)
+    platform.provision.assert_awaited_once()
+    assert platform.instance()["openrouter_key_hash"] == "key_hash_new"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+    assert summary.errors == []
+
+
+def test_update_for_a_superseded_stripe_subscription_is_ignored(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", stripe_subscription_id="sub_stripe_new"))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    _send_webhook("customer.subscription.updated", _stripe_subscription("canceled"))
+
+    assert platform.subscription()["status"] == "active"
+    assert platform.instance()["status"] == "running"
+
+
+def test_customer_start_of_held_instance_resumes_through_lifecycle(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.start_instance", platform.start),
+        ):
+            response = TestClient(app).post("/my/instances/7/start")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": False}
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_operator_reprovision_keeps_held_instance_stopped() -> None:
+    db = FakeSupabase(
+        {
+            "instances": [
+                _instance(
+                    "stopped", tier="byok", openrouter_key_hash=None, lifecycle_stopped_at="2026-09-20T03:00:00+00:00"
+                )
+            ]
+        }
+    )
+    kubectl = AsyncMock(return_value=(0, "", ""))
+    wait_ready = AsyncMock(return_value=True)
+    service = "backend.services.provisioner_service"
+    with (
+        patch(f"{service}.run_kubectl", kubectl),
+        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{service}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{service}.wait_for_deployment_ready", wait_ready),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+    ):
+        result = await provision_instance(
+            db,
+            data={"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "byok", "instance_id": 7},
+            background_tasks=None,
+        )
+
+    assert "kept stopped" in result["message"]
+    assert call(["scale", "deployment/mindroom-7", "--replicas=0"], namespace="mindroom-instances") in (
+        kubectl.await_args_list
+    )
+    wait_ready.assert_not_awaited()
+    assert db.row("instances", instance_id=7)["status"] == "stopped"
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:

@@ -5,6 +5,7 @@ from typing import Annotated, Any, NotRequired, TypedDict
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
+from backend.entitlements import db_subscription_status
 from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
 from backend.services.instance_lifecycle import reconcile_account_instances
@@ -62,11 +63,6 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     raise ValueError(msg)
 
 
-def _db_subscription_status(stripe_status: str) -> str:
-    """Map a Stripe subscription status to the stored status; the database spells it `cancelled`."""
-    return "cancelled" if stripe_status == "canceled" else stripe_status
-
-
 class _SubscriptionFields(TypedDict):
     """Shared subscription persistence fields and event-specific additions."""
 
@@ -95,7 +91,7 @@ def _subscription_fields(subscription: dict) -> _SubscriptionFields:
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
         "tier": tier,
-        "status": _db_subscription_status(subscription["status"]),
+        "status": db_subscription_status(subscription["status"]),
         "max_agents": limits.get("max_agents", 1),
         "max_messages_per_day": limits.get("max_messages_per_day", 100),
         "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
@@ -170,6 +166,12 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
         return False, None
 
     account_id = account_result.data["id"]
+
+    current = sb.table("subscriptions").select("stripe_subscription_id").eq("account_id", account_id).execute().data
+    current_stripe_id = current[0].get("stripe_subscription_id") if current else None
+    if current_stripe_id and current_stripe_id != subscription["id"]:
+        logger.info("Ignoring update for superseded Stripe subscription %s", subscription["id"])
+        return True, account_id
 
     subscription_data = _subscription_fields(subscription)
     subscription_data["cancelled_at"] = _maybe_timestamp_to_iso(subscription.get("canceled_at"))
