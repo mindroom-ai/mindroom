@@ -122,7 +122,7 @@ class DesktopShellOutput(ShellOutputCapture):
 
 @dataclass(frozen=True)
 class DesktopShellResult:
-    """One command's state; a finished result hands its output to the caller to transfer and release.
+    """One command's state; a finished result's output stays behind its handle until ``DesktopShell.hand_over``.
 
     ``killed`` means ``kill_shell`` stopped the command; ``completed`` means it exited on its own.
     """
@@ -406,6 +406,8 @@ class DesktopShell:
                 stdin=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.STDOUT,
                 kill_group_after_exit=True,
+                # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
+                register_finished=True,
             ),
         )
         cancelled = asyncio.create_task(self._cancel_event.wait())
@@ -422,23 +424,20 @@ class DesktopShell:
             raise DesktopShellError(_STOPPED)
         result = run.result()
         self._prune()
-        if result.handle is not None:
-            if self._cancel_event.is_set():
-                # Revocation raced the new handle's registration and has already killed it.
-                output.release()
-                raise DesktopShellError(_STOPPED)
-            self._handles[result.handle] = _ShellHandle(
-                request.requester_id,
-                request.agent_name,
-                request.command,
-                started_at,
-                output,
-            )
-            return DesktopShellResult("running", result.handle, None, output)
-        if not output.completed:
+        if result.handle is None:
             output.release()
             raise DesktopShellError(result.message.removeprefix("Error: "))
-        return DesktopShellResult("completed", None, output.exit_code, output)
+        if self._cancel_event.is_set():
+            # Revocation raced the new handle's registration and has already killed and forgotten it.
+            discard_background_record(self._records, result.handle)
+            if not output.completed:
+                output.release()
+                raise DesktopShellError(_STOPPED)
+            return DesktopShellResult("completed", None, output.exit_code, output)
+        entry = _ShellHandle(request.requester_id, request.agent_name, request.command, started_at, output)
+        self._handles[result.handle] = entry
+        record = self._records[result.handle]
+        return DesktopShellResult(entry.state(record), result.handle, record.return_code, output)
 
     def check(
         self,

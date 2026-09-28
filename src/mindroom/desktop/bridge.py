@@ -1001,9 +1001,9 @@ class DesktopBridge:
         try:
             return await self._finished_shell_result(command, shell, result, payload, offset or 0)
         except BaseException:
-            if result.handle is None:
-                # Without a handle nothing else owns this output.
-                output.release()
+            if command.action == "run_shell":
+                # The caller never learned this handle, so nothing could page from it.
+                shell.hand_over(result)
             raise
 
     async def _finished_shell_result(
@@ -1016,9 +1016,11 @@ class DesktopBridge:
     ) -> dict[str, object]:
         """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
         content = result.output.read(start)
+        # A run_shell reply names its handle only while that handle stays to page from.
+        delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
         # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
         if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-            inline = {**payload, "output": content.decode()}
+            inline = {**delivered, "output": content.decode()}
             if self._fits_inline(command, inline):
                 shell.hand_over(result)
                 return inline
@@ -1037,10 +1039,10 @@ class DesktopBridge:
             error = "Shell output upload failed."
         else:
             shell.hand_over(result)
-            return {**payload, "output_attachment": media.to_content()}
+            return {**delivered, "output_attachment": media.to_content()}
         detail = error[:_MAX_WARNING_DETAIL]
         if result.handle is None:
-            # A command that finished inline has no handle to page from, so this page is all it can return.
+            # Revocation raced this command's registration, so there is no handle to page from.
             shell.hand_over(result)
             warning = (
                 f"The output could not be attached ({detail}); only its beginning is shown and the rest is not "

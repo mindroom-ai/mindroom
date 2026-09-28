@@ -131,9 +131,12 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
     shell.decide("r1", approved=True)
     result = await task
     assert marker.read_text() == "approved"
-    assert (result.exit_code, result.handle) == (0, None)
+    assert (result.state, result.exit_code) == ("completed", 0)
+    # A finished command is retained as a handle until its caller hands its output over.
+    assert [entry["handle"] for entry in shell.status()["handles"]] == [result.handle]
     assert completed_output(result) == "done"
-    assert shell.status()["pending"] is None
+    shell.hand_over(result)
+    assert (shell.status()["pending"], shell.status()["handles"]) == (None, [])
     await shell.close()
 
 

@@ -1574,12 +1574,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
 
 
 @pytest.mark.asyncio
-async def test_failed_upload_of_an_inline_finished_command_keeps_exit_code_and_first_output(
+async def test_failed_upload_of_a_finished_run_shell_keeps_exit_code_and_a_first_page(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a handle to page from, an attachment failure still shows the exit code and the output's start."""
+    """An attachment failure still shows the exit code and the output's start, with a handle to page on from."""
     monkeypatch.setattr(
         "mindroom.desktop.bridge.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
@@ -1596,11 +1596,12 @@ async def test_failed_upload_of_an_inline_finished_command_keeps_exit_code_and_f
     assert response.ok
     result = response.result
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 4, None)
-    assert (result["handle"], result["output_start"], set(str(result["output"]))) == (None, 0, {"x"})
+    assert isinstance(result["handle"], str)
+    assert (result["output_start"], set(str(result["output"]))) == (0, {"x"})
     assert result["next_offset"] == len(str(result["output"]))
     assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "Matrix media upload failed: offline" in str(result["warning"])
-    assert "the rest is not kept" in str(result["warning"])
+    assert "Continue with check_shell from next_offset" in str(result["warning"])
     assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     await bridge.stop()
     bridge.close()
@@ -1654,6 +1655,7 @@ _LARGE_OUTPUT = "import sys; sys.stdout.write('x' * 100_000 + 'tail')"
 
 def _assert_upload_fallback(result: dict[str, object]) -> None:
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 0, None)
+    assert isinstance(result["handle"], str)
     assert (result["output_start"], set(str(result["output"]))) == (0, {"x"})
     assert result["next_offset"] == len(str(result["output"]))
     assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
@@ -1705,6 +1707,69 @@ async def test_failed_upload_keeps_a_finished_handle_until_its_output_is_deliver
     bridge.close()
 
 
+@pytest.mark.parametrize("ending", ["paged", "revoked"])
+@pytest.mark.asyncio
+async def test_failed_upload_turns_an_inline_finished_run_shell_into_a_pageable_handle(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Undeliverable output of a finished run_shell stays behind a handle until paged in full or revoked."""
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge.upload_encrypted_media",
+        AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
+    )
+    released: list[DesktopShellOutput] = []
+    release = DesktopShellOutput.release
+
+    def record_release(output: DesktopShellOutput) -> None:
+        released.append(output)
+        release(output)
+
+    monkeypatch.setattr(DesktopShellOutput, "release", record_release)
+    content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("cat log", tmp_path)))
+    first = _response(transport)
+    handle = first.result["handle"]
+    assert isinstance(handle, str)
+    assert (first.result["state"], first.result["exit_code"], first.result["output_start"]) == ("completed", 0, 0)
+    assert "Continue with check_shell from next_offset" in str(first.result["warning"])
+    received, offset = str(first.result["output"]).encode(), first.result["next_offset"]
+    assert received == content[:offset]
+    spool = Path(str(shell._directory))
+    await _handle(
+        bridge,
+        _event(_command("request_status", request_id="query", sequence=2, parameters={"request_id": "run"})),
+    )
+    assert _response(transport).result["response"] == first.to_content()
+    assert released == []
+    if ending == "revoked":
+        bridge.revoke_local_shell()
+    else:
+        for sequence in range(3, 20):
+            await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+            page = _response(transport).result
+            shown = str(page["output"]).encode()
+            assert (page["output_start"], page["next_offset"]) == (offset, offset + len(shown))
+            received, offset = received + shown, offset + len(shown)
+            if offset == len(content):
+                break
+            assert released == []
+        assert received == content
+    assert [output.stdout.file.closed for output in released] == [True]
+    assert bridge.local_status()["shell"]["handles"] == []
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=30, offset=offset)))
+    assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    assert not spool.exists()
+    bridge.close()
+
+
 @pytest.mark.parametrize("action", ["run_shell", "check_shell"])
 @pytest.mark.asyncio
 async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound(
@@ -1729,8 +1794,8 @@ async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound
         (tmp_path / "release").touch()
         result, _ = await asyncio.wait_for(_check_until_finished(bridge, transport, handle, first_sequence=2), 5)
     _assert_upload_fallback(result)
-    # A handle keeps its output for the next page; a command that finished inline has nothing to keep it.
-    assert [output.closed for output in released] == ([True] if action == "run_shell" else [])
+    # The handle keeps its output for the next page.
+    assert released == []
     await bridge.stop()
     bridge.close()
 

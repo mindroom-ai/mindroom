@@ -128,7 +128,8 @@ class ShellRunResult:
     """Outcome of one run_command call.
 
     ``handle`` is set only when the command timed out and was registered as a
-    background record, so callers that could not deliver the message can roll
+    background record, or finished in time and ``register_finished`` kept it as
+    a finished record, so callers that could not deliver the message can roll
     the registration back with ``discard_background_record``.
     ``output_file_handled`` means execution owns publication or its error receipt;
     the generic output-file wrapper must not write the returned message again.
@@ -155,6 +156,7 @@ async def run_command(
     stdin: int | None = None,
     stderr: int = asyncio.subprocess.PIPE,
     kill_group_after_exit: bool = False,
+    register_finished: bool = False,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -169,7 +171,9 @@ async def run_command(
     ``output_destination``. ``stdin`` and ``stderr`` go to the subprocess as
     given, so ``stderr=asyncio.subprocess.STDOUT`` merges both streams. With
     ``kill_group_after_exit``, whatever remains of the process group is killed
-    once the foreground process exits or is cancelled.
+    once the foreground process exits or is cancelled. With ``register_finished``,
+    a command that finishes within ``timeout`` is also registered, as a finished
+    record whose handle the caller can check or discard later.
     """
     _sweep_stale_records(registry)
     if handle is not None:
@@ -196,6 +200,7 @@ async def run_command(
             stdin=stdin,
             stderr=stderr,
             kill_group_after_exit=kill_group_after_exit,
+            register_finished=register_finished,
         )
     finally:
         if handle is not None and handle_reservations is not None:
@@ -217,6 +222,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
     stdin: int | None,
     stderr: int,
     kill_group_after_exit: bool,
+    register_finished: bool,
 ) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
     capture = output_capture
@@ -284,10 +290,31 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
 
     return_code = process.returncode
     assert return_code is not None
+    finished_handle = None
+    if register_finished:
+        finished_handle = handle or _unused_handle(registry)
+        registry[finished_handle] = ProcessRecord(
+            namespace=namespace,
+            handle=finished_handle,
+            pid=process.pid,
+            args=argv,
+            process=process,
+            stdout_buf=stdout_buf,
+            stderr_buf=stderr_buf,
+            tail=tail,
+            finished=True,
+            finished_at=time.monotonic(),
+            return_code=return_code,
+            output_capture=capture,
+        )
     if capture is not None:
         capture.incomplete = stdout_reader.cancelled() or stderr_reader.cancelled()
         try:
-            return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
+            return ShellRunResult(
+                message=capture.publish(return_code),
+                handle=finished_handle,
+                output_file_handled=True,
+            )
         finally:
             capture.close()
     if return_code != 0:
@@ -297,8 +324,15 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
                 stderr_buf.render(),
                 return_code=return_code,
             ),
+            handle=finished_handle,
         )
-    return ShellRunResult(message=stdout_buf.render(tail=tail))
+    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle)
+
+
+def _unused_handle(registry: dict[str, ProcessRecord]) -> str:
+    while (handle := f"shell:{uuid.uuid4().hex[:8]}") in registry:
+        pass
+    return handle
 
 
 async def _background_process(
