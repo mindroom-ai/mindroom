@@ -80,7 +80,7 @@ create_event(
 
 ### What It Does
 
-`google_tasks_list_task_lists()` returns up to 1,000 task lists with their IDs and titles.
+`google_tasks_list_task_lists()` returns up to 1,000 task lists per page with their IDs and titles, and a `nextPageToken` when more lists remain.
 `google_tasks_list_tasks()` returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat spaces, and returns a `nextPageToken` when more tasks remain.
 Completed tasks are omitted unless `show_completed=True`, which also includes tasks completed in Google's own apps.
 `google_tasks_create_task()` creates a task with optional notes, due date, and parent task.

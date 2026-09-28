@@ -55,15 +55,17 @@ class _FakeTasksRequest:
 class _FakeTaskListsResource:
     def __init__(self) -> None:
         self.list_calls: list[dict[str, object]] = []
+        self.next_page_token: str | None = None
 
     def list(self, **kwargs: object) -> _FakeTasksRequest:
         self.list_calls.append(kwargs)
-        return _FakeTasksRequest(
-            {
-                "kind": "tasks#taskLists",
-                "items": [{"id": "list-1", "title": "My Tasks"}],
-            },
-        )
+        response: dict[str, object] = {
+            "kind": "tasks#taskLists",
+            "items": [{"id": "list-1", "title": "My Tasks"}],
+        }
+        if self.next_page_token is not None:
+            response["nextPageToken"] = self.next_page_token
+        return _FakeTasksRequest(response)
 
 
 class _FakeTasksResource:
@@ -192,6 +194,16 @@ def test_google_tasks_list_task_lists(tmp_path: Path) -> None:
 
     assert service.tasklists_resource.list_calls == [{"maxResults": 1000}]
     assert result == {"taskLists": [{"id": "list-1", "title": "My Tasks"}]}
+
+
+def test_google_tasks_list_task_lists_pages_beyond_first_response(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    service.tasklists_resource.next_page_token = "lists-page-3"  # noqa: S105
+
+    result = json.loads(tool.google_tasks_list_task_lists(page_token="lists-page-2"))  # noqa: S106
+
+    assert service.tasklists_resource.list_calls == [{"maxResults": 1000, "pageToken": "lists-page-2"}]
+    assert result["nextPageToken"] == "lists-page-3"
 
 
 def test_google_tasks_list_tasks_defaults_to_open_tasks_in_default_list(tmp_path: Path) -> None:

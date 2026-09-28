@@ -35,6 +35,13 @@ def _error_result(message: str) -> str:
     return json.dumps({"error": message})
 
 
+def _page_result(result: dict[str, object], response: dict[str, object]) -> str:
+    """Return one page of results, adding Google's nextPageToken when more pages remain."""
+    if response.get("nextPageToken"):
+        result["nextPageToken"] = response["nextPageToken"]
+    return json.dumps(result)
+
+
 def _due_timestamp(due: str) -> str:
     """Return Google's midnight-UTC due timestamp for a YYYY-MM-DD calendar date."""
     if not _DUE_DATE_PATTERN.fullmatch(due):
@@ -110,21 +117,24 @@ class GoogleTasksTools(GoogleApiToolkit):
             **kwargs,
         )
 
-    def google_tasks_list_task_lists(self) -> str:
+    def google_tasks_list_task_lists(self, page_token: str | None = None) -> str:
         """List the connected user's Google Tasks lists.
 
+        Args:
+            page_token: nextPageToken from a previous call, to fetch the following page.
+
         Returns:
-            JSON containing up to 1000 task lists with their IDs and titles.
+            JSON containing up to 1000 task lists with their IDs and titles and, when more remain, a nextPageToken.
 
         """
+        params: dict[str, object] = {"maxResults": _MAX_TASK_LISTS}
+        if page_token:
+            params["pageToken"] = page_token
         try:
-            response = cast(
-                "dict[str, object]",
-                self._google_api_service().tasklists().list(maxResults=_MAX_TASK_LISTS).execute(),
-            )
+            response = cast("dict[str, object]", self._google_api_service().tasklists().list(**params).execute())
         except HttpError as exc:
             return google_http_error_result(_SERVICE_NAME, "list_task_lists", exc)
-        return json.dumps({"taskLists": response.get("items", [])})
+        return _page_result({"taskLists": response.get("items", [])}, response)
 
     def google_tasks_list_tasks(
         self,
@@ -161,10 +171,7 @@ class GoogleTasksTools(GoogleApiToolkit):
             response = cast("dict[str, object]", self._google_api_service().tasks().list(**params).execute())
         except HttpError as exc:
             return google_http_error_result(_SERVICE_NAME, "list_tasks", exc)
-        result: dict[str, object] = {"taskListId": task_list_id, "tasks": response.get("items", [])}
-        if response.get("nextPageToken"):
-            result["nextPageToken"] = response["nextPageToken"]
-        return json.dumps(result)
+        return _page_result({"taskListId": task_list_id, "tasks": response.get("items", [])}, response)
 
     def google_tasks_create_task(
         self,
