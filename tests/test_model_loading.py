@@ -490,6 +490,32 @@ def test_current_direct_gemini_omits_deprecated_sampling_controls(tmp_path: Path
     assert request_config.top_k is None
 
 
+def test_models_from_one_entry_do_not_share_authored_generation_config(tmp_path: Path) -> None:
+    """Agno writes each Gemini request into an authored generation_config dict, so each model needs its own."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "gemini": ModelConfig(
+                    provider="google",
+                    id="gemini-3.8-flash",
+                    extra_kwargs={"api_key": "dummy-key", "generation_config": {"max_output_tokens": 256}},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    agent_a = get_model_instance(config, runtime_paths_for(config), "gemini")
+    agent_b = get_model_instance(config, runtime_paths_for(config), "gemini")
+    tool = {"type": "function", "function": {"name": "agent_a_tool", "parameters": {"type": "object"}}}
+
+    agent_a.get_request_params(system_message="Agent A.", tools=[tool], tool_choice="auto")
+    request_config = agent_b.get_request_params(system_message="Agent B.")["config"]
+
+    assert request_config.tools is None
+    assert request_config.tool_config is None
+    assert config.models["gemini"].extra_kwargs["generation_config"] == {"max_output_tokens": 256}
+
+
 def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:
     """Explicit Claude timeout config wins over the default."""
     config = bind_runtime_paths(
