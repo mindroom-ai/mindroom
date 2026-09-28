@@ -78,9 +78,9 @@ final class LocalAgentPairingTests: XCTestCase {
 
     @MainActor
     func testLateCancelKeepsCompletedPairingAndSaveFailureVisible() async {
-        for exitCode: Int32 in [0, 1, SIGTERM] {
+        for exitCode: Int32 in [0, 1] {
             let finished = expectation(description: "Approved pairing finished with \(exitCode)")
-            let output = "Connected.\n\(exitCode == 0 ? "Saved credentials" : "Could not save credentials; recovery exports")"
+            let output = exitCode == 0 ? "Saved credentials" : "Could not save credentials; recovery exports"
             let runner = MindRoomCommandRunner(processRunner: { invocation, process in
                 guard invocation.arguments.contains("connect") else {
                     return CommandResult(exitCode: 0, output: "MindRoom service: running")

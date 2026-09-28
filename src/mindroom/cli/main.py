@@ -668,7 +668,7 @@ def connect(
                 raise typer.Exit(_CONNECT_CANCELLED_EXIT_CODE)
             return False
 
-        previous_handler = signal.signal(signal.SIGTERM, request_cancel) if graceful_cancel else None
+        _ = signal.signal(signal.SIGTERM, request_cancel) if graceful_cancel else None
         try:
             cli_connect.pair_local_install(
                 runtime_paths,
@@ -683,9 +683,9 @@ def connect(
             )
             console.print("\nNext step:\n  mindroom run")
         finally:
-            # None denotes a non-Python handler, which signal.signal cannot restore.
-            if previous_handler is not None:
-                signal.signal(signal.SIGTERM, previous_handler)
+            if graceful_cancel:
+                # Preserve the result through shutdown; Python resets callable handlers during finalization.
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None

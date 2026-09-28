@@ -3775,6 +3775,45 @@ class TestDoctor:
 class TestConnect:
     """Tests for `mindroom connect` pairing command."""
 
+    @pytest.mark.parametrize(("outcome", "expected_exit"), [("success", 0), ("failure", 1)])
+    def test_graceful_cancel_preserves_result_during_process_shutdown(
+        self,
+        tmp_path: Path,
+        outcome: str,
+        expected_exit: int,
+    ) -> None:
+        """A real SIGTERM after the command returns must not replace its saved result."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\n")
+        script = """\
+import atexit
+import os
+import signal
+import sys
+import mindroom.cli.connect as cli_connect
+from mindroom.cli.main import app
+
+def pair(*args, **kwargs):
+    print("pair-result", flush=True)
+    if sys.argv[2] == "failure":
+        raise ValueError("test save failure; recovery exports")
+
+cli_connect.pair_local_install = pair
+atexit.register(lambda: os.kill(os.getpid(), signal.SIGTERM))
+app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
+     "--provisioning-url", "https://provisioning.example"])
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(cfg), outcome],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert "pair-result" in result.stdout, result.stderr
+        assert result.returncode == expected_exit, result.stdout + result.stderr
+        assert ("recovery exports" in result.stdout) == (outcome == "failure")
+
     @pytest.mark.parametrize("cancel_at", ["waiting", "claiming", "saving", "config", "save_error"])
     def test_graceful_cancel_stops_waiting_but_finishes_claimed_credentials(
         self,
@@ -3840,7 +3879,7 @@ class TestConnect:
             ["connect", "--graceful-cancel", "--provisioning-url", "https://provisioning.example"],
             cfg,
         )
-        assert handlers[-1] == signal.SIG_DFL
+        assert handlers[-1] == signal.SIG_IGN
 
         expected_exit = {"waiting": 130, "save_error": 1}.get(cancel_at, 0)
         assert result.exit_code == expected_exit, result.output
