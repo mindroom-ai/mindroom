@@ -524,6 +524,32 @@ async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_kill_marks_a_handle_killed_only_when_its_signal_was_delivered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that exits before the signal reaches it is reported by how it really ended."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, timeout=1))
+    assert running.handle is not None
+
+    def vanished(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "killpg", vanished)
+        assert shell.kill(REQUESTER, AGENT, running.handle) == "completed"
+        shell.kill_handle(running.handle)
+    assert shell.status()["handles"][0]["state"] == "running"
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = await check_until_finished(shell, running.handle)
+    assert (killed.state, killed.exit_code) == ("killed", -signal.SIGTERM)
+    killed.output.release()
+    await shell.close()
+
+
+@pytest.mark.asyncio
 async def test_killed_handle_keeps_the_exit_code_its_process_returned(tmp_path: Path) -> None:
     """A command that traps TERM and exits cleanly still finishes as killed, with the code it chose."""
     shell = local_shell()

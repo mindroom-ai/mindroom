@@ -20,8 +20,8 @@ from mindroom.shell_execution import (
     ProcessRecord,
     discard_background_record,
     kill_all_records,
-    kill_command,
     run_command,
+    signal_record,
 )
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
@@ -480,12 +480,11 @@ class DesktopShell:
         self._signal(self._records[handle], handle, force=True)
 
     def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
-        if record.process.returncode is not None:
-            # An earlier kill stays the reason it ended, matching what the next check reports.
-            return "killed" if self._handles[handle].killed else "completed"
-        kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
-        self._handles[handle] = replace(self._handles[handle], killed=True)
-        return "killed"
+        # Only a delivered signal makes the handle killed; a process that exited first ended on its own.
+        if record.process.returncode is None and signal_record(record, force=force):
+            self._handles[handle] = replace(self._handles[handle], killed=True)
+        # An earlier kill stays the reason it ended, matching what the next check reports.
+        return "killed" if self._handles[handle].killed else "completed"
 
     def _caller_record(self, requester_id: str, agent_name: str, handle: str) -> ProcessRecord:
         self._prune()

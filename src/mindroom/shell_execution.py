@@ -417,17 +417,23 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
     if record.finished:
         return f"Process already finished (exit code {record.return_code})"
 
-    sig = signal.SIGKILL if force else signal.SIGTERM
     sig_name = "SIGKILL" if force else "SIGTERM"
-    try:
-        os.killpg(record.pid, sig)
-    except (ProcessLookupError, PermissionError):
+    if not signal_record(record, force=force):
         return f"Process {record.pid} already exited"
 
-    if record.output_capture is not None:
-        record.output_capture.incomplete = True
     action = "Force-killed" if force else "Terminated"
     return f"{action} process {record.pid} ({sig_name} sent). Use check_shell_command('{handle}') to confirm exit."
+
+
+def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:
+    """Send SIGTERM, or SIGKILL with *force*, to a record's process group; report whether it was delivered."""
+    try:
+        os.killpg(record.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    if record.output_capture is not None:
+        record.output_capture.incomplete = True
+    return True
 
 
 def kill_all_records(registry: dict[str, ProcessRecord]) -> None:
