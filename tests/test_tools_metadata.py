@@ -283,7 +283,9 @@ def _install_custom_api_transport(
         if isinstance(response.stream, httpx.ByteStream):
             # Responses built from bytes are preloaded; a network transport streams its body instead.
             return httpx.Response(
-                response.status_code, headers=response.headers, stream=_TrackedStream(response.content)
+                response.status_code,
+                headers=response.headers,
+                stream=_TrackedStream(response.content),
             )
         return response
 
