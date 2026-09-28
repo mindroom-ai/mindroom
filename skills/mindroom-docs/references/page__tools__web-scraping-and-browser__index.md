@@ -130,6 +130,7 @@ read_url("https://docs.mindroom.chat")
 - Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
 - Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
 - Each page and redirect hop is requested uncompressed and read up to 1 MiB; a larger page is parsed from its first 1 MiB and its text ends with a truncation note.
+- Each hop's body must arrive within 30 seconds in total, so a server that trickles bytes cannot hold the fetch open.
 - A page the server compresses anyway (`gzip`, `x-gzip`, `deflate`, `br`, or `zstd`) fails instead of being inflated in the primary process.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
