@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
-from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
+from mindroom.matrix.identity import MAX_MATRIX_USER_ID_BYTES, MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -32,6 +33,25 @@ class _MentionToken:
     localpart: str
     has_server_name: bool = False
     explicit_user_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _DisjointSpans:
+    """Sorted, pairwise-disjoint text spans with logarithmic overlap checks."""
+
+    starts: list[int]
+    ends: list[int]
+
+    @classmethod
+    def from_spans(cls, spans: Iterable[tuple[int, int]]) -> _DisjointSpans:
+        ordered = sorted(spans)
+        return cls(starts=[start for start, _end in ordered], ends=[end for _start, end in ordered])
+
+    def overlaps(self, start: int, end: int) -> bool:
+        """Return whether one span overlaps any stored span."""
+        # Disjoint spans sorted by start also have sorted ends, so only the last span starting before `end` can reach past `start`.
+        index = bisect_left(self.starts, end) - 1
+        return index >= 0 and self.ends[index] > start
 
 
 @dataclass(frozen=True)
@@ -134,15 +154,18 @@ def _scan_mention_tokens(text: str) -> list[_MentionToken]:
         return []
 
     fenced_code_ranges = markdown_fenced_code_ranges(text)
+    fenced_code_spans = _DisjointSpans.from_spans(fenced_code_ranges)
     tokens = [
         token
         for token in _scan_explicit_matrix_id_tokens(text)
-        if not _range_overlaps_existing(token.start, token.end, fenced_code_ranges)
+        if not fenced_code_spans.overlaps(token.start, token.end)
     ]
     tokens.extend(
         _scan_entity_alias_tokens(
             text,
-            occupied_ranges=[*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
+            occupied_spans=_DisjointSpans.from_spans(
+                [*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
+            ),
         ),
     )
     return sorted(tokens, key=lambda token: token.start)
@@ -171,12 +194,12 @@ def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
 def _scan_entity_alias_tokens(
     text: str,
     *,
-    occupied_ranges: list[tuple[int, int]],
+    occupied_spans: _DisjointSpans,
 ) -> list[_MentionToken]:
     """Return non-overlapping alias-style mention tokens from text."""
     tokens: list[_MentionToken] = []
     for match in _ENTITY_MENTION_PATTERN.finditer(text):
-        if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
+        if occupied_spans.overlaps(match.start(), match.end()):
             continue
         tokens.append(
             _MentionToken(
@@ -331,7 +354,8 @@ def _literal_user_resolution(user_id: str) -> _MentionResolution:
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
     """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
-    for end in range(len(token), 0, -1):
+    # No prefix longer than the user ID byte limit can be valid, so only those prefixes are validated.
+    for end in range(min(len(token), MAX_MATRIX_USER_ID_BYTES), 0, -1):
         candidate = token[:end]
         if _is_valid_explicit_matrix_user_id(candidate):
             return candidate
@@ -394,11 +418,6 @@ def resolve_entity_name_for_mention_localpart(
         config,
         allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
-
-
-def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
-    """Return whether one text span overlaps any existing replacement span."""
-    return any(start < existing_end and end > existing_start for existing_start, existing_end in ranges)
 
 
 def _apply_replacements(

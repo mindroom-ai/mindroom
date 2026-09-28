@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -13,7 +14,12 @@ from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.matrix import mentions as mentions_module
+from mindroom.matrix.mentions import (
+    format_message_with_mentions,
+    parse_mentions_in_text,
+    resolve_mentioned_user_ids_from_text,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
@@ -897,3 +903,56 @@ class TestMentionParsing:
 
             assert mentioned_agents == expected_agents, f"Failed for text: {text}"
             assert len(mentions) == len(expected_agents)
+
+
+class TestMentionScanCost:
+    """Mention scanning stays linear in the body so one message cannot stall the shared event loop."""
+
+    def test_overlong_explicit_matrix_id_token_validates_bounded_prefixes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A single huge @-token only validates prefixes a Matrix user ID could have."""
+        config = _make_config(_default_runtime_paths())
+        validated: list[str] = []
+        original_parse = mentions_module.parse_current_matrix_user_id
+
+        def counting_parse(candidate: str) -> str:
+            validated.append(candidate)
+            return original_parse(candidate)
+
+        monkeypatch.setattr(mentions_module, "parse_current_matrix_user_id", counting_parse)
+        token = "@" + "a" * 8_000 + ":" + "b" * 8_000
+
+        user_ids = resolve_mentioned_user_ids_from_text(
+            f"{token} @alice:example.org",
+            config,
+            _runtime_paths_for(config),
+        )
+
+        assert user_ids == ["@alice:example.org"]
+        assert len(validated) <= 2 * 255
+        assert max(len(candidate) for candidate in validated) <= 255
+
+    def test_many_explicit_matrix_ids_scan_in_linear_time(self) -> None:
+        """Thousands of explicit MXIDs in one body are scanned without pairwise span comparisons."""
+        config = _make_config(_default_runtime_paths())
+        text = "@a:b.c " * 20_000
+
+        started = time.perf_counter()
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+        elapsed = time.perf_counter() - started
+
+        assert user_ids == ["@a:b.c"]
+        assert elapsed < 1.0
+
+    def test_fenced_code_and_explicit_matrix_ids_scan_in_linear_time(self) -> None:
+        """Many fenced blocks next to many MXIDs do not compare every token with every fence."""
+        config = _make_config(_default_runtime_paths())
+        text = "```\n@x:y.z\n```\n" * 5_000 + "@a:b.c " * 10_000
+
+        started = time.perf_counter()
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+        elapsed = time.perf_counter() - started
+
+        assert user_ids == ["@a:b.c"]
+        assert elapsed < 1.0

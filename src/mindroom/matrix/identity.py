@@ -16,8 +16,10 @@ if TYPE_CHECKING:
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
+MAX_MATRIX_USER_ID_BYTES = 255
 
 __all__ = [
+    "MAX_MATRIX_USER_ID_BYTES",
     "MatrixID",
     "managed_account_key",
     "managed_account_user_id",
@@ -167,6 +169,10 @@ def matrix_user_id_from_email(email: str, template: str, email_domain: str | Non
 
 
 def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
+    # Every character encodes to at least one byte, so this rejects overlong IDs before per-character checks.
+    if len(matrix_id) > MAX_MATRIX_USER_ID_BYTES:
+        msg = f"Invalid Matrix ID length: {matrix_id}"
+        raise ValueError(msg)
     if _contains_surrogate(parsed.username):
         msg = f"Invalid Matrix ID localpart: {matrix_id}"
         raise ValueError(msg)
@@ -178,7 +184,7 @@ def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
     except UnicodeEncodeError as exc:
         msg = f"Invalid Matrix ID: {matrix_id}"
         raise ValueError(msg) from exc
-    if len(encoded_matrix_id) > 255:
+    if len(encoded_matrix_id) > MAX_MATRIX_USER_ID_BYTES:
         msg = f"Invalid Matrix ID length: {matrix_id}"
         raise ValueError(msg)
 
