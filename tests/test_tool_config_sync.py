@@ -440,6 +440,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
                 or "password" in param_name.lower()
                 or "secret" in param_name.lower()
                 or "key" in param_name.lower()
+                or param_name.lower().endswith("_pat")  # personal access token
             ):
                 expected_type = "password"
             elif (
