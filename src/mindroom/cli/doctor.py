@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
+from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
@@ -23,6 +24,12 @@ from mindroom.matrix.health import (
     matrix_versions_url,
     response_advertises_sliding_sync,
     response_has_matrix_versions,
+)
+from mindroom.matrix.provisioning_env import (
+    local_pairing_required,
+    local_provisioning_client_credentials_from_env,
+    provisioning_url_from_env,
+    registration_token_from_env,
 )
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -102,26 +109,17 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
             failed += f
             warnings += w
 
-    # 5. Matrix homeserver reachable
-    p, f, w = _run_doctor_step(
-        "Checking Matrix homeserver...",
-        lambda: _check_matrix_homeserver(runtime_paths=runtime_paths, config=config),
-    )
-    passed += p
-    failed += f
-    warnings += w
-
-    # 6. Storage directory writable
-    p, f, w = _run_doctor_step("Checking storage...", lambda: _check_storage_writable(runtime_paths))
-    passed += p
-    failed += f
-    warnings += w
-
-    # 7. Matrix encryption stores match persisted device identities
-    p, f, w = _run_doctor_step("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths))
-    passed += p
-    failed += f
-    warnings += w
+    # 5+. Matrix homeserver, hosted pairing, storage, and encryption stores
+    for message, check in (
+        ("Checking Matrix homeserver...", lambda: _check_matrix_homeserver(runtime_paths=runtime_paths, config=config)),
+        ("Checking pairing...", lambda: _check_pairing(runtime_paths)),
+        ("Checking storage...", lambda: _check_storage_writable(runtime_paths)),
+        ("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths)),
+    ):
+        p, f, w = _run_doctor_step(message, check)
+        passed += p
+        failed += f
+        warnings += w
 
     # Summary
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
@@ -720,6 +718,33 @@ def _check_matrix_homeserver(runtime_paths: RuntimePaths, config: Config | None 
     detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
     console.print(f"[red]✗[/red] Matrix homeserver {detail}: {homeserver}")
     return 0, 1, 0
+
+
+def _check_pairing(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check hosted pairing state. Returns (passed, failed, warnings).
+
+    An unpaired hosted install before its first run is normal because `mindroom run` pairs it, so it counts as passed.
+    A warning would keep the macOS app's Check step at "Needs attention" on every first run.
+    """
+    if provisioning_url_from_env(runtime_paths) is None or registration_token_from_env(runtime_paths) is not None:
+        # Without hosted provisioning, or with a registration token, agents register without pairing.
+        return 0, 0, 0
+    try:
+        required = local_pairing_required(runtime_paths)
+        paired = local_provisioning_client_credentials_from_env(runtime_paths) is not None
+    except ValueError as exc:
+        console.print(f"[red]✗[/red] Pairing: {escape(str(exc))}")
+        return 0, 1, 0
+    if required:
+        console.print(
+            "[green]✓[/green] Not paired yet: `mindroom run` will print a link to approve "
+            "with your MindRoom Chat account",
+        )
+        return 1, 0, 0
+    if paired:
+        console.print("[green]✓[/green] Paired with MindRoom Chat")
+        return 1, 0, 0
+    return 0, 0, 0
 
 
 def _check_storage_writable(runtime_paths: RuntimePaths) -> tuple[int, int, int]:

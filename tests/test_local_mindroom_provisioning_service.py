@@ -764,6 +764,16 @@ def test_client_error_detail_constants_match_service() -> None:
     assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL
 
 
+def test_cli_pair_poll_detail_constant_matches_service() -> None:
+    """`mindroom connect` and `run` recognize a lost approval by this exact 410 detail."""
+    assert cli_connect._PAIR_SESSION_ALREADY_CLAIMED_DETAIL == provisioning.PAIR_SESSION_ALREADY_CLAIMED_DETAIL
+
+
+def test_cli_expiry_grace_covers_the_service_approved_claim_grace() -> None:
+    """`mindroom connect` keeps waiting through an outage as long as the service may still hand out a late approval."""
+    assert cli_connect._EXPIRY_GRACE_SECONDS >= provisioning.APPROVED_CLAIM_GRACE_SECONDS
+
+
 def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> None:
     """The CLI's device-pairing requests and its response fixtures satisfy the service schemas."""
     calls: list[tuple[str, dict[str, object]]] = []

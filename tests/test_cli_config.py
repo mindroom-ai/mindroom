@@ -3084,8 +3084,9 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert len(status_messages) == 7
+        assert len(status_messages) == 8
         assert any("Matrix homeserver" in msg for msg in status_messages)
+        assert any("pairing" in msg for msg in status_messages)
         assert any("memory config" in msg for msg in status_messages)
         assert any("encryption stores" in msg for msg in status_messages)
 
@@ -3841,7 +3842,8 @@ class TestConnect:
         assert result.exit_code == 0
         assert "https://chat.example/connect?code=ABCD-EFGH" in result.output
         assert "ABCD-EFGH" in result.output
-        assert "Connected as @alice:mindroom.chat" in result.output
+        assert "Approved by @alice:mindroom.chat." in result.output
+        assert "Connected." in result.output
         env_content = (tmp_path / ".env").read_text()
         assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
@@ -4290,6 +4292,8 @@ class TestConnect:
         result = _invoke_with_runtime(
             ["connect", "--provisioning-url", "https://provisioning.example", "--force"],
             cfg,
+            # A terminal still confirms the approving account after pairing.
+            input="\n",
         )
 
         assert result.exit_code == 0, result.output
@@ -4335,6 +4339,130 @@ class TestConnect:
 
         assert result.exit_code == 1
         assert "Error: bad runtime" in result.output
+
+    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", True)])
+    def test_connect_asks_whether_the_approving_account_is_yours(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        answer: str,
+        saved: bool,
+    ) -> None:
+        """A terminal confirms the approving account (default yes); declining saves nothing and fails."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
+            f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+            input=answer,
+        )
+
+        output = normalize_console_output(result.output)
+        assert "Approved by @alice:mindroom.chat." in output
+        assert "Is this your account? [Y/n]" in output
+        assert (tmp_path / ".env").exists() is saved
+        assert (OWNER_MATRIX_USER_ID_PLACEHOLDER in cfg.read_text()) is not saved
+        if saved:
+            assert result.exit_code == 0, result.output
+        else:
+            assert result.exit_code == 1
+            assert "Credentials discarded" in output
+            assert "MindRoom Chat → Settings → Local MindRoom" in output
+
+    def test_connect_treats_an_interrupted_confirmation_as_no(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """EOF or Ctrl+C at the approver prompt discards the credentials with the revoke hint, not a bare abort."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg, input="")
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "Aborted" not in output
+        assert "Credentials discarded" in output
+        assert "MindRoom Chat → Settings → Local MindRoom" in output
+        assert not (tmp_path / ".env").exists()
+
+    def test_connect_does_not_ask_about_the_approving_account_without_a_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The macOS app and services get the approving account printed instead of a prompt."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Approved by @alice:mindroom.chat." in output
+        assert "Is this your account?" not in output
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
+
+    def test_connect_refuses_to_pair_a_self_hosted_homeserver(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without a provisioning URL, a self-hosted homeserver is told how to register agents instead."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        env_path = tmp_path / ".env"
+        env_path.write_text("MATRIX_HOMESERVER=https://matrix.example.org\n")
+        posts: list[str] = []
+        monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda url, **_kw: posts.append(url))
+
+        result = _invoke_with_runtime(["connect"], cfg)
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "hosted mindroom.chat" in output
+        assert "MATRIX_REGISTRATION_TOKEN" in output
+        assert posts == []
+        assert env_path.read_text() == "MATRIX_HOMESERVER=https://matrix.example.org\n"
+
+    def test_connect_pairs_a_self_hosted_homeserver_with_an_explicit_provisioning_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit --provisioning-url is the operator's own provisioning service, so pairing proceeds."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://matrix.example.org\n")
+        responses = self._device_flow_responses()
+        monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
+        monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == 0, result.output
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
 
 
 # ---------------------------------------------------------------------------

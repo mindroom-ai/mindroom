@@ -9,6 +9,7 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
 
@@ -34,7 +35,7 @@ from .service import service_app
 from .trigger import trigger_app
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -177,11 +178,8 @@ def run(
                 runtime_paths,
                 console=console,
                 # `mindroom connect` or the macOS app may pair this machine while the run waits.
-                stop_waiting=lambda: (
-                    not local_pairing_required(
-                        activate_cli_runtime(path=config_path, storage_path=storage_path),
-                    )
-                ),
+                stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
+                confirm_approver=_approver_confirmation(),
             )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -628,6 +626,9 @@ def connect(
 
     try:
         runtime_paths = activate_cli_runtime(path)
+        if provisioning_url is None and (refusal := cli_connect.self_hosted_pairing_error(runtime_paths)):
+            console.print(f"[red]Error:[/red] {escape(refusal)}")
+            raise typer.Exit(1)
         if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
             "MINDROOM_LOCAL_CLIENT_SECRET",
         ):
@@ -649,6 +650,7 @@ def connect(
             persist_env=persist_env,
             open_browser=open_browser,
             renew_expired=False,
+            confirm_approver=_approver_confirmation(),
         )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -664,6 +666,33 @@ def _stdin_is_interactive() -> bool:
 def _terminal_is_interactive() -> bool:
     """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
+    """Whether another process made pairing unnecessary since this run resolved its runtime."""
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    try:
+        return not local_pairing_required(activate_cli_runtime(path=config_path, storage_path=storage_path))
+    except ValueError:
+        # A half-written or undecodable .env keeps the run waiting because its writer may not have finished.
+        return False
+
+
+def _approver_confirmation() -> Callable[[], bool] | None:
+    """Ask whether the approving account is the user's own, only when a person can answer."""
+    if not _stdin_is_interactive():
+        return None
+
+    def confirm() -> bool:
+        try:
+            return typer.confirm("Is this your account?", default=True)
+        except typer.Abort:
+            # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
+            console.print()
+            return False
+
+    return confirm
 
 
 app.command("local-stack-setup")(local_stack_setup)

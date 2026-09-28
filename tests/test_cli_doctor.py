@@ -14,6 +14,7 @@ from mindroom.cli.doctor import (
     _check_matrix_homeserver,
     _check_memory_config,
     _check_memory_embedder,
+    _check_pairing,
     _classify_vertexai_claude_error,
     doctor,
 )
@@ -211,6 +212,71 @@ def test_doctor_counts_credential_sync_value_error_as_warning(
     output = capsys.readouterr().out
     assert "Could not sync env credentials into the store" in output
     assert "1 warning" in output
+
+
+_NOT_PAIRED_LINE = "Not paired yet: `mindroom run` will print a link to approve with your MindRoom Chat account"
+
+
+@pytest.mark.parametrize(
+    ("env_file", "expected", "line"),
+    [
+        ("", (0, 0, 0), None),
+        ("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", (1, 0, 0), _NOT_PAIRED_LINE),
+        (
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
+            "MINDROOM_LOCAL_CLIENT_ID=id\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n",
+            (1, 0, 0),
+            "Paired with MindRoom Chat",
+        ),
+        (
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMINDROOM_LOCAL_CLIENT_ID=id\n",
+            (0, 1, 0),
+            "Provisioning credentials are incomplete",
+        ),
+        ("MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMATRIX_REGISTRATION_TOKEN=t\n", (0, 0, 0), None),
+    ],
+)
+def test_pairing_check_reports_hosted_pairing_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    env_file: str,
+    expected: tuple[int, int, int],
+    line: str | None,
+) -> None:
+    """An unpaired hosted install before its first run is informational, so the macOS Check step can pass."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+
+    assert _check_pairing(runtime_paths) == expected
+
+    output = " ".join(capsys.readouterr().out.split())
+    if line is None:
+        assert output == ""
+    else:
+        assert line in output
+
+
+def test_doctor_summary_keeps_an_unpaired_first_run_free_of_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Doctor includes the pairing line without adding a warning to the summary the macOS app parses."""
+    for name in ("MINDROOM_PROVISIONING_URL", "MINDROOM_LOCAL_CLIENT_ID", "MINDROOM_LOCAL_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    config_dir = tmp_path / "conf"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    monkeypatch.setattr("mindroom.cli.doctor._check_matrix_homeserver", lambda **_kwargs: (1, 0, 0))
+
+    with pytest.raises(typer.Exit):
+        doctor(config_path=config_dir / "config.yaml", storage_path=tmp_path / "storage")
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert _NOT_PAIRED_LINE in output
+    assert output.endswith("4 passed, 1 failed, 0 warnings")
 
 
 def _versions_response(payload: dict[str, object]) -> httpx.Response:

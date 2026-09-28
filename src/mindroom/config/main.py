@@ -1213,6 +1213,10 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}"
         raise ValueError(msg)
 
+    def entity_display_name(self, entity_name: str) -> str:
+        """Return the configured display name for one agent or team."""
+        return self._configured_entity(entity_name).display_name
+
     def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
         """Return effective replay settings for one configured agent or team."""
         entity = self._configured_entity(entity_name)
