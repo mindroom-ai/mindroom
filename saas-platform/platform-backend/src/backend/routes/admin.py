@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
-from backend.deps import ensure_supabase, invalidate_account_auth_cache, limiter, verify_admin
+from backend.deps import ACTIVE_ACCOUNT_STATUS, ensure_supabase, invalidate_account_auth_cache, limiter, verify_admin
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -286,6 +286,13 @@ async def update_account_status(
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {list(ACCOUNT_STATUSES)}")
 
     try:
+        # Setting active would leave deleted_at set, which keeps the account refused everywhere.
+        if request.status == ACTIVE_ACCOUNT_STATUS:
+            account = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
+            if account.data and account.data[0].get("deleted_at") is not None:
+                raise HTTPException(  # noqa: TRY301
+                    status_code=409, detail="Account is awaiting deletion; restore it instead of setting it active"
+                )
         result = (
             sb.table("accounts")
             .update({"status": request.status, "updated_at": datetime.now(UTC).isoformat()})
@@ -307,6 +314,8 @@ async def update_account_status(
         )
 
         return {"status": "success", "account_id": account_id, "new_status": request.status}  # noqa: TRY300
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e

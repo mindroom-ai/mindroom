@@ -328,6 +328,40 @@ class TestAdminEndpoints:
         assert data["account_id"] == "acc_123"
         assert data["new_status"] == "suspended"
 
+    def test_admin_refuses_to_activate_an_account_awaiting_deletion(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """Setting active would leave deleted_at set, so the admin is told to restore the account instead."""
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": "2026-09-01T00:00:00Z"}])
+
+        response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
+
+        assert response.status_code == 409
+        assert "restore" in response.json()["detail"]
+        mock_supabase.table().update.assert_not_called()
+
+    def test_admin_activates_an_account_not_awaiting_deletion(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """Reactivating a suspended account still works."""
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": None}])
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "acc_123", "status": "active"}])
+
+        response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
+
+        assert response.status_code == 200
+        assert response.json()["new_status"] == "active"
+
+    def test_admin_status_change_for_an_unknown_account_is_not_found(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """A missing account answers 404 instead of being reported as a server error."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[])
+
+        response = client.put("/admin/accounts/acc_missing/status", json={"status": "suspended"})
+
+        assert response.status_code == 404
+
     @pytest.mark.parametrize(
         ("method", "path", "body"),
         [
