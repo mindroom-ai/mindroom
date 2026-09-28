@@ -1,10 +1,12 @@
 """Test GDPR endpoints functionality."""
 
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import stripe
 from fastapi.testclient import TestClient
 
 from main import app
@@ -54,10 +56,10 @@ def mock_supabase():
 def mock_lifecycle():
     """Stub the instance lifecycle steps the deletion routes run after their RPC."""
     with (
-        patch("backend.routes.gdpr.instance_lifecycle.stop_account_for_deletion", new=AsyncMock()) as stop,
+        patch("backend.routes.gdpr.instance_lifecycle.cancel_account_billing", new=AsyncMock()) as cancel_billing,
         patch("backend.routes.gdpr.instance_lifecycle.reconcile_account_instances", new=AsyncMock()) as reconcile,
     ):
-        yield MagicMock(stop_account_for_deletion=stop, reconcile_account_instances=reconcile)
+        yield MagicMock(cancel_account_billing=cancel_billing, reconcile_account_instances=reconcile)
 
 
 def _function_body(sql: str, name: str) -> str:
@@ -67,7 +69,8 @@ def _function_body(sql: str, name: str) -> str:
 
 
 def test_account_deletion_functions_change_only_the_account() -> None:
-    """Soft delete and restore leave subscription and instance state to Stripe and the instance lifecycle."""
+    """Soft delete and restore change only the account, restore ends with the grace period, and hard delete
+    spares a restored account."""
     migration = (MIGRATIONS_DIR / "005_account_deletion_and_instance_uniqueness.sql").read_text(encoding="utf-8")
     baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
 
@@ -80,6 +83,8 @@ def test_account_deletion_functions_change_only_the_account() -> None:
             assert "UPDATE accounts" in body
             assert "subscriptions" not in body
             assert "instances" not in body
+        assert "AND deleted_at > NOW() - INTERVAL '7 days'" in _function_body(sql, "restore_account")
+        assert "deleted_at IS NOT NULL) THEN" in _function_body(sql, "hard_delete_account")
 
 
 class TestGDPREndpoints:
@@ -175,10 +180,14 @@ class TestGDPREndpoints:
         mock_rpc.execute.return_value = MagicMock(data=None)
         mock_supabase.rpc.return_value = mock_rpc
 
-        async def stop_after_soft_delete(_account_id: str) -> None:
+        async def cancel_billing_before_soft_delete(_account_id: str) -> None:
+            mock_rpc.execute.assert_not_called()
+
+        async def hold_after_soft_delete(_account_id: str) -> None:
             mock_rpc.execute.assert_called_once_with()
 
-        mock_lifecycle.stop_account_for_deletion.side_effect = stop_after_soft_delete
+        mock_lifecycle.cancel_account_billing.side_effect = cancel_billing_before_soft_delete
+        mock_lifecycle.reconcile_account_instances.side_effect = hold_after_soft_delete
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -202,9 +211,25 @@ class TestGDPREndpoints:
                 "requested_by": mock_user["account_id"],
             },
         )
-        # The hosted service stops only after the account is marked pending deletion.
-        mock_lifecycle.stop_account_for_deletion.assert_awaited_once_with(mock_user["account_id"])
+        # Billing ends before the account is marked pending deletion, and its instances are held after.
+        mock_lifecycle.cancel_account_billing.assert_awaited_once_with(mock_user["account_id"])
+        mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
         assert "cancelled" in data["message"]
+
+    def test_request_deletion_changes_nothing_when_stripe_cannot_cancel(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """A Stripe failure is reported before the soft delete, so the request can simply be retried."""
+        mock_lifecycle.cancel_account_billing.side_effect = stripe.APIConnectionError("stripe unavailable")
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 502
+        assert "nothing was deleted" in response.json()["detail"]
+        mock_supabase.rpc.assert_not_called()
+        mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
     def test_cancel_deletion(self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle):
         """Test canceling deletion request."""
@@ -216,7 +241,8 @@ class TestGDPREndpoints:
         mock_table.select.return_value = mock_select
         mock_eq = MagicMock()
         mock_select.eq.return_value = mock_eq
-        mock_eq.execute.return_value = MagicMock(data=[{"deleted_at": "2025-01-01T00:00:00Z"}])
+        deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        mock_eq.execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
 
         # Mock restore_account function
         mock_rpc = MagicMock()
@@ -237,6 +263,19 @@ class TestGDPREndpoints:
         mock_supabase.table.assert_called_once_with("accounts")
         # Held instances resume only when their subscription is entitled.
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
+
+    def test_cancel_deletion_is_refused_after_the_grace_period(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """Once cleanup may have uninstalled the instances, the account can no longer be restored."""
+        deleted_at = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+
+        response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
+
+        assert response.status_code == 409
+        mock_supabase.rpc.assert_not_called()
+        mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):
         """Test updating consent preferences."""

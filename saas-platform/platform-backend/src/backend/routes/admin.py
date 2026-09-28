@@ -171,11 +171,16 @@ async def admin_provision_instance(
     if instance.get("status") not in ["deprovisioned", "error"]:
         raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
 
+    # The subscription's tier, not the instance's copy of an older one, decides the resources and AI budget.
+    subscriptions = sb.table("subscriptions").select("tier").eq("id", instance["subscription_id"]).limit(1).execute()
+    if not subscriptions.data:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
     # Call the provisioner service with existing instance data
     data = {
         "subscription_id": instance.get("subscription_id"),
         "account_id": instance.get("account_id"),
-        "tier": instance.get("tier", "free"),
+        "tier": subscriptions.data[0]["tier"],
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
@@ -185,7 +190,7 @@ async def admin_provision_instance(
         action="provision",
         resource_type="instance",
         resource_id=str(instance_id),
-        details={"account_id": instance.get("account_id"), "tier": instance.get("tier")},
+        details={"account_id": instance.get("account_id"), "tier": data["tier"]},
     )
     return result
 

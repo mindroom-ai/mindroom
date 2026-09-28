@@ -206,13 +206,19 @@ class TestAdminEndpoints:
         """Test admin provisioning an instance."""
         # Setup - Mock instance query
         mock_supabase.table().select().eq().execute.return_value = Mock(
-            data=[{"instance_id": "123", "status": "deprovisioned", "account_id": "acc_123"}]
+            data=[
+                {
+                    "instance_id": "123",
+                    "status": "deprovisioned",
+                    "account_id": "acc_123",
+                    "subscription_id": "sub_123",
+                    "tier": "pro",
+                }
+            ]
         )
 
-        # Mock subscription query for provision_instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "sub_123", "account_id": "acc_123", "tier": "byok"}
-        )
+        # The subscription moved to byok since the instance was last deployed as pro.
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"tier": "byok"}])
 
         with patch("backend.services.provisioner_service.provision_instance") as mock_provision:
             mock_provision.return_value = {
@@ -231,6 +237,7 @@ class TestAdminEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert data["success"] is True
+            assert mock_provision.call_args.kwargs["data"]["tier"] == "byok"
 
     def test_admin_sync_instances(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin syncing instances."""

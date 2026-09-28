@@ -388,7 +388,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Restore function (for accidental deletions within grace period).
+-- Restore function (for accidental deletions within the 7-day grace period).
 -- Only the account changes; held instances resume through the instance lifecycle while their subscription is entitled.
 CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
@@ -404,7 +404,13 @@ BEGIN
         status = 'active',
         updated_at = NOW()
     WHERE id = target_account_id
-    AND deleted_at IS NOT NULL;
+    AND deleted_at IS NOT NULL
+    -- After the grace period, cleanup may already have uninstalled everything the account ran.
+    AND deleted_at > NOW() - INTERVAL '7 days';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
 
     -- Audit log entry
     INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
@@ -424,6 +430,11 @@ CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    -- Only an account still pending deletion is deleted, so a restored account keeps its rows.
+    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id AND deleted_at IS NOT NULL) THEN
+        RETURN;
+    END IF;
+
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
     DELETE FROM subscriptions WHERE account_id = target_account_id;

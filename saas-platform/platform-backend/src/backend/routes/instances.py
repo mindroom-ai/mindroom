@@ -296,11 +296,16 @@ async def start_user_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
     user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_run(
+    result = await _verify_instance_ownership_and_run(
         instance_id, user, provisioner_service.start_instance, require_active_subscription=True
     )
+    # A stopped instance keeps its old deployment and loses only a key its tier does not include, so once it runs
+    # the lifecycle redeploys it with what its tier pays for.
+    background_tasks.add_task(instance_lifecycle.reconcile_account_instances, user["account_id"])
+    return result
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)

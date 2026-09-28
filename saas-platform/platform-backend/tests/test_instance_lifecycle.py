@@ -25,7 +25,7 @@ from backend.tasks.cleanup import run_cleanup_job
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
-from postgrest.exceptions import APIError
+from supabase import PostgrestAPIError
 
 from tests.fake_supabase import FakeSupabase
 
@@ -993,7 +993,7 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
 @pytest.mark.asyncio
 async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_unpublished_key() -> None:
     hobby_budget = get_plan_details("hobby").included_ai_budget_usd
-    # The stored key is stale (old budget), so provisioning mints a replacement.
+    # The stored key is stale (old budget), so provisioning deletes it and mints a replacement.
     db = FakeSupabase(
         {
             "instances": [
@@ -1048,7 +1048,9 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
     ):
         with pytest.raises(HTTPException):
             await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
-        assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
+        # The stale key was deleted before B existed, and B was discarded, so the row names no key at all.
+        assert db.row("instances", instance_id=7)["openrouter_key_hash"] is None
+        assert alive == set()
         await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
 
     assert published["openrouter_key"] == "key_C"
@@ -1198,25 +1200,42 @@ async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platfo
     assert platform.db.rpc_calls == []
 
 
-def test_cancelled_deletion_restores_the_account_and_reconciles_through_the_lifecycle(platform: Platform) -> None:
-    now = datetime.now(UTC)
-    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
-    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
-    # The restore_account RPC is recorded, not run, so the account is restored up front.
+def _cancel_deletion(platform: Platform) -> Any:  # noqa: ANN401
+    record_rpc = platform.db.rpc
+
+    def restore_account(name: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+        platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = None
+        return record_rpc(name, params)
+
     app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
     try:
         with (
             patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db),
-            patch("backend.routes.gdpr.instance_lifecycle.reconcile_account_instances") as reconcile,
+            patch.object(platform.db, "rpc", side_effect=restore_account),
         ):
-            platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = now.isoformat()
-            response = TestClient(app).post("/my/gdpr/cancel-deletion")
+            return TestClient(app).post("/my/gdpr/cancel-deletion")
     finally:
         app.dependency_overrides.clear()
 
+
+@pytest.mark.parametrize(("stripe_status", "restarted"), [("canceled", False), ("active", True)])
+def test_cancelled_deletion_restarts_instances_only_for_a_subscription_stripe_still_bills(
+    platform: Platform, stripe_status: str, *, restarted: bool
+) -> None:
+    now = datetime.now(UTC)
+    _pending_deletion(platform)
+    # Stored as active, as the old restore_account wrote it; Stripe decides.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": stripe_status, "trial_end": None}
+
+    response = _cancel_deletion(platform)
+
     assert response.status_code == 200
     assert platform.db.rpc_calls == [("restore_account", {"target_account_id": ACCOUNT_ID})]
-    reconcile.assert_awaited_once_with(ACCOUNT_ID)
+    assert platform.start.await_count == int(restarted)
+    assert (platform.instance()["lifecycle_stopped_at"] is None) is restarted
 
 
 def test_fresh_provision_confirms_the_stored_status_with_stripe(platform: Platform) -> None:
@@ -1252,6 +1271,38 @@ async def test_resume_on_a_cheaper_tier_reprovisions_instead_of_reenabling_the_o
     assert platform.instance()["lifecycle_stopped_at"] is None
 
 
+def test_start_of_a_stopped_instance_redeploys_it_for_its_tier(platform: Platform) -> None:
+    # The pro key was revoked while the customer had it stopped after a downgrade to hobby.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", openrouter_key_hash=None))
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.start_instance", platform.start),
+        ):
+            response = TestClient(app).post("/my/instances/7/start")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    platform.start.assert_awaited_once_with(7)
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "hobby"
+
+
+@pytest.mark.asyncio
+async def test_tier_change_with_the_same_budget_redeploys_a_running_instance(platform: Platform) -> None:
+    # Enterprise and byok both include no AI budget, but run different resource profiles.
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("running", tier="enterprise", openrouter_key_hash=None))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "byok"
+
+
 def test_plan_change_redeploys_a_running_instance_with_the_new_budget(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
     platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
@@ -1272,6 +1323,8 @@ async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform) 
 
     async def helm_fails_once(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         if platform.provision.await_count == 1:
+            # Like provision_instance, a failed deploy marks the instance errored.
+            platform.instance()["status"] = "error"
             msg = "Helm install failed: timed out"
             raise RuntimeError(msg)
         # The retry publishes the hobby key.
@@ -1401,7 +1454,7 @@ async def test_reprovisioning_never_shrinks_the_instance_volumes(
 async def test_a_second_instance_for_one_subscription_is_refused_by_the_database() -> None:
     create_key = Mock()
     helm = AsyncMock()
-    duplicate = APIError({"code": "23505", "message": "duplicate key value violates unique constraint"})
+    duplicate = PostgrestAPIError({"code": "23505", "message": "duplicate key value violates unique constraint"})
     with (
         patch(f"{_SERVICE}.create_instance", Mock(side_effect=duplicate)),
         patch(f"{_SERVICE}.create_openrouter_key", create_key),

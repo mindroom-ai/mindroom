@@ -9,7 +9,8 @@ BEGIN;
 -- Soft delete and restore no longer rewrite subscription or instance status.
 -- The backend cancels Stripe billing and the instance lifecycle stops the account's instances
 -- when deletion is requested; restoring the account resumes them only while Stripe or the
--- lifecycle says the subscription is entitled.
+-- lifecycle says the subscription is entitled. Restore is refused after the 7-day grace period,
+-- because cleanup then uninstalls the account's instances before deleting its rows.
 CREATE OR REPLACE FUNCTION soft_delete_account(
     target_account_id UUID,
     reason TEXT DEFAULT 'user_request',
@@ -58,7 +59,13 @@ BEGIN
         status = 'active',
         updated_at = NOW()
     WHERE id = target_account_id
-    AND deleted_at IS NOT NULL;
+    AND deleted_at IS NOT NULL
+    -- After the grace period, cleanup may already have uninstalled everything the account ran.
+    AND deleted_at > NOW() - INTERVAL '7 days';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
 
     -- Audit log entry
     INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
@@ -68,6 +75,35 @@ BEGIN
         'account',
         target_account_id::text,
         jsonb_build_object('status', 'restored'),
+        TRUE
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Hard delete only an account still pending deletion, so a restored account keeps its rows.
+CREATE OR REPLACE FUNCTION hard_delete_account(
+    target_account_id UUID
+) RETURNS VOID AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id AND deleted_at IS NOT NULL) THEN
+        RETURN;
+    END IF;
+
+    -- Delete related data (cascade will handle most)
+    DELETE FROM instances WHERE account_id = target_account_id;
+    DELETE FROM subscriptions WHERE account_id = target_account_id;
+    DELETE FROM audit_logs WHERE account_id = target_account_id;
+
+    -- Finally delete the account
+    DELETE FROM accounts WHERE id = target_account_id;
+
+    -- Audit entry for hard delete (system action)
+    INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
+    VALUES (
+        'gdpr_account_hard_deleted',
+        'account',
+        target_account_id::text,
+        jsonb_build_object('source', 'hard_delete_account'),
         TRUE
     );
 END;

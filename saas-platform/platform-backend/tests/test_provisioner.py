@@ -2,12 +2,13 @@
 
 import base64
 import inspect
-import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from backend.openrouter import CreatedOpenRouterKey, OpenRouterError
 from fastapi.testclient import TestClient
+
+from tests.fake_supabase import FakeSupabase
 
 
 def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
@@ -112,13 +113,28 @@ def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(
     )
 
 
-@pytest.mark.asyncio
-async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None:
-    """Replacing a stored OpenRouter key should revoke the superseded key hash."""
-    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
+def _stale_hobby_key_db() -> FakeSupabase:
+    """An instance whose stored key has a limit the hobby tier no longer includes."""
+    return FakeSupabase(
+        {
+            "instances": [
+                {
+                    "instance_id": "123",
+                    "openrouter_key_hash": "old_hash",
+                    "openrouter_key_limit_usd": 10,
+                    "openrouter_key_limit_reset": "monthly",
+                }
+            ]
+        }
+    )
 
-    sb = MagicMock()
-    sb.table().update().eq().execute.return_value = Mock()
+
+@pytest.mark.asyncio
+async def test_provision_openrouter_key_deletes_the_stored_key_before_minting_its_replacement() -> None:
+    """The replaced key is gone before a new one exists, so a failed delete can never leave an untracked live key."""
+    from backend.services.provisioner_service import _provision_openrouter_key
+
+    db = _stale_hobby_key_db()
     created_key = CreatedOpenRouterKey(
         key="sk-or-v1-new-customer",
         hash="new_hash",
@@ -126,77 +142,61 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
         limit_usd=15,
         limit_reset="monthly",
     )
+    order: list[str] = []
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        order.append(f"delete {key_hash}")
+
+    def create_key(*, management_api_key: str, plan: object) -> CreatedOpenRouterKey:  # noqa: ARG001
+        order.append("create")
+        return created_key
 
     with (
-        patch(
-            "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True
-        ),
-        patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
-        patch("backend.services.provisioner_service.delete_openrouter_key", create=True) as delete_key,
+        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch("backend.services.provisioner_service.create_openrouter_key", create_key),
+        patch("backend.services.provisioner_service.delete_openrouter_key", delete_key),
     ):
         result, pending_key = await _provision_openrouter_key(
-            sb=sb,
+            sb=db,
             account_id="acc_123",
             instance_id="123",
             tier="hobby",
-            existing_instance_row={
-                "openrouter_key_hash": "old_hash",
-                "openrouter_key_limit_usd": 10,
-                "openrouter_key_limit_reset": "monthly",
-            },
+            existing_instance_row=db.row("instances", instance_id="123"),
             namespace="mindroom-instances",
         )
-        assert pending_key == created_key
-        await _commit_openrouter_key(sb, "123", created_key, "old_hash")
 
-    assert result == "sk-or-v1-new-customer"
-    delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="old_hash")
+    assert (result, pending_key) == ("sk-or-v1-new-customer", created_key)
+    assert order == ["delete old_hash", "create"]
+    assert db.row("instances", instance_id="123")["openrouter_key_hash"] is None
 
 
 @pytest.mark.asyncio
-async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(caplog: pytest.LogCaptureFixture) -> None:
-    """Superseded key deletion failure should be visible but not lose the replacement key."""
-    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
+async def test_failed_delete_of_the_stored_key_mints_no_replacement() -> None:
+    """While the old key cannot be deleted, the row keeps naming it and no second key is created."""
+    from backend.services.provisioner_service import _provision_openrouter_key
 
-    sb = MagicMock()
-    sb.table().update().eq().execute.return_value = Mock()
-    created_key = CreatedOpenRouterKey(
-        key="sk-or-v1-new-customer",
-        hash="new_hash",
-        label="MindRoom hobby instance 123",
-        limit_usd=15,
-        limit_reset="monthly",
-    )
-
+    db = _stale_hobby_key_db()
+    create_key = Mock()
     with (
-        caplog.at_level(logging.WARNING),
-        patch(
-            "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True
-        ),
-        patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch("backend.services.provisioner_service.create_openrouter_key", create_key),
         patch(
             "backend.services.provisioner_service.delete_openrouter_key",
             side_effect=OpenRouterError("OpenRouter key deletion failed"),
-            create=True,
         ),
+        pytest.raises(OpenRouterError),
     ):
-        result, pending_key = await _provision_openrouter_key(
-            sb=sb,
+        await _provision_openrouter_key(
+            sb=db,
             account_id="acc_123",
             instance_id="123",
             tier="hobby",
-            existing_instance_row={
-                "openrouter_key_hash": "old_hash",
-                "openrouter_key_limit_usd": 10,
-                "openrouter_key_limit_reset": "monthly",
-            },
+            existing_instance_row=db.row("instances", instance_id="123"),
             namespace="mindroom-instances",
         )
-        assert pending_key == created_key
-        await _commit_openrouter_key(sb, "123", created_key, "old_hash")
 
-    assert result == "sk-or-v1-new-customer"
-    assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
+    create_key.assert_not_called()
+    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "old_hash"
 
 
 def _is_existing_secret_value_lookup(args: list[str]) -> bool:

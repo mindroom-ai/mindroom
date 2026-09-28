@@ -9,13 +9,14 @@ from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any
 
+from backend.config import ACCOUNT_DELETION_GRACE_DAYS
 from backend.deps import ensure_supabase
 from backend.services.instance_lifecycle import reconcile_all_subscriptions, tear_down_account
 
 logger = logging.getLogger(__name__)
 
 
-async def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
+async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETION_GRACE_DAYS) -> dict:
     """
     Hard delete accounts that have been soft-deleted for longer than grace period.
     This ensures GDPR compliance while giving users time to recover accounts.

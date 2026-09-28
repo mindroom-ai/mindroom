@@ -3,13 +3,15 @@ GDPR compliance endpoints for data export and deletion.
 KISS principle - simple, straightforward implementation.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from backend.config import ACCOUNT_DELETION_GRACE_DAYS, stripe
 from backend.deps import ensure_supabase, verify_user
+from backend.entitlements import parse_timestamp
 from backend.models import (
     GdprCancelDeletionResponse,
     GdprConsentResponse,
@@ -158,13 +160,20 @@ async def request_account_deletion(
         }
     ).execute()
 
+    # End billing first, so a Stripe failure leaves the account untouched and the request can simply be retried.
+    try:
+        await instance_lifecycle.cancel_account_billing(account_id)
+    except stripe.StripeError as exc:
+        detail = "Could not cancel your subscription with Stripe, so nothing was deleted. Please try again."
+        raise HTTPException(status_code=502, detail=detail) from exc
+
     # Soft-delete now; the optional cleanup scheduler uninstalls the instances and deletes the rows after 7 days.
     # Payment/webhook references can block cleanup; external data is outside this RPC.
     sb.rpc(
         "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
     ).execute()
-    # Held until cleanup: an account pending deletion never runs instances, and Stripe stops billing it.
-    await instance_lifecycle.stop_account_for_deletion(account_id)
+    # An account pending deletion never runs instances, so this holds them until cleanup.
+    await instance_lifecycle.reconcile_account_instances(account_id)
 
     return {
         "status": "deletion_scheduled",
@@ -172,7 +181,7 @@ async def request_account_deletion(
             "Your account has been scheduled for deletion; any paid subscription was cancelled "
             "and your hosted instances were stopped"
         ),
-        "grace_period_days": 7,
+        "grace_period_days": ACCOUNT_DELETION_GRACE_DAYS,
         "deletion_date": (
             "Eligible for scheduled application-database cleanup after 7 days, when cleanup is enabled; "
             "completion is not guaranteed"
@@ -253,6 +262,10 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     account_result = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
     if not account_result.data or not account_result.data[0].get("deleted_at"):
         return {"status": "not_pending", "message": "No deletion request found for this account"}
+    deleted_at = parse_timestamp(account_result.data[0]["deleted_at"])
+    if deleted_at is not None and deleted_at <= datetime.now(UTC) - timedelta(days=ACCOUNT_DELETION_GRACE_DAYS):
+        # Cleanup may already have uninstalled the account's instances; restore_account refuses the same way.
+        raise HTTPException(status_code=409, detail="Account deletion is already in progress and cannot be cancelled")
 
     # The RPC restores the account and records the cancellation in one transaction.
     sb.rpc("restore_account", {"target_account_id": account_id}).execute()

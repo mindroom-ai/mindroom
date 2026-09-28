@@ -11,8 +11,8 @@ Stripe webhooks and the nightly cleanup job both call it, so they behave identic
   a larger key from an instance that is not running.
 - Teardown due and still not entitled: uninstall everything and mark the instance deprovisioned.
 
-Account deletion also runs through this module: a deletion request holds the instances and cancels Stripe
-billing, and the GDPR hard delete uninstalls every instance before the account's rows are deleted.
+Account deletion also runs through this module: a deletion request cancels Stripe billing and holds the
+instances, and the GDPR hard delete uninstalls every instance before the account's rows are deleted.
 
 `lifecycle_stopped_at` marks the instances this module holds.
 Customer or admin stops never set it, so a manually stopped instance of an entitled subscription is left alone.
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from supabase import Client
 
 LIFECYCLE_INSTANCE_COLUMNS = (
-    "instance_id,subscription_id,account_id,status,openrouter_key_hash,openrouter_key_limit_usd,"
+    "instance_id,subscription_id,account_id,status,tier,openrouter_key_hash,openrouter_key_limit_usd,"
     "openrouter_key_limit_reset,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
@@ -158,14 +158,12 @@ async def reconcile_account_instances(account_id: str) -> None:
         logger.exception("Instance lifecycle reconcile failed for account %s; the nightly job retries", account_id)
 
 
-async def stop_account_for_deletion(account_id: str) -> None:
-    """Stop an account's hosted service right after it asked to be deleted.
+async def cancel_account_billing(account_id: str) -> None:
+    """Cancel every Stripe subscription of the account's customer that still bills; a no-op without Stripe.
 
-    Its instances are held like those of an inactive subscription, then every Stripe subscription of its customer
-    is cancelled so billing ends. Holding never raises, so a Stripe failure still leaves the instances stopped; that
-    error propagates, and `tear_down_account` cancels again before the account's rows are deleted.
+    Run before an account is marked pending deletion, so a Stripe error leaves nothing half done;
+    once it is pending deletion, reconciling its instances holds them until cleanup.
     """
-    await reconcile_account_instances(account_id)
     await _cancel_stripe_subscriptions(ensure_supabase(), account_id)
 
 
@@ -377,14 +375,15 @@ async def _resume(
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
-    # Only provisioning mints the tier's key, or drops one the tier does not include (for example after a downgrade),
-    # and a key lost in an earlier failed attempt is missing too; re-enabling the stored key would hand it back.
-    key_mismatch = not openrouter_key_matches_plan(instance, subscription["tier"])
+    # Only provisioning applies another tier's resources and mints its key or drops one it does not include (for
+    # example after a downgrade), and a key lost in an earlier failed attempt is missing too; re-enabling the
+    # stored key would hand it back.
+    plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if (
         instance.get("status") == "deprovisioned"
-        or key_mismatch
+        or plan_mismatch
         or failed_before
         or not await check_deployment_exists(str(instance_id))
     ):
@@ -404,15 +403,24 @@ async def _resume(
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
 
 
+def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
+    """Return whether an instance was last deployed for the tier, with exactly the platform-paid key it includes."""
+    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
+
+
 def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "revoke"] | None:
-    """Return how an instance the lifecycle does not hold must change to carry only its tier's AI budget."""
-    if openrouter_key_matches_plan(instance, tier):
-        return None
-    if instance.get("status") == "running":
-        # Provisioning mints the tier's key, revokes the old one, and applies the tier's resources.
+    """Return how an instance the lifecycle does not hold must change to run only what its tier pays for."""
+    status = instance.get("status")
+    if status == "error" and instance.get("lifecycle_error"):
+        # A redeploy by this function failed, and provisioning marked the instance errored; retry it.
         return "redeploy"
-    # A stopped, failed, or provisioning instance is not redeployed, which would start it or race the provision;
-    # it only loses a key its tier does not pay for, and a smaller key waits until the instance runs again.
+    if _deployed_plan_matches(instance, tier):
+        return None
+    if status == "running":
+        # Provisioning applies the tier's resources and replaces or deletes the key.
+        return "redeploy"
+    # Any other instance is not redeployed, which would start a customer-stopped one or race a provision; it only
+    # loses a key its tier does not pay for, and the rest follows once it runs again.
     return "revoke" if openrouter_key_exceeds_plan(instance, tier) else None
 
 
@@ -425,13 +433,15 @@ def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, ent
 
 
 async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[str, Any]) -> None:
-    """Keep an entitled instance the lifecycle does not hold on its subscription tier's platform-paid AI budget."""
+    """Keep an entitled instance the lifecycle does not hold on what its subscription tier pays for."""
     instance_id = instance["instance_id"]
     alignment = _plan_alignment(instance, subscription["tier"])
+    if alignment is None:
+        return
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance_id, subscription)
-    elif alignment == "revoke":
+    else:
         logger.info("Revoking the OpenRouter key of instance %s, which its tier does not include", instance_id)
         await revoke_instance_openrouter_key(sb, instance_id)
     if instance.get("lifecycle_error"):

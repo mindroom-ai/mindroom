@@ -66,6 +66,8 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {"1", "true", "yes"}
 # Days a stopped instance of an inactive subscription keeps its data before teardown.
 INSTANCE_TEARDOWN_GRACE_DAYS = max(1, int(os.getenv("INSTANCE_TEARDOWN_GRACE_DAYS", "30")))
+# Days an account pending deletion can still be restored; restore_account enforces the same 7 days.
+ACCOUNT_DELETION_GRACE_DAYS = 7
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -146,6 +148,7 @@ def _build_allowed_origins(domain: str, environment: str) -> list[str]:
 ALLOWED_ORIGINS = _build_allowed_origins(PLATFORM_DOMAIN, ENVIRONMENT)
 
 __all__ = [
+    "ACCOUNT_DELETION_GRACE_DAYS",
     "ALLOWED_ORIGINS",
     "ENABLE_CLEANUP_SCHEDULER",
     "ENVIRONMENT",

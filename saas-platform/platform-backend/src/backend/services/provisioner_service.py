@@ -88,7 +88,7 @@ from backend.services.instances_data import (
     update_instance_status,
 )
 from fastapi import BackgroundTasks, HTTPException
-from postgrest.exceptions import APIError
+from supabase import PostgrestAPIError
 
 _MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
 # Rooms created by the seeded instance config (cluster/k8s/instance/default-config.yaml).
@@ -581,20 +581,20 @@ async def _provision_openrouter_key(
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
+    A stored key the tier does not include as-is (for example after a downgrade) is deleted before any replacement
+    is created, so a failure never leaves a live key that the row no longer names.
     A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
     or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
-    if monthly_limit_usd <= 0:
-        # A tier without an included budget keeps no platform-paid key, including one left from a pricier tier.
-        if _stored_openrouter_key_hash(existing_instance_row) is not None:
-            await revoke_instance_openrouter_key(sb, instance_id)
-        return "", None
-
-    if _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
+    if monthly_limit_usd > 0 and _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
         existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         if existing_key:
             return existing_key, None
+    if _stored_openrouter_key_hash(existing_instance_row) is not None:
+        await revoke_instance_openrouter_key(sb, instance_id)
+    if monthly_limit_usd <= 0:
+        return "", None
 
     create_key = partial(
         create_openrouter_key,
@@ -613,32 +613,12 @@ async def _provision_openrouter_key(
     return created_key.key, created_key
 
 
-async def _commit_openrouter_key(
-    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, superseded_key_hash: str | None
-) -> None:
-    """Record a newly published key and revoke the key it replaces."""
-    metadata_persisted = False
+async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+    """Record a newly published key; the key it replaces was already deleted by `_provision_openrouter_key`."""
     try:
         await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
-        metadata_persisted = True
     except Exception:
         logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
-    if metadata_persisted and superseded_key_hash and superseded_key_hash != created_key.hash:
-        try:
-            await anyio.to_thread.run_sync(
-                partial(
-                    delete_openrouter_key,
-                    management_api_key=OPENROUTER_PROVISIONING_API_KEY,
-                    key_hash=superseded_key_hash,
-                )
-            )
-        except OpenRouterError:
-            logger.warning(
-                "Failed to revoke superseded OpenRouter key %s for instance %s",
-                superseded_key_hash,
-                instance_id,
-                exc_info=True,
-            )
 
 
 async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
@@ -703,7 +683,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         except HTTPException:
             raise
         except Exception as e:
-            if isinstance(e, APIError) and e.code == _UNIQUE_VIOLATION:
+            if isinstance(e, PostgrestAPIError) and e.code == _UNIQUE_VIOLATION:
                 # A concurrent request inserted this subscription's instance first; the database allows only one.
                 raise HTTPException(status_code=409, detail="This subscription already has an instance") from e
             logger.exception("Failed to insert instance")
@@ -893,9 +873,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 await _discard_openrouter_key(created_openrouter_key, customer_id)
             raise
         if created_openrouter_key is not None:
-            await _commit_openrouter_key(
-                sb, customer_id, created_openrouter_key, _stored_openrouter_key_hash(existing_instance_row)
-            )
+            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
