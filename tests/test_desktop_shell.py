@@ -406,6 +406,35 @@ async def test_kill_reports_an_already_completed_handle(tmp_path: Path) -> None:
     await shell.close()
 
 
+@pytest.mark.asyncio
+async def test_invalid_output_offset_is_rejected_before_a_completed_handle_is_handed_over(tmp_path: Path) -> None:
+    """A check with a bad offset changes nothing, so a corrected check still receives the finished output."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(
+        request("printf 'é'; while [ ! -f release ]; do sleep 0.05; done; printf ab", tmp_path, timeout=1),
+    )
+    assert running.handle is not None
+    (tmp_path / "release").touch()
+    for _ in range(600):
+        if shell.status()["handles"][0]["state"] == "completed":
+            break
+        await asyncio.sleep(0.01)
+    for offset, message in (
+        (-1, "nonnegative"),
+        (True, "nonnegative"),
+        (5, "past the captured output"),
+        (1, "start of a UTF-8 character"),
+    ):
+        with pytest.raises(DesktopShellError, match=message):
+            shell.check(REQUESTER, AGENT, running.handle, offset=offset)
+    completed = shell.check(REQUESTER, AGENT, running.handle, offset=4)
+    assert (completed.state, completed.exit_code) == ("completed", 0)
+    assert completed.output.read(2) == b"ab"
+    assert completed_output(completed) == "éab"
+    await shell.close()
+
+
 @pytest.mark.parametrize("stop", ["revoke", "close", "local_kill"])
 @pytest.mark.asyncio
 async def test_revoke_close_and_local_kill_stop_handles(tmp_path: Path, pids: Path, stop: str) -> None:

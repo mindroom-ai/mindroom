@@ -1081,6 +1081,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
         "output_bytes": 6,
         "output_truncated": False,
         "output_attachment": None,
+        "next_offset": 6,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=2)))
     assert _response(transport).result["state"] == "running"
@@ -1095,9 +1096,79 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
         "output_bytes": 10,
         "output_truncated": False,
         "output_attachment": None,
+        "next_offset": 10,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
     assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    bridge.close()
+
+
+async def _wait_for_finished_handle(bridge: DesktopBridge, handle: str) -> None:
+    for _ in range(600):
+        entries = {entry["handle"]: entry["state"] for entry in bridge.local_status()["shell"]["handles"]}
+        if entries.get(handle) != "running":
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail("shell handle never finished")
+
+
+@pytest.mark.asyncio
+async def test_check_shell_offset_polls_every_byte_once_without_splitting_characters(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Polling from each next_offset returns contiguous whole characters, and the completed slice may be attached."""
+    media = replace(MEDIA, mime_type="text/plain")
+    upload = AsyncMock(return_value=media)
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    first = ("\u00e9" * 30_000).encode()  # More than one inline reply, in two-byte characters.
+    rest = ("\u00fc" * 30_000 + "end").encode()
+    printer = f"{shlex.quote(sys.executable)} -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))'"
+    (tmp_path / "first").write_text(first.hex())
+    (tmp_path / "rest").write_text(rest.hex())
+    command = f"{printer} < first; while [ ! -f release ]; do sleep 0.05; done; {printer} < rest"
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell(command, tmp_path)))
+    started = _response(transport).result
+    handle = started["handle"]
+    assert isinstance(handle, str)
+    assert started["next_offset"] == started["output_bytes"]
+
+    received, offset, polls = b"", 0, 0
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+        reply = _response(transport)
+        assert reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+        shown = str(reply.result["output"]).encode()
+        assert reply.result["next_offset"] == offset + len(shown)
+        assert reply.result["output_truncated"] is (reply.result["next_offset"] < reply.result["output_bytes"])
+        received, offset = received + shown, offset + len(shown)
+        polls += bool(shown)
+        if offset == len(first):
+            break
+        await asyncio.sleep(0.01)
+    assert (received, polls > 1) == (first, True)
+
+    for sequence, bad_offset, error in (
+        (700, len(first) + 1, "past the captured output"),
+        (701, 1, "start of a UTF-8 character"),
+        (702, -1, "nonnegative"),
+    ):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=bad_offset)))
+        assert error in str(_response(transport).error)
+
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=703, offset=offset)))
+    completed = _response(transport).result
+    assert (completed["state"], completed["exit_code"], completed["output"]) == ("completed", 0, "")
+    assert (completed["output_bytes"], completed["next_offset"]) == (len(first) + len(rest), len(first) + len(rest))
+    assert completed["output_attachment"] == media.to_content()
+    assert upload.await_args.args[1] == rest
     await bridge.stop()
     bridge.close()
 
@@ -1295,6 +1366,7 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output": "",
         "output_bytes": len(expected),
         "output_truncated": False,
+        "next_offset": len(expected),
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
@@ -1455,6 +1527,7 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
             "output_bytes": len(output.encode()),
             "output_truncated": False,
             "output_attachment": None,
+            "next_offset": len(output.encode()),
         },
     ).content_bytes()
 

@@ -168,7 +168,10 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "offset": {
             "type": "integer",
             "minimum": 0,
-            "description": "Byte offset for read_file; continue a truncated file from the returned next_offset.",
+            "description": (
+                "Byte offset for read_file or check_shell; continue a truncated file or a command's output from "
+                "the last returned next_offset."
+            ),
         },
         "command": {
             "type": "string",
@@ -224,7 +227,10 @@ _DESKTOP_DESCRIPTION = (
     "granted temporary auto-approval there, and the call waits up to 120 seconds for that decision. Approval "
     "happens only on the user's computer, never through chat; never resubmit or rephrase a rejected or expired "
     "command to get around the decision. timeout_seconds (1 to 60) is how long run_shell waits for output; a "
-    "command still running then returns a handle to poll with check_shell and stop with kill_shell. "
+    "command still running then returns a handle to poll with check_shell and stop with kill_shell. Shell "
+    "results include next_offset, the byte just past the returned output: pass the last next_offset as the "
+    "check_shell offset to receive only newer output, since without an offset a running handle shows only its "
+    "newest output. "
     f"Output is captured up to {MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB per command, and results carry "
     f"all of it; results over {DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB by default are saved to "
     "a workspace file automatically, or pass mindroom_output_path to choose the file. "
@@ -582,7 +588,7 @@ _LOCAL_ACTION_ARGUMENTS: dict[str, frozenset[str]] = {
     "list_directory": frozenset({"root_id", "path"}),
     "read_file": frozenset({"root_id", "path", "offset"}),
     "run_shell": frozenset({"command", "cwd", "timeout_seconds"}),
-    "check_shell": frozenset({"handle"}),
+    "check_shell": frozenset({"handle", "offset"}),
     "kill_shell": frozenset({"handle", "force"}),
 }
 
@@ -629,6 +635,8 @@ def _shell_start_parameters(arguments: _LocalArguments) -> dict[str, object]:
 
 def _handle_parameters(arguments: _LocalArguments) -> dict[str, object]:
     parameters: dict[str, object] = {"handle": _required_argument(arguments.handle, name="handle")}
+    if arguments.offset is not None:
+        parameters["offset"] = _bounded_integer(arguments.offset, name="offset", minimum=0)
     if arguments.force is not None and not isinstance(arguments.force, bool):
         msg = "Desktop argument force must be a boolean."
         raise ValueError(msg)

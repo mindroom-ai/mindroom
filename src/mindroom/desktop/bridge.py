@@ -933,11 +933,11 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
         parameters = command.parameters
         if command.action == "check_shell":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle"}))
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
             handle = _required_str_parameter(parameters, "handle")
-            return _Execution(
-                await self._shell_result(command, shell.check(command.requester_id, command.agent_name, handle)),
-            )
+            offset = _optional_int_parameter(parameters, "offset")
+            result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
+            return _Execution(await self._shell_result(command, result, offset=offset))
         if command.action == "kill_shell":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
             handle = _required_str_parameter(parameters, "handle")
@@ -958,8 +958,18 @@ class DesktopBridge:
         )
         return _Execution(await self._shell_result(command, await shell.execute(request)))
 
-    async def _shell_result(self, command: DesktopCommand, result: DesktopShellResult) -> dict[str, object]:
-        """Reply inline when the encrypted response fits one to-device message, otherwise attach the full output."""
+    async def _shell_result(
+        self,
+        command: DesktopCommand,
+        result: DesktopShellResult,
+        *,
+        offset: int | None = None,
+    ) -> dict[str, object]:
+        """Reply inline when the encrypted response fits one to-device message, otherwise attach the full output.
+
+        Output starts at byte ``offset``; without one, a running command shows its newest output. ``next_offset``
+        is the byte just past the returned output, where the next check continues.
+        """
         output = result.output
         size = output.size
         payload: dict[str, object] = {
@@ -970,11 +980,15 @@ class DesktopBridge:
             "output_bytes": size,
             "output_truncated": output.truncated,
             "output_attachment": None,
+            "next_offset": size,
         }
         if result.state == "running":
-            return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), size=size)
+            if offset is None:
+                return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
+            head = output.read(offset)[:MAX_INLINE_RESPONSE_BYTES]
+            return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
         try:
-            content = output.read()
+            content = output.read(offset or 0)
             # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
             if len(content) <= MAX_INLINE_RESPONSE_BYTES:
                 inline = {**payload, "output": content.decode()}
@@ -1000,7 +1014,7 @@ class DesktopBridge:
                 command,
                 {**payload, "warning": warning},
                 content[-MAX_INLINE_RESPONSE_BYTES:],
-                size=size,
+                requested=len(content),
             )
         finally:
             output.release()
@@ -1032,19 +1046,42 @@ class DesktopBridge:
         payload: dict[str, object],
         tail: bytes,
         *,
-        size: int,
+        requested: int,
     ) -> dict[str, object]:
         """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
         text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
 
         def reply(start: int) -> dict[str, object]:
             shown = text[start:]
-            truncated = bool(payload["output_truncated"]) or len(shown.encode()) < size
+            truncated = bool(payload["output_truncated"]) or len(shown.encode()) < requested
             return {**payload, "output": shown, "output_truncated": truncated}
 
         # Dropping older characters never grows the reply, so search for the fewest to drop.
         start = self._leftmost_fitting(command, 0, len(text), reply)
         return reply(start)
+
+    def _fit_output_head(
+        self,
+        command: DesktopCommand,
+        payload: dict[str, object],
+        head: bytes,
+        *,
+        offset: int,
+        requested: int,
+    ) -> dict[str, object]:
+        """Show the oldest output from ``offset`` whose escaped reply still fits inline, and where to continue."""
+        # The offset starts a character, so only the last one can be cut; ``next_offset`` then points at it.
+        text = head.decode(errors="ignore")
+
+        def reply(dropped: int) -> dict[str, object]:
+            shown = text[: len(text) - dropped]
+            shown_bytes = len(shown.encode())
+            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
+            return {**payload, "output": shown, "output_truncated": truncated, "next_offset": offset + shown_bytes}
+
+        # Dropping newer characters never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, len(text), reply)
+        return reply(dropped)
 
     def _fit_listing(
         self,

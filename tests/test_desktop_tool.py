@@ -904,6 +904,30 @@ async def test_folder_listing_omits_unspecified_optional_arguments(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_check_shell_polls_from_an_offset_and_returns_where_to_continue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent passes the last next_offset to check_shell; other shell actions refuse an offset."""
+    polled = _shell_result(state="running", handle="shell:1", exit_code=None, output="new", next_offset=9)
+    request = _route_desktop_requests(monkeypatch, DesktopResponse("r1", "s", True, result=polled))
+    tool = _configured_tool(monkeypatch)
+
+    result = await tool.desktop("check_shell", handle="shell:1", offset=6)
+
+    assert request.await_args.args[1].parameters == {"handle": "shell:1", "offset": 6}
+    assert json.loads(result.content)["result"]["next_offset"] == 9
+    for action, arguments, message in (
+        ("check_shell", {"handle": "shell:1", "offset": -1}, "offset must be an integer of at least 0"),
+        ("kill_shell", {"handle": "shell:1", "offset": 6}, "does not accept offset"),
+        ("run_shell", {"command": "ls", "offset": 6}, "does not accept offset"),
+    ):
+        payload = json.loads((await tool.desktop(action, **arguments)).content)
+        assert (payload["status"], message in payload["message"]) == ("error", True)
+    assert request.await_count == 1
+    properties = tool.async_functions["desktop"].parameters["properties"]
+    assert "check_shell" in properties["offset"]["description"]
+    assert "next_offset" in (tool.async_functions["desktop"].description or "")
+
+
+@pytest.mark.asyncio
 async def test_run_shell_waits_for_local_approval_while_other_actions_keep_configured_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

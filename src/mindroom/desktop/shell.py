@@ -78,16 +78,29 @@ class DesktopShellOutput(ShellOutputCapture):
         """Report output dropped past the cap or lost to a capture error."""
         return self.stdout.error is not None
 
-    def read(self) -> bytes:
-        """Return all retained output."""
-        return self.tail(self.size)
+    def read(self, offset: int = 0) -> bytes:
+        """Return the retained output from byte *offset* on."""
+        self.stdout.file.seek(offset)
+        # Reading to the end leaves the engine's next write appending after existing output.
+        return self.stdout.file.read()
 
     def tail(self, max_bytes: int) -> bytes:
         """Return at most the newest *max_bytes* bytes; the first character may be partial."""
+        return self.read(max(0, self.size - max_bytes))
+
+    def check_offset(self, offset: int) -> None:
+        """Reject an offset that is negative, past the retained output, or inside a character."""
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            message = "Shell output offset must be a nonnegative integer."
+            raise DesktopShellError(message)
         size = self.size
-        self.stdout.file.seek(max(0, size - max_bytes))
-        # Reading to the end leaves the engine's next write appending after existing output.
-        return self.stdout.file.read()
+        if offset > size:
+            message = f"Shell output offset is past the captured output ({size} bytes)."
+            raise DesktopShellError(message)
+        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
+        if offset < size and os.pread(self.stdout.file.fileno(), 1, offset)[0] & 0xC0 == 0x80:
+            message = "Shell output offset must be at the start of a UTF-8 character."
+            raise DesktopShellError(message)
 
     def publish(self, return_code: int | None) -> str:
         """Record completion; the bridge transfers the spool instead of writing a workspace file."""
@@ -415,9 +428,21 @@ class DesktopShell:
             raise DesktopShellError(result.message.removeprefix("Error: "))
         return DesktopShellResult("completed", None, output.exit_code, output)
 
-    def check(self, requester_id: str, agent_name: str, handle: str) -> DesktopShellResult:
-        """Report the caller's own handle; a completed handle is handed over once and forgotten."""
+    def check(
+        self,
+        requester_id: str,
+        agent_name: str,
+        handle: str,
+        *,
+        offset: int | None = None,
+    ) -> DesktopShellResult:
+        """Report the caller's own handle; a completed handle is handed over once and forgotten.
+
+        An invalid output ``offset`` is rejected before the hand-over, so a corrected check still gets the output.
+        """
         record = self._caller_record(requester_id, agent_name, handle)
+        if offset is not None:
+            self._handles[handle].output.check_offset(offset)
         if not record.finished:
             return DesktopShellResult("running", handle, None, self._handles[handle].output)
         self._records.pop(handle)
