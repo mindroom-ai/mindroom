@@ -109,7 +109,14 @@ def test_tuwunel_start_hint_parses_for_selected_instance(bridge_manager: ModuleT
 
 _BRIDGE_ADMIN = "@alice:m-alpha.example.com"
 _BRIDGE_CREDENTIAL_ARGS = {
-    "telegram": ["--api-id", "12345", "--api-hash", "telegram-hash-for-tests", "--bot-token", "telegram-token-for-tests"],
+    "telegram": [
+        "--api-id",
+        "12345",
+        "--api-hash",
+        "telegram-hash-for-tests",
+        "--bot-token",
+        "telegram-token-for-tests",
+    ],
     "slack": ["--app-token", "slack-app-for-tests", "--bot-token", "slack-bot-for-tests", "--team-id", "T0TEST"],
 }
 

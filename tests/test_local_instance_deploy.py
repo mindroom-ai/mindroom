@@ -8,15 +8,18 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _REAL_SUBPROCESS_RUN = subprocess.run
 _SANDBOX_SERVICES = {"sandbox-runner", "sandbox-relay"}
