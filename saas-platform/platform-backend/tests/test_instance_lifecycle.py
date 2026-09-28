@@ -19,6 +19,7 @@ from backend.pricing import get_plan_details
 from backend.services.instance_lifecycle import (
     DELETION_BILLING_MARKER,
     LifecycleSummary,
+    lifecycle_overview,
     reconcile_all_subscriptions,
     reconcile_subscription_instances,
 )
@@ -1674,7 +1675,7 @@ async def test_nightly_billing_change_leaves_an_account_restored_meanwhile_bille
 ) -> None:
     _pending_deletion(platform, days_ago=2)
     platform.db.tables["subscriptions"].append(_subscription("active"))
-    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active"), _stripe_sub("sub_unpaid", "incomplete"))
     account = platform.db.row("accounts", id=ACCOUNT_ID)
     real_table = platform.db.table
     listed = False
@@ -1709,6 +1710,8 @@ async def test_nightly_billing_change_leaves_an_account_restored_meanwhile_bille
     resumes = call("sub_stripe_1", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""})
     expected = [] if restored == "before the billing change" else [ends, resumes]
     assert platform.stripe.Subscription.modify.call_args_list == expected
+    # A cancellation cannot be undone, so a restored account never loses a subscription to it.
+    platform.stripe.Subscription.cancel.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1944,6 +1947,27 @@ async def test_short_teardown_grace_never_uninstalls_inside_the_account_deletion
 
     platform.uninstall.assert_not_awaited()
     assert platform.instance()["status"] == "stopped"
+    # A restored account gets the instance's full teardown grace period again, not a date already past.
+    assert datetime.fromisoformat(platform.instance()["teardown_after"]) == now + timedelta(days=30)
+
+
+def test_admin_overview_does_not_flag_the_deferred_teardown_of_an_account_pending_deletion(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=9)).isoformat(),
+            teardown_after=(now - timedelta(days=3)).isoformat(),
+        )
+    )
+
+    _pending, stuck = lifecycle_overview(now=now)
+
+    assert stuck == []
 
 
 def test_deletion_moves_a_later_end_date_to_the_period_end_and_cancelling_it_restores_that_date(

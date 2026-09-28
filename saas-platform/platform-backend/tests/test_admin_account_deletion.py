@@ -106,6 +106,20 @@ class TestAdminAccountDeletion:
         assert response.json()["detail"] == "Account not found"
         mock_tear_down.tear_down_account.assert_not_awaited()
 
+    def test_an_account_that_is_not_marked_pending_deletion_is_not_torn_down(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
+    ):
+        """The claim only takes when the soft delete did, so a customer can never restore mid-teardown."""
+        self._account_tables(mock_supabase, [])
+        claim = mock_supabase.table("accounts").update.return_value.eq.return_value.not_.is_.return_value
+        claim.execute.return_value = Mock(data=[])
+
+        response = client.delete("/admin/accounts/account_123/complete")
+
+        assert response.status_code == 500
+        assert "nothing was deleted" in response.json()["detail"]
+        mock_tear_down.tear_down_account.assert_not_awaited()
+
     def test_failed_teardown_keeps_the_account(
         self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
     ):

@@ -99,6 +99,8 @@ async def _end_billing_unless_restored(sb: Any, account_id: str) -> None:  # noq
     if not account_pending_deletion(sb, account_id):
         await resume_subscriptions(scheduled)
         return
+    # A restore landing in the one Stripe round trip after this check can still see an unpaid subscription cancelled;
+    # it had no paid period, and checkout accepts the account again.
     await cancel_unpaid_subscriptions(account_id)
 
 

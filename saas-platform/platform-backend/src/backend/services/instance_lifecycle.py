@@ -464,7 +464,9 @@ def _lifecycle_problem(
     if held and status != "stopped":
         return f"Held for an inactive subscription but status is {status}"
     teardown_after = parse_timestamp(instance.get("teardown_after"))
-    if held and teardown_after is not None and teardown_after < now - timedelta(days=1):
+    overdue = teardown_after is not None and teardown_after < now - timedelta(days=1)
+    # The account cleanup, not the teardown date, removes an instance of an account pending deletion.
+    if held and overdue and not account_row_pending_deletion(account):
         return "Teardown is overdue"
     if not held and not entitled:
         return "Subscription is not entitled but the instance is not scheduled for teardown"
@@ -615,17 +617,21 @@ async def _hold(
 
     teardown_after = parse_timestamp(instance.get("teardown_after"))
     if teardown_after is not None and teardown_after <= now:
-        await _teardown(sb, instance_id, subscription, summary)
+        await _teardown(sb, instance_id, subscription, now, summary)
 
 
-async def _teardown(sb: Client, instance_id: Any, subscription: dict[str, Any], summary: LifecycleSummary) -> None:
+async def _teardown(
+    sb: Client, instance_id: Any, subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
+) -> None:
     """Uninstall an instance whose grace period ended, unless its subscription became entitled or its account is
     pending deletion meanwhile."""
     fresh = sb.table("subscriptions").select("*").eq("id", subscription["id"]).limit(1).execute().data
     if fresh and account_pending_deletion(sb, fresh[0]["account_id"]):
         # The account's own cleanup tears it down once its restore window ends, even when a short teardown grace
-        # period would come first.
+        # period would come first. Moving the date keeps the instance's full grace period for a restored account.
         logger.info("Skipping teardown of instance %s: its account is pending deletion", instance_id)
+        teardown_after = now + timedelta(days=INSTANCE_TEARDOWN_GRACE_DAYS)
+        update_instance(sb, instance_id, {"teardown_after": teardown_after.isoformat()})
         return
     if fresh and is_subscription_service_active(fresh[0]):
         logger.warning(

@@ -585,9 +585,17 @@ async def admin_delete_account_complete(
         "soft_delete_account",
         {"target_account_id": account_id, "reason": "admin_complete_deletion", "requested_by": admin["user_id"]},
     ).execute()
-    sb.table("accounts").update({"hard_delete_started_at": datetime.now(UTC).isoformat()}).eq("id", account_id).is_(
-        "hard_delete_started_at", "null"
-    ).execute()
+    claimed = (
+        sb.table("accounts")
+        .update({"hard_delete_started_at": datetime.now(UTC).isoformat()})
+        .eq("id", account_id)
+        .not_.is_("deleted_at", "null")
+        .execute()
+        .data
+    )
+    if not claimed:
+        detail = "The account could not be marked pending deletion, so nothing was deleted; retry the deletion"
+        raise HTTPException(status_code=500, detail=detail)
 
     # 2. Cancel Stripe billing and uninstall every instance; the rows are the only record of what to tear down,
     # so they stay until this succeeds.

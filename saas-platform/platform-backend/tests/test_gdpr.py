@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from main import app
 from backend.deps import verify_user
+from backend.services.instance_lifecycle import ScheduledBillingEnd
 
 from tests.fake_supabase import FakeSupabase
 
@@ -299,7 +300,7 @@ class TestGDPREndpoints:
         self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
     ):
         """If the deletion cannot be recorded, the billing this request set to end renews again, and only that."""
-        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
+        mock_lifecycle.end_account_billing_at_period_end.return_value = [ScheduledBillingEnd("sub_a", "none")]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
         _account_deleted_at(mock_supabase, None)
 
@@ -309,7 +310,7 @@ class TestGDPREndpoints:
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Your account was not deleted and your billing is unchanged. Try again."
-        mock_lifecycle.resume_subscriptions.assert_awaited_once_with(["sub_a"])
+        mock_lifecycle.resume_subscriptions.assert_awaited_once_with([ScheduledBillingEnd("sub_a", "none")])
         mock_lifecycle.resume_account_billing.assert_not_awaited()
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
@@ -317,7 +318,7 @@ class TestGDPREndpoints:
         self, client, mock_verify_user, mock_supabase, mock_lifecycle
     ):
         """When even the follow-up lookup fails, nothing is undone and the customer is told the state is unknown."""
-        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
+        mock_lifecycle.end_account_billing_at_period_end.return_value = [ScheduledBillingEnd("sub_a", "none")]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
         lookup = mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value
         lookup.execute.side_effect = RuntimeError("connection reset")
@@ -331,11 +332,21 @@ class TestGDPREndpoints:
         assert "may be set to end at the end of its billing period" in response.json()["detail"]
         mock_lifecycle.resume_subscriptions.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "failure", [stripe.APIConnectionError("stripe unavailable"), RuntimeError("database unavailable")]
+    )
     def test_unpaid_subscription_cancel_failure_keeps_the_recorded_deletion(
-        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle, failure
     ):
-        """The nightly cleanup retries the cancellation, so the deletion request still succeeds."""
-        mock_lifecycle.cancel_unpaid_subscriptions.side_effect = stripe.APIConnectionError("stripe unavailable")
+        """Instances are held first, and the nightly cleanup retries the cancellation, so the request succeeds."""
+        steps: list[str] = []
+        mock_lifecycle.reconcile_account_instances.side_effect = lambda _account_id: steps.append("hold") or []
+
+        def cancel_fails(_account_id: str) -> None:
+            steps.append("cancel unpaid")
+            raise failure
+
+        mock_lifecycle.cancel_unpaid_subscriptions.side_effect = cancel_fails
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -343,12 +354,13 @@ class TestGDPREndpoints:
 
         assert response.status_code == 200
         assert response.json()["status"] == "deletion_scheduled"
+        assert steps == ["hold", "cancel unpaid"]
 
     def test_soft_delete_that_committed_before_its_response_was_lost_stands(
         self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
     ):
         """The account is pending deletion after all, so its billing stays set to end and its instances stop."""
-        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
+        mock_lifecycle.end_account_billing_at_period_end.return_value = [ScheduledBillingEnd("sub_a", "none")]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
         _account_deleted_at(mock_supabase, datetime.now(UTC).isoformat())
 

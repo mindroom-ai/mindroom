@@ -184,14 +184,14 @@ async def request_account_deletion(
         # The soft delete may have committed before its response was lost; then the deletion stands.
         if not _deletion_recorded_after_all(sb, account_id, scheduled):
             raise HTTPException(status_code=500, detail=await _undo_scheduled_billing_end(scheduled)) from exc
-    # Cancelling cannot be undone, so subscriptions without a paid period are cancelled only now; the nightly cleanup
-    # repeats it for accounts inside their grace period.
-    try:
-        await instance_lifecycle.cancel_unpaid_subscriptions(account_id)
-    except stripe.StripeError:
-        logger.exception("Could not cancel the unpaid subscriptions of account %s; cleanup retries", account_id)
     # An account pending deletion never runs instances, so this holds them until cleanup.
     hold_errors = await instance_lifecycle.reconcile_account_instances(account_id)
+    # Cancelling cannot be undone, so subscriptions without a paid period are cancelled only now the deletion is
+    # recorded. The deletion stands whatever fails here, and the nightly cleanup repeats this step.
+    try:
+        await instance_lifecycle.cancel_unpaid_subscriptions(account_id)
+    except Exception:
+        logger.exception("Could not cancel the unpaid subscriptions of account %s; cleanup retries", account_id)
     instances = (
         "Stopping your hosted instances failed and is retried automatically."
         if hold_errors
