@@ -604,7 +604,7 @@ async def test_a_missing_sidecar_exports_its_preview_marked_unavailable(router: 
 
     messages = await export(reader_for(router, homeserver))
 
-    assert bodies(messages) == ["root", "the whole long mes…"]
+    assert bodies(messages) == ["root", "the whole long mes…\n\n[long message content unavailable]"]
     assert messages[-1].content["io.mindroom.long_text_unavailable"] is True
     assert homeserver.download_calls == 1
 

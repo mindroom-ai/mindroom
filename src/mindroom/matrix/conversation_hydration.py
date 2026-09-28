@@ -1214,10 +1214,11 @@ class ConversationHydrator:
         message then stays unreadable and keeps its refresh token, so the next
         strict read tries again rather than installing the preview and calling
         the debt settled. An attachment that can never be read -- missing,
-        oversized, undecryptable, or not a message payload -- is settled
-        instead with its preview and an explicit unavailable marker, because
-        any room member can post one and a debt nothing can repay would fail
-        every later strict read of the conversation.
+        oversized, undecryptable, or not a message payload, or one that has
+        kept failing transiently for too long -- is settled instead with its
+        preview and an explicit unavailable marker, because any room member can
+        post one and a debt nothing can repay would fail every later strict
+        read of the conversation.
         """
         if not holds_unresolved_sidecar(content):
             return content

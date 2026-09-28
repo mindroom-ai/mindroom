@@ -30,7 +30,7 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
     resolve_sidecar_content,
 )
-from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, sidecar_mxc_url
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, sidecar_mxc_url, unavailable_sidecar_content
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.visible_body import (
     strip_matrix_rich_reply_fallback,
@@ -170,6 +170,107 @@ async def test_unreadable_sidecars_are_classified_and_remembered(response: FakeM
     assert (second.permanently_unavailable, second.downloads) == (permanent, 0)
     assert client.send.await_count == 1
     assert holds_unresolved_sidecar(second.content)
+
+
+def test_unavailable_sidecar_placeholder_marks_the_owning_content_and_notes_its_body() -> None:
+    """The placeholder keeps the event's relation and fields, and says the text is incomplete where readers look."""
+    metadata = {"version": 2, "encoding": "matrix_event_content_json"}
+    relation = {"rel_type": "m.replace", "event_id": "$original"}
+    edit = {
+        "msgtype": "m.text",
+        "body": "* preview",
+        "m.new_content": {
+            "msgtype": "m.file",
+            "body": "preview",
+            "url": "mxc://s/x",
+            "io.mindroom.long_text": metadata,
+        },
+        "m.relates_to": relation,
+    }
+
+    placeholder = unavailable_sidecar_content(edit)
+    bodiless = unavailable_sidecar_content({"url": "mxc://s/y", "io.mindroom.long_text": metadata})
+
+    assert placeholder == {
+        "msgtype": "m.text",
+        "body": "* preview",
+        "m.new_content": {
+            "msgtype": "m.file",
+            "body": "preview\n\n[long message content unavailable]",
+            "url": "mxc://s/x",
+            "io.mindroom.long_text_unavailable": True,
+        },
+        "m.relates_to": relation,
+    }
+    assert not holds_unresolved_sidecar(placeholder)
+    assert bodiless["body"] == "[long message content unavailable]"
+
+
+def _clocked_sidecar_client(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[FakeMediaResponse],
+) -> tuple[AsyncMock, list[float]]:
+    """Return a client serving ``responses`` in order and a mutable clock the sidecar memory reads."""
+    clock = [1_000.0]
+    monkeypatch.setattr(message_content_module, "monotonic", lambda: clock[0])
+    client = _make_client()
+    client.send.side_effect = responses
+    return client, clock
+
+
+_SIDECAR_PREVIEW = {
+    "body": "preview",
+    "url": "mxc://server/sidecar",
+    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+}
+
+
+@pytest.mark.asyncio
+async def test_repeated_transient_sidecar_failures_become_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sidecar that keeps failing transiently is treated as unreadable after three failed downloads."""
+    client, clock = _clocked_sidecar_client(monkeypatch, [FakeMediaResponse(status=503) for _ in range(3)])
+    outcomes = []
+    for _ in range(3):
+        outcomes.append(await resolve_sidecar_content(_SIDECAR_PREVIEW, client))
+        clock[0] += message_content_module._TRANSIENT_UNAVAILABLE_SECONDS + 1
+
+    assert [outcome.permanently_unavailable for outcome in outcomes] == [False, False, True]
+    assert [outcome.downloads for outcome in outcomes] == [1, 1, 1]
+    assert (await resolve_sidecar_content(_SIDECAR_PREVIEW, client)).downloads == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_sidecar_failures_become_permanent_after_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sidecar still failing ten minutes after its first failure is unreadable, however few attempts ran."""
+    client, clock = _clocked_sidecar_client(monkeypatch, [FakeMediaResponse(status=503) for _ in range(2)])
+
+    first = await resolve_sidecar_content(_SIDECAR_PREVIEW, client)
+    clock[0] += message_content_module._TRANSIENT_FAILURE_WINDOW_SECONDS
+    second = await resolve_sidecar_content(_SIDECAR_PREVIEW, client)
+
+    assert (first.permanently_unavailable, second.permanently_unavailable) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_a_success_before_escalation_resolves_and_resets_the_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sidecar that recovers resolves normally, and later failures count from zero again."""
+    client, clock = _clocked_sidecar_client(
+        monkeypatch,
+        [
+            FakeMediaResponse(status=503),
+            FakeMediaResponse(status=503),
+            media_response(json.dumps({"body": "whole"}).encode()),
+            FakeMediaResponse(status=503),
+            FakeMediaResponse(status=503),
+        ],
+    )
+    outcomes = []
+    for _ in range(5):
+        outcomes.append(await resolve_sidecar_content(_SIDECAR_PREVIEW, client))
+        clock[0] += message_content_module._TRANSIENT_UNAVAILABLE_SECONDS + 1
+
+    assert outcomes[2].content == {"body": "whole"}
+    assert [outcome.permanently_unavailable for outcome in outcomes] == [False, False, False, False, False]
 
 
 @pytest.mark.asyncio

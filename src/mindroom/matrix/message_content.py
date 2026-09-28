@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import math
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -56,34 +56,63 @@ _MAX_SIDECAR_HOPS = 2
 # Plaintext is never kept: it belongs to the visible revision the projection stores.
 _UNAVAILABLE_SIDECAR_CACHE_SIZE = 1024
 _TRANSIENT_UNAVAILABLE_SECONDS = 30.0
+# A sidecar that keeps failing in ways that could clear later is treated as unreadable for good after this many
+# failed downloads, or once it has kept failing this long, so a sender-controlled media server cannot keep its
+# message owed forever.
+_TRANSIENT_FAILURES_BEFORE_PERMANENT = 3
+_TRANSIENT_FAILURE_WINDOW_SECONDS = 600.0
 
 
 @dataclass(frozen=True, slots=True)
 class _UnavailableSidecar:
     permanent: bool
-    expires_at: float
+    transient_failures: int
+    first_failure_at: float
+    retry_at: float
 
 
 _unavailable_sidecars: OrderedDict[tuple[str, str | None], _UnavailableSidecar] = OrderedDict()
 
 
 def _cached_unavailable_sidecar(key: tuple[str, str | None]) -> MxcUnavailable | None:
+    """Return a remembered failure, or nothing when the sidecar should be downloaded again."""
     entry = _unavailable_sidecars.get(key)
     if entry is None:
         return None
-    if entry.expires_at <= monotonic():
-        del _unavailable_sidecars[key]
-        return None
     _unavailable_sidecars.move_to_end(key)
-    return MxcUnavailable(permanent=entry.permanent)
+    if entry.permanent:
+        return MxcUnavailable(permanent=True)
+    if monotonic() < entry.retry_at:
+        return MxcUnavailable(permanent=False)
+    return None
 
 
-def _remember_unavailable_sidecar(key: tuple[str, str | None], unavailable: MxcUnavailable) -> None:
-    expires_at = math.inf if unavailable.permanent else monotonic() + _TRANSIENT_UNAVAILABLE_SECONDS
-    _unavailable_sidecars[key] = _UnavailableSidecar(permanent=unavailable.permanent, expires_at=expires_at)
+def _remember_sidecar_outcome(key: tuple[str, str | None], unavailable: MxcUnavailable | None) -> MxcUnavailable | None:
+    """Record one download outcome and return it, escalating a transient failure that has repeated for too long."""
+    if unavailable is None:
+        _unavailable_sidecars.pop(key, None)
+        return None
+    now = monotonic()
+    previous = _unavailable_sidecars.get(key)
+    first_failure_at = now if previous is None else previous.first_failure_at
+    transient_failures = 1 if previous is None else previous.transient_failures + 1
+    permanent = (
+        unavailable.permanent
+        or transient_failures >= _TRANSIENT_FAILURES_BEFORE_PERMANENT
+        or now - first_failure_at >= _TRANSIENT_FAILURE_WINDOW_SECONDS
+    )
+    if permanent and not unavailable.permanent:
+        logger.warning("mxc_sidecar_transient_failures_escalated", mxc_url=key[0], failures=transient_failures)
+    _unavailable_sidecars[key] = _UnavailableSidecar(
+        permanent=permanent,
+        transient_failures=transient_failures,
+        first_failure_at=first_failure_at,
+        retry_at=math.inf if permanent else now + _TRANSIENT_UNAVAILABLE_SECONDS,
+    )
     _unavailable_sidecars.move_to_end(key)
     while len(_unavailable_sidecars) > _UNAVAILABLE_SIDECAR_CACHE_SIZE:
         _unavailable_sidecars.popitem(last=False)
+    return MxcUnavailable(permanent=permanent)
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,9 +360,7 @@ async def _resolve_canonical_content(
     if (cached := _cached_unavailable_sidecar(cache_key)) is not None:
         return _SidecarChain(content=content, unavailable=cached, downloads=0)
     chain = await _download_sidecar_chain(content, client)
-    if chain.unavailable is not None:
-        _remember_unavailable_sidecar(cache_key, chain.unavailable)
-    return chain
+    return replace(chain, unavailable=_remember_sidecar_outcome(cache_key, chain.unavailable))
 
 
 def _sidecar_cache_key(mxc_url: str, sidecar_content: Mapping[str, Any]) -> tuple[str, str | None]:

@@ -24,6 +24,7 @@ from mindroom.constants import (
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
 from mindroom.matrix import media as media_module
+from mindroom.matrix import message_content as message_content_module
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
@@ -1766,10 +1767,34 @@ class TestSidecarResolution:
         assert client.downloads == ["mxc://s/bad"]
         for page in (first, second):
             [message] = page.messages
-            assert message.content["body"] == "The answer beg [continues]"
+            assert message.content["body"] == "The answer beg [continues]\n\n[long message content unavailable]"
             assert message.content["io.mindroom.long_text_unavailable"] is True
             assert "io.mindroom.long_text" not in message.content
             assert page.refresh_pending == ()
+
+    async def test_an_attachment_that_keeps_failing_transiently_settles_after_three_reads(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A media server that answers 503 forever cannot keep the message owed and the thread unreadable."""
+        clock = [1_000.0]
+        monkeypatch.setattr(message_content_module, "monotonic", lambda: clock[0])
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/flaky")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source}, sidecar_statuses={"mxc://s/flaky": 503})
+        reader = await self._reader(alice, client)
+
+        for _ in range(2):
+            with pytest.raises(_StaleConversationError):
+                await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+            clock[0] += message_content_module._TRANSIENT_UNAVAILABLE_SECONDS + 1
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/flaky"] * 3
+        [message] = page.messages
+        assert message.content["body"] == "The answer beg [continues]\n\n[long message content unavailable]"
+        assert message.content["io.mindroom.long_text_unavailable"] is True
 
     async def test_an_edit_after_an_unavailable_attachment_resolves_normally(self, alice: PrincipalStore) -> None:
         """Settling one revision with its preview does not stop a later edit from replacing it."""
