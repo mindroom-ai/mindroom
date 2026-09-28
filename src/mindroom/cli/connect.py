@@ -21,6 +21,7 @@ from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeho
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
+from mindroom.matrix.provisioning_env import provisioning_url_from_env
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -171,9 +172,12 @@ def _validate_poll_interval(raw_value: object) -> int:
 
 
 def _parse_expires_at(raw_value: str) -> datetime:
-    """Return the session expiry as an aware datetime."""
-    expires_at = datetime.fromisoformat(raw_value)
-    return expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
+    """Return the session expiry, which the service sends as a timezone-aware ISO timestamp."""
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        msg = "Pairing response has invalid expires_at."
+        raise ValueError(msg) from None
 
 
 def _utc_now() -> datetime:
@@ -578,7 +582,7 @@ def _is_hosted_homeserver(homeserver: str) -> bool:
 
 def self_hosted_pairing_error(runtime_paths: RuntimePaths) -> str | None:
     """Explain why pairing does not apply to a self-hosted homeserver with no provisioning service configured."""
-    if (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip():
+    if provisioning_url_from_env(runtime_paths) is not None:
         return None
     homeserver = constants.runtime_matrix_homeserver(runtime_paths).strip()
     if _is_hosted_homeserver(homeserver):

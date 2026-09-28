@@ -539,6 +539,26 @@ def test_run_device_pairing_validates_poll_interval() -> None:
         assert result.client_id == "client-123"
 
 
+@pytest.mark.parametrize(
+    ("expires_at", "error"),
+    [(None, r"Provisioning response missing expires_at"), ("soon", r"Pairing response has invalid expires_at")],
+)
+def test_run_device_pairing_requires_a_valid_expires_at(expires_at: str | None, error: str) -> None:
+    """The outage deadline depends on the session expiry, so a missing or malformed one fails the start."""
+    post = _fake_transport([httpx.Response(200, json={**_START, "expires_at": expires_at})], [])
+
+    with pytest.raises(ValueError, match=error):
+        cli_connect.run_device_pairing(
+            provisioning_url="https://provisioning.example",
+            client_name="devbox",
+            client_fingerprint="sha256:test",
+            matrix_ssl_verify=True,
+            announce=lambda _session: None,
+            post_request=post,
+            sleep=lambda _seconds: None,
+        )
+
+
 def test_run_device_pairing_fails_on_unknown_poll_status() -> None:
     """Unknown poll status raises ValueError instead of polling forever."""
     post = _fake_transport(
