@@ -99,7 +99,7 @@ Use `stdio` for local subprocess servers.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
-Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value but show `args` as written, and `args` support no placeholders.
+Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value except whole `${ENV_VAR}` placeholders, but show `args` as written, and `args` support no placeholders.
 Static `headers` are process-global and shared by every requester.
 Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
 Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
