@@ -1263,12 +1263,7 @@ def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -
     ("stored", "expected"),
     [
         ("false", False),
-        (" FALSE ", False),
-        ("0", False),
-        ("off", False),
         ("true", True),
-        ("True", True),
-        ("1", True),
         (False, False),
         (True, True),
     ],
@@ -1295,7 +1290,7 @@ def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
     assert tool._allow_private_networks is expected
 
 
-@pytest.mark.parametrize("stored", ["maybe", "", 1, 0.0, ["true"]])
+@pytest.mark.parametrize("stored", ["maybe", "", "False", " true", "1", "no", 1, 0.0, ["true"]])
 def test_stored_boolean_tool_config_rejects_non_boolean_values(tmp_path: Path, stored: object) -> None:
     """Unrecognized stored values for a boolean option fail instead of silently choosing a truthiness."""
     runtime_paths = resolve_runtime_paths(
