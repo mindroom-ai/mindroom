@@ -462,7 +462,6 @@ async def test_verify_user_rejects_inactive_accounts(auth_backend, account: dict
     [
         pytest.param(_account_row(), id="active"),
         pytest.param(_account_row(status="deleted", deleted_at="2026-09-01T00:00:00Z"), id="soft-deleted"),
-        pytest.param(_account_row(deleted_at="2026-09-01T00:00:00Z"), id="active-with-deleted-at"),
     ],
 )
 async def test_verify_user_allow_deleted_admits_accounts_pending_deletion(
@@ -485,6 +484,8 @@ async def test_verify_user_allow_deleted_admits_accounts_pending_deletion(
         pytest.param(_account_row(status="suspended", deleted_at="2026-09-01T00:00:00Z"), id="suspended-and-deleted"),
         pytest.param(_account_row(status="pending_verification"), id="pending-verification"),
         pytest.param(_account_row(status="deleted"), id="deleted-without-pending-deletion"),
+        # restore_account restores only deleted accounts, so this one could never cancel its deletion.
+        pytest.param(_account_row(deleted_at="2026-09-01T00:00:00Z"), id="active-with-deleted-at"),
     ],
 )
 async def test_verify_user_allow_deleted_still_rejects_blocked_accounts(

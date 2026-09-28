@@ -26,7 +26,8 @@ if TYPE_CHECKING:
 AUTH_CACHE_MAX_ENTRIES = 100
 AUTH_CACHE_MAX_TTL_SECONDS = 300
 ACTIVE_ACCOUNT_STATUS = "active"
-# Status the soft-delete RPC sets; such accounts keep GDPR self-service access until cleanup removes them.
+# Status the soft-delete RPC sets alongside deleted_at; only such accounts keep GDPR self-service access,
+# because restore_account restores only them.
 PENDING_DELETION_ACCOUNT_STATUS = "deleted"
 
 
@@ -103,10 +104,7 @@ def _account_is_active(account: dict[str, Any]) -> bool:
 
 
 def _account_is_pending_deletion(account: dict[str, Any]) -> bool:
-    return account.get("deleted_at") is not None and account.get("status") in {
-        ACTIVE_ACCOUNT_STATUS,
-        PENDING_DELETION_ACCOUNT_STATUS,
-    }
+    return account.get("status") == PENDING_DELETION_ACCOUNT_STATUS and account.get("deleted_at") is not None
 
 
 def _require_account_access(account: dict[str, Any], *, allow_pending_deletion: bool) -> None:
