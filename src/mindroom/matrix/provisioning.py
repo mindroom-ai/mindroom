@@ -42,14 +42,15 @@ class _ProvisioningRegisterResult:
 # Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract
 # test. The service's other credential failures ("Missing/Invalid local client
 # credentials") always use HTTP 401, so only the revoked detail matters for 403.
-_CONNECTION_REVOKED_DETAIL = "Connection revoked"
+# The heartbeat (provisioning_heartbeat.py) classifies revoked connections by the same string.
+CONNECTION_REVOKED_DETAIL = "Connection revoked"
 _NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 
 
 def _raise_for_register_agent_error(response: httpx.Response, *, username: str) -> NoReturn:
     """Raise the appropriate error for a failed register-agent response."""
     detail = error_detail_from_response(response)
-    if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
+    if response.status_code == 401 or (response.status_code == 403 and detail == CONNECTION_REVOKED_DETAIL):
         msg = f"Provisioning credentials are invalid or revoked (server said: {detail}). Run `mindroom connect` again."
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 403:

@@ -1435,6 +1435,46 @@ class TestAgentBot(AgentBotTestBase):
         assert watched_paths == [resolved_config_path]
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_starts_provisioning_heartbeat(self, tmp_path: Path) -> None:
+        """Startup runs the paired-install heartbeat as a background task and cancels it at shutdown."""
+        reset_runtime_state()
+        runtime_paths = self._runtime_paths(tmp_path)
+        heartbeat_paths: list[RuntimePaths] = []
+        heartbeat_started = asyncio.Event()
+        heartbeat_cancelled = asyncio.Event()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _heartbeat(paths: RuntimePaths) -> None:
+            heartbeat_paths.append(paths)
+            heartbeat_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                heartbeat_cancelled.set()
+                raise
+
+        async def _start() -> None:
+            await asyncio.wait_for(heartbeat_started.wait(), timeout=1)
+            msg = "stop after heartbeat start"
+            raise RuntimeError(msg)
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
+            patch("mindroom.orchestrator.run_provisioning_heartbeat", side_effect=_heartbeat),
+            pytest.raises(RuntimeError, match="stop after heartbeat start"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert heartbeat_paths == [runtime_paths]
+        assert heartbeat_cancelled.is_set()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_commits_runtime_storage_root_before_logging_and_credential_sync(
         self,
         tmp_path: Path,
