@@ -973,6 +973,26 @@ class TestDownloadMxcText:
         assert client.send.return_value.released
 
     @pytest.mark.asyncio
+    async def test_rate_limited_download_waits_and_retries(self) -> None:
+        """A 429 is retried after the homeserver's Retry-After delay, as nio's request loop did."""
+        client = _make_client()
+        rate_limited = FakeMediaResponse(status=429, headers={"Retry-After": "0"})
+        client.send.side_effect = [rate_limited, media_response(b"after the wait")]
+
+        assert await _download_mxc_text(client, "mxc://server/limited") == "after the wait"
+        assert client.send.await_count == 2
+        assert rate_limited.released
+
+    @pytest.mark.asyncio
+    async def test_download_gives_up_after_repeated_rate_limits(self) -> None:
+        """Retries are bounded, so a homeserver that keeps rate limiting leaves the sidecar unresolved."""
+        client = _make_client()
+        client.send.side_effect = [FakeMediaResponse(status=429, headers={"Retry-After": "0"}) for _ in range(5)]
+
+        assert await _download_mxc_text(client, "mxc://server/limited") is None
+        assert client.send.await_count == 3
+
+    @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oversized sidecar bytes should not be decoded."""
         monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)

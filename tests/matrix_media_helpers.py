@@ -29,6 +29,7 @@ class FakeMediaResponse:
     status: int = 200
     chunks: Iterable[bytes] = ()
     content_length: int | None = None
+    headers: dict[str, str] = field(default_factory=dict)
     released: bool = field(default=False, init=False)
 
     @property

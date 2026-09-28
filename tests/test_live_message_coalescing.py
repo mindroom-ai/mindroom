@@ -112,6 +112,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_media_helpers import media_response
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
@@ -7428,9 +7429,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
         SKIP_MENTIONS_KEY: True,
     }
-    response = MagicMock(spec=nio.DownloadResponse)
-    response.body = json.dumps(hydrated_content).encode("utf-8")
-    bot.client.download = AsyncMock(return_value=response)
+    bot.client.send = AsyncMock(return_value=media_response(json.dumps(hydrated_content).encode("utf-8")))
     captured_envelopes: list[MessageEnvelope] = []
     captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
@@ -7492,6 +7491,8 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         await bot._coalescing_gate.drain_all()
 
     assert handled is _IngressAdmissionOutcome.DEFERRED
+    bot.client.send.assert_awaited()
+    assert captured_envelopes[0].body == "@test_agent hydrated sidecar"
     assert captured_envelopes[0].source_kind == "message"
     assert captured_envelopes[0].mentioned_agents == ("test_agent",)
     assert captured_envelopes[0].requester_id == "@user:localhost"

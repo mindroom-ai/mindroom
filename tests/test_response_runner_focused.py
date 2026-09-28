@@ -152,6 +152,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.history_helpers import RecordingModel
+from tests.matrix_media_helpers import media_response
 from tests.response_runner_helpers import (
     _bot,
     _config,
@@ -2598,7 +2599,7 @@ async def test_restart_recovery_waits_for_unresolved_long_text(
     client = runner._client()
     client.room_get_event = AsyncMock(return_value=response)
     client.room_get_event_relations = MagicMock(return_value=_relations(*relations))
-    client.download = AsyncMock(return_value=nio.DownloadError("missing"))
+    client.send = AsyncMock(return_value=media_response(None))
 
     body = await fetch_latest_visible_body(
         client,
