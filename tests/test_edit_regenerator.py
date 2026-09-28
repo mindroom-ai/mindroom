@@ -19,7 +19,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
-from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
+from mindroom.edit_regenerator import (
+    _MAX_CONSECUTIVE_EDIT_REBUILDS,
+    EditRegenerator,
+    EditRegeneratorDeps,
+    _Edit,
+    _Mailbox,
+)
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -43,6 +49,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
+from mindroom.turn_record import EditPreparation
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import (
     make_relation_lookup,
@@ -885,6 +892,26 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
     }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_that_never_changes_is_capped(tmp_path: Path) -> None:
+    """A snapshot check that keeps asking to rebuild cannot hold the room's lane forever."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    harness.turn_store.prepare_edit_snapshot.side_effect = AsyncMock(return_value=EditPreparation.REBUILD)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
     assert harness.regenerator._mailboxes == {}
 
 

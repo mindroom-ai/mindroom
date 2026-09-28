@@ -11,6 +11,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import hook_ingress_policy
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
@@ -35,6 +36,12 @@ if TYPE_CHECKING:
     from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
+
+
+logger = get_logger(__name__)
+# Backstop for a snapshot check that keeps asking to rebuild a request the
+# drain cannot change; the edit is then dropped rather than holding the room.
+_MAX_CONSECUTIVE_EDIT_REBUILDS = 8
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,7 @@ class _Mailbox:
     handed_off_revisions: set[str] = field(default_factory=set)
     participants: int = 0
     rebuild_requested: bool = False
+    consecutive_rebuilds: int = 0
 
 
 @dataclass
@@ -390,6 +398,14 @@ class EditRegenerator:
                 thread_history=history,
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
+            mailbox.consecutive_rebuilds = mailbox.consecutive_rebuilds + 1 if mailbox.rebuild_requested else 0
+            if mailbox.consecutive_rebuilds > _MAX_CONSECUTIVE_EDIT_REBUILDS:
+                logger.error(
+                    "Dropping an edit whose regeneration kept asking to rebuild the same request",
+                    room_id=room.room_id,
+                    driving_revision_id=driving_edit.revision[1],
+                    rebuilds=mailbox.consecutive_rebuilds,
+                )
             if result is False and not stale_runs_removed:
                 self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
@@ -540,7 +556,8 @@ class EditRegenerator:
             self.deps.turn_store.release_pending_turn_claim(claimed_record)
 
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
-        while mailbox.pending:
+        mailbox.consecutive_rebuilds = 0
+        while mailbox.pending and mailbox.consecutive_rebuilds <= _MAX_CONSECUTIVE_EDIT_REBUILDS:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = await self._build_request(room, mailbox)
             if request is None or record is None:

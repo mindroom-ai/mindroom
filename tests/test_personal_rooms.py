@@ -31,6 +31,7 @@ from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
+    personal_room_digest,
     personal_room_record_path,
     read_personal_room,
     retained_personal_rooms,
@@ -714,6 +715,32 @@ async def test_existing_alias_requires_creator_marker(
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     assert server.membership(room_id, "@eve:localhost") == "join"
     assert len(server.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_squatted_alias_is_reported_as_an_alias_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room another account bound to the requester's alias fails validation with a specific warning."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch)
+    alias = "#personal_" + personal_room_digest("@alice:localhost")[:20] + ":localhost"
+    server.aliases[alias] = "!squatted:localhost"
+    server.state["!squatted:localhost"] = [
+        {"type": "m.room.create", "state_key": "", "sender": "@mallory:localhost", "content": {}},
+    ]
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="ownership or membership"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    conflicts = [
+        entry for entry in logs if entry["event"] == "Personal-room alias names a room this agent does not own"
+    ]
+    assert [(entry["alias"], entry["room_id"], entry["user_id"]) for entry in conflicts] == [
+        (alias, "!squatted:localhost", "@alice:localhost"),
+    ]
+    assert server.create_count == 0
 
 
 @pytest.mark.asyncio

@@ -390,13 +390,29 @@ class PersonalRoomService:
     def _ownership(self, user_id: str) -> dict[str, str]:
         return {"user_id": user_id, "agent_user_id": self._client().user_id}
 
+    async def _adopt_aliased_room(self, record: PersonalRoomRecord, room_id: str) -> str:
+        """Reuse the room the personal alias names only if this agent owns it."""
+        record.room_id = room_id
+        try:
+            await self._validate_room(record)
+        except RuntimeError:
+            # Any local account can bind the deterministic alias first, and
+            # onboarding for this requester stays blocked until an operator
+            # frees it, so say which room holds it.
+            logger.warning(
+                "Personal-room alias names a room this agent does not own",
+                user_id=record.user_id,
+                alias=record.alias,
+                room_id=room_id,
+            )
+            raise
+        return room_id
+
     async def _resolve_or_create(self, record: PersonalRoomRecord, source_room_id: str) -> str:
         client = self._client()
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
-            record.room_id = response.room_id
-            await self._validate_room(record)
-            return response.room_id
+            return await self._adopt_aliased_room(record, response.room_id)
         if not isinstance(response, nio.RoomResolveAliasError) or response.status_code != "M_NOT_FOUND":
             msg = "Personal-room alias lookup failed"
             raise RuntimeError(msg)
@@ -419,9 +435,7 @@ class PersonalRoomService:
         # Concurrent creators and ambiguous create responses converge on the alias.
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
-            record.room_id = response.room_id
-            await self._validate_room(record)
-            return response.room_id
+            return await self._adopt_aliased_room(record, response.room_id)
         msg = "Personal-room creation failed"
         raise RuntimeError(msg)
 
