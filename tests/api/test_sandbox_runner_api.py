@@ -89,6 +89,8 @@ from tests.conftest import requires_linux
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
@@ -2982,13 +2984,8 @@ def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
     assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
 
 
-@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
-def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    execution_mode: str,
-) -> None:
-    """A runner started without any config registers plugin tools, and validates their overrides, from the snapshot."""
+def _write_snapshot_only_plugin(tmp_path: Path) -> dict[str, object]:
+    """Write a plugin beside the runner's config path and return a snapshot that enables it."""
     plugin_root = tmp_path / "plugins" / "snapshot-only"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -3021,6 +3018,17 @@ def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
         "    return SnapshotOnlyTool\n",
         encoding="utf-8",
     )
+    return {"plugins": [{"path": "./plugins/snapshot-only", "enabled": True}]}
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A runner started without any config registers plugin tools, and validates their overrides, from the snapshot."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
     # The runner gets no config file, as in every chart; the plugin directory is visible beside its config path.
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
@@ -3036,12 +3044,51 @@ def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
                 "tool_name": "snapshot_only_plugin",
                 "function_name": "greet",
                 "tool_config_overrides": {"greeting": "from the snapshot"},
-                "config_snapshot": {"plugins": [{"path": "./plugins/snapshot-only", "enabled": True}]},
+                "config_snapshot": snapshot,
             },
         )
 
     assert response.status_code == 200, response.text
     assert response.json() == {"ok": True, "result": "from the snapshot", "error": None, "failure_kind": None}
+
+
+def test_sandbox_runner_loads_snapshot_plugins_once_per_distinct_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every request carries the snapshot, so plugins reload only when their entries change."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "inprocess")
+    _set_sandbox_token(monkeypatch)
+    loads: list[list[str]] = []
+    load_registry = sandbox_runner_module._ensure_registry_loaded_with_config
+
+    def record_load(runtime_paths: RuntimePaths, config: Config) -> None:
+        loads.append([entry.path for entry in config.plugins])
+        load_registry(runtime_paths, config)
+
+    monkeypatch.setattr(sandbox_runner_module, "_ensure_registry_loaded_with_config", record_load)
+
+    def greet(config_snapshot: dict[str, object]) -> httpx.Response:
+        return client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={"tool_name": "snapshot_only_plugin", "function_name": "greet", "config_snapshot": config_snapshot},
+        )
+
+    with TestClient(sandbox_runner_app) as client, capture_logs() as logs:
+        results = [greet(snapshot).json()["result"] for _ in range(3)]
+        disabled = greet({"plugins": [{"path": "./plugins/snapshot-only", "enabled": False}]})
+
+    assert results == ["hello"] * 3
+    assert disabled.status_code == 404
+    # Startup loads the empty startup config, the three identical snapshots load once, and the changed entry reloads.
+    assert loads == [[], ["./plugins/snapshot-only"], ["./plugins/snapshot-only"]]
+    assert [entry for entry in logs if entry["event"] == "Loaded plugins"] == [
+        {"event": "Loaded plugins", "log_level": "info", "plugins": ["snapshot_only_plugin"]},
+    ]
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

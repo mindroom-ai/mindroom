@@ -329,12 +329,25 @@ def initialize_sandbox_runner_app(
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
     committed_config = config or _runtime_config_or_empty(runtime_paths)
-    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
-    api_app.state.sandbox_runner_context = _SandboxRunnerContext(
+    context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
+    _ensure_request_tool_registry(context, committed_config)
+    api_app.state.sandbox_runner_context = context
+
+
+def _ensure_request_tool_registry(context: _SandboxRunnerContext, config: Config) -> None:
+    """Register one request config's plugin tools, reloading only when its plugin entries change.
+
+    Snapshots carry no MCP servers, and MCP tools never run on a runner, so only plugin entries key the reload.
+    """
+    plugins = tuple((entry.path, entry.enabled) for entry in config.plugins)
+    if context.tool_registry.loaded_plugins == plugins:
+        return
+    _ensure_registry_loaded_with_config(context.runtime_paths, config)
+    context.tool_registry.loaded_plugins = plugins
 
 
 def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
@@ -574,12 +587,20 @@ class _SandboxRunnerCliState:
     runtime: CliWorkerRuntime | None = None
 
 
+@dataclass
+class _SandboxRunnerToolRegistryState:
+    """Plugin entries this runner process last loaded, so repeated snapshots do not reload plugins."""
+
+    loaded_plugins: tuple[tuple[str, bool], ...] | None = None
+
+
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
     runner_token: str | None
     cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
+    tool_registry: _SandboxRunnerToolRegistryState = field(default_factory=_SandboxRunnerToolRegistryState)
 
 
 @dataclass(frozen=True)
@@ -839,7 +860,7 @@ def _resolve_entrypoint(
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    _ensure_registry_loaded_with_config(runtime_paths, config)
+    """Build one tool's entrypoint from a registry its caller already loaded for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
         routing_agent_name,
@@ -1530,6 +1551,8 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
         # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
         sys.path.append(str(Path.cwd()))
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
+        # A fresh child registers the request's plugin tools itself.
+        _ensure_registry_loaded_with_config(runtime_paths, config)
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
     tool_output = captured_out.getvalue() + captured_err.getvalue()
@@ -1846,7 +1869,6 @@ async def _execute_worker_browser(
             status_code=400,
             detail="Worker computer requires an unambiguous dedicated user_agent worker.",
         )
-    _ensure_registry_loaded_with_config(runtime_paths, config)
     provider = select_browser_provider(
         payload.tool_name,
         payload.function_name,
@@ -1964,7 +1986,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
     # Plugin tools come from the request's config, not from a startup config runners never receive.
-    _ensure_registry_loaded_with_config(runtime_paths, config)
+    _ensure_request_tool_registry(context, config)
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=TOOL_METADATA)
