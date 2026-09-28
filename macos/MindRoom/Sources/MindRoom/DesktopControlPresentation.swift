@@ -114,10 +114,17 @@ extension DesktopShellRequest {
     var hasEscapedCharacters: Bool {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
+
+    /// Counted like the helper and the terminal prompt: Unicode scalars, and lines split at newlines.
+    var commandSizeLabel: String {
+        let characters = command.unicodeScalars.count
+        let lines = command.unicodeScalars.filter { $0 == "\n" }.count + 1
+        return "\(characters) \(characters == 1 ? "character" : "characters") on \(lines) \(lines == 1 ? "line" : "lines")"
+    }
 }
 
-/// Escapes control, invisible-format, and text-direction characters so remote text cannot hide what runs.
-/// Ordinary newlines stay readable; everything escaped appears as `\u{…}`.
+/// Escapes control, invisible-format, text-direction, and non-ASCII space characters so remote text cannot hide what runs.
+/// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
 func desktopSafePreview(_ text: String) -> String {
     var preview = ""
     for scalar in text.unicodeScalars {
@@ -137,6 +144,8 @@ func desktopPreviewEscapes(_ text: String) -> Bool {
 private func isHiddenPreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
     switch scalar.properties.generalCategory {
     case .control: scalar != "\n"
+    // Look-alike and wide spaces could disguise a command or pad it out of view.
+    case .spaceSeparator: scalar != " "
     case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: true
     default: false
     }

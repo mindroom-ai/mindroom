@@ -272,6 +272,17 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(request.command, command, "Execution keeps the original command")
     }
 
+    func testApprovalPreviewEscapesNonASCIISpacesAndReportsCommandSize() {
+        let command = "rm\u{00A0}-rf a\u{3000}b\nls"
+
+        XCTAssertEqual(desktopSafePreview(command), #"rm\u{A0}-rf a\u{3000}b"# + "\nls")
+        XCTAssertTrue(desktopPreviewEscapes(command))
+        XCTAssertTrue(shellRequest(command: command).hasEscapedCharacters)
+        XCTAssertFalse(desktopPreviewEscapes("ls -la ~/Projects"))
+        XCTAssertEqual(shellRequest(command: command).commandSizeLabel, "13 characters on 2 lines")
+        XCTAssertEqual(shellRequest(command: "l").commandSizeLabel, "1 character on 1 line")
+    }
+
     func testAutoApprovalConfirmationNamesAllLocallyAllowedCallers() {
         let value = status(
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,

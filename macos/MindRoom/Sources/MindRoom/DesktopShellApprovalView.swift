@@ -1,9 +1,13 @@
 import SwiftUI
 
+/// Approval controls stay disabled this long after a request appears or replaces another one.
+private let desktopShellApprovalArmingDelay = Duration.seconds(1)
+
 /// Local shell approval, auto-approval, and running commands; shown above every Computer access step.
 struct DesktopShellApprovalView: View {
     @ObservedObject var store: DesktopControlStore
     @State private var confirmation: DesktopShellConfirmation?
+    @State private var armedRequestID: String?
 
     var body: some View {
         AppSectionCard {
@@ -41,19 +45,18 @@ struct DesktopShellApprovalView: View {
     private func pendingRequest(_ request: DesktopShellRequest) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Shell command waiting for your approval", systemImage: "terminal").font(.headline)
-            ScrollView {
-                Text(request.displayCommand)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-            }
-            .frame(maxHeight: 160)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
+            // The whole command is shown, never clipped, so the decision buttons always come after all of it.
+            Text(request.displayCommand)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
+            Text("The command is \(request.commandSizeLabel).").font(.callout).foregroundStyle(.secondary)
             if request.hasEscapedCharacters {
-                Label("This request contains control or text-direction characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
+                Label("This request contains control, text-direction, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
             detail("Working folder", request.displayCwd)
@@ -68,15 +71,22 @@ struct DesktopShellApprovalView: View {
                 Button("Reject") { store.decideShell(request, .reject) }
                 Button("Approve Once") { store.decideShell(request, .approveOnce) }
                     .buttonStyle(.borderedProminent)
+                    .disabled(armedRequestID != request.requestID)
                 Menu("Approve & Allow…") {
                     ForEach(DesktopShellAutoApproval.choices) { approval in
                         Button(approval.title) { confirmation = DesktopShellConfirmation(request: request, approval: approval) }
                     }
                 }
                 .fixedSize()
+                .disabled(armedRequestID != request.requestID)
                 Spacer()
                 revokeButton
             }
+        }
+        // A click aimed at the previous request, or made just as this one appears, must not approve it.
+        .task(id: request.requestID) {
+            try? await Task.sleep(for: desktopShellApprovalArmingDelay)
+            if !Task.isCancelled { armedRequestID = request.requestID }
         }
     }
 
