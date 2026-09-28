@@ -12786,7 +12786,8 @@ manage_team(
 ### What It Does
 
 `self_config` exposes `get_own_config()` and `update_own_config()`.
-`get_own_config()` returns the current agent's authored YAML block.
+`get_own_config()` returns the current agent's authored YAML block, redacted like `config_manager` inspection.
+Reads and writes both require a requester listed in `administrators`.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
 `update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
@@ -14024,6 +14025,8 @@ Use `stdio` for local subprocess servers.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
+Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value but show `args` as written, and `args` support no placeholders.
 Static `headers` are process-global and shared by every requester.
 Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
 Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
@@ -14040,7 +14043,7 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
-| `args` | list[string] | `[]` | Optional `stdio` arguments |
+| `args` | list[string] | `[]` | Optional `stdio` arguments; shown unmasked, so never put credentials here |
 | `cwd` | string | `null` | Optional `stdio` working directory |
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
@@ -18549,7 +18552,7 @@ Changes are validated against the Pydantic config schema before applying.
 !config get agents.analyst.display_name
 ```
 
-Shown values are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
+Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
 
 **Modify configuration:**
 
@@ -18577,6 +18580,8 @@ When you use `!config set`, MindRoom:
 
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
+Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores only the path, the new value, and the decision, never the current value.
+`!config set` therefore refuses any new value that redaction would mask; set credentials in the configuration file or the dashboard instead.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
