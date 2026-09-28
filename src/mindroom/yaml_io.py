@@ -8,7 +8,9 @@ every safe load/dump in this codebase should go through this module.
 Input that untrusted code can write, such as workspace files that worker code
 shares, goes through ``safe_load_untrusted`` instead: libyaml's composer
 recurses in C, so deeply nested input overflows the C stack and kills the
-process, where the pure-Python loader raises ``RecursionError``.
+process, where the pure-Python loader raises ``RecursionError``. It also
+refuses aliases, because a few hundred bytes of nested aliases expand to
+gigabytes once anything serializes the result.
 
 ``SafeLoader`` is also the base for custom safe loaders, so they share the
 same libyaml preference and pure-Python fallback.
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
+from yaml.composer import ComposerError
 
 try:
     from yaml import CSafeDumper
@@ -54,9 +57,20 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     return yaml.load(stream, Loader=SafeLoader)
 
 
+class _UntrustedSafeLoader(yaml.SafeLoader):
+    """Pure-Python safe loader that refuses aliases, which untrusted input can nest into an expansion bomb."""
+
+    def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node | None:
+        if self.check_event(yaml.AliasEvent):
+            event = self.peek_event()
+            message = "YAML aliases are not accepted in untrusted input"
+            raise ComposerError(None, None, message, event.start_mark)
+        return super().compose_node(parent, index)
+
+
 def safe_load_untrusted(stream: str) -> Any:  # noqa: ANN401
-    """Parse one YAML document that untrusted code can write, with the pure-Python loader."""
-    return yaml.safe_load(stream)
+    """Parse one YAML document that untrusted code can write, with the pure-Python loader and no aliases."""
+    return yaml.load(stream, Loader=_UntrustedSafeLoader)  # noqa: S506 - a SafeLoader subclass
 
 
 @overload

@@ -29,6 +29,7 @@ from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
+import mindroom.tool_system.workspace_skills as workspace_skills_module
 from mindroom.agent_storage import create_session_storage
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -2661,6 +2662,71 @@ async def test_skill_manage_refuses_metadata_that_skill_loading_drops(tmp_path: 
     edited = json.loads(await tools.skill_manage("edit", "probe", content=broken))
     assert not edited["success"]
     assert "probe" in load_skill_catalog(config, paths, "mind", root).entries
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_refuses_frontmatter_aliases(tmp_path: Path) -> None:
+    """Aliases could nest into an expansion bomb, so frontmatter that uses them is refused, not stored."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    aliased = "---\nname: probe\ndescription: Mine\nmetadata:\n  a: &a [x, x]\n  b: *a\n---\nBody\n"
+    result = json.loads(
+        await SkillManageTools("mind", config, paths, root).skill_manage("create", "probe", content=aliased),
+    )
+    assert not result["success"]
+    assert "not a valid YAML mapping" in result["error"]
+    assert not (root / "probe").exists()
+
+
+def test_skill_manage_refuses_changes_past_the_workspace_skill_count(tmp_path: Path) -> None:
+    """Skill loading reads at most MAX_WORKSPACE_SKILLS directories, so a create beyond them is refused."""
+    root = tmp_path / "skills"
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS):
+        _write_skill(root, f"skill-{index:03d}", HANDWRITTEN.replace("handwritten", f"skill-{index:03d}"))
+    with pytest.raises(library.SkillEditError, match="already holds"):
+        library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    assert not (root / "deploy-checks").exists()
+
+
+def test_skill_manage_refuses_a_support_file_past_the_listing_cap(tmp_path: Path) -> None:
+    """Skill loading lists at most MAX_WORKSPACE_SKILL_LISTING_ENTRIES files per directory, so another is refused."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=False)
+    references = root / "deploy-checks" / "references"
+    references.mkdir()
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILL_LISTING_ENTRIES):
+        (references / f"note-{index:03d}.md").write_text("n")
+    with pytest.raises(library.SkillEditError, match="already lists"):
+        library.write_skill_file(root, "deploy-checks", "references/zz.md", "z", expected_digest=None, learner=False)
+    assert not (references / "zz.md").exists()
+
+
+@pytest.mark.parametrize("change", ["create", "edit"])
+def test_skill_manage_refuses_changes_past_the_workspace_prompt_budget(tmp_path: Path, change: str) -> None:
+    """Skill loading stops at the prompt budget and skips the rest, so a change that would pass it is refused."""
+    root = tmp_path / "skills"
+    for index in range(8):
+        name = f"large-{index}"
+        _write_skill(root, name, f"---\nname: {name}\ndescription: Large\n---\n" + "x" * 1_040_000 + "\n")
+    grown = LEARNED.replace("1. Run the smoke test.", "x" * 90_000)
+    if change == "create":
+        with pytest.raises(library.SkillEditError, match="prompt budget"):
+            library.create_skill(root, "deploy-checks", grown, reserved_names=frozenset(), learner=True)
+        assert not (root / "deploy-checks").exists()
+    else:
+        library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+        current = library.read_skill_file(root, "deploy-checks")
+        assert current is not None
+        with pytest.raises(library.SkillEditError, match="prompt budget"):
+            library.write_skill_file(
+                root,
+                "deploy-checks",
+                "SKILL.md",
+                grown,
+                expected_digest=current.digest,
+                learner=True,
+            )
+        assert (root / "deploy-checks" / "SKILL.md").read_text() == LEARNED
 
 
 def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_path: Path) -> None:

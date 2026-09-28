@@ -26,7 +26,10 @@ from mindroom.redaction import find_credential
 from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
     MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
+    MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
     MAX_WORKSPACE_SKILL_NAME_CHARS,
+    MAX_WORKSPACE_SKILLS,
+    MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
     SkillUsage,
     forget_missing_skill_usage,
@@ -38,8 +41,11 @@ from mindroom.tool_system.workspace_skills import (
     parse_skill_markdown,
     parse_skill_metadata,
     read_text_at,
+    skill_prompt_bytes,
     update_skill_usage,
+    workspace_skill,
     workspace_skill_name,
+    workspace_skill_prompt_bytes,
 )
 
 if TYPE_CHECKING:
@@ -226,9 +232,17 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
     # Workspaces of shared agents without file memory exist only once something is written into them.
     skills_root.parent.mkdir(parents=True, exist_ok=True)
     with open_skills_root(skills_root, create=True) as root_fd:
-        if name in {entry.lower() for entry in list_entries(root_fd, directories=True)}:
+        directories = list_entries(root_fd, directories=True)
+        if name in {entry.lower() for entry in directories}:
             msg = f"A workspace skill directory named {name!r} already exists."
             raise SkillEditError(msg)
+        if len(directories) >= MAX_WORKSPACE_SKILLS:
+            msg = (
+                f"The workspace already holds {MAX_WORKSPACE_SKILLS} skill directories, the most skill loading reads; "
+                "improve or merge an existing skill instead."
+            )
+            raise SkillEditError(msg)
+        _require_prompt_budget(skills_root, name, content, skill_fd=None)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
@@ -238,6 +252,40 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
             name,
             lambda _usage: SkillUsage(created_by="learner" if learner else None, created_at=now),
         )
+
+
+def _require_prompt_budget(
+    skills_root: Path,
+    name: str,
+    markdown: str,
+    *,
+    skill_fd: int | None,
+    added: tuple[str, str] | None = None,
+) -> None:
+    """Refuse a change after which skill loading would stop at the workspace prompt budget and skip skills."""
+    listings = {
+        kind: list_support_files(skill_fd, skills_root / name, kind) if skill_fd is not None else []
+        for kind in ("scripts", "references")
+    }
+    if added is not None:
+        kind, filename = added
+        listings[kind] = [*listings[kind], filename]
+    changed = workspace_skill(
+        markdown,
+        skills_root,
+        name,
+        scripts=listings["scripts"],
+        references=listings["references"],
+    )
+    if changed is None:
+        return
+    others = sum(size for directory, size in workspace_skill_prompt_bytes(skills_root).items() if directory != name)
+    if others + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
+        msg = (
+            f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
+            "budget, and skill loading would skip some; shorten or merge skills instead."
+        )
+        raise SkillEditError(msg)
 
 
 def write_skill_file(
@@ -262,6 +310,16 @@ def write_skill_file(
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False, learner=learner)
+            _require_prompt_budget(skills_root, name, content, skill_fd=skill_fd)
+        elif current is None:
+            listed = list_support_files(skill_fd, skills_root / name, directory)
+            if len(listed) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+                msg = (
+                    f"{directory}/ already lists {MAX_WORKSPACE_SKILL_LISTING_ENTRIES} files, the most skill loading "
+                    "offers; extend an existing file instead."
+                )
+                raise SkillEditError(msg)
+            _require_prompt_budget(skills_root, name, markdown.content, skill_fd=skill_fd, added=(directory, filename))
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:

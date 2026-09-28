@@ -34,12 +34,12 @@ SKILL_FILENAME = "SKILL.md"
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
 WORKSPACE_SKILLS_DIRNAME = "skills"
-_MAX_WORKSPACE_SKILLS = 256
-_MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
+MAX_WORKSPACE_SKILLS = 256
+MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 # Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
 MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
-_MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
@@ -120,17 +120,17 @@ def list_support_files(skill_fd: int, skill_path: Path, directory: str) -> list[
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
             filenames = list_entries(support_fd, directories=False)
-            if len(filenames) > _MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+            if len(filenames) > MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
                 logger.warning(
                     "Listing only the first workspace skill files",
                     path=str(skill_path / directory),
-                    limit=_MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
+                    limit=MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
                     found=len(filenames),
                 )
             # A file too large to read is not offered.
             return [
                 filename
-                for filename in filenames[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
+                for filename in filenames[:MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
                 if _readable_size(support_fd, skill_path / directory / filename)
             ]
     except FileNotFoundError:
@@ -283,15 +283,30 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
     for skill in _each_skill_directory(
         skills_root,
         lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
-        limit=_MAX_WORKSPACE_SKILLS,
+        limit=MAX_WORKSPACE_SKILLS,
     ):
-        prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
-        loaded_bytes += len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
-        if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+        loaded_bytes += skill_prompt_bytes(skill)
+        if loaded_bytes > MAX_WORKSPACE_SKILLS_BYTES:
             logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
             break
         skills.append(skill)
     return skills
+
+
+def skill_prompt_bytes(skill: Skill) -> int:
+    """Return one skill's share of the workspace prompt budget: every system prompt carries these parts."""
+    prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
+    return len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
+
+
+def workspace_skill_prompt_bytes(skills_root: Path) -> dict[str, int]:
+    """Return every workspace skill directory's share of the prompt budget, as skill loading measures it."""
+
+    def share(skill_fd: int, directory: str) -> tuple[str, int] | None:
+        skill = _load_workspace_skill(skill_fd, skills_root, directory)
+        return None if skill is None else (directory, skill_prompt_bytes(skill))
+
+    return dict(_each_skill_directory(skills_root, share))
 
 
 def workspace_skill_directories(skills_root: Path) -> list[str]:
@@ -330,6 +345,25 @@ def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> S
         return None
     if content is None:
         return None
+    return workspace_skill(
+        content,
+        skills_root,
+        directory,
+        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
+        references=list_support_files(skill_fd, skills_root / directory, "references"),
+    )
+
+
+def workspace_skill(
+    content: str,
+    skills_root: Path,
+    directory: str,
+    *,
+    scripts: list[str],
+    references: list[str],
+) -> Skill | None:
+    """Build the skill that loading reads from one SKILL.md and its listings, or None when loading refuses it."""
+    path = skills_root / directory / SKILL_FILENAME
     frontmatter, instructions = parse_skill_markdown(content, loose=True)
     # Skill normalization drops a skill without a usable name.
     name = _frontmatter_name(frontmatter, directory) or ""
@@ -345,8 +379,8 @@ def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> S
         description=description,
         instructions=instructions,
         source_path=str(skills_root / directory),
-        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
-        references=list_support_files(skill_fd, skills_root / directory, "references"),
+        scripts=scripts,
+        references=references,
         metadata=frontmatter.get("metadata"),
         license=frontmatter.get("license"),
         compatibility=frontmatter.get("compatibility"),

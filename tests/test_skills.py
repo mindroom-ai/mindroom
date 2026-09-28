@@ -653,6 +653,24 @@ def test_a_skill_removed_while_the_workspace_is_listed_hides_no_other(tmp_path: 
         assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["aaa", "ccc"]
 
 
+def _alias_bomb(levels: int) -> str:
+    lines = ["  l0: &l0 [x, x, x, x, x, x, x, x, x, x]"]
+    lines += [f"  l{level}: &l{level} [{', '.join([f'*l{level - 1}'] * 10)}]" for level in range(1, levels)]
+    return "metadata:\n" + "\n".join(lines) + "\n"
+
+
+def test_frontmatter_aliases_neither_stall_loading_nor_hide_other_skills(tmp_path: Path) -> None:
+    """A few hundred bytes of nested aliases would expand to gigabytes; the untrusted loader refuses aliases."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "alpha").mkdir()
+    (workspace_skills / "alpha" / "SKILL.md").write_text(
+        f"---\nname: alpha\ndescription: Aliased\n{_alias_bomb(7)}---\nbody\n",
+        encoding="utf-8",
+    )
+    _write_skill(workspace_skills, "zeta", "Loaded after the aliased skill")
+    assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["alpha", "zeta"]
+
+
 def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:
     """Only skills/<name>/SKILL.md loads; LocalSkills loaded skills/SKILL.md alone and hid every skill beside it."""
     storage, root = _workspace_skills(tmp_path)
@@ -1078,15 +1096,15 @@ def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
     """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    for index in range(workspace_skills_module._MAX_WORKSPACE_SKILLS + 1):
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS + 1):
         _write_skill(workspace_skills, f"skill-{index:04d}", "Numbered skill")
 
     with capture_logs() as logs:
         skills = _load_agent_skills(tmp_path, storage)
 
-    assert len(_skill_names(skills)) == workspace_skills_module._MAX_WORKSPACE_SKILLS
+    assert len(_skill_names(skills)) == workspace_skills_module.MAX_WORKSPACE_SKILLS
     assert any(
-        entry["log_level"] == "warning" and entry.get("limit") == workspace_skills_module._MAX_WORKSPACE_SKILLS
+        entry["log_level"] == "warning" and entry.get("limit") == workspace_skills_module.MAX_WORKSPACE_SKILLS
         for entry in logs
     )
 

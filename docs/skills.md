@@ -92,6 +92,8 @@ They do not appear in the global skills API or dashboard listing because those v
 Workspace skills are read through no-follow descriptors because worker code can share the workspace.
 Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed.
 A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
+`skill_manage` refuses a change that would cross one of these limits, so a skill it writes always loads.
+Workspace frontmatter may not use YAML aliases, which a few hundred bytes can nest into gigabytes; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
 Each workspace skill lives in its own directory, `skills/<name>/SKILL.md`; a `SKILL.md` placed directly in `skills/` is ignored with a warning.
