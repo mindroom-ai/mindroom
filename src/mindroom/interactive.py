@@ -158,6 +158,9 @@ _INTERACTIVE_PATTERN = (
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
+# An interactive block whose closing fence has not streamed in yet, and a trailing fence whose marker is still arriving.
+_UNFINISHED_INTERACTIVE_PATTERN = r"```[ \t]*(?:\r?\n[ \t]*)?interactive(?:[ \t]+json)?[ \t]*(?:\r?\n|$)"
+_TRAILING_FENCE_PATTERN = r"(?:^|\n)[ \t]*```[ \t]*([a-z]*)[ \t]*$"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -336,6 +339,22 @@ def _first_valid_interactive_payload(
         if payload is not None:
             return index, *payload
     return None
+
+
+def hide_unfinished_interactive(formatted_text: str) -> str:
+    """Cut a still-streaming interactive block from formatted text, so its raw JSON never shows.
+
+    Complete blocks are already rendered as questions, so any interactive fence left in the text has not
+    closed yet; a trailing fence whose marker could still become ``interactive`` is cut too. The text before
+    the block stays visible, and the question appears once its closing fence arrives.
+    """
+    unfinished = re.search(_UNFINISHED_INTERACTIVE_PATTERN, formatted_text, re.IGNORECASE)
+    if unfinished is not None:
+        return formatted_text[: unfinished.start()].rstrip()
+    trailing = re.search(_TRAILING_FENCE_PATTERN, formatted_text, re.IGNORECASE)
+    if trailing is not None and "interactive".startswith(trailing.group(1).lower()):
+        return formatted_text[: trailing.start()].rstrip()
+    return formatted_text
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:

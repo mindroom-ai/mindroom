@@ -23,6 +23,23 @@ class TestInteractiveFunctions:
     """Test pure interactive formatting and Matrix button delivery."""
 
     @pytest.mark.parametrize(
+        ("streamed", "shown"),
+        [
+            ('Two things.\n\n```interactive\n{"question": "What next?", "opt', "Two things."),
+            ("Two things.\n\n```interactive json\n", "Two things."),
+            ("Two things.\n\n```\ninteractive\n{", "Two things."),
+            ("Two things.\n\n```inter", "Two things."),
+            ("Two things.\n\n```", "Two things."),
+            ("Two things.\n\n```python\nprint(", "Two things.\n\n```python\nprint("),
+            ('Two things.\n\n```json\n{"a": 1', 'Two things.\n\n```json\n{"a": 1'),
+            ("Two things.\n\nWhat next?\n1. 📊 Numbers", "Two things.\n\nWhat next?\n1. 📊 Numbers"),
+        ],
+    )
+    def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:
+        """Text before an unfinished question block stays; other fences and rendered questions are untouched."""
+        assert interactive.hide_unfinished_interactive(streamed) == shown
+
+    @pytest.mark.parametrize(
         "response_text",
         [
             """Please choose.

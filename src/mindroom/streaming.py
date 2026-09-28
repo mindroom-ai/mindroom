@@ -16,6 +16,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -100,6 +101,9 @@ __all__ = [
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+_IN_PROGRESS_STREAM_STATUSES = frozenset(
+    {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,6 +444,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
 
     response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
     display_text = response.formatted_text
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+        # An interactive block still arriving is raw JSON; its question renders once the block closes.
+        display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None

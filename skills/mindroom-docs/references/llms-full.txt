@@ -18697,6 +18697,8 @@ React with an emoji or type the number to respond.
 ```
 
 The corresponding emoji reactions are added to the message as clickable buttons.
+While a streamed response is still arriving, an `interactive` block that has not closed yet is left out of the visible message, so its raw JSON never shows.
+The text before it stays visible, and the formatted question appears as soon as the block's closing fence streams in.
 
 ## User Response Methods
 

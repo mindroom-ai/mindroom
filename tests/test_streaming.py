@@ -705,6 +705,28 @@ def test_delivery_preparation_builds_thread_relation_only_for_initial_send(confi
     assert edit_kwargs["latest_thread_event_id"] is None
 
 
+def test_streaming_edits_hide_an_interactive_block_until_it_closes(config: Config) -> None:
+    """A question block still arriving is raw JSON, so edits show the text before it until the block closes."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    def display_text() -> str:
+        snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+        assert snapshot is not None
+        return streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
+
+    streaming.accumulated_text = 'Two things need you.\n\n```interactive\n{"question": "What next?", "options": ['
+    assert display_text() == "Two things need you."
+    streaming.accumulated_text += '{"emoji": "📊", "label": "Pull the numbers", "value": "numbers"}]}\n```'
+    shown = display_text()
+    assert "What next?" in shown
+    assert "Pull the numbers" in shown
+    assert "```" not in shown
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])
