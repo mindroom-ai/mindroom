@@ -61,6 +61,7 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         max_runtime_seconds=3600,
         state_scope_worker_key="v1:test:user_agent:alice:private-agent",
         private_agent_names=("private-agent",),
+        config_snapshot={"agents": {"private-agent": {"display_name": "Private"}}},
     )
 
     assert result is None
@@ -74,6 +75,7 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         "gateway_url": "http://primary.test/api/script-gateway",
         "max_runtime_seconds": 3600,
         "private_agent_names": ["private-agent"],
+        "config_snapshot": {"agents": {"private-agent": {"display_name": "Private"}}},
         "protocol_version": 1,
     }
 

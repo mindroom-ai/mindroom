@@ -117,6 +117,12 @@ def _invoice(invoice_id: str = "in_1", *, status: str = "paid", amount_paid: int
         "period_end": 1_787_000_000,
         "period_start": 1_784_321_600,
         "status": status,
+        "status_transitions": {
+            "finalized_at": 1_787_000_000,
+            "marked_uncollectible_at": None,
+            "paid_at": 1_787_000_050 if status == "paid" else None,
+            "voided_at": None,
+        },
         "subtotal": 2900,
         "total": 2900,
     }
@@ -178,9 +184,9 @@ def _subscription(*, period_start: int = 1_787_000_000, period_end: int = 1_789_
     }
 
 
-@pytest.fixture
-def db() -> Iterator[_SchemaCheckedSupabase]:
-    db = _SchemaCheckedSupabase(
+def seeded_db() -> _SchemaCheckedSupabase:
+    """One account bound to customer ``cus_1`` and Stripe subscription ``sub_stripe_1``, with no payments yet."""
+    return _SchemaCheckedSupabase(
         {
             "accounts": [{"id": ACCOUNT_ID, "email": "customer@example.com", "stripe_customer_id": "cus_1"}],
             "subscriptions": [
@@ -196,6 +202,11 @@ def db() -> Iterator[_SchemaCheckedSupabase]:
             "webhook_events": [],
         }
     )
+
+
+@pytest.fixture
+def db() -> Iterator[_SchemaCheckedSupabase]:
+    db = seeded_db()
     with (
         patch("backend.routes.webhooks.ensure_supabase", return_value=db),
         patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", WEBHOOK_SECRET),
@@ -246,10 +257,22 @@ def test_payment_succeeded_records_payment(db: _SchemaCheckedSupabase) -> None:
         "amount": 29.0,
         "currency": "usd",
         "status": "succeeded",
+        "created_at": "2026-08-17T20:54:10+00:00",
     }
     event = db.row("webhook_events", stripe_event_id="evt_1")
     assert event["account_id"] == ACCOUNT_ID
     assert "error" not in event
+
+
+@pytest.mark.parametrize("status_transitions", [None, {"paid_at": None}])
+def test_payment_without_paid_at_is_dated_at_invoice_creation(
+    db: _SchemaCheckedSupabase, status_transitions: dict[str, Any] | None
+) -> None:
+    invoice = _invoice() | {"status_transitions": status_transitions}
+
+    assert _deliver("invoice.payment_succeeded", invoice) == {"received": True, "error": None}
+
+    assert db.row("payments", invoice_id="in_1")["created_at"] == "2026-08-17T20:53:20+00:00"  # invoice["created"]
 
 
 def test_payment_succeeded_falls_back_to_subscription_account(db: _SchemaCheckedSupabase) -> None:

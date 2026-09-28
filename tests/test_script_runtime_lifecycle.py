@@ -296,8 +296,9 @@ class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
         max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
+        config_snapshot: dict[str, object] | None = None,
     ) -> None:
-        del run_id, source_digest, gateway_url, state_scope_worker_key, private_agent_names
+        del run_id, source_digest, gateway_url, state_scope_worker_key, private_agent_names, config_snapshot
         assert max_runtime_seconds > 0
         self.launch_entered.set()
         await self.release_launch.wait()
