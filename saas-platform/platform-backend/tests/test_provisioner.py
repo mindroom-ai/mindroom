@@ -696,6 +696,33 @@ class TestProvisionerEndpoints:
         assert set_args["synapseResources.requests.memory"] == "1Gi"
         assert set_args["sandboxRunnerResources.limits.memory"] == "2Gi"
 
+    @pytest.mark.parametrize("namespace", ["", "nginx"])
+    def test_provision_forwards_the_configured_ingress_controller_namespace(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+        namespace: str,
+    ):
+        """Instance NetworkPolicies must admit the controller where the cluster actually runs it."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with patch("backend.services.provisioner_service.INSTANCE_INGRESS_CONTROLLER_NAMESPACE", namespace):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        set_args = _helm_set_args(mock_helm.call_args.args[0])
+        assert set_args.get("ingressControllerNamespace") == (namespace or None)
+
     def test_provision_passes_owner_matrix_user_to_instance_chart(
         self,
         client: TestClient,

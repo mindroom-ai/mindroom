@@ -1149,6 +1149,27 @@ def test_platform_backend_cannot_create_service_accounts_in_the_tenant_namespace
     assert all("serviceaccounts" not in rule["resources"] for rule in role["rules"])
 
 
+def test_platform_chart_exposes_the_instance_ingress_controller_namespace() -> None:
+    """Fresh clusters may run the controller outside the instance chart's default namespace."""
+    default_config = _resource(
+        _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform"),
+        "ConfigMap",
+        "platform-config",
+    )
+    config = _resource(
+        _render_chart(
+            Path("cluster/k8s/platform"),
+            "provisioner.instanceIngressControllerNamespace=nginx",
+            release_name="mindroom-platform",
+        ),
+        "ConfigMap",
+        "platform-config",
+    )
+
+    assert default_config["data"]["INSTANCE_INGRESS_CONTROLLER_NAMESPACE"] == ""
+    assert config["data"]["INSTANCE_INGRESS_CONTROLLER_NAMESPACE"] == "nginx"
+
+
 def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:
     """Platform services should be deployable without forcing identical image tags."""
     docs = _render_chart(

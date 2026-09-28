@@ -69,6 +69,7 @@ data:
   INSTANCE_TEARDOWN_GRACE_DAYS: {{ .Values.cleanupScheduler.teardownGraceDays | default 30 | quote }}
   INSTANCE_BASE_DOMAIN: {{ .Values.provisioner.instanceBaseDomain | default .Values.domain | quote }}
   INSTANCE_STORAGE_CLASS_NAME: {{ .Values.provisioner.instanceStorageClassName | default "" | quote }}
+  INSTANCE_INGRESS_CONTROLLER_NAMESPACE: {{ .Values.provisioner.instanceIngressControllerNamespace | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE: {{ .Values.provisioner.instanceMindroomImage | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_IMAGE_PULL_SECRET_NAMES: {{ (.Values.provisioner.instanceImagePullSecretNames | default (list) | join ",") | quote }}

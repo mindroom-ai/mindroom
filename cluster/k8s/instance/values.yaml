@@ -8,7 +8,8 @@ synapseStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
 # Namespace of the ingress-nginx controller pods, the only pods outside the instance that may reach its service ports.
 # kube-hetzner's nginx addon installs into `nginx` unless its ingress_target_namespace is set, so confirm the live
-# namespace with `kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx` and set this to match.
+# namespace with `kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx`; provisioned instances take it from
+# the platform chart's provisioner.instanceIngressControllerNamespace.
 ingressControllerNamespace: ingress-nginx
 
 # Tenants share nodes, so every container bounds its ephemeral storage (writable layer, logs, and emptyDirs).

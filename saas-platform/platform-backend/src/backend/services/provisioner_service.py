@@ -25,6 +25,7 @@ from backend.config import (
     INSTANCE_BASE_DOMAIN,
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_IMAGE_PULL_SECRET_NAMES,
+    INSTANCE_INGRESS_CONTROLLER_NAMESPACE,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MATRIX_OIDC_CLIENT_ID,
     INSTANCE_MATRIX_OIDC_CLIENT_SECRET,
@@ -768,6 +769,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         ]
         if storage_class_name:
             helm_args += ["--set", f"storageClassName={storage_class_name}"]
+        if INSTANCE_INGRESS_CONTROLLER_NAMESPACE:
+            helm_args += ["--set", f"ingressControllerNamespace={INSTANCE_INGRESS_CONTROLLER_NAMESPACE}"]
         plan = get_plan_details(tier)
         if plan:
             _append_resource_profile_helm_args(helm_args, plan.resource_profile)
