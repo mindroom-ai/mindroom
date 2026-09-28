@@ -26222,7 +26222,7 @@ If the provisioning service does not name the approving account, nothing is aske
 
 If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
 `connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
-You can revoke the unused entry in MindRoom Chat.
+You can revoke the unused entry in MindRoom Chat → Settings → Local MindRoom.
 
 Pairing is only for hosted mindroom.chat or your own provisioning service.
 When no provisioning URL is configured and the effective homeserver is not mindroom.chat, `connect` refuses without contacting anything or writing files.

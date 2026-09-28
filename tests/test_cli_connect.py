@@ -1032,7 +1032,7 @@ def test_run_device_pairing_starts_over_when_the_approval_was_lost() -> None:
     assert [session.pair_code for session in announced] == ["ABCD-EFGH", "WXYZ-2345"]
     assert warnings == [
         "The previous approval could not be received; starting a new pairing. "
-        "You can revoke the unused entry in MindRoom Chat.",
+        "You can revoke the unused entry in MindRoom Chat → Settings → Local MindRoom.",
     ]
 
 
@@ -1054,7 +1054,7 @@ def test_run_device_pairing_explains_a_lost_approval_without_renewal() -> None:
 
     message = str(exc_info.value)
     assert "410" not in message
-    assert "revoke the unused entry in MindRoom Chat" in message
+    assert "revoke the unused entry in MindRoom Chat → Settings → Local MindRoom." in message
     assert "Run the command again" in message
 
 

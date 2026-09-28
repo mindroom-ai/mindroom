@@ -56,10 +56,10 @@ _EXPIRY_GRACE_SECONDS = 60
 # Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract test.
 _PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 _HOSTED_MATRIX_DOMAIN = "mindroom.chat"
-_REVOKE_LOCATION = "MindRoom Chat → Settings → Local MindRoom"
+_LOCAL_MINDROOM_SETTINGS = "MindRoom Chat → Settings → Local MindRoom"
 _LOST_APPROVAL_WARNING = (
     "The previous approval could not be received; starting a new pairing. "
-    "You can revoke the unused entry in MindRoom Chat."
+    f"You can revoke the unused entry in {_LOCAL_MINDROOM_SETTINGS}."
 )
 
 
@@ -323,7 +323,7 @@ def _raise_or_warn_before_renewal(
     if outcome == "claimed":
         msg = (
             "The approval could not be received: its credentials were issued but never arrived, "
-            "so that connection is unusable and you can revoke the unused entry in MindRoom Chat. "
+            f"so that connection is unusable and you can revoke the unused entry in {_LOCAL_MINDROOM_SETTINGS}. "
             "Run the command again to get a new link."
         )
         raise ValueError(msg)
@@ -479,7 +479,7 @@ def pair_local_install(
     def announce(session: DevicePairSession) -> None:
         console.print("\nConnect this machine to MindRoom:")
         console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
-        console.print(f"  or enter code {session.pair_code} in MindRoom Chat → Settings → Local MindRoom", markup=False)
+        console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
         if console.is_terminal:
             console.print(render_qr(session.approve_url), markup=False, highlight=False)
         console.print("Waiting for approval (Ctrl+C to cancel)…")
@@ -551,12 +551,12 @@ def _confirm_approver_or_raise(
     console.print(f"\n[bold]Approved by {escape(approver)}.[/bold]")
     # Nobody can recognize an unnamed account, so it gets the same revoke hint as an unattended run.
     if confirm_approver is None or result.owner_user_id is None:
-        console.print(f"If this is not your account, revoke this connection in {_REVOKE_LOCATION}.")
+        console.print(f"If this is not your account, revoke this connection in {_LOCAL_MINDROOM_SETTINGS}.")
         return
     if not confirm_approver():
         msg = (
             "Credentials discarded; nothing was saved. "
-            f"The connection approved by {approver} is unusable; revoke it in {_REVOKE_LOCATION}."
+            f"The connection approved by {approver} is unusable; revoke it in {_LOCAL_MINDROOM_SETTINGS}."
         )
         raise ValueError(msg)
 
