@@ -439,6 +439,21 @@ def _oauth_onboarding_guidance(
         return ""
 
 
+def platform_administrator_error(config: Config, message: str) -> str | None:
+    """Return ``message`` unless the current tool requester is a platform administrator.
+
+    Every authored-configuration read and write shares this rule; calls without a requester fail closed.
+    """
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is not None and is_platform_administrator(
+        runtime_context.requester_id,
+        config,
+        runtime_context.runtime_paths,
+    ):
+        return None
+    return message
+
+
 class _InfoType(str, Enum):
     """Types of information that can be retrieved."""
 
@@ -536,7 +551,7 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-        authorization_error = self._platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return authorization_error
 
@@ -594,7 +609,7 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-        authorization_error = self._platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         if config.uses_includes:
@@ -753,7 +768,7 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert config is not None
         assert tool_metadata is not None
-        authorization_error = self._platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 
@@ -818,7 +833,7 @@ class ConfigManagerTools(Toolkit):
         if load_error is not None:
             return load_error
         assert config is not None
-        authorization_error = self._platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         return self._create_team_config(team_name, display_name, role, agents, mode, config=config)
@@ -854,18 +869,6 @@ class ConfigManagerTools(Toolkit):
             footer=footer,
             tolerate_plugin_load_errors=True,
         )
-
-    @staticmethod
-    def _platform_administrator_error(config: Config) -> str | None:
-        """Deny full configuration reads and writes without a current platform administrator."""
-        runtime_context = get_tool_runtime_context()
-        if runtime_context is not None and is_platform_administrator(
-            runtime_context.requester_id,
-            config,
-            runtime_context.runtime_paths,
-        ):
-            return None
-        return _PLATFORM_ADMIN_REQUIRED_MESSAGE
 
     def _load_config_and_tool_metadata_or_error(
         self,
@@ -1465,7 +1468,7 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-        authorization_error = self._platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return authorization_error
 

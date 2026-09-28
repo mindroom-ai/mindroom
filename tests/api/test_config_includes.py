@@ -181,9 +181,8 @@ class TestEmptyDirectoryIncludes:
         assert before.uses_includes is False
         path.write_text(include_source, encoding="utf-8")
         monkeypatch.setattr(
-            ConfigManagerTools,
-            "_platform_administrator_error",
-            staticmethod(lambda _config: None),
+            "mindroom.custom_tools.config_manager.platform_administrator_error",
+            lambda _config, _message: None,
         )
         manager = ConfigManagerTools(runtime_paths)
 

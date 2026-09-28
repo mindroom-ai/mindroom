@@ -412,9 +412,8 @@ class TestConsolidatedConfigManager:
     def _permit_access_for_non_authorization_tests(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep behavior tests focused; dedicated tests above exercise the real admin gate."""
         monkeypatch.setattr(
-            ConfigManagerTools,
-            "_platform_administrator_error",
-            staticmethod(lambda _config: None),
+            "mindroom.custom_tools.config_manager.platform_administrator_error",
+            lambda _config, _message: None,
         )
 
     def test_init(self, tmp_path: Path) -> None:

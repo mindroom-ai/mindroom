@@ -9,19 +9,16 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
-from mindroom.authorization import is_platform_administrator
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import (
-    Config,
-    ConfigRuntimeValidationError,
-    format_invalid_config_message,
-    load_config_or_user_error,
-)
+from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
+from mindroom.custom_tools.config_manager import (
+    platform_administrator_error,
+    preserve_tool_overrides,
+    validate_knowledge_bases,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -33,18 +30,6 @@ _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 _PLATFORM_ADMIN_REQUIRED_MESSAGE = (
     "Error: Reading or changing this agent's configuration requires an active platform administrator requester."
 )
-
-
-def _platform_administrator_error(config: Config) -> str | None:
-    """Deny self-configuration reads and writes without a current platform administrator."""
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is not None and is_platform_administrator(
-        runtime_context.requester_id,
-        config,
-        runtime_context.runtime_paths,
-    ):
-        return None
-    return _PLATFORM_ADMIN_REQUIRED_MESSAGE
 
 
 class SelfConfigTools(Toolkit):
@@ -78,7 +63,7 @@ class SelfConfigTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-        authorization_error = _platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return authorization_error
 
@@ -147,7 +132,7 @@ class SelfConfigTools(Toolkit):
             return load_error
         assert config is not None
 
-        authorization_error = _platform_administrator_error(config)
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 
