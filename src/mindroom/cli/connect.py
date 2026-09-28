@@ -574,6 +574,23 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
         return
     if replaced:
         console.print(f"  Updated owner placeholder(s) in: {config_path}")
+    elif not _is_config_administrator(config_path, owner_user_id):
+        # A re-pair with another account finds no placeholder left, so the earlier account stays in charge.
+        console.print(
+            f"  Note: {owner_user_id} is not listed in administrators in {config_path}. "
+            "If this account should manage MindRoom, add it to administrators, "
+            "room_defaults.invite_users, and room_defaults.admins.",
+            markup=False,
+        )
+
+
+def _is_config_administrator(config_path: Path, owner_user_id: str) -> bool:
+    """Report whether the config lists the user as an administrator; an unreadable config prints no note."""
+    try:
+        data, _ = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        return True
+    return owner_user_id in (data.get("administrators") or ())
 
 
 def _is_hosted_homeserver(homeserver: str) -> bool:
