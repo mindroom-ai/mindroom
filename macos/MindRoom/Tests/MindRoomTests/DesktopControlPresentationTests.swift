@@ -234,7 +234,7 @@ final class DesktopControlPresentationTests: XCTestCase {
 
         let running = status(
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,
-            shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 250.2, activeRequestID: "shell-2")
+            shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 251, activeRequestID: "shell-2")
         )
         XCTAssertTrue(running.hasBridgeWorkInFlight)
         XCTAssertEqual(running.shellApprovalState, .autoApprove(seconds: 251))

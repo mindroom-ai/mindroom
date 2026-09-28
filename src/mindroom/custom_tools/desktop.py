@@ -197,7 +197,13 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
             "default": 30,
             "description": "Seconds run_shell waits for output before a still-running command becomes a handle.",
         },
-        "handle": {"type": "string", "description": "Shell handle returned by a still-running run_shell."},
+        "handle": {
+            "type": "string",
+            "description": (
+                "Shell handle from a run_shell or check_shell reply; a finished command keeps one only while output is "
+                "still undelivered."
+            ),
+        },
         "force": {
             "type": "boolean",
             "default": False,

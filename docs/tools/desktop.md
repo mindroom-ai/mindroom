@@ -194,14 +194,14 @@ An `output_start` above the requested offset, 0 without one, means earlier outpu
 Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and more output is available while `next_offset` is below `output_bytes`.
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
-The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.
+The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each running one.
 A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with the exit code the process returned, instead of an unknown handle.
 A `check_shell` that returns a finished handle's remaining output in full, inline or as an attachment, hands it over and forgets the handle.
 If the attachment cannot be uploaded, the reply shows the part that fits from the requested offset with a `warning`, and the handle stays for a `check_shell` from `next_offset`.
 A `run_shell` that finished within its inline wait but whose output cannot be attached returns such a handle too, and a `request_status` for that `run_shell` returns the same reply with the handle.
 If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
 The bridge retains at most 16 handles.
-When all 16 are retained, a new command drops the oldest finished handle that nobody has checked, together with its output, and is refused before approval if all 16 are still running.
+When all 16 are retained, a new command drops the handle that finished longest ago, together with its output, even if the agent is still paging through it, and is refused before approval if all 16 are still running.
 A retained handle keeps its output, up to 10 MiB, in the bridge's private temporary files, so 16 retained handles can hold up to 160 MiB on local disk until each is checked in full, dropped for a new command, dropped when a command starts more than 10 minutes after it finished, or forgotten by revoke, stop, or shutdown.
 
 Revoking shell access, stopping the bridge, and helper shutdown kill and forget every handle, so a later `check_shell` reports an unknown handle.

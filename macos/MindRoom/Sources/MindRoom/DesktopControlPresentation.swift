@@ -215,7 +215,7 @@ extension DesktopStatus {
         guard isBridgeOnline, shell.enabled else { return .off }
         if let pending = shell.pending { return .pending(pending) }
         if shell.autoApproveUntilRevoked { return .untilRevoked }
-        let remaining = Int(shell.autoApproveRemainingSeconds.rounded(.up))
+        let remaining = shell.autoApproveRemainingSeconds
         return remaining > 0 ? .autoApprove(seconds: remaining) : .askEachTime
     }
 

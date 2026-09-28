@@ -855,6 +855,11 @@ def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
     command = function.parameters["properties"]["command"]["description"]
     assert "/bin/sh" in command
     assert "2>file" in command
+    handle = function.parameters["properties"]["handle"]["description"]
+    assert handle == (
+        "Shell handle from a run_shell or check_shell reply; a finished command keeps one only while output is "
+        "still undelivered."
+    )
 
 
 @pytest.mark.asyncio
