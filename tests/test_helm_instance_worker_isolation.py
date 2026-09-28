@@ -807,17 +807,34 @@ def test_instance_chart_static_runner_generates_primary_api_key_without_other_au
     assert "MINDROOM_API_KEY" not in _env_by_name(_container(deployment, "sandbox-runner"))
 
 
+def test_instance_chart_dedicated_workers_generate_primary_api_key_without_other_auth() -> None:
+    """Without Supabase auth, dedicated worker pods can reach the primary Service, so its API gets a key too."""
+    docs = _render_instance_chart()
+    api_key_secret = _resource(docs, "Secret", "mindroom-primary-api-key-demo")
+
+    assert len(base64.b64decode(api_key_secret["data"]["MINDROOM_API_KEY"])) == 48
+    assert _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))["MINDROOM_API_KEY"] == {
+        "name": "MINDROOM_API_KEY",
+        "valueFrom": {"secretKeyRef": {"name": "mindroom-primary-api-key-demo", "key": "MINDROOM_API_KEY"}},
+    }
+
+
+@pytest.mark.parametrize("worker_backend", ["static_runner", "kubernetes"])
 @pytest.mark.parametrize(
     "settings",
     [
         ("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"),
         ("allowUnauthenticatedPrimary=true",),
-        ("workerBackend=kubernetes", "storageAccessMode=ReadWriteMany"),
     ],
 )
-def test_instance_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...]) -> None:
-    """Provisioned Supabase auth, the opt-out, and dedicated workers render no generated key."""
-    docs = _render_chart(Path("cluster/k8s/instance"), *settings)
+def test_instance_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...], worker_backend: str) -> None:
+    """Provisioned Supabase auth and the opt-out render no generated key for either worker backend."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        f"workerBackend={worker_backend}",
+        "storageAccessMode=ReadWriteMany",
+        *settings,
+    )
     mindroom_container = _container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom")
 
     assert not any(
@@ -3196,14 +3213,26 @@ def test_runtime_chart_static_runner_generates_primary_api_key() -> None:
     assert "MINDROOM_API_KEY" not in _env_by_name(runner_container)
 
 
-@pytest.mark.parametrize("settings", [("apiAuth.allowUnauthenticatedPrimary=true",), ("workers.backend=kubernetes",)])
-def test_runtime_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...]) -> None:
-    """The explicit opt-out and dedicated workers render no generated key."""
+def test_runtime_chart_dedicated_workers_generate_primary_api_key() -> None:
+    """Dedicated worker pods can reach the primary Service, so an unauthenticated primary API gets a key too."""
+    docs = _render_runtime_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    api_key_secret = _resource(docs, "Secret", "mindroom-runtime-api-key")
+
+    assert list(api_key_secret["data"]) == ["MINDROOM_API_KEY"]
+    assert len(base64.b64decode(api_key_secret["data"]["MINDROOM_API_KEY"])) == 48
+    assert _container(deployment, "mindroom")["envFrom"] == [{"secretRef": {"name": "mindroom-runtime-api-key"}}]
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_opt_out_skips_generated_api_key(backend: str) -> None:
+    """The explicit opt-out renders no generated key for either worker backend."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
         "workers.sandbox.proxyToken.value=test-token",
         "eventCache.postgres.auth.password=test-password",
-        *settings,
+        "apiAuth.allowUnauthenticatedPrimary=true",
         release_name="mindroom-runtime",
     )
     mindroom_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
