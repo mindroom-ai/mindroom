@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import agno.tools.trafilatura as agno_trafilatura
 import httpx
 from agno.utils.log import log_warning
@@ -16,15 +18,18 @@ from mindroom.server_fetch_url import (
     validate_server_fetch_url,
 )
 
+if TYPE_CHECKING:
+    from mindroom.bounded_http_body import HttpExchange
+
 _DOWNLOAD_TIMEOUT_SECONDS = DEFAULT_CONFIG.getint("DEFAULT", "DOWNLOAD_TIMEOUT")
 _MAX_REDIRECTS = DEFAULT_CONFIG.getint("DEFAULT", "MAX_REDIRECTS")
 _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 
 
-def _read_response(response: httpx.Response, url: str, *, decode: bool, deadline: float) -> Response | None:
+def _read_response(response: httpx.Response, url: str, *, decode: bool, exchange: HttpExchange) -> Response | None:
     """Buffer one uncompressed response body within Trafilatura's download size limit."""
     try:
-        body = read_identity_body_prefix(response, max_bytes=_MAX_FILE_SIZE, deadline=deadline)
+        body = read_identity_body_prefix(response, max_bytes=_MAX_FILE_SIZE, exchange=exchange)
     except CompressedHttpBodyError:
         log_warning("Trafilatura download used an unrequested content encoding")
         return None
@@ -56,7 +61,7 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
             for _redirect_count in range(_MAX_REDIRECTS + 1):
                 with client.stream("GET", request_url, extensions=exchange.extensions) as response:
                     if not response.is_redirect:
-                        return _read_response(response, request_url, decode=decode, deadline=exchange.deadline)
+                        return _read_response(response, request_url, decode=decode, exchange=exchange)
                     location = response.headers.get("location")
                 request_url = validate_server_fetch_redirect_url(request_url, location)
     except (httpx.HTTPError, httpx.InvalidURL) as error:

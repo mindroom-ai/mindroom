@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
 
     from mindroom.event_journal import HydrationView, RefreshRequest, RoomHistoryRecovery
+    from mindroom.matrix.message_content import SidecarResolution
 
 logger = get_logger(__name__)
 
@@ -1239,7 +1240,7 @@ class ConversationHydrator:
         if refresh_pass.failed_downloads_remaining <= 0:
             logger.info("conversation_refresh_sidecar_deferred", event_id=event_id)
             return _RevisionContent(unavailable_sidecar_content(content), durable=False)
-        sidecar = await resolve_sidecar_content(content, self._client())
+        sidecar: SidecarResolution = await resolve_sidecar_content(content, self._client())
         if sidecar.failed_download:
             refresh_pass.failed_downloads_remaining -= 1
         if not holds_unresolved_sidecar(sidecar.content):

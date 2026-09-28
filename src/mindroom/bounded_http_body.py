@@ -58,7 +58,7 @@ class HttpExchange:
                 return
         _shut_down(connected)
 
-    def expire(self) -> None:
+    def _expire(self) -> None:
         """Mark the deadline as passed and wake every read blocked on the exchange's connections."""
         with self._lock:
             self.expired = True
@@ -81,10 +81,10 @@ def _shut_down(connected: socket.socket) -> None:
 def http_exchange_deadline(seconds: float) -> Iterator[HttpExchange]:
     """Bound one whole HTTP exchange, redirects included, to ``seconds``, raising ``httpx.ReadTimeout`` past it.
 
-    Pass ``exchange.extensions`` to every request and ``exchange.deadline`` to ``read_identity_body_prefix``.
+    Pass ``exchange.extensions`` to every request and the exchange to ``read_identity_body_prefix``.
     """
     exchange = HttpExchange(deadline=monotonic() + seconds)
-    timer = threading.Timer(seconds, exchange.expire)
+    timer = threading.Timer(seconds, exchange._expire)
     timer.daemon = True
     timer.start()
     try:
@@ -98,18 +98,18 @@ def http_exchange_deadline(seconds: float) -> Iterator[HttpExchange]:
         timer.cancel()
 
 
-def read_identity_body_prefix(response: httpx.Response, *, max_bytes: int, deadline: float) -> BytePrefix:
+def read_identity_body_prefix(response: httpx.Response, *, max_bytes: int, exchange: HttpExchange) -> BytePrefix:
     """Read at most ``max_bytes`` of a streamed response's raw body, refusing compressed bodies unread.
 
     Callers request ``Accept-Encoding: identity`` and read raw bytes, so no body is ever decompressed.
-    A body still arriving at ``deadline``, a ``time.monotonic()`` instant, raises ``httpx.ReadTimeout``.
+    A body still arriving at the exchange's deadline raises ``httpx.ReadTimeout``.
     """
     codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
     if not codings.isdisjoint(_COMPRESSED_CONTENT_CODINGS):
         msg = "The response must use identity content encoding."
         raise CompressedHttpBodyError(msg)
     try:
-        return collect_sync_byte_prefix(response.iter_raw(), max_bytes=max_bytes, deadline=deadline)
+        return collect_sync_byte_prefix(response.iter_raw(), max_bytes=max_bytes, deadline=exchange.deadline)
     except ByteStreamDeadlineError as error:
         msg = "The response body did not arrive before its deadline."
         raise httpx.ReadTimeout(msg, request=response.request) from error

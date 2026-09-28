@@ -67,7 +67,7 @@ def test_a_trickling_exchange_ends_at_its_total_deadline(trickle_server: str) ->
         httpx.Client(timeout=_READ_TIMEOUT_SECONDS) as client,
         client.stream("GET", f"{trickle_server}/", extensions=exchange.extensions) as response,
     ):
-        read_identity_body_prefix(response, max_bytes=10_000_000, deadline=exchange.deadline)
+        read_identity_body_prefix(response, max_bytes=10_000_000, exchange=exchange)
 
     assert time.monotonic() - started < _READ_TIMEOUT_SECONDS / 2
 
@@ -80,7 +80,7 @@ def test_an_exchange_within_its_deadline_is_untouched() -> None:
         httpx.Client(transport=transport) as client,
         client.stream("GET", "http://example.test/", extensions=exchange.extensions) as response,
     ):
-        body = read_identity_body_prefix(response, max_bytes=100, deadline=exchange.deadline)
+        body = read_identity_body_prefix(response, max_bytes=100, exchange=exchange)
 
     time.sleep(_DEADLINE_SECONDS * 2)
     assert body.data == b"whole"

@@ -83,7 +83,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                     request = response.next_request
                     continue
                 response.raise_for_status()
-                content = read_identity_body_prefix(response, max_bytes=limit, deadline=exchange.deadline)
+                content = read_identity_body_prefix(response, max_bytes=limit, exchange=exchange)
                 if content.truncated:
                     msg = "Worker media exceeds the byte limit."
                     raise ValueError(msg)

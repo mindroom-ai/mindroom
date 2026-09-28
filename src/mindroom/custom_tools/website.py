@@ -201,7 +201,7 @@ def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> _F
         body = (
             _NO_BODY
             if response.is_redirect
-            else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES, deadline=exchange.deadline)
+            else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES, exchange=exchange)
         )
         return _FetchedPage(
             httpx.Response(response.status_code, headers=response.headers, content=body.data, request=response.request),
