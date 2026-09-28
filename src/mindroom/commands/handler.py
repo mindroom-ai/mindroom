@@ -190,11 +190,8 @@ def _format_welcome_message(
         entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
         if entity_name is None:
             continue
-        entity_config = config.agents.get(entity_name) or config.teams.get(entity_name)
-        if entity_config is None:
-            continue
         description = _format_agent_description(entity_name, config)
-        entity_entry = f"• **{entity_config.display_name}**"
+        entity_entry = f"• **{config.entity_display_name(entity_name)}** (alias `{entity_name}`)"
         if description:
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
