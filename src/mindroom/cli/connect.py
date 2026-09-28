@@ -65,7 +65,7 @@ _LOST_APPROVAL_WARNING = (
 
 @dataclass(frozen=True)
 class PairCompleteResult:
-    """Credentials returned by the provisioning pair-complete endpoint."""
+    """Credentials returned once by the provisioning device-pairing poll endpoint."""
 
     client_id: str
     client_secret: str

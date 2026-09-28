@@ -23,30 +23,24 @@ service never needs Matrix access tokens. It is still a short-lived bearer
 credential: until it expires, any OpenID relying party that validates tokens
 with the same homeserver (for example the MatrixRTC lk-jwt-service or an
 identity server) accepts it as proof of the user's identity.
-Browser-initiated pairing and connection management still accept access
-tokens for the currently deployed chat client; device pairing does not.
 
-Pairing flows: the service supports device-initiated pairing (CLI starts at
-``/v1/local-mindroom/pair/device/start``, browser user approves at
-``/v1/local-mindroom/pair/device/approve``, CLI polls at
-``/v1/local-mindroom/pair/device/poll`` for credentials). Before approving,
-the browser reads ``/v1/local-mindroom/pair/device/inspect``, which names the
-client and the address that started the session. The legacy
-browser-initiated flow (``/v1/local-mindroom/pair/start``,
-``/v1/local-mindroom/pair/status``, ``/v1/local-mindroom/pair/complete``) is
-kept for one release to allow existing chat clients to migrate.
+Pairing is device-initiated: the CLI starts at
+``/v1/local-mindroom/pair/device/start``, the signed-in browser user reads
+``/v1/local-mindroom/pair/device/inspect``, which names the client and the
+address that started the session, before approving the code at
+``/v1/local-mindroom/pair/device/approve``, and the CLI then polls
+``/v1/local-mindroom/pair/device/poll`` for its credentials.
 
-Rate limits: every request that the service must resolve through the
-homeserver (OpenID userinfo, or whoami for legacy access tokens) first counts
-against a per-client-address limit of 300 per minute, so invalid tokens cannot
-make the service flood the homeserver while many users behind one NAT still
-reach their per-user limits, which apply after verification. Polls for a
-known device secret are limited to 30 per minute per secret, so one client
-cannot starve the others; unknown secrets get no per-secret state. All device
-polls then count against 300 per minute per client address, leaving room for
-many CLIs behind one NAT. The service refuses to start with a
-MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS short enough for the per-secret
-limit to throttle clients that follow it.
+Rate limits: every OpenID token that the service must resolve through the
+homeserver's userinfo endpoint first counts against a per-client-address limit
+of 300 per minute, so invalid tokens cannot make the service flood the
+homeserver while many users behind one NAT still reach their per-user limits,
+which apply after verification. Polls for a known device secret are limited to
+30 per minute per secret, so one client cannot starve the others; unknown
+secrets get no per-secret state. All device polls then count against 300 per
+minute per client address, leaving room for many CLIs behind one NAT. The
+service refuses to start with a MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS
+short enough for the per-secret limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
@@ -130,7 +124,6 @@ CONNECTION_REVOKED_DETAIL = "Connection revoked"
 NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 # `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
-PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
 # It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
@@ -164,10 +157,7 @@ class ServiceConfig:
 
 @dataclass(slots=True)
 class PairSession:
-    """Pair code lifecycle state.
-
-    Browser-initiated sessions know their user at start; device sessions learn it on approval.
-    """
+    """Device pair code lifecycle state; the approving user is learned on approval."""
 
     id: str
     user_id: str | None
@@ -175,11 +165,11 @@ class PairSession:
     status: Literal["pending", "approved", "connected", "expired"]
     created_at: datetime
     expires_at: datetime
+    device_secret_hash: str
+    client_name: str
+    fingerprint: str
     completed_at: datetime | None = None
     connection_id: str | None = None
-    device_secret_hash: str | None = None
-    client_name: str | None = None
-    fingerprint: str | None = None
     approved_at: datetime | None = None
     client_ip: str | None = None
 
@@ -212,15 +202,6 @@ class ProvisioningState:
     last_rate_limit_cleanup: float
 
 
-class PairStartResponse(BaseModel):
-    """Response for starting pairing."""
-
-    pair_code: str
-    pair_session_id: str
-    expires_at: datetime
-    poll_interval_seconds: int
-
-
 class LocalConnectionOut(BaseModel):
     """Public shape for linked local installations."""
 
@@ -231,32 +212,6 @@ class LocalConnectionOut(BaseModel):
     created_at: datetime
     last_seen_at: datetime
     revoked_at: datetime | None = None
-
-
-class PairStatusResponse(BaseModel):
-    """Response for pair status polling."""
-
-    status: Literal["pending", "connected", "expired"]
-    expires_at: datetime | None = None
-    connection: LocalConnectionOut | None = None
-
-
-class PairCompleteRequest(BaseModel):
-    """Request payload for local pairing completion."""
-
-    pair_code: str = Field(min_length=9, max_length=9)
-    client_name: str = Field(min_length=1, max_length=120)
-    client_pubkey_or_fingerprint: str = Field(min_length=1, max_length=512)
-
-
-class PairCompleteResponse(BaseModel):
-    """Response payload for completed pairing."""
-
-    connection: LocalConnectionOut
-    client_id: str
-    client_secret: str
-    namespace: str
-    owner_user_id: str
 
 
 class ConnectionsResponse(BaseModel):
@@ -577,11 +532,13 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
     payload = json.loads(state_path.read_text(encoding="utf-8"))
 
     for item in payload.get("pair_sessions", []):
-        # LEGACY_COMPAT: pair sessions persisted before device pairing lack device fields
-        # Legacy format: state written by the provisioning service before this change, which only supported browser-initiated pairing; device_secret_hash, client_name, fingerprint, and approved_at are missing.
-        # Last legacy release: unversioned service state; replaced by this change.
-        # Handling: missing fields load as None, i.e. a browser-initiated session.
-        # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_browser_sessions.
+        # LEGACY_COMPAT: pair sessions from the removed browser-initiated flow have no device fields
+        # Legacy format: a persisted pair session whose `device_secret_hash` is missing or null, written by the removed `POST /v1/local-mindroom/pair/start` endpoint; sessions written before device pairing also lack `client_name`, `fingerprint`, and `approved_at`.
+        # Last legacy release: <fill at merge: last tag before merge> still wrote such sessions from `pair/start` (v2026.9.351 is the latest tag checked); <fill at merge: first tag containing this change> writes only device sessions, which v2026.9.330 first introduced.
+        # Handling: such sessions are dropped on load and disappear from the file on the next write, because no remaining endpoint can use them; connections, including ones paired through that flow, load unchanged.
+        # Coverage: tests/test_local_mindroom_provisioning_service.py::test_state_drops_browser_initiated_sessions_and_keeps_connections.
+        if item.get("device_secret_hash") is None:
+            continue
         session = PairSession(
             id=item["id"],
             user_id=item["user_id"],
@@ -589,11 +546,11 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             status=item["status"],
             created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
             expires_at=_from_utc_iso(item["expires_at"]) or _now_utc(),
+            device_secret_hash=item["device_secret_hash"],
+            client_name=item["client_name"],
+            fingerprint=item["fingerprint"],
             completed_at=_from_utc_iso(item.get("completed_at")),
             connection_id=item.get("connection_id"),
-            device_secret_hash=item.get("device_secret_hash"),
-            client_name=item.get("client_name"),
-            fingerprint=item.get("fingerprint"),
             approved_at=_from_utc_iso(item.get("approved_at")),
             # LEGACY_COMPAT: pair sessions persisted before requester addresses were recorded lack client_ip
             # Legacy format: state written by the provisioning service before this change; client_ip is missing.
@@ -604,8 +561,7 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
-        if session.device_secret_hash is not None:
-            state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
+        state.pair_session_by_device_secret_hash[session.device_secret_hash] = session.id
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
@@ -658,14 +614,6 @@ def _new_pair_code_unlocked(state: ProvisioningState) -> str:
         pair_code = _generate_pair_code()
         if _hash_token(pair_code) not in state.pair_session_by_hash:
             return pair_code
-
-
-def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> PairSession | None:
-    pair_hash = _hash_token(_normalize_pair_code(pair_code))
-    session_id = state.pair_session_by_hash.get(pair_hash)
-    if not session_id:
-        return None
-    return state.pair_sessions.get(session_id)
 
 
 def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> bool:
@@ -723,8 +671,7 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
     for session_id in finished_ids:
         session = state.pair_sessions.pop(session_id)
         state.pair_session_by_hash.pop(session.pair_code_hash, None)
-        if session.device_secret_hash is not None:
-            state.pair_session_by_device_secret_hash.pop(session.device_secret_hash, None)
+        state.pair_session_by_device_secret_hash.pop(session.device_secret_hash, None)
 
 
 def _cleanup_rate_limit_buckets_unlocked(
@@ -811,31 +758,6 @@ async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> s
     return user_id
 
 
-async def _matrix_whoami(config: ServiceConfig, access_token: str) -> str:
-    url = f"{config.matrix_homeserver}/_matrix/client/v3/account/whoami"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        async with httpx.AsyncClient(timeout=8, verify=config.matrix_ssl_verify) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Could not reach Matrix homeserver: {exc}") from exc
-
-    if response.status_code == 401:
-        raise HTTPException(status_code=401, detail="Invalid Matrix access token")
-    if not response.is_success:
-        raise HTTPException(status_code=502, detail="Matrix homeserver whoami failed")
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="Matrix homeserver returned invalid whoami response") from exc
-
-    user_id = payload.get("user_id") if isinstance(payload, dict) else None
-    if not isinstance(user_id, str) or not user_id.startswith("@"):
-        raise HTTPException(status_code=502, detail="Matrix whoami response missing user_id")
-    return user_id
-
-
 async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
     register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
     request_payload = {
@@ -893,18 +815,14 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
     raise HTTPException(status_code=502, detail=f"Matrix registration failed: {detail}")
 
 
-def _extract_bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, _, value = authorization.partition(" ")
-    if scheme.lower() != "bearer":
-        return None
-    token = value.strip()
-    return token or None
-
-
-async def _limit_homeserver_token_lookup(request: Request) -> None:
-    """Bound homeserver lookups per client address so invalid tokens cannot amplify traffic."""
+async def _verify_openid_user(
+    request: Request,
+    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
+) -> str:
+    token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    # Bound homeserver lookups per client address so invalid tokens cannot amplify traffic.
     state = _runtime_state_from_request(request)
     remote = request.client.host if request.client else "unknown"
     async with state.lock:
@@ -914,40 +832,7 @@ async def _limit_homeserver_token_lookup(request: Request) -> None:
             limit=HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE,
             window_seconds=60,
         )
-
-
-async def _verify_openid_user(
-    request: Request,
-    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
-) -> str:
-    token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
-    await _limit_homeserver_token_lookup(request)
     return await _matrix_openid_userinfo(_service_config_from_request(request), token)
-
-
-async def _verify_browser_user(
-    request: Request,
-    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header()] = None,
-    x_matrix_access_token: Annotated[str | None, Header(alias="X-Matrix-Access-Token")] = None,
-) -> str:
-    if x_matrix_openid_token and x_matrix_openid_token.strip():
-        return await _verify_openid_user(request, x_matrix_openid_token)
-
-    # LEGACY_COMPAT: browser endpoints authenticated with the user's Matrix access token
-    # Legacy format: the deployed MindRoom Chat client sends its full Matrix access token as `Authorization: Bearer` or `X-Matrix-Access-Token` to pair/start, pair/status, GET /connections, and DELETE /connections/{id}.
-    # Last legacy release: unversioned external input; the deployed chat client is not a MindRoom release, and its replacement sends `X-Matrix-OpenID-Token` instead.
-    # Handling: when no OpenID token is sent, these endpoints still resolve the access token through the homeserver's whoami endpoint; the OpenID header wins when both are sent, and device inspect/approve never accept access tokens.
-    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_browser_endpoints_still_accept_legacy_access_token_headers, tests/test_local_mindroom_provisioning_service.py::test_openid_token_wins_over_legacy_access_token, tests/test_local_mindroom_provisioning_service.py::test_device_endpoints_reject_access_tokens.
-    token = _extract_bearer_token(authorization)
-    if not token and x_matrix_access_token:
-        token = x_matrix_access_token.strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
-    await _limit_homeserver_token_lookup(request)
-    return await _matrix_whoami(_service_config_from_request(request), token)
 
 
 def _service_config_from_request(request: Request) -> ServiceConfig:
@@ -965,76 +850,6 @@ router = APIRouter()
 async def healthz() -> dict[str, str]:
     """Liveness probe endpoint."""
     return {"status": "ok"}
-
-
-@router.post("/v1/local-mindroom/pair/start", response_model=PairStartResponse)
-async def start_pair(
-    user_id: Annotated[str, Depends(_verify_browser_user)],
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
-    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
-) -> PairStartResponse:
-    """Start a browser-authenticated pairing flow for a local client."""
-    now = _now_utc()
-    expires_at = now + timedelta(seconds=config.pair_code_ttl_seconds)
-    pair_code = _generate_pair_code()
-    pair_hash = _hash_token(pair_code)
-    session_id = secrets.token_urlsafe(18)
-
-    async with state.lock:
-        _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
-        _enforce_rate_limit_unlocked(state, key=f"pair:start:{user_id}", limit=10, window_seconds=60)
-        for session in state.pair_sessions.values():
-            if session.user_id == user_id and session.status == "pending":
-                session.status = "expired"
-
-        session = PairSession(
-            id=session_id,
-            user_id=user_id,
-            pair_code_hash=pair_hash,
-            status="pending",
-            created_at=now,
-            expires_at=expires_at,
-        )
-        state.pair_sessions[session_id] = session
-        state.pair_session_by_hash[pair_hash] = session_id
-        _persist_state_unlocked(state, config.state_path)
-
-    return PairStartResponse(
-        pair_code=pair_code,
-        pair_session_id=session_id,
-        expires_at=expires_at,
-        poll_interval_seconds=config.pair_poll_interval_seconds,
-    )
-
-
-@router.get("/v1/local-mindroom/pair/status", response_model=PairStatusResponse)
-async def pair_status(
-    user_id: Annotated[str, Depends(_verify_browser_user)],
-    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
-    x_local_mindroom_pair_session_id: Annotated[
-        str | None,
-        Header(alias=PAIR_STATUS_SESSION_HEADER),
-    ] = None,
-) -> PairStatusResponse:
-    """Poll a pairing session by opaque session ID header."""
-    now = _now_utc()
-    async with state.lock:
-        _enforce_rate_limit_unlocked(state, key=f"pair:status:{user_id}", limit=60, window_seconds=60)
-        session_id = x_local_mindroom_pair_session_id.strip() if x_local_mindroom_pair_session_id else ""
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Missing pair session id")
-        session = state.pair_sessions.get(session_id)
-        if not session or session.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Pair session not found")
-
-        _expire_if_needed(session, now)
-        if session.status == "connected" and session.connection_id:
-            connection = state.connections.get(session.connection_id)
-            if connection:
-                return PairStatusResponse(status="connected", connection=_serialize_connection(connection))
-        if session.status == "expired":
-            return PairStatusResponse(status="expired")
-        return PairStatusResponse(status="pending", expires_at=session.expires_at)
 
 
 def _create_connection_unlocked(
@@ -1061,55 +876,10 @@ def _create_connection_unlocked(
     return connection, client_secret
 
 
-@router.post("/v1/local-mindroom/pair/complete", response_model=PairCompleteResponse)
-async def pair_complete(
-    request: Request,
-    payload: PairCompleteRequest,
-    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
-    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
-) -> PairCompleteResponse:
-    """Complete pairing from the local client using the short pair code."""
-    now = _now_utc()
-    remote = request.client.host if request.client else "unknown"
-    async with state.lock:
-        _enforce_rate_limit_unlocked(state, key=f"pair:complete:{remote}", limit=20, window_seconds=60)
-        session = _find_pair_session_unlocked(state, payload.pair_code)
-        if not session:
-            raise HTTPException(status_code=404, detail="Pair code not found")
-        if session.device_secret_hash is not None or session.user_id is None:
-            raise HTTPException(status_code=404, detail="Pair code not found")
-
-        _expire_if_needed(session, now)
-        if session.status == "expired":
-            raise HTTPException(status_code=410, detail="Pair code expired")
-        if session.status == "connected":
-            raise HTTPException(status_code=409, detail="Pair code already used")
-
-        connection, client_secret = _create_connection_unlocked(
-            state,
-            user_id=session.user_id,
-            client_name=payload.client_name,
-            fingerprint=payload.client_pubkey_or_fingerprint,
-            now=now,
-        )
-
-        session.status = "connected"
-        session.completed_at = now
-        session.connection_id = connection.id
-        _persist_state_unlocked(state, config.state_path)
-
-    return PairCompleteResponse(
-        connection=_serialize_connection(connection),
-        client_id=connection.id,
-        client_secret=client_secret,
-        namespace=connection.namespace,
-        owner_user_id=session.user_id,
-    )
-
-
-def _find_device_session_unlocked(state: ProvisioningState, pair_code: str, now: datetime) -> PairSession:
-    session = _find_pair_session_unlocked(state, pair_code)
-    if session is None or session.device_secret_hash is None:
+def _live_pair_session_by_code_unlocked(state: ProvisioningState, pair_code: str, now: datetime) -> PairSession:
+    session_id = state.pair_session_by_hash.get(_hash_token(_normalize_pair_code(pair_code)))
+    session = state.pair_sessions.get(session_id) if session_id else None
+    if session is None:
         raise HTTPException(status_code=404, detail="Pair code not found")
     _expire_if_needed(session, now)
     if session.status == "expired":
@@ -1120,8 +890,6 @@ def _find_device_session_unlocked(state: ProvisioningState, pair_code: str, now:
 
 
 def _device_session_out(session: PairSession) -> DevicePairSessionOut:
-    if session.client_name is None:
-        raise HTTPException(status_code=500, detail="Corrupt pair session")
     if session.status not in ("pending", "approved"):
         raise HTTPException(status_code=500, detail="Corrupt pair session")
     return DevicePairSessionOut(
@@ -1183,7 +951,7 @@ async def inspect_device_pair(
     """Describe the machine waiting behind a device code before the user approves it."""
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:device:inspect:{user_id}", limit=20, window_seconds=60)
-        return _device_session_out(_find_device_session_unlocked(state, payload.pair_code, _now_utc()))
+        return _device_session_out(_live_pair_session_by_code_unlocked(state, payload.pair_code, _now_utc()))
 
 
 @router.post("/v1/local-mindroom/pair/device/approve", response_model=DevicePairSessionOut)
@@ -1197,7 +965,7 @@ async def approve_device_pair(
     now = _now_utc()
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:device:approve:{user_id}", limit=20, window_seconds=60)
-        session = _find_device_session_unlocked(state, payload.pair_code, now)
+        session = _live_pair_session_by_code_unlocked(state, payload.pair_code, now)
         if session.status == "approved" and session.user_id != user_id:
             raise HTTPException(status_code=409, detail="Pair code already approved")
         if session.status == "pending":
@@ -1247,10 +1015,6 @@ async def poll_device_pair(
             return DevicePairPollResponse(status=session.status, expires_at=session.expires_at)
         if session.user_id is None:
             raise HTTPException(status_code=500, detail="Corrupt pair session")
-        if session.client_name is None:
-            raise HTTPException(status_code=500, detail="Corrupt pair session")
-        if session.fingerprint is None:
-            raise HTTPException(status_code=500, detail="Corrupt pair session")
         connection, client_secret = _create_connection_unlocked(
             state,
             user_id=session.user_id,
@@ -1274,7 +1038,7 @@ async def poll_device_pair(
 
 @router.get("/v1/local-mindroom/connections", response_model=ConnectionsResponse)
 async def list_connections(
-    user_id: Annotated[str, Depends(_verify_browser_user)],
+    user_id: Annotated[str, Depends(_verify_openid_user)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> ConnectionsResponse:
     """List local client connections owned by the authenticated Matrix user."""
@@ -1287,7 +1051,7 @@ async def list_connections(
 @router.delete("/v1/local-mindroom/connections/{connection_id}", response_model=RevokeConnectionResponse)
 async def revoke_connection(
     connection_id: str,
-    user_id: Annotated[str, Depends(_verify_browser_user)],
+    user_id: Annotated[str, Depends(_verify_openid_user)],
     config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
 ) -> RevokeConnectionResponse:
@@ -1410,13 +1174,7 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
         allow_origins=service_config.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "X-Matrix-Access-Token",
-            OPENID_TOKEN_HEADER,
-            PAIR_STATUS_SESSION_HEADER,
-        ],
+        allow_headers=["Content-Type", OPENID_TOKEN_HEADER],
     )
     app.include_router(router)
     return app
