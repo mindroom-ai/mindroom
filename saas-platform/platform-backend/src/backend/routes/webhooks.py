@@ -7,9 +7,21 @@ from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
 from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
-from fastapi import APIRouter, Header, HTTPException, Request
+from backend.services.instance_lifecycle import reconcile_account_instances
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
+
+# Events that can change whether a subscription may run its hosted instance.
+_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.payment_succeeded",
+        "invoice.payment_failed",
+    }
+)
 
 
 def _timestamp_to_iso(timestamp: float) -> str:
@@ -50,6 +62,11 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     raise ValueError(msg)
 
 
+def _db_subscription_status(stripe_status: str) -> str:
+    """Map a Stripe subscription status to the stored status; the database spells it `cancelled`."""
+    return "cancelled" if stripe_status == "canceled" else stripe_status
+
+
 class _SubscriptionFields(TypedDict):
     """Shared subscription persistence fields and event-specific additions."""
 
@@ -78,7 +95,7 @@ def _subscription_fields(subscription: dict) -> _SubscriptionFields:
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
         "tier": tier,
-        "status": subscription["status"],
+        "status": _db_subscription_status(subscription["status"]),
         "max_agents": limits.get("max_agents", 1),
         "max_messages_per_day": limits.get("max_messages_per_day", 100),
         "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
@@ -311,13 +328,14 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 
     account_id = sub_result.data["account_id"]
 
-    # Update subscription status to past_due
+    # Only an active subscription becomes past_due; past_due keeps the instance running, so a failed
+    # first payment (incomplete) or a late event for a cancelled subscription must not reach it.
     sb.table("subscriptions").update({"status": "past_due", "updated_at": datetime.now(UTC).isoformat()}).eq(
         "stripe_subscription_id", invoice["subscription"]
     ).eq(
         "account_id",
         account_id,  # Tenant validation
-    ).execute()
+    ).eq("status", "active").execute()
 
     return True, account_id
 
@@ -325,7 +343,9 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
 @limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
-    request: Request, stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None
+    request: Request,
+    background_tasks: BackgroundTasks,
+    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
     # An empty secret makes the HMAC signature forgeable, so refuse every event.
@@ -417,6 +437,10 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
         sb.table("webhook_events").insert(webhook_record).execute()
     except Exception:
         logger.exception("Failed to record webhook event")
+
+    # Stop, start, or reprovision instances after the response so Kubernetes trouble never fails the webhook.
+    if account_id and event.type in _LIFECYCLE_EVENT_TYPES:
+        background_tasks.add_task(reconcile_account_instances, account_id)
 
     if error_msg:
         return {"received": True, "error": error_msg}

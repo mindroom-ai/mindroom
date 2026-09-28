@@ -10,9 +10,13 @@ from backend.pricing import get_plan_limits_from_metadata
 from fastapi import HTTPException
 
 PAID_TIERS = frozenset({"byok", "hobby", "pro", "enterprise"})
+# past_due keeps service running while Stripe retries the payment; Stripe then moves the
+# subscription to canceled or unpaid, which stops the instance.
+SERVICE_STATUSES = frozenset({"active", "past_due"})
 
 
-def _parse_timestamp(value: str | None) -> datetime | None:
+def parse_timestamp(value: str | None) -> datetime | None:
+    """Parse a Supabase ISO timestamp into an aware UTC datetime."""
     if not value:
         return None
 
@@ -30,13 +34,13 @@ def is_subscription_service_active(subscription: dict[str, Any], *, now: datetim
         return False
 
     status = str(subscription.get("status") or "")
-    if status == "active":
+    if status in SERVICE_STATUSES:
         return True
 
     if status != "trialing":
         return False
 
-    trial_ends_at = _parse_timestamp(subscription.get("trial_ends_at"))
+    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
     if trial_ends_at is None:
         return False
 
@@ -49,7 +53,7 @@ def is_expired_trial(subscription: dict[str, Any], *, now: datetime | None = Non
     if str(subscription.get("status") or "") != "trialing":
         return False
 
-    trial_ends_at = _parse_timestamp(subscription.get("trial_ends_at"))
+    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
     if trial_ends_at is None:
         return False
 
@@ -62,7 +66,7 @@ def trial_days_remaining(subscription: dict[str, Any], *, now: datetime | None =
     if str(subscription.get("status") or "") not in {"trialing", "paused"}:
         return None
 
-    trial_ends_at = _parse_timestamp(subscription.get("trial_ends_at"))
+    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
     if trial_ends_at is None:
         return None
 
@@ -95,10 +99,10 @@ def _entitlement_failure_detail(subscription: dict[str, Any], action: str) -> st
     if status == "trialing":
         return "Your MindRoom trial has expired. Add billing or choose a paid plan to continue using the instance."
 
-    if status == "past_due":
-        return "Payment is past due. Update billing before you run the MindRoom instance."
+    if status == "unpaid":
+        return "Payment failed. Update billing before you run the MindRoom instance."
 
-    if status in {"cancelled", "paused"}:
+    if status in {"cancelled", "paused", "incomplete", "incomplete_expired"}:
         return "This subscription is not active. Reactivate billing before you run the MindRoom instance."
 
     return "This subscription is not entitled to run a hosted MindRoom instance."

@@ -1,0 +1,440 @@
+"""Hosted instances follow their subscription: stop, restart, and tear down."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, Mock, call, patch
+
+import pytest
+from backend.deps import verify_admin, verify_user
+from backend.openrouter import OpenRouterKeyNotFoundError
+from backend.services.instance_lifecycle import LifecycleSummary, reconcile_subscription_instances
+from backend.services.provisioner_service import set_instance_openrouter_key_disabled
+from backend.tasks.cleanup import run_cleanup_job
+from fastapi.testclient import TestClient
+from main import app
+
+from tests.fake_supabase import FakeSupabase
+
+ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
+SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
+
+
+@dataclass
+class Platform:
+    """Fake database plus the Kubernetes, provisioning, and OpenRouter side effects of the lifecycle."""
+
+    db: FakeSupabase
+    kubectl: AsyncMock
+    start: AsyncMock
+    provision: AsyncMock
+    uninstall: AsyncMock
+    set_key_disabled: AsyncMock
+
+    def instance(self) -> dict[str, Any]:
+        return self.db.row("instances", instance_id=7)
+
+    def subscription(self) -> dict[str, Any]:
+        return self.db.row("subscriptions", id=SUBSCRIPTION_ID)
+
+    def scaled_down(self) -> bool:
+        return call(["scale", "deployment/mindroom-7", "--replicas=0"], namespace="mindroom-instances") in (
+            self.kubectl.await_args_list
+        )
+
+
+def _subscription(status: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {
+        "id": SUBSCRIPTION_ID,
+        "account_id": ACCOUNT_ID,
+        "stripe_subscription_id": "sub_stripe_1",
+        "tier": "hobby",
+        "status": status,
+        "trial_ends_at": None,
+        **fields,
+    }
+
+
+def _instance(status: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {
+        "id": "instance-row-7",
+        "instance_id": 7,
+        "subscription_id": SUBSCRIPTION_ID,
+        "account_id": ACCOUNT_ID,
+        "status": status,
+        "tier": "hobby",
+        "openrouter_key_hash": "key_hash_7",
+        "lifecycle_stopped_at": None,
+        "teardown_after": None,
+        "lifecycle_error": None,
+        "lifecycle_error_at": None,
+        **fields,
+    }
+
+
+@pytest.fixture
+def platform() -> Iterator[Platform]:
+    db = FakeSupabase(
+        {
+            "accounts": [{"id": ACCOUNT_ID, "email": "customer@example.com", "stripe_customer_id": "cus_1"}],
+            "subscriptions": [],
+            "instances": [],
+            "webhook_events": [],
+            "cleanup_runs": [],
+        }
+    )
+
+    def mark(status: str) -> AsyncMock:
+        async def side_effect(instance_id: Any, *_args: Any, **_kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+            db.row("instances", instance_id=instance_id)["status"] = status
+            return {"success": True, "message": status}
+
+        return AsyncMock(side_effect=side_effect)
+
+    async def provision(_sb: Any, *, data: dict[str, Any], background_tasks: Any) -> dict[str, Any]:  # noqa: ANN401, ARG001
+        db.row("instances", instance_id=data["instance_id"]).update(
+            {"status": "running", "openrouter_key_hash": "key_hash_new"}
+        )
+        return {"success": True}
+
+    lifecycle = "backend.services.instance_lifecycle"
+    platform = Platform(
+        db=db,
+        kubectl=AsyncMock(return_value=(0, "scaled", "")),
+        start=mark("running"),
+        provision=AsyncMock(side_effect=provision),
+        uninstall=mark("deprovisioned"),
+        set_key_disabled=AsyncMock(),
+    )
+    with (
+        patch(f"{lifecycle}.ensure_supabase", return_value=db),
+        patch("backend.routes.webhooks.ensure_supabase", return_value=db),
+        patch("backend.tasks.cleanup.ensure_supabase", return_value=db),
+        patch(f"{lifecycle}.run_kubectl", platform.kubectl),
+        patch(f"{lifecycle}.check_deployment_exists", AsyncMock(return_value=True)),
+        patch(f"{lifecycle}.start_instance", platform.start),
+        patch(f"{lifecycle}.provision_instance", platform.provision),
+        patch(f"{lifecycle}.uninstall_instance", platform.uninstall),
+        patch(f"{lifecycle}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
+        patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
+    ):
+        yield platform
+
+
+def _send_webhook(event_type: str, obj: dict[str, Any]) -> dict[str, Any]:
+    event = Mock(id=f"evt_{event_type}", type=event_type)
+    event.data.object = obj
+    with patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event):
+        response = TestClient(app).post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
+    assert response.status_code == 200
+    return response.json()
+
+
+def _stripe_subscription(status: str) -> dict[str, Any]:
+    return {
+        "id": "sub_stripe_1",
+        "customer": "cus_1",
+        "status": status,
+        "items": {
+            "data": [{"price": {"id": "price_hobby", "metadata": {"tier": "hobby", "billing_cycle": "monthly"}}}]
+        },
+        "trial_end": None,
+        "canceled_at": None,
+    }
+
+
+def test_webhook_cancel_stops_instance_disables_key_and_schedules_teardown(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    _send_webhook("customer.subscription.deleted", {"id": "sub_stripe_1"})
+
+    instance = platform.instance()
+    assert platform.subscription()["status"] == "cancelled"
+    assert instance["status"] == "stopped"
+    assert platform.scaled_down()
+    platform.set_key_disabled.assert_awaited_once()
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": True}
+    teardown_after = datetime.fromisoformat(instance["teardown_after"])
+    assert teardown_after - datetime.fromisoformat(instance["lifecycle_stopped_at"]) == timedelta(days=30)
+    platform.uninstall.assert_not_awaited()
+
+
+def test_stripe_canceled_status_is_stored_as_cancelled_and_stops_instance(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    _send_webhook("customer.subscription.updated", _stripe_subscription("canceled"))
+
+    assert platform.subscription()["status"] == "cancelled"
+    assert platform.instance()["status"] == "stopped"
+
+
+def test_webhook_resubscribe_starts_instance_and_reenables_key(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=3)).isoformat(),
+            teardown_after=(now + timedelta(days=27)).isoformat(),
+        )
+    )
+
+    _send_webhook("customer.subscription.created", _stripe_subscription("active"))
+
+    instance = platform.instance()
+    platform.start.assert_awaited_once_with(7)
+    assert instance["status"] == "running"
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": False}
+    assert instance["lifecycle_stopped_at"] is None
+    assert instance["teardown_after"] is None
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_after_teardown_reprovisions_instance(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "deprovisioned",
+            openrouter_key_hash=None,
+            lifecycle_stopped_at=(now - timedelta(days=40)).isoformat(),
+            teardown_after=(now - timedelta(days=10)).isoformat(),
+        )
+    )
+
+    await reconcile_subscription_instances(platform.subscription())
+
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"] == {
+        "subscription_id": SUBSCRIPTION_ID,
+        "account_id": ACCOUNT_ID,
+        "tier": "hobby",
+        "instance_id": 7,
+    }
+    assert platform.instance()["status"] == "running"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+
+    _send_webhook("customer.subscription.updated", _stripe_subscription("active"))
+
+    platform.start.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+
+
+def test_webhook_succeeds_when_kubernetes_is_down_and_records_error(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.kubectl.return_value = (1, "", "Unable to connect to the server")
+
+    body = _send_webhook("customer.subscription.deleted", {"id": "sub_stripe_1"})
+
+    instance = platform.instance()
+    assert body == {"received": True, "error": None}
+    assert instance["status"] == "running"
+    assert "Unable to connect to the server" in instance["lifecycle_error"]
+    assert instance["teardown_after"] is not None
+
+
+@pytest.mark.asyncio
+async def test_nightly_job_catches_missed_cancellation_and_records_run(platform: Platform) -> None:
+    # The DB says cancelled, but no webhook stopped the instance, and its status was left as error.
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("error"))
+
+    with (
+        patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0}),
+        patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
+        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
+    ):
+        run = await run_cleanup_job()
+
+    assert run["ok"] is True
+    assert platform.scaled_down()
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["teardown_after"] is not None
+    assert run["summary"]["instance_lifecycle"]["instances_stopped"] == 1
+    assert platform.db.tables["cleanup_runs"] == [{**run, "id": platform.db.tables["cleanup_runs"][0]["id"]}]
+
+
+@pytest.mark.asyncio
+async def test_past_due_subscription_keeps_instance_running(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("past_due"))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    summary = await reconcile_subscription_instances(platform.subscription())
+
+    platform.kubectl.assert_not_awaited()
+    platform.set_key_disabled.assert_not_awaited()
+    assert platform.instance()["status"] == "running"
+    assert platform.instance()["teardown_after"] is None
+    assert summary.errors == []
+
+
+def test_payment_failure_does_not_make_incomplete_subscription_past_due(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("incomplete"))
+
+    _send_webhook("invoice.payment_failed", {"id": "in_1", "customer": "cus_1", "subscription": "sub_stripe_1"})
+
+    assert platform.subscription()["status"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_teardown_waits_for_grace_period(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=29)).isoformat(),
+            teardown_after=(now + timedelta(days=1)).isoformat(),
+        )
+    )
+
+    await reconcile_subscription_instances(platform.subscription(), now=now)
+    platform.uninstall.assert_not_awaited()
+
+    summary = await reconcile_subscription_instances(platform.subscription(), now=now + timedelta(days=1, minutes=1))
+    platform.uninstall.assert_awaited_once_with(7)
+    assert platform.instance()["status"] == "deprovisioned"
+    assert summary.instances_torn_down == 1
+
+
+@pytest.mark.asyncio
+async def test_teardown_skipped_when_subscription_became_entitled(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    stale_subscription = _subscription("cancelled")
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=31)).isoformat(),
+            teardown_after=(now - timedelta(days=1)).isoformat(),
+        )
+    )
+
+    await reconcile_subscription_instances(stale_subscription, now=now)
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_one_failing_cleanup_task_does_not_skip_the_others(platform: Platform) -> None:
+    audit_logs = Mock(return_value={"audit_logs_deleted": 3})
+    usage_metrics = Mock(return_value={"usage_metrics_deleted": 4})
+    reconcile = AsyncMock(return_value=LifecycleSummary())
+    with (
+        patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", side_effect=RuntimeError("rpc denied")),
+        patch("backend.tasks.cleanup.cleanup_old_audit_logs", audit_logs),
+        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", usage_metrics),
+        patch("backend.tasks.cleanup.reconcile_all_subscriptions", reconcile),
+    ):
+        run = await run_cleanup_job()
+
+    audit_logs.assert_called_once()
+    usage_metrics.assert_called_once()
+    reconcile.assert_awaited_once()
+    assert run["ok"] is False
+    assert run["summary"]["accounts"] == {"error": "rpc denied"}
+    assert platform.db.tables["cleanup_runs"][0]["ok"] is False
+
+
+def test_provision_route_restarts_held_instance(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with patch("backend.routes.instances.ensure_supabase", return_value=platform.db):
+            response = TestClient(app).post("/my/instances/provision")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Instance restarted"
+    platform.start.assert_awaited_once_with(7)
+
+
+def test_admin_lifecycle_overview_reports_last_run_pending_and_stuck(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].extend(
+        [_subscription("cancelled"), _subscription("cancelled", id="sub-2", account_id=ACCOUNT_ID)]
+    )
+    platform.db.tables["instances"].extend(
+        [
+            _instance(
+                "stopped",
+                lifecycle_stopped_at=(now - timedelta(days=5)).isoformat(),
+                teardown_after=(now + timedelta(days=25)).isoformat(),
+            ),
+            _instance("running", id="instance-row-8", instance_id=8, subscription_id="sub-2"),
+        ]
+    )
+    platform.db.tables["cleanup_runs"].append(
+        {"id": "run-1", "started_at": now.isoformat(), "finished_at": now.isoformat(), "ok": True, "summary": {}}
+    )
+    app.dependency_overrides[verify_admin] = lambda: {"user_id": "admin", "email": "admin@example.com"}
+    try:
+        with patch("backend.routes.admin.ensure_supabase", return_value=platform.db):
+            response = TestClient(app).get("/admin/instance-lifecycle")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["teardown_grace_days"] == 30
+    assert body["last_run"]["ok"] is True
+    assert [row["instance_id"] for row in body["pending_teardown"]] == [7]
+    assert body["pending_teardown"][0]["account_email"] == "customer@example.com"
+    assert [(row["instance_id"], row["problem"]) for row in body["stuck"]] == [
+        (8, "Subscription is not entitled but the instance is not scheduled for teardown")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabling_a_missing_key_succeeds_but_reenabling_it_raises() -> None:
+    missing = Mock(side_effect=OpenRouterKeyNotFoundError("status 404"))
+    with patch("backend.services.provisioner_service.set_openrouter_key_disabled", missing):
+        await set_instance_openrouter_key_disabled({"instance_id": 7, "openrouter_key_hash": "gone"}, disabled=True)
+        with pytest.raises(OpenRouterKeyNotFoundError):
+            await set_instance_openrouter_key_disabled(
+                {"instance_id": 7, "openrouter_key_hash": "gone"}, disabled=False
+            )
+        await set_instance_openrouter_key_disabled({"instance_id": 7, "openrouter_key_hash": None}, disabled=False)
+
+    assert missing.call_count == 2
+
+
+def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:
+    migration = (MIGRATIONS_DIR / "004_instance_lifecycle.sql").read_text(encoding="utf-8")
+    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
+
+    assert migration.lstrip().startswith("--")
+    assert "BEGIN;" in migration
+    assert migration.rstrip().endswith("COMMIT;")
+    assert "CREATE TABLE IF NOT EXISTS cleanup_runs" in migration
+    for column in ("lifecycle_stopped_at", "teardown_after", "lifecycle_error", "lifecycle_error_at"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in migration
+        assert column in baseline
+    for sql in (migration, baseline):
+        assert "ALTER TABLE cleanup_runs ENABLE ROW LEVEL SECURITY;" in sql
+        assert "REVOKE ALL ON TABLE cleanup_runs FROM PUBLIC, anon, authenticated;" in sql
+        assert "GRANT ALL ON TABLE cleanup_runs TO service_role;" in sql
+        assert "'incomplete', 'incomplete_expired', 'unpaid'" in sql

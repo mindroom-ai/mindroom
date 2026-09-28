@@ -64,6 +64,8 @@ else:
 PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {"1", "true", "yes"}
+# Days a stopped instance of an inactive subscription keeps its data before teardown.
+INSTANCE_TEARDOWN_GRACE_DAYS = int(os.getenv("INSTANCE_TEARDOWN_GRACE_DAYS", "30"))
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -156,6 +158,7 @@ __all__ = [
     "INSTANCE_SYNAPSE_IMAGE",
     "INSTANCE_SYNAPSE_IMAGE_PULL_POLICY",
     "INSTANCE_STORAGE_CLASS_NAME",
+    "INSTANCE_TEARDOWN_GRACE_DAYS",
     "INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED",
     "INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
     "INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER",

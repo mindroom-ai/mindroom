@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import time
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import stripe
@@ -55,6 +55,12 @@ class TestWebhookEndpoints:
         """Configure a webhook secret so requests reach signature verification."""
         with patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", _WEBHOOK_SECRET):
             yield
+
+    @pytest.fixture(autouse=True)
+    def mock_reconcile(self):
+        """Keep instance lifecycle side effects out of webhook persistence tests."""
+        with patch("backend.routes.webhooks.reconcile_account_instances", new=AsyncMock()) as mock:
+            yield mock
 
     @pytest.fixture
     def mock_stripe_signature(self):
@@ -247,6 +253,33 @@ class TestWebhookEndpoints:
         assert result["error"] is None
         inserted_payloads = [call_.args[0] for call_ in mock_supabase.table().insert.call_args_list if call_.args]
         assert any(payload.get("tier") == "byok" for payload in inserted_payloads)
+
+    @pytest.mark.parametrize(
+        ("event_type", "reconciles"),
+        [("customer.subscription.updated", True), ("customer.subscription.trial_will_end", False)],
+    )
+    def test_lifecycle_events_reconcile_account_instances(
+        self,
+        client: TestClient,
+        mock_stripe_signature: Mock,
+        mock_supabase: MagicMock,
+        mock_reconcile: AsyncMock,
+        event_type: str,
+        reconciles: bool,
+    ):
+        """Subscription and invoice events reconcile the account's instances after responding."""
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = Mock(
+            data={"id": "acc_123"}
+        )
+        mock_stripe_signature.return_value = self._create_stripe_event(event_type, self._create_subscription_data())
+
+        response = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "test_sig"})
+
+        assert response.status_code == 200
+        if reconciles:
+            mock_reconcile.assert_awaited_once_with("acc_123")
+        else:
+            mock_reconcile.assert_not_awaited()
 
     def test_subscription_created_no_account(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
