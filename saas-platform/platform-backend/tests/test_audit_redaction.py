@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from unittest.mock import Mock
 
 import pytest
@@ -113,25 +114,45 @@ async def test_audit_log_persists_non_object_json_bodies(monkeypatch: pytest.Mon
     assert inserted["details"]["status_code"] == 200
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("a" * 1_000_000, id="delimiter-free-run"),
-        pytest.param("A" * 1_000_000, id="uppercase-run"),
-        pytest.param("a=" * 500_000, id="chained-assignments"),
-        pytest.param("a='" * 300_000, id="chained-quoted-assignments"),
-        pytest.param("token=x," * 125_000, id="many-secret-assignments"),
-    ],
-)
-def test_redact_audit_details_is_bounded_on_adversarial_strings(text: str) -> None:
-    """Redaction must stay fast on long attacker-controlled strings and keys."""
-    started = time.perf_counter()
-    redacted = redact_audit_details({"value": text, text: "key"})
-    elapsed = time.perf_counter() - started
+def _growth_ratio(function: Callable[[str], object], unit: str, length: int = 50_000) -> float:
+    """Return how much longer `function` takes on four times as many repetitions of `unit`, best of three runs each.
 
-    assert elapsed < 1
+    Linear work gives about 4 and quadratic work about 16, independent of how fast the host is,
+    so a limit of 8 tolerates timing noise on a busy host.
+    """
+
+    def best_time(text: str) -> float:
+        timings = []
+        for _ in range(3):
+            started = time.perf_counter()
+            function(text)
+            timings.append(time.perf_counter() - started)
+        return min(timings)
+
+    return best_time(unit * (4 * length // len(unit))) / best_time(unit * (length // len(unit)))
+
+
+ADVERSARIAL_UNITS = [
+    pytest.param("a", id="delimiter-free-run"),
+    pytest.param("A", id="uppercase-run"),
+    pytest.param("a=", id="chained-assignments"),
+    pytest.param("a='", id="chained-quoted-assignments"),
+    pytest.param("token=x,", id="many-secret-assignments"),
+    pytest.param("https://h?", id="url-runs"),
+    pytest.param("Bearer x ", id="bearer-tokens"),
+]
+
+
+@pytest.mark.parametrize("unit", ADVERSARIAL_UNITS)
+def test_redact_audit_details_bounds_output_and_scales_linearly(unit: str) -> None:
+    """Long attacker-controlled strings and keys are redacted in linear time and cut to the audit text length."""
+    text = unit * (100_000 // len(unit))
+
+    redacted = redact_audit_details({"value": text, text: "key"})
+
     assert all(len(key) <= MAX_AUDIT_TEXT_LENGTH for key in redacted)
     assert all(len(value) <= MAX_AUDIT_TEXT_LENGTH for value in redacted.values())
+    assert _growth_ratio(lambda text: redact_audit_details({"value": text, text: "key"}), unit) < 8
 
 
 def test_redact_audit_details_bounds_quoted_secrets_that_never_close() -> None:
@@ -157,15 +178,38 @@ def test_redact_audit_details_classifies_each_key_once(children: object) -> None
     assert time.perf_counter() - started < 1
 
 
-def test_redact_audit_text_truncates_after_redacting_the_cut_region() -> None:
-    """Long audit text is truncated, and a secret that straddles the cut is still masked."""
-    text = "x" * (MAX_AUDIT_TEXT_LENGTH - 20) + " password=" + "s" * 100 + " tail"
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        pytest.param("", id="plain-text"),
+        # Redacting the long password shrinks the text, so the output cut falls far from the input position.
+        pytest.param("password=" + "S" * 1_500 + " note: ", id="after-a-shrinking-redaction"),
+    ],
+)
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("https://admin:HunterTwoPw@db.example.com/x", id="short-userinfo"),
+        pytest.param("https://admin:HunterTwoPw" + "P" * 600 + "@db.example.com/x", id="long-userinfo"),
+    ],
+)
+def test_redact_audit_text_masks_url_credentials_wherever_the_output_cut_falls(prefix: str, url: str) -> None:
+    """Text is redacted whole before the output is cut, so a credential straddling the cut never leaks a prefix."""
+    for filler_length in range(0, 2 * MAX_AUDIT_TEXT_LENGTH, 7):
+        redacted = redact_audit_text(prefix + "y" * filler_length + " " + url)
 
-    redacted = redact_audit_text(text)
+        assert len(redacted) <= MAX_AUDIT_TEXT_LENGTH
+        assert "Hunter" not in redacted
+        assert "S" * 5 not in redacted
+        assert "P" * 5 not in redacted
+
+
+def test_redact_audit_text_truncates_redacted_output() -> None:
+    """Output longer than the audit text length ends in the truncation marker."""
+    redacted = redact_audit_text("x" * (2 * MAX_AUDIT_TEXT_LENGTH) + " password=pw-secret")
 
     assert len(redacted) == MAX_AUDIT_TEXT_LENGTH
     assert redacted.endswith(TRUNCATED)
-    assert "s" * 5 not in redacted
 
 
 def test_redact_audit_text_redacts_secret_assignments_after_non_secret_keys() -> None:
@@ -200,6 +244,7 @@ def test_redact_audit_text_does_not_close_quoted_values_at_inner_quotes(text: st
         ("password=]P4ss", "P4ss"),
         ("password='}pw-secret\\'", "pw-secret"),
         ('Authorization: ]a\\cookie=",ck-secret\'"&', "ck-secret"),
+        ('password="abc\rcr-secret" user=bob', "cr-secret"),
     ],
 )
 def test_redact_audit_text_redacts_values_that_start_with_a_delimiter(text: str, secret: str) -> None:
@@ -226,7 +271,7 @@ def _assignment_text(draw: st.DrawFn) -> tuple[str, list[str]]:
         rest = draw(st.text(_VALUE_CHARACTERS, max_size=12))
         quote = draw(st.sampled_from(["", "'", '"']))
         if quote:
-            inner = draw(st.text(st.sampled_from(" ,&)]}(" + ("'" if quote == '"' else '"')), max_size=3))
+            inner = draw(st.text(st.sampled_from(" ,&)]}(\r" + ("'" if quote == '"' else '"')), max_size=3))
             value = f"{quote}{inner}{marker}{rest}{inner}{quote}"
         else:
             first = draw(st.sampled_from(",&)]}(=!#'\""))
@@ -256,6 +301,8 @@ def test_redact_audit_text_redacts_every_secret_assignment_value(case: tuple[str
 @pytest.mark.parametrize(
     "unit",
     [
+        "authorization=",
+        "authorization=***redacted***=",
         "authorization=bearer ***redacted***",
         "authorization: bearer ***redacted*** ",
         "Authorization: basic ",
@@ -266,14 +313,9 @@ def test_redact_audit_text_redacts_every_secret_assignment_value(case: tuple[str
         "a=",
     ],
 )
-def test_secret_assignment_scan_is_linear_without_the_length_cap(unit: str) -> None:
-    """The scanner itself stays linear, so its safety does not rest on the audit text length cap."""
-    text = unit * (200_000 // len(unit))
-
-    started = time.perf_counter()
-    _redact_secret_assignments(text)
-
-    assert time.perf_counter() - started < 1
+def test_secret_assignment_scan_is_linear(unit: str) -> None:
+    """The assignment scan is linear in its input, which is the only bound on redaction cost."""
+    assert _growth_ratio(_redact_secret_assignments, unit) < 8
 
 
 def test_redact_audit_details_redacts_unparseable_urls_instead_of_failing() -> None:

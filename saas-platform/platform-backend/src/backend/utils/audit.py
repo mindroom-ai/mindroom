@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
 _REDACTED_BEARER = f"bearer {REDACTED}"
 _AUTHORIZATION_SCHEMES = frozenset({"basic", "bearer"})
+_LONGEST_AUTHORIZATION_SCHEME = max(map(len, _AUTHORIZATION_SCHEMES))
 TRUNCATED = "... [truncated]"
-# Audit text is cut to this length; redaction scans a little further so a secret straddling the cut is still masked.
+# Audit text is redacted whole and only the redacted output is cut to this length.
 MAX_AUDIT_TEXT_LENGTH = 4 * 1024
-_REDACTION_LOOKAHEAD_CHARS = 512
 MAX_AUDIT_DEPTH = 32
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
@@ -42,7 +42,7 @@ _ASSIGNMENT_VALUE_END_PATTERN = re.compile(
 )
 _QUOTE_PATTERN = re.compile(r"[\"']")
 _TRAILING_SPACE_PATTERN = re.compile(r"\s*+\Z")
-_LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
+_LINE_BREAK_PATTERN = re.compile(r"\n")
 _ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
 _NON_ALPHANUMERIC_RUN_PATTERN = re.compile(r"[^a-z0-9]+")
@@ -224,10 +224,11 @@ def _redact_secret_assignments(value: str) -> str:
         if span is None:
             continue
         value_start, value_end = span
-        # A bare, unquoted authorization scheme carries no credential.
+        # A bare, unquoted authorization scheme carries no credential; the length check keeps long values unsliced.
         if (
             is_authorization
             and value_start == search_start
+            and value_end - value_start <= _LONGEST_AUTHORIZATION_SCHEME
             and value[value_start:value_end].lower() in _AUTHORIZATION_SCHEMES
         ):
             continue
@@ -242,10 +243,6 @@ def _redact_secret_assignments(value: str) -> str:
         copied_until = value_end
     parts.append(value[copied_until:])
     return "".join(parts)
-
-
-def _redaction_input(value: str) -> str:
-    return value[: MAX_AUDIT_TEXT_LENGTH + _REDACTION_LOOKAHEAD_CHARS]
 
 
 def _truncate_audit_text(value: str) -> str:
@@ -288,7 +285,7 @@ def _redact_url(value: str) -> str:
 def _redact_query_fragment(value: str) -> str:
     query_items: list[tuple[str, str]] = []
     changed = False
-    for key, item in parse_qsl(_redaction_input(value), keep_blank_values=True):
+    for key, item in parse_qsl(value, keep_blank_values=True):
         if _is_redacted_query_key(key):
             query_items.append((key, REDACTED))
             changed = True
@@ -301,7 +298,7 @@ def _redact_query_fragment(value: str) -> str:
 
 def redact_audit_text(value: str) -> str:
     """Redact credential-bearing values from free-form audit text and cut it to `MAX_AUDIT_TEXT_LENGTH`."""
-    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), _redaction_input(value))
+    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
