@@ -211,8 +211,10 @@ Only `TMPDIR` and `LANG` come from the helper's own environment, so helper crede
 
 If capture fails or takes longer than 5 seconds, commands use that minimal environment instead.
 Profile changes apply the next time the bridge starts.
-Commands read standard input from `/dev/null` and have no terminal, so they cannot answer password prompts, but they keep any authority the account already has without one.
-Standard error is merged into standard output in the order it is written.
+Each call runs in a fresh non-interactive `/bin/sh`, so a directory change, variable, or other shell state never carries over to the next call.
+`$SHELL` is still your login shell, not the shell running the command.
+Commands read standard input from `/dev/null`, so it is at end of file, and have no terminal, so they cannot answer password prompts, but they keep any authority the account already has without one.
+Standard error is merged into standard output in the order it is written; redirect it with `2>file` to keep it separate.
 
 The bridge captures up to 10 MiB of combined output per command in private temporary files, which it removes after transfer and when it stops.
 Output beyond that limit is dropped, and the result reports `output_truncated: true`.

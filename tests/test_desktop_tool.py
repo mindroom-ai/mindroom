@@ -11,12 +11,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
-from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 from tests.conftest import test_runtime_paths
@@ -832,6 +833,26 @@ def test_local_folder_and_shell_actions_are_discoverable_with_their_own_paramete
     assert "check_shell" in description
     assert "kill_shell" in description
     assert "untrusted" in description
+
+
+def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
+    """The agent learns the real size limits and that each command runs alone in a non-interactive /bin/sh."""
+    function = DesktopTools().async_functions["desktop"]
+    description = function.description or ""
+    assert f"{DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB" in description
+    assert f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB" in description
+    for phrase in (
+        "stderr is merged into output in order",
+        "2>file",
+        "$SHELL is the user's login shell",
+        "fresh non-interactive /bin/sh",
+        "stdin at EOF",
+        "no TTY",
+    ):
+        assert phrase in description
+    command = function.parameters["properties"]["command"]["description"]
+    assert "/bin/sh" in command
+    assert "2>file" in command
 
 
 @pytest.mark.asyncio
