@@ -42,7 +42,7 @@ Each model configuration supports the following fields:
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
+MindRoom never passes the shared key to a model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`), although Agno may still read `ANTHROPIC_API_KEY` or `AZURE_OPENAI_API_KEY` from the process environment.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 

@@ -436,6 +436,55 @@ describe("ModelConfig", () => {
     });
   });
 
+  it.each([
+    { provider: /DeepSeek/i, newKey: "paste" },
+    { provider: /DeepSeek/i, newKey: "reuse" },
+    { provider: /Ollama/i, newKey: "none" },
+  ])(
+    "removes the old saved key once when a renamed model switches provider ($newKey)",
+    async ({ provider, newKey }) => {
+      addModels({
+        keyed: { provider: "openai", id: "gpt-6-astra" },
+        deepseek_other: { provider: "deepseek", id: "deepseek-flash" },
+      });
+      keyStatusByService["model:deepseek_other"] = {
+        has_key: true,
+        source: "ui",
+        masked_key: "sk-ds...0000",
+      };
+      await renderWithSavedKeyedModelKey();
+
+      const row = editKeyedRow();
+      fireEvent.change(within(row).getByDisplayValue("keyed"), {
+        target: { value: "keyed2" },
+      });
+      chooseProvider(row, provider);
+      if (newKey === "paste") {
+        fireEvent.change(
+          within(row).getByPlaceholderText("Paste new API key"),
+          {
+            target: { value: "sk-new" },
+          },
+        );
+      } else if (newKey === "reuse") {
+        const reuseTrigger = within(row)
+          .getByText("Reuse from same provider")
+          .closest("button");
+        if (!reuseTrigger) throw new Error("reuse trigger not found");
+        fireEvent.click(reuseTrigger);
+        fireEvent.click(
+          screen.getByRole("option", { name: /deepseek_other/i }),
+        );
+      }
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.deleteModel).toHaveBeenCalledWith("keyed");
+      });
+      expect(deleteCallsFor("model:keyed")).toHaveLength(1);
+    },
+  );
+
   it("keeps the saved key when the provider is switched back before saving", async () => {
     addKeyedOpenAIModel({ api_key: "sk-openai-config" });
     await renderWithSavedKeyedModelKey();

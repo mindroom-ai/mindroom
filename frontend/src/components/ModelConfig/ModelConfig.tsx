@@ -798,6 +798,7 @@ export function ModelConfig() {
       rowDraft.provider !== originalModelConfig.provider;
 
     let keyOperationOk = true;
+    let deletedOriginalKey = false;
 
     if (rowDraft.provider !== "ollama") {
       if (hasKeyReuseSource) {
@@ -812,6 +813,7 @@ export function ModelConfig() {
         );
       } else if (clearsCustomKey && hadCustomKey) {
         keyOperationOk = await deleteModelApiKey(originalModelName);
+        deletedOriginalKey = true;
       } else if (renamed && hadCustomKey) {
         keyOperationOk = await copyModelApiKey(
           targetModelName,
@@ -820,9 +822,11 @@ export function ModelConfig() {
       }
     } else if (hadCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
+      deletedOriginalKey = true;
     }
 
-    if (keyOperationOk && renamed && hadCustomKey && !clearsCustomKey) {
+    // A renamed model's saved key must not stay behind under the old name.
+    if (keyOperationOk && renamed && hadCustomKey && !deletedOriginalKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
