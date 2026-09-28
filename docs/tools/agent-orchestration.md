@@ -639,7 +639,8 @@ manage_team(
 ### What It Does
 
 `self_config` exposes `get_own_config()` and `update_own_config()`.
-`get_own_config()` returns the current agent's authored YAML block.
+`get_own_config()` returns the current agent's authored YAML block, redacted like `config_manager` inspection.
+Reads and writes both require a requester listed in `administrators`.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
 `update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
