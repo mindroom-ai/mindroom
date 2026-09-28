@@ -200,7 +200,7 @@ final class CommandRunnerTests: XCTestCase {
         let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
             recorder.record(invocation.arguments)
             return CommandResult(exitCode: 0, output: "Paired")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
@@ -216,7 +216,7 @@ final class CommandRunnerTests: XCTestCase {
             invocation.arguments.contains("connect")
                 ? CommandResult(exitCode: MindRoomCommand.alreadyConnectedExitCode, output: "This machine is already connected.")
                 : CommandResult(exitCode: 0, output: "MindRoom service: running (pid 123)")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
@@ -232,7 +232,7 @@ final class CommandRunnerTests: XCTestCase {
         let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
             recorder.record(invocation.arguments)
             return CommandResult(exitCode: 0, output: "Paired")
-        })
+        }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.reconnectHosted)
         await fulfillment(of: [completed], timeout: 3)
