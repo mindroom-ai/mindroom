@@ -133,7 +133,6 @@ class CliWorkerLease:
         launch = CliWorkerLaunch(
             protocol_version=WORKER_PROTOCOL_VERSION,
             worker_key=self.handle.worker_key,
-            state_scope_worker_key=self.spec.state_scope_worker_key or "",
             private_agent_names=sorted(self.spec.private_agent_names or ()),
             turn_id=owner.turn_id,
             generation=owner.generation,

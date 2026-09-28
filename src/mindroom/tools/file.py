@@ -29,6 +29,7 @@ from mindroom.tools.path_safety import (
     read_resolved_file,
     remove_resolved_path,
     resolve_base_dir_path,
+    resolve_tool_base_dir,
     split_search_pattern,
     write_resolved_file,
 )
@@ -79,6 +80,8 @@ class _MindRoomFileTools(AgnoFileTools):
             all=all,
             **cast("dict[str, Any]", kwargs),
         )
+        # Agno's plain resolve would adopt the target of a link swapped in after runtime resolution.
+        self.base_dir = resolve_tool_base_dir(base_dir)
 
     def _check_path(self, file_name: str, base_dir: Path, restrict_to_base_dir: bool = True) -> tuple[bool, Path]:
         """Resolve a path against base_dir, honoring this toolkit's restriction setting.
@@ -88,8 +91,8 @@ class _MindRoomFileTools(AgnoFileTools):
         del restrict_to_base_dir
         try:
             return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir)
-        except ValueError:
-            log_error(f"Path escapes base directory: {file_name}")
+        except ValueError as exc:
+            log_error(f"Refused path {file_name}: {exc}")
             return False, base_dir
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
@@ -249,12 +252,10 @@ class _MindRoomFileTools(AgnoFileTools):
         against ``base_dir``, so an outside directory is searched by a copy
         rooted there and its hits are reported as absolute paths.
         """
-        if not directory:
-            return super().search_content(query, directory, limit)
-        safe, search_dir = self._check_path(directory, self.base_dir)
+        safe, search_dir = self._check_path(directory or ".", self.base_dir)
         if not safe:
-            return blocked_file_action_message("searching content", directory, self.base_dir)
-        if is_within_base_dir(search_dir, self.base_dir):
+            return blocked_file_action_message("searching content", directory or ".", self.base_dir)
+        if self.restrict_to_base_dir or is_within_base_dir(search_dir, self.base_dir):
             return super().search_content(query, directory, limit)
         if not search_dir.is_dir():
             return f"Error: '{directory}' is not a directory"
