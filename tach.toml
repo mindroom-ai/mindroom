@@ -4171,7 +4171,7 @@ visibility = ["mindroom.cli.main"]
 
 [[modules]]
 path = "mindroom.cli.pairing_probes"
-depends_on = ["mindroom.runtime_state"]
+depends_on = []
 visibility = ["mindroom.cli.main"]
 
 [[modules]]

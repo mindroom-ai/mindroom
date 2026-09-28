@@ -157,7 +157,8 @@ curl http://localhost:8765/api/health
 ```
 
 An unpaired hosted container answers `/api/health` with `200` while it waits for pairing approval, so a health check does not restart it and replace its pairing code.
-`/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"` until pairing finishes and startup completes.
+During that wait, `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`.
+After approval, the port is briefly closed while the full API server takes it over, as at any startup, and `/api/ready` then reports normal startup progress until MindRoom is ready.
 Find the approval link in the container logs.
 
 ## Data Persistence

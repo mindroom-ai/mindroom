@@ -16,13 +16,13 @@ from mindroom import constants as constants_mod
 from mindroom.cli import main as main_module
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
+from mindroom.cli.pairing_probes import serve_pairing_probes
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.runtime_state import get_runtime_state
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
@@ -576,7 +576,62 @@ def test_run_answers_health_probes_while_waiting_for_pairing(tmp_path: Path) -> 
     assert probes["ready"].status_code == 503
     assert probes["ready"].json() == {"status": "starting", "detail": "Waiting for local pairing approval"}
     assert started_ports == [port]
-    assert get_runtime_state().phase == "idle"
+
+
+def _require_ipv6_loopback() -> None:
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback is unavailable")
+
+
+def _probe_status(host: str, port: int) -> int:
+    return httpx.get(f"http://{host}:{port}/api/health", trust_env=False).status_code
+
+
+def test_pairing_probes_answer_on_every_localhost_address() -> None:
+    """Like the real API server, `localhost` probes answer on both loopbacks, and a taken IPv4 loopback fails early."""
+    _require_ipv6_loopback()
+    families = {info[0] for info in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)}
+    if families != {socket.AF_INET, socket.AF_INET6}:
+        pytest.skip("localhost does not resolve to both loopbacks")
+    port = _unused_local_port()
+
+    with serve_pairing_probes("localhost", port):
+        assert _probe_status("127.0.0.1", port) == 200
+        assert _probe_status("[::1]", port) == 200
+
+    # Probe connections leave TIME_WAIT entries, which SO_REUSEADDR skips just as the real API server does.
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("127.0.0.1", port))
+        occupied.listen()
+        with pytest.raises(OSError, match="Address already in use"), serve_pairing_probes("localhost", port):
+            pass
+    # No listener stays bound after the failure.
+    with socket.socket(socket.AF_INET6) as released:
+        released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        released.bind(("::1", port))
+        released.listen()
+
+
+def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
+    """Like the real API server, `::` binds IPv6 only, so an IPv4 listener on the same port does not block pairing."""
+    _require_ipv6_loopback()
+    port = _unused_local_port()
+
+    with serve_pairing_probes("::", port):
+        assert _probe_status("[::1]", port) == 200
+        with pytest.raises(httpx.ConnectError):
+            _probe_status("127.0.0.1", port)
+
+    with socket.socket() as ipv4_listener:
+        ipv4_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ipv4_listener.bind(("0.0.0.0", port))  # noqa: S104
+        ipv4_listener.listen()
+        with serve_pairing_probes("::", port):
+            assert _probe_status("[::1]", port) == 200
 
 
 def test_run_fails_before_pairing_when_the_api_address_is_taken(tmp_path: Path) -> None:

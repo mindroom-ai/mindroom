@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 import socket
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
-
-from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_starting
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -26,12 +24,11 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"status": "healthy"})
         elif path == "/api/ready":
-            state = get_runtime_state()
-            self._send_json(503, {"status": state.phase, "detail": state.detail})
+            self._send_json(503, {"status": "starting", "detail": _PAIRING_WAIT_DETAIL})
         else:
             self._send_json(404, {"detail": "Not Found"})
 
-    def _send_json(self, status: int, payload: dict[str, str | None]) -> None:
+    def _send_json(self, status: int, payload: dict[str, str]) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -44,10 +41,15 @@ class _ProbeHandler(BaseHTTPRequestHandler):
 
 
 class _ProbeServer(ThreadingHTTPServer):
-    def __init__(self, host: str, port: int) -> None:
-        # Pick the address family from the host so IPv6 binds such as `::` work like the real API server.
-        self.address_family = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0][0]
-        super().__init__((host, port), _ProbeHandler)
+    def __init__(self, family: socket.AddressFamily, address: tuple) -> None:
+        self.address_family = family
+        super().__init__(address, _ProbeHandler)
+
+    def server_bind(self) -> None:
+        # Like asyncio's create_server behind Uvicorn, an IPv6 listener leaves IPv4 to its own listener.
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
 
 
 @contextmanager
@@ -57,13 +59,20 @@ def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
     Container probes then see a live process that is waiting for pairing instead of a closed port.
     Raises OSError when the address cannot be bound, before pairing starts.
     """
-    server = _ProbeServer(host, port)
-    set_runtime_starting(_PAIRING_WAIT_DETAIL)
-    thread = threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True)
-    thread.start()
-    try:
+    # Bind every resolved address, as the real API server does, so `localhost` answers on both loopbacks.
+    addresses = {
+        (family, address)
+        for family, _type, _proto, _canonname, address in socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+            flags=socket.AI_PASSIVE,
+        )
+    }
+    with ExitStack() as servers:
+        for family, address in addresses:
+            server = _ProbeServer(family, address)
+            servers.callback(server.server_close)
+            threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True).start()
+            servers.callback(server.shutdown)
         yield
-    finally:
-        server.shutdown()
-        server.server_close()
-        reset_runtime_state()
