@@ -977,8 +977,8 @@ def test_pair_local_install_does_not_note_an_owner_who_is_administrator(tmp_path
 
 @pytest.mark.parametrize(
     "config_text",
-    ["- administrators\n", "administrators: 5\n"],
-    ids=["top-level-list", "scalar-administrators"],
+    ["- administrators\n", "administrators: 5\n", "administrators: false\n", "administrators: {}\n"],
+    ids=["top-level-list", "scalar-administrators", "false-administrators", "mapping-administrators"],
 )
 def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path, config_text: str) -> None:
     """A config of the wrong shape leaves the administrator check unknown, so pairing completes without a note."""

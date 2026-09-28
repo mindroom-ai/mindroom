@@ -596,7 +596,9 @@ def _should_note_missing_administrator(config_path: Path, owner_user_id: str) ->
         return False
     if not isinstance(data, dict):
         return False
-    administrators = data.get("administrators") or []
+    administrators = data.get("administrators")
+    if administrators is None:
+        return True
     return isinstance(administrators, list) and owner_user_id not in administrators
 
 
