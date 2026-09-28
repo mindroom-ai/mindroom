@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
-from mindroom.matrix.identity import MAX_MATRIX_USER_ID_BYTES, MatrixID, parse_current_matrix_user_id
+from mindroom.matrix.identity import MatrixID, matrix_user_id_prefix_candidates, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
@@ -354,9 +354,7 @@ def _literal_user_resolution(user_id: str) -> _MentionResolution:
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
     """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
-    # No prefix longer than the user ID byte limit can be valid, so only those prefixes are validated.
-    for end in range(min(len(token), MAX_MATRIX_USER_ID_BYTES), 0, -1):
-        candidate = token[:end]
+    for candidate in matrix_user_id_prefix_candidates(token):
         if _is_valid_explicit_matrix_user_id(candidate):
             return candidate
     return None

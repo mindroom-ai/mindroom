@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
-if TYPE_CHECKING:
-    import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -23,6 +23,9 @@ from mindroom.matrix.mentions import (
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
+
+if TYPE_CHECKING:
+    import pytest
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
@@ -933,6 +936,71 @@ class TestMentionScanCost:
         assert user_ids == ["@alice:example.org"]
         assert len(validated) <= 2 * 255
         assert max(len(candidate) for candidate in validated) <= 255
+
+    @given(
+        localpart=st.text(alphabet="ab_.=/+-A", max_size=6),
+        server_pieces=st.lists(
+            st.sampled_from(
+                [
+                    "a",
+                    "Z",
+                    "0",
+                    "9",
+                    "-",
+                    ".",
+                    ":",
+                    "[",
+                    "]",
+                    "::1",
+                    "[::1]",
+                    ":8448",
+                    "65536",
+                    "a" * 64,
+                    "_",
+                    "٣",
+                    "!",
+                ],
+            ),
+            max_size=40,
+        ),
+    )
+    @settings(max_examples=3000, deadline=None)
+    def test_structural_candidates_find_the_longest_valid_prefix(
+        self,
+        localpart: str,
+        server_pieces: list[str],
+    ) -> None:
+        """Validating only structural candidates finds the same user ID as validating every prefix."""
+        token = f"@{localpart}{''.join(server_pieces)}"
+        every_prefix = next(
+            (
+                token[:end]
+                for end in range(len(token), 0, -1)
+                if mentions_module._is_valid_explicit_matrix_user_id(token[:end])
+            ),
+            None,
+        )
+
+        assert mentions_module._extract_longest_valid_matrix_user_id(token) == every_prefix
+
+    def test_crafted_short_tokens_validate_few_candidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tokens under the length limit whose ports never validate still cost only a few validations each."""
+        config = _make_config(_default_runtime_paths())
+        validated: list[str] = []
+        original_parse = mentions_module.parse_current_matrix_user_id
+
+        def counting_parse(candidate: str) -> str:
+            validated.append(candidate)
+            return original_parse(candidate)
+
+        monkeypatch.setattr(mentions_module, "parse_current_matrix_user_id", counting_parse)
+        token = "@a:" + "b." * 63 + "b:" + "x" * 120
+        text = f"{token} " * 200
+
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+
+        assert user_ids == ["@a:" + "b." * 63 + "b"]
+        assert len(validated) <= 7 * 200
 
     def test_many_explicit_matrix_ids_scan_in_linear_time(self) -> None:
         """Thousands of explicit MXIDs in one body are scanned without pairwise span comparisons."""
