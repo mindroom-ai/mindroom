@@ -318,7 +318,10 @@ def _ingress_controller_peers(policy: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize(("namespace", "expected"), [(None, "ingress-nginx"), ("nginx", "nginx")])
-def test_instance_chart_admits_the_configured_ingress_controller_namespace(namespace: str | None, expected: str) -> None:
+def test_instance_chart_admits_the_configured_ingress_controller_namespace(
+    namespace: str | None,
+    expected: str,
+) -> None:
     """Both controller rules follow one chart value, whose default keeps the namespace existing releases admit."""
     set_args = () if namespace is None else (f"ingressControllerNamespace={namespace}",)
     policy = _resource(
