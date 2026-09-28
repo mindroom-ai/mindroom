@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
 
@@ -64,24 +65,18 @@ def _extract_mentioned_user_ids(
     mentions = content.get("m.mentions")
     user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
     if isinstance(user_ids, list) and user_ids:
-        return [user_id for user_id in user_ids if isinstance(user_id, str)]
+        return list(dict.fromkeys(user_id for user_id in user_ids if isinstance(user_id, str)))
 
     formatted_body = content.get("formatted_body")
     if isinstance(formatted_body, str):
         pill_user_ids = _MATRIX_PILL_RE.findall(formatted_body)
         if pill_user_ids:
-            return pill_user_ids
+            return list(dict.fromkeys(pill_user_ids))
 
     body = content.get("body")
     if isinstance(body, str):
         return resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
     return []
-
-
-def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
-    registry = entity_identity_registry(config, runtime_paths)
-    return registry.current_entity_name_for_user_id(sender) is not None or sender in config.bot_accounts
 
 
 def is_router_only_agent_mention(
@@ -120,9 +115,15 @@ def check_agent_mentioned(
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, registry)
     am_i_mentioned = agent_id in mentioned_agents
-    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
+    bot_accounts = set(config.bot_accounts)
+    non_agent_mentions = [
+        uid
+        for uid in all_mentioned_ids
+        if registry.current_entity_name_for_user_id(uid) is None and uid not in bot_accounts
+    ]
     has_non_agent_mentions = bool(non_agent_mentions) and (
         not room_membership_is_complete(room)
         or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
@@ -162,13 +163,8 @@ def get_agents_in_thread(
     return agents
 
 
-def _agents_from_user_ids(
-    user_ids: list[str],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[MatrixID]:
+def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
-    registry = entity_identity_registry(config, runtime_paths)
     agents: list[MatrixID] = []
     for user_id in user_ids:
         agent_name = registry.current_entity_name_for_user_id(user_id)
@@ -264,11 +260,12 @@ def get_all_mentioned_agents_in_thread(
     """
     mentioned_agents = []
     seen_ids: set[str] = set()
+    registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
         content = msg.content
         user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-        agents = _agents_from_user_ids(user_ids, config, runtime_paths)
+        agents = _agents_from_user_ids(user_ids, registry)
 
         for agent in agents:
             if agent.full_id not in seen_ids:

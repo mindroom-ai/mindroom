@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import tempfile
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -16,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix import mentions as mentions_module
 from mindroom.matrix.mentions import (
+    _MAX_MENTION_TOKENS_PER_SCANNER,
     format_message_with_mentions,
     parse_mentions_in_text,
     resolve_mentioned_user_ids_from_text,
@@ -908,6 +908,19 @@ class TestMentionParsing:
             assert len(mentions) == len(expected_agents)
 
 
+def _count_calls(monkeypatch: pytest.MonkeyPatch, name: str) -> list[object]:
+    """Record the first argument of every call to one mentions-module function."""
+    calls: list[object] = []
+    original = getattr(mentions_module, name)
+
+    def counting(first: object, *args: object, **kwargs: object) -> object:
+        calls.append(first)
+        return original(first, *args, **kwargs)
+
+    monkeypatch.setattr(mentions_module, name, counting)
+    return calls
+
+
 class TestMentionScanCost:
     """Mention scanning stays linear in the body so one message cannot stall the shared event loop."""
 
@@ -917,14 +930,7 @@ class TestMentionScanCost:
     ) -> None:
         """A single huge @-token only validates prefixes a Matrix user ID could have."""
         config = _make_config(_default_runtime_paths())
-        validated: list[str] = []
-        original_parse = mentions_module.parse_current_matrix_user_id
-
-        def counting_parse(candidate: str) -> str:
-            validated.append(candidate)
-            return original_parse(candidate)
-
-        monkeypatch.setattr(mentions_module, "parse_current_matrix_user_id", counting_parse)
+        validated = _count_calls(monkeypatch, "parse_current_matrix_user_id")
         token = "@" + "a" * 8_000 + ":" + "b" * 8_000
 
         user_ids = resolve_mentioned_user_ids_from_text(
@@ -935,7 +941,7 @@ class TestMentionScanCost:
 
         assert user_ids == ["@alice:example.org"]
         assert len(validated) <= 2 * 255
-        assert max(len(candidate) for candidate in validated) <= 255
+        assert max(len(str(candidate)) for candidate in validated) <= 255
 
     @given(
         localpart=st.text(alphabet="ab_.=/+-A", max_size=6),
@@ -986,42 +992,96 @@ class TestMentionScanCost:
     def test_crafted_short_tokens_validate_few_candidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Tokens under the length limit whose ports never validate still cost only a few validations each."""
         config = _make_config(_default_runtime_paths())
-        validated: list[str] = []
-        original_parse = mentions_module.parse_current_matrix_user_id
-
-        def counting_parse(candidate: str) -> str:
-            validated.append(candidate)
-            return original_parse(candidate)
-
-        monkeypatch.setattr(mentions_module, "parse_current_matrix_user_id", counting_parse)
+        validated = _count_calls(monkeypatch, "parse_current_matrix_user_id")
         token = "@a:" + "b." * 63 + "b:" + "x" * 120
         text = f"{token} " * 200
 
         user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
 
         assert user_ids == ["@a:" + "b." * 63 + "b"]
-        assert len(validated) <= 7 * 200
+        assert len(validated) == 200
 
-    def test_many_explicit_matrix_ids_scan_in_linear_time(self) -> None:
-        """Thousands of explicit MXIDs in one body are scanned without pairwise span comparisons."""
+    def test_many_explicit_matrix_ids_resolve_a_bounded_number_of_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Thousands of explicit MXIDs in one body cost a bounded number of validations and alias checks."""
         config = _make_config(_default_runtime_paths())
-        text = "@a:b.c " * 20_000
+        validated = _count_calls(monkeypatch, "parse_current_matrix_user_id")
+        alias_localparts = _count_calls(monkeypatch, "_mention_localpart")
 
-        started = time.perf_counter()
-        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
-        elapsed = time.perf_counter() - started
+        user_ids = resolve_mentioned_user_ids_from_text("@a:b.c " * 20_000, config, _runtime_paths_for(config))
 
         assert user_ids == ["@a:b.c"]
-        assert elapsed < 1.0
+        assert len(validated) == _MAX_MENTION_TOKENS_PER_SCANNER
+        assert len(alias_localparts) == 0
 
-    def test_fenced_code_and_explicit_matrix_ids_scan_in_linear_time(self) -> None:
-        """Many fenced blocks next to many MXIDs do not compare every token with every fence."""
+    def test_distinct_matrix_ids_resolve_a_bounded_number_of_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A body of distinct user IDs resolves only the per-body token budget, in mention order."""
         config = _make_config(_default_runtime_paths())
-        text = "```\n@x:y.z\n```\n" * 5_000 + "@a:b.c " * 10_000
+        validated = _count_calls(monkeypatch, "parse_current_matrix_user_id")
+        text = " ".join(f"@u{index}:b.c" for index in range(20_000))
 
-        started = time.perf_counter()
         user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
-        elapsed = time.perf_counter() - started
 
-        assert user_ids == ["@a:b.c"]
-        assert elapsed < 1.0
+        assert user_ids == [f"@u{index}:b.c" for index in range(_MAX_MENTION_TOKENS_PER_SCANNER)]
+        assert len(validated) == _MAX_MENTION_TOKENS_PER_SCANNER
+
+    def test_mentioned_user_id_deduplication_is_linear(self) -> None:
+        """Deduplicating resolved mentions compares each user ID a bounded number of times."""
+        comparisons = 0
+
+        class CountingUserId(str):
+            __slots__ = ()
+
+            def __eq__(self, other: object) -> bool:
+                nonlocal comparisons
+                comparisons += 1
+                return str.__eq__(self, other)
+
+            __hash__ = str.__hash__
+
+        replacements = [
+            mentions_module._MentionReplacement(
+                start=index,
+                end=index + 1,
+                plain_text="",
+                markdown_text="",
+                user_id=CountingUserId(f"@u{index % 1000}:b.c"),
+            )
+            for index in range(2000)
+        ]
+
+        user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
+
+        assert user_ids == [f"@u{index}:b.c" for index in range(1000)]
+        assert comparisons <= 2000
+
+    def test_fenced_code_does_not_consume_or_multiply_mention_scanning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mentions after many fenced blocks resolve, without comparing every token with every fence."""
+        config = _make_config(_default_runtime_paths())
+        span_comparisons = 0
+
+        class CountingOffset(int):
+            def __lt__(self, other: object) -> bool:
+                nonlocal span_comparisons
+                span_comparisons += 1
+                return int.__lt__(self, other)
+
+            def __gt__(self, other: object) -> bool:
+                nonlocal span_comparisons
+                span_comparisons += 1
+                return int.__gt__(self, other)
+
+        original_fences = mentions_module.markdown_fenced_code_ranges
+
+        def counting_fences(text: str) -> list[tuple[int, int]]:
+            return [(CountingOffset(start), CountingOffset(end)) for start, end in original_fences(text)]
+
+        monkeypatch.setattr(mentions_module, "markdown_fenced_code_ranges", counting_fences)
+        text = "```\n@x:y.z\n```\n" * 2_000 + "@a:b.c @calculator " * 2_000
+
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+
+        assert user_ids == ["@a:b.c", "@actual_calculator:localhost"]
+        assert span_comparisons <= 20_000

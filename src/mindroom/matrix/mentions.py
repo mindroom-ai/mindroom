@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_left
 from dataclasses import dataclass
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -15,7 +16,7 @@ from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_lo
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Iterator
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
 
 _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
+# Each scanner resolves at most this many @ tokens per body, so one message costs bounded CPU on the shared loop.
+_MAX_MENTION_TOKENS_PER_SCANNER = 256
 
 
 @dataclass(frozen=True)
@@ -141,11 +144,7 @@ def format_entity_mention(
 
 def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
     """Return replacement user IDs without duplicates while preserving mention order."""
-    mentioned_user_ids: list[str] = []
-    for replacement in replacements:
-        if replacement.user_id not in mentioned_user_ids:
-            mentioned_user_ids.append(replacement.user_id)
-    return mentioned_user_ids
+    return list(dict.fromkeys(replacement.user_id for replacement in replacements))
 
 
 def _scan_mention_tokens(text: str) -> list[_MentionToken]:
@@ -153,28 +152,42 @@ def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     if "@" not in text:
         return []
 
-    fenced_code_ranges = markdown_fenced_code_ranges(text)
-    fenced_code_spans = _DisjointSpans.from_spans(fenced_code_ranges)
-    tokens = [
-        token
-        for token in _scan_explicit_matrix_id_tokens(text)
-        if not fenced_code_spans.overlaps(token.start, token.end)
-    ]
+    # Fences span whole lines, so no token crosses a fence boundary and prose can be scanned on its own.
+    prose_ranges = _ranges_outside(markdown_fenced_code_ranges(text), len(text))
+    tokens = _scan_explicit_matrix_id_tokens(text, prose_ranges)
     tokens.extend(
         _scan_entity_alias_tokens(
             text,
-            occupied_spans=_DisjointSpans.from_spans(
-                [*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
-            ),
+            prose_ranges,
+            occupied_spans=_DisjointSpans.from_spans((token.start, token.end) for token in tokens),
         ),
     )
     return sorted(tokens, key=lambda token: token.start)
 
 
-def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
-    """Return explicit full-MXID tokens from text."""
+def _ranges_outside(ranges: list[tuple[int, int]], text_length: int) -> list[tuple[int, int]]:
+    """Return the gaps around sorted, disjoint ranges within one text."""
+    gaps: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in ranges:
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = end
+    if cursor < text_length:
+        gaps.append((cursor, text_length))
+    return gaps
+
+
+def _prose_matches(pattern: re.Pattern[str], text: str, prose_ranges: list[tuple[int, int]]) -> Iterator[re.Match[str]]:
+    """Yield at most the per-scanner token budget of pattern matches from prose ranges, in text order."""
+    matches = (match for start, end in prose_ranges for match in pattern.finditer(text, start, end))
+    return islice(matches, _MAX_MENTION_TOKENS_PER_SCANNER)
+
+
+def _scan_explicit_matrix_id_tokens(text: str, prose_ranges: list[tuple[int, int]]) -> list[_MentionToken]:
+    """Return explicit full-MXID tokens from prose text."""
     tokens: list[_MentionToken] = []
-    for match in _FULL_MATRIX_ID_CANDIDATE_PATTERN.finditer(text):
+    for match in _prose_matches(_FULL_MATRIX_ID_CANDIDATE_PATTERN, text, prose_ranges):
         user_id = _extract_longest_valid_matrix_user_id(match.group(0))
         if user_id is None:
             continue
@@ -193,12 +206,13 @@ def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
 
 def _scan_entity_alias_tokens(
     text: str,
+    prose_ranges: list[tuple[int, int]],
     *,
     occupied_spans: _DisjointSpans,
 ) -> list[_MentionToken]:
-    """Return non-overlapping alias-style mention tokens from text."""
+    """Return alias-style mention tokens from prose text that do not overlap explicit tokens."""
     tokens: list[_MentionToken] = []
-    for match in _ENTITY_MENTION_PATTERN.finditer(text):
+    for match in _prose_matches(_ENTITY_MENTION_PATTERN, text, prose_ranges):
         if occupied_spans.overlaps(match.start(), match.end()):
             continue
         tokens.append(

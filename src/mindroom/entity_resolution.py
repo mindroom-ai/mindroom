@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -246,14 +247,17 @@ class EntityIdentityRegistry:
         """Return one configured entity's current persisted Matrix ID."""
         return self.current_ids[entity_name]
 
+    @cached_property
+    def _entity_names_by_user_id(self) -> dict[str, str]:
+        # The factory rejects duplicate entity IDs, so each user ID names at most one entity.
+        return {current_id.full_id: entity_name for entity_name, current_id in self.current_ids.items()}
+
     def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
         """Return the configured entity currently represented by one Matrix user ID."""
-        for entity_name, current_id in self.current_ids.items():
-            if not include_router and entity_name == ROUTER_AGENT_NAME:
-                continue
-            if current_id.full_id == user_id:
-                return entity_name
-        return None
+        entity_name = self._entity_names_by_user_id.get(user_id)
+        if not include_router and entity_name == ROUTER_AGENT_NAME:
+            return None
+        return entity_name
 
     def is_managed_user_id(self, user_id: str, *, include_router: bool = True) -> bool:
         """Return whether a Matrix user ID belongs to a current configured entity."""

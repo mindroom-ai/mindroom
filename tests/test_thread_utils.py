@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 
+from mindroom import thread_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.thread_utils import has_multiple_non_agent_users_in_thread
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.thread_utils import check_agent_mentioned, has_multiple_non_agent_users_in_thread
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -114,3 +117,44 @@ def test_internal_account_excludes_persisted_and_configured_identity(config: Con
         runtime_paths_for(config),
         current_sender_id="@alice:localhost",
     )
+
+
+def test_check_agent_mentioned_resolves_many_distinct_mentions_with_one_registry(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thousands of distinct explicit mentions build the entity registry once and keep non-agent detection."""
+    runtime_paths = runtime_paths_for(config)
+    helper_id = entity_identity_registry(config, runtime_paths).current_id("helper")
+    registry_builds = 0
+
+    def counting_registry(*args: object, **kwargs: object) -> object:
+        nonlocal registry_builds
+        registry_builds += 1
+        return entity_identity_registry(*args, **kwargs)
+
+    monkeypatch.setattr(thread_utils, "entity_identity_registry", counting_registry)
+    user_ids = [f"@user{index}:localhost" for index in range(5_000)]
+    event_source = {
+        "content": {
+            "msgtype": "m.text",
+            "body": "hello",
+            "m.mentions": {"user_ids": [*user_ids, helper_id.full_id, "@bridgebot:localhost", *user_ids]},
+        },
+    }
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_helper:localhost")
+    room.members_synced = True
+    room.add_member("@user4999:localhost", None, None)
+
+    mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+        event_source,
+        helper_id,
+        config,
+        runtime_paths,
+        room=room,
+    )
+
+    assert mentioned_agents == [helper_id]
+    assert am_i_mentioned is True
+    assert has_non_agent_mentions is True
+    assert registry_builds == 1

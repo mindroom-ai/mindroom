@@ -18,11 +18,11 @@ _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 # Greedy matching returns the longest run of complete DNS labels, which is the longest host a prefix can end with.
 _SERVER_HOST_PREFIX_PATTERN = re.compile(r"(?:[A-Za-z0-9-]{1,63}\.)*[A-Za-z0-9-]{1,63}")
-_MAX_PORT_DIGITS = 5
-MAX_MATRIX_USER_ID_BYTES = 255
+# Ports are one to five decimal digits, and `\d` matches exactly the characters `str.isdecimal` accepts.
+_PORT_PREFIX_PATTERN = re.compile(r"\d{1,5}")
+_MAX_MATRIX_USER_ID_BYTES = 255
 
 __all__ = [
-    "MAX_MATRIX_USER_ID_BYTES",
     "MatrixID",
     "managed_account_key",
     "managed_account_user_id",
@@ -177,10 +177,10 @@ def matrix_user_id_prefix_candidates(token: str) -> list[str]:
 
     A user ID is ``@localpart:server_name``, and a server name is a DNS host or a bracketed IPv6 literal,
     optionally followed by a port of at most five digits.
-    Its localpart ends at the first colon, so only the longest host and its few port lengths can pass validation.
+    Its localpart ends at the first colon, so only the longest host and the digit prefixes of its port can pass.
     Callers still validate each candidate; this only avoids validating every prefix of a long token.
     """
-    token = token[:MAX_MATRIX_USER_ID_BYTES]
+    token = token[:_MAX_MATRIX_USER_ID_BYTES]
     head, separator, server_part = token.partition(":")
     if not separator:
         return []
@@ -193,15 +193,16 @@ def matrix_user_id_prefix_candidates(token: str) -> list[str]:
         return []
     user_id_with_host = f"{head}:{host}"
     remainder = server_part[len(host) :]
-    if not remainder.startswith(":"):
+    port_match = _PORT_PREFIX_PATTERN.match(remainder, 1) if remainder.startswith(":") else None
+    if port_match is None:
         return [user_id_with_host]
-    port_lengths = range(min(len(remainder) - 1, _MAX_PORT_DIGITS), 0, -1)
-    return [*(user_id_with_host + remainder[: length + 1] for length in port_lengths), user_id_with_host]
+    port = port_match.group(0)
+    return [*(f"{user_id_with_host}:{port[:length]}" for length in range(len(port), 0, -1)), user_id_with_host]
 
 
 def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
     # Every character encodes to at least one byte, so overlong IDs are rejected before the surrogate and server checks.
-    if len(matrix_id) > MAX_MATRIX_USER_ID_BYTES:
+    if len(matrix_id) > _MAX_MATRIX_USER_ID_BYTES:
         msg = f"Invalid Matrix ID length: {matrix_id}"
         raise ValueError(msg)
     if _contains_surrogate(parsed.username):
@@ -215,7 +216,7 @@ def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
     except UnicodeEncodeError as exc:
         msg = f"Invalid Matrix ID: {matrix_id}"
         raise ValueError(msg) from exc
-    if len(encoded_matrix_id) > MAX_MATRIX_USER_ID_BYTES:
+    if len(encoded_matrix_id) > _MAX_MATRIX_USER_ID_BYTES:
         msg = f"Invalid Matrix ID length: {matrix_id}"
         raise ValueError(msg)
 
