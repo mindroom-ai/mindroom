@@ -2612,8 +2612,8 @@ event_journal:
 defaults:
   file_access: unrestricted
   tools:
-    - google_bigquery:
-        credentials: default-tool-override-secret
+    - custom_api:
+        base_url: https://user:default-tool-override-secret@api.example.org
 agents:
   code:
     display_name: Code
@@ -2623,8 +2623,8 @@ agents:
     knowledge_bases: [docs]
     tools:
       - shell
-      - google_bigquery:
-          credentials: tool-override-secret
+      - custom_api:
+          base_url: https://user:tool-override-secret@api.example.org
 models:
   default:
     provider: openai
@@ -2649,9 +2649,9 @@ administrators:
     projected_text = (_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8")
     assert "secret" not in projected_text
     assert yaml.safe_load(projected_text) == {
-        "defaults": {"file_access": "unrestricted", "tools": ["google_bigquery"]},
+        "defaults": {"file_access": "unrestricted", "tools": ["custom_api"]},
         "agents": {
-            "code": {"display_name": "Code", "knowledge_bases": ["docs"], "tools": ["shell", "google_bigquery"]},
+            "code": {"display_name": "Code", "knowledge_bases": ["docs"], "tools": ["shell", "custom_api"]},
         },
         "plugins": [{"path": "./.mindroom-worker-assets/plugins/00-my-plugin"}],
         "memory": {"backend": "file"},

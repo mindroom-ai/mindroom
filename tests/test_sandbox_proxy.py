@@ -5130,7 +5130,7 @@ def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
                     "display_name": "Mind",
                     "memory_backend": "file",
                     "instructions": ["live-agent-instructions"],
-                    "tools": ["shell", {"google_bigquery": {"credentials": "live-tool-override-secret"}}],
+                    "tools": ["shell", {"custom_api": {"base_url": "https://user:live-tool-override-secret@api.example.org"}}],
                 },
                 "vault": {
                     "display_name": "Vault",
@@ -5203,7 +5203,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     if sends_snapshot:
         assert captured["json"]["config_snapshot"] == {
             "agents": {
-                "mind": {"display_name": "Mind", "memory_backend": "file", "tools": ["shell", "google_bigquery"]},
+                "mind": {"display_name": "Mind", "memory_backend": "file", "tools": ["shell", "custom_api"]},
                 "vault": {"display_name": "Vault", "private": {"per": "user", "knowledge": {"path": "notes"}}},
             },
             "plugins": [{"path": "./plugins/live", "enabled": False}],
