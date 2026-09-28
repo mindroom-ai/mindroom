@@ -834,6 +834,7 @@ def test_local_folder_and_shell_actions_are_discoverable_with_their_own_paramete
     assert "kill_shell" in description
     assert "untrusted" in description
     assert "gui_mode (observe_only or control) covers only app control" in description
+    assert "kill_shell finishes with state killed" in description
 
 
 def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:

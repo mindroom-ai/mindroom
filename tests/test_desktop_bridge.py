@@ -460,11 +460,12 @@ async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
     assert status["bridge"]["shell"] == {
         "enabled": False,
         "pending": False,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
     }
+    assert type(status["bridge"]["shell"]["auto_approve_remaining_seconds"]) is int
     await _handle(bridge, _event(_command("list_apps", request_id="r6", sequence=6)))
     assert _response(transport).result == {"apps": [], "metrics": _response(transport).result["metrics"]}
     await _handle(bridge, _event(_command("get_app_state", request_id="r7", sequence=7)))
@@ -924,7 +925,7 @@ async def test_other_callers_see_shell_state_without_pending_command(transport: 
     assert status.result["bridge"]["shell"] == {
         "enabled": True,
         "pending": True,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
@@ -1028,7 +1029,7 @@ def _without_metrics(result: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in result.items() if key != "metrics"}
 
 
-async def _check_until_completed(
+async def _check_until_finished(
     bridge: DesktopBridge,
     transport: AsyncMock,
     handle: str,
@@ -1038,10 +1039,10 @@ async def _check_until_completed(
     for sequence in range(first_sequence, first_sequence + 600):
         await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence)))
         result = _response(transport).result
-        if result["state"] == "completed":
+        if result["state"] != "running":
             return result, sequence
         await asyncio.sleep(0.01)
-    pytest.fail("shell handle never completed")
+    pytest.fail("shell handle never finished")
 
 
 async def _wait_until_gone(pid: int) -> None:
@@ -1088,7 +1089,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
     assert _response(transport).result["state"] == "running"
 
     (tmp_path / "release").touch()
-    completed, sequence = await _check_until_completed(bridge, transport, handle, first_sequence=3)
+    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=3)
     assert _without_metrics(completed) == {
         "state": "completed",
         "handle": handle,
@@ -1187,7 +1188,7 @@ async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
     handle = _response(transport).result["handle"]
     assert isinstance(handle, str)
     (tmp_path / "release").touch()
-    completed, sequence = await _check_until_completed(bridge, transport, handle, first_sequence=2)
+    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=2)
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
     assert _response(transport).error == "Unknown shell handle."
 
@@ -1229,8 +1230,16 @@ async def test_other_callers_cannot_check_or_kill_a_handle(transport: AsyncMock,
 
     await _handle(bridge, _event(_handle_command("kill_shell", handle, sequence=6)))
     assert _without_metrics(_response(transport).result) == {"state": "killed", "handle": handle}
-    completed, _ = await _check_until_completed(bridge, transport, handle, first_sequence=7)
-    assert completed["exit_code"] == -signal.SIGTERM
+    killed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=7)
+    assert (killed["state"], killed["exit_code"]) == ("killed", -signal.SIGTERM)
+    query = _command(
+        "request_status",
+        request_id="query",
+        sequence=sequence + 1,
+        parameters={"request_id": f"check_shell-{sequence}"},
+    )
+    await _handle(bridge, _event(query))
+    assert _response(transport).result["response"]["result"]["state"] == "killed"
     await bridge.stop()
     bridge.close()
 
@@ -1359,7 +1368,7 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
     assert running.result["output_attachment"] is None
 
     (tmp_path / "release").touch()
-    completed, _ = await _check_until_completed(bridge, transport, handle, first_sequence=2)
+    completed, _ = await _check_until_finished(bridge, transport, handle, first_sequence=2)
     assert {key: value for key, value in _without_metrics(completed).items() if key != "output_attachment"} == {
         "state": "completed",
         "handle": handle,
@@ -1485,7 +1494,7 @@ async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_
         handle = _response(transport).result["handle"]
         assert isinstance(handle, str)
         (tmp_path / "release").touch()
-        result, _ = await asyncio.wait_for(_check_until_completed(bridge, transport, handle, first_sequence=2), 5)
+        result, _ = await asyncio.wait_for(_check_until_finished(bridge, transport, handle, first_sequence=2), 5)
     _assert_upload_fallback(result)
     assert [output.closed for output in released] == [True]
     await bridge.stop()
@@ -1669,17 +1678,17 @@ async def test_local_shell_controls_require_enabled_running_shell() -> None:
     assert gui_only.local_status()["shell"] == {
         "enabled": False,
         "pending": None,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
     }
     gui_only.close()
     bridge = _local_bridge(shell=_local_shell())
-    assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] > 59
+    assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] == 60
     assert bridge.grant_local_shell(until_revoked=True)["shell"]["auto_approve_until_revoked"] is True
     revoked = bridge.revoke_local_shell()["shell"]
-    assert (revoked["auto_approve_remaining_seconds"], revoked["auto_approve_until_revoked"]) == (0.0, False)
+    assert (revoked["auto_approve_remaining_seconds"], revoked["auto_approve_until_revoked"]) == (0, False)
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         bridge.kill_local_shell_handle("shell:missing")
     await bridge.stop()
@@ -1989,7 +1998,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "shell": {
             "enabled": False,
             "pending": False,
-            "auto_approve_remaining_seconds": 0.0,
+            "auto_approve_remaining_seconds": 0,
             "auto_approve_until_revoked": False,
             "active_request_id": None,
             "handles": [],

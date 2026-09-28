@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -120,9 +120,12 @@ class DesktopShellOutput(ShellOutputCapture):
 
 @dataclass(frozen=True)
 class DesktopShellResult:
-    """One command's state; a completed result hands its output to the caller to transfer and release."""
+    """One command's state; a finished result hands its output to the caller to transfer and release.
 
-    state: Literal["completed", "running"]
+    ``killed`` means ``kill_shell`` stopped the command; ``completed`` means it exited on its own.
+    """
+
+    state: Literal["completed", "killed", "running"]
     handle: str | None
     exit_code: int | None
     output: DesktopShellOutput
@@ -135,6 +138,12 @@ class _ShellHandle:
     command: str
     started_at: float
     output: DesktopShellOutput
+    killed: bool = False
+
+    def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
+        if not record.finished:
+            return "running"
+        return "killed" if self.killed else "completed"
 
 
 class DesktopShell:
@@ -223,8 +232,9 @@ class DesktopShell:
                 if pending
                 else None
             ),
+            # Rounded up, so a live lease never reads as zero seconds.
             "auto_approve_remaining_seconds": (
-                0.0 if until_revoked else max(0.0, self._lease_until - self._monotonic_clock())
+                0 if until_revoked else max(0, math.ceil(self._lease_until - self._monotonic_clock()))
             ),
             "auto_approve_until_revoked": until_revoked,
             "active_request_id": self._active_request_id if owns_active else None,
@@ -247,7 +257,7 @@ class DesktopShell:
                     "agent_name": entry.agent_name,
                     "command_preview": entry.command[:_COMMAND_PREVIEW_CHARS],
                     "elapsed_seconds": round(max(0.0, ended_at - entry.started_at), 1),
-                    "state": "completed" if record.finished else "running",
+                    "state": entry.state(record),
                 },
             )
         return entries
@@ -446,7 +456,8 @@ class DesktopShell:
         if not record.finished:
             return DesktopShellResult("running", handle, None, self._handles[handle].output)
         self._records.pop(handle)
-        return DesktopShellResult("completed", handle, record.return_code, self._handles.pop(handle).output)
+        entry = self._handles.pop(handle)
+        return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)
 
     def kill(
         self,
@@ -456,11 +467,12 @@ class DesktopShell:
         *,
         force: bool = False,
     ) -> Literal["killed", "completed"]:
-        """Signal the caller's own running handle, keeping its output for a later check."""
+        """Signal the caller's own running handle, keeping its output for a later check that reports it killed."""
         record = self._caller_record(requester_id, agent_name, handle)
         if record.process.returncode is not None:
             return "completed"
         kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
+        self._handles[handle] = replace(self._handles[handle], killed=True)
         return "killed"
 
     def kill_handle(self, handle: str) -> None:

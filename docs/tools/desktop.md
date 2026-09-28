@@ -163,6 +163,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
   With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
   An offset past the captured output, a negative offset, or one inside a UTF-8 character is rejected, and a finished handle stays available for a corrected check.
 - `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
+  A later `check_shell` then reports `state: "killed"` with the signal's negative `exit_code`, -15 or -9, while `completed` means the command exited on its own.
 
 ### Local Approval
 
@@ -197,7 +198,7 @@ If that reply is lost or its outcome is uncertain, recover it with `request_stat
 The bridge retains at most 16 handles.
 When all 16 are retained, a new command drops the oldest finished handle that nobody has checked, together with its output, and is refused before approval if all 16 are still running.
 
-Revoking shell access, stopping the bridge, and helper shutdown kill every handle.
+Revoking shell access, stopping the bridge, and helper shutdown kill and forget every handle, so a later `check_shell` reports an unknown handle.
 Handles never survive a helper restart.
 If the helper is force-killed, for example with `SIGKILL`, running handle processes are not cleaned up.
 After a command finishes, the remaining processes in its process group, such as children started with `&`, are terminated, so long-running work should stay in the foreground and continue as a handle.

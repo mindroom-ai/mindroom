@@ -198,7 +198,7 @@ class NativeDesktopHost:
                 {
                     "enabled": bool(config and config.shell.enabled),
                     "pending": None,
-                    "auto_approve_remaining_seconds": 0.0,
+                    "auto_approve_remaining_seconds": 0,
                     "auto_approve_until_revoked": False,
                     "active_request_id": None,
                     "handles": [],
