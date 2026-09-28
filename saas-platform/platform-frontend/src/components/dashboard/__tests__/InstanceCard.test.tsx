@@ -321,6 +321,33 @@ describe('InstanceCard', () => {
       expect(screen.queryByRole('link', { name: /Open MindRoom/i })).not.toBeInTheDocument()
       expect(screen.queryByRole('link', { name: /Open Chat Interface/i })).not.toBeInTheDocument()
     })
+
+    it('should warn when an inactive subscription paused the instance and data will be deleted', () => {
+      const teardownAfter = '2026-10-27T03:00:00+00:00'
+      render(
+        <InstanceCard
+          instance={{
+            ...mockInstance,
+            status: 'stopped',
+            lifecycle_stopped_at: '2026-09-27T03:00:00+00:00',
+            teardown_after: teardownAfter,
+          }}
+        />
+      )
+
+      const banner = screen.getByRole('alert')
+      expect(banner).toHaveTextContent('Your instance is paused because your subscription is no longer active.')
+      expect(banner).toHaveTextContent(
+        `Its data will be deleted on ${new Date(teardownAfter).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })} unless you resubscribe.`
+      )
+      expect(screen.getByRole('link', { name: 'Go to billing' })).toHaveAttribute('href', '/dashboard/billing')
+    })
+
+    it('should not show the paused banner for a manually stopped instance', () => {
+      render(<InstanceCard instance={{ ...mockInstance, status: 'stopped' }} />)
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
   })
 
   describe('Copy to Clipboard', () => {

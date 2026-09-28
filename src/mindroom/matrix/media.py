@@ -38,6 +38,8 @@ _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _matrix_media_max_bytes = 64 * 1024 * 1024
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_EXIF_ORIENTATION_TAG = 274
+_EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -219,6 +221,24 @@ class _PreparedMediaUpload:
         )
 
 
+def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
+    """Return displayed image dimensions so clients size previews instead of cropping them."""
+    if not mimetype.startswith("image/"):
+        return {}
+    # Keep the image decoder lazy during slim worker startup.
+    from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
+
+    try:
+        with Image.open(io.BytesIO(media_bytes)) as image:
+            width, height = image.size
+            orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
+    except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
+        return {}
+    if orientation in _EXIF_ROTATED_ORIENTATIONS:
+        width, height = height, width
+    return {"w": width, "h": height}
+
+
 def prepare_media_upload(
     media_bytes: bytes,
     *,
@@ -234,7 +254,7 @@ def prepare_media_upload(
         data=upload_bytes,
         content_type="application/octet-stream" if encrypt else mimetype,
         filename=f"{filename}.enc" if encrypt else filename,
-        info={"size": len(media_bytes), "mimetype": mimetype},
+        info={"size": len(media_bytes), "mimetype": mimetype, **_image_dimensions(media_bytes, mimetype)},
         encryption_keys=encryption_keys,
     )
 

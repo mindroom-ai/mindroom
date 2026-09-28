@@ -2,7 +2,7 @@
 
 The native app and its desktop helper require macOS 14 or newer.
 
-The app has Overview, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
+The app has Overview, Chat, Dashboard, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
 Sidebar buttons support Tab and Space navigation; when you activate a section, keyboard focus follows that section instead of remaining on a previous button.
 The menu shows local-agent and computer-access status as clickable shortcuts to their sections, with start, stop, and revoke actions when available.
 Hover over Quit MindRoom for its effect on background work: computer access stops, while local agents keep running.
@@ -13,10 +13,41 @@ MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
 ```
 
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
-It runs the existing Python Accessibility, screen capture, input, browser, Matrix, and desktop bridge implementations.
+It runs the existing Python Accessibility, screen capture, input, browser, read-only folder, shell, Matrix, and desktop bridge implementations.
 The menu app launches it as a foreground child and communicates only through inherited stdin, stdout, and stderr pipes.
-Quitting the app closes that channel and clears every control lease.
+Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
+
+## Local agents
+
+Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.
+Executable detection is separate from launchd status, so an installed CLI is not presented as missing when only the service has not been installed.
+Existing configuration is reused.
+**Check Setup** runs `mindroom doctor`; its result is kept for the current session and invalidated when a refresh observes changes to the root config or adjacent `.env`.
+Doctor's zero exit code can include warnings.
+Only a recognized summary with no failures or warnings completes the Check step; other results keep attention visible.
+Local-agent commands and the config-folder action use the configuration and storage paths saved in the launchd service, falling back to `~/.mindroom/config.yaml` for a new service.
+Computer access retains its independent configuration binding.
+Status refresh requests are coalesced and repeated when needed after an action, rather than dropping the newest request.
+Periodic polling skips an in-flight read so slow checks still finish.
+Existing services start using their saved configuration path even when the app's config file is absent.
+The step navigation is shared with Computer access and supports clicking the whole button area.
+
+## Chat and dashboard
+
+Chat opens inside the app and keeps its sign-in session between launches.
+Set **Chat website** in Settings for a self-hosted client; the default is `https://chat.mindroom.chat`.
+HTTPS sites and HTTP loopback development sites are supported.
+Sign in once in the app: existing browser cookies are not imported.
+Use **Open in Browser** when you prefer your browser or a sign-in provider requires it.
+
+With the local-agent service running, **Open Dashboard** opens its dashboard inside the app.
+The private native-helper action `dashboard_configuration` rereads `MINDROOM_URL` and `MINDROOM_API_KEY` from the config-adjacent `.env`, preserving explicit process-environment overrides.
+The default dashboard URL is `http://127.0.0.1:8765`.
+Automatic sign-in supports HTTP loopback addresses with an explicit port; it never sends the key to a remote dashboard.
+The app exchanges the key through the existing `/api/auth/session` endpoint, refuses login redirects, and transfers only the validated HttpOnly cookie into a nonpersistent dashboard WebKit store.
+Chat uses a separate persistent store; dashboard credentials never enter Chat, page URLs, JavaScript, UserDefaults, or diagnostics.
+Switching sidebar sections keeps both pages alive, including chat drafts.
 
 ## Build
 
@@ -31,6 +62,8 @@ macos/build-macos-app.sh --universal --dmg
 `build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment using the locked `desktop-helper` dependency group.
 It copies the helper into the parent, stamps matching versions, signs the helper before the parent, and runs `verify-desktop-helper.sh`.
 The helper build does not modify the project environment.
+The frozen helper uses its bundled `certifi` roots for HTTPS, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is explicitly set.
+This avoids depending on the Python build machine's certificate paths while keeping certificate verification enabled.
 
 Universal releases contain separate `arm64` and `x86_64` helper apps; the native app selects the helper matching its compiled architecture.
 Each helper uses matching Python 3.13 and dependency wheels, and every collected Mach-O file is checked for that architecture.
@@ -66,14 +99,20 @@ Import only fills transient form state.
 The one-time pairing code is not written to the native configuration.
 The person at the Mac must confirm the exact controller fingerprint, requester, and agent after edits or configuration revision changes.
 
+The Access step has separate Applications, Read-only folders, and Shell commands editors, each with its own saved or unsaved indicator.
 Allowed applications has searchable checkboxes and a separate Save App Access action.
 The list includes apps in standard installation folders and currently running apps; Add App can select an application elsewhere.
 Saved applications remain visible even when they are no longer installed.
 For an existing connection, saving apps preserves the controller, requester, browser, and capture settings without requiring pairing again.
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
-Start Observe Only explicitly to resume with the saved app list.
-Saving an empty selection removes all app access; select and save at least one app before Start Observe Only becomes available again.
-Setup presents one step at a time: Connect, Apps, Permissions, Start. The top connection summary names the next required step.
+Resume explicitly with Start Observe Only, or with Start Access when folders or shell commands are saved.
+Saving an empty selection removes all app access; Start stays unavailable until at least one app, folder, or shell choice is saved.
+A saved browser setting alone does not make Start available.
+Read-only folders are chosen with a directory panel and saved as canonical paths; duplicates, including links to an already selected folder, are rejected.
+Folders and the Allow shell command requests switch save together with Save Folder and Shell Access, using the same revision check and stop-before-saving confirmation as app access.
+Choosing only folders or shell commands needs no app selection, and the Permissions step reports that Accessibility and Screen Recording are not needed.
+Setup presents one step at a time: Connect, Access, Permissions, Start.
+The top connection summary names the next required step.
 Save and Connect saves a disabled configuration and claims pairing using the reviewed revision and saved session. I’ve Confirmed in Chat enables that exact saved setup after the user confirms the agent's response.
 A failed claim or app restart before confirmation leaves the configuration disabled; fresh setup data can be imported without replacing the saved login. Pairing codes and confirmation commands remain transient.
 The Start step explains remaining blockers and links to the corresponding step. App selection save controls appear above the list.
@@ -94,8 +133,16 @@ Use the existing device to finish pairing, or select **Replace Saved Login…** 
 Replacement requires pairing the new device again and is unavailable while the bridge is running.
 Organization sign-in and pairing accept the imported Cloudflare Access requirement, prepare headers without blocking the native loop, and persist that requirement with the saved session.
 
+While access runs with shell requests allowed, a pending shell command appears on an approval card above the steps, with escaped control and text-direction characters.
+Every decision sends only the reviewed request ID and choice, never the command text.
+Approve & Allow and Allow Without Asking first confirm the agents and requesters they cover for 5, 15, or 60 minutes or until stopped.
+The app sends a decision only while the helper still reports the exact request that was reviewed, and never sends an approval or grant on launch, reconnect, save, or status refresh.
+Revoke Shell Access and each running handle's Kill button stay available while other work is pending.
+The menu bar shows Command waiting with Review Command…, which opens the card without approving, and offers Revoke Shell Access while auto-approval or a shell command is active.
+Approvals and auto-approval are never saved.
+
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
-Stop has a separate single request lane; status, revoke, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
+Stop has a separate single request lane; status, control and shell revoke, shell decisions and grants, handle kills, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
 Excess requests receive an immediate retryable `busy` response.
 A durable transport or bridge worker failure fences admission and control before its peer is cancelled.
 
@@ -111,5 +158,6 @@ A release still requires these checks on macOS:
 3. Confirm Accessibility and Screen Recording prompts name the packaged helper.
 4. Upgrade over a prior signed build and confirm permission continuity.
 5. Exercise keyboard and VoiceOver navigation in Computer access.
-6. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
-7. Notarize, staple, and launch the DMG build, then test a Sparkle update.
+6. With a disposable folder and a harmless command, check folder selection, a protected-folder prompt, the shell approval card, auto-approval confirmation, and Revoke Shell Access.
+7. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
+8. Notarize, staple, and launch the DMG build, then test a Sparkle update.

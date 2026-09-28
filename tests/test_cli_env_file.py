@@ -6,6 +6,7 @@ import stat
 from typing import TYPE_CHECKING
 
 import pytest
+from dotenv import dotenv_values
 
 from mindroom.cli.env_file import env_path_for_config, upsert_env_values
 
@@ -40,6 +41,20 @@ def test_upsert_env_values_preserves_lines_and_rewrites_exported_keys(tmp_path: 
     assert env_path.read_text(encoding="utf-8") == (
         "# keep this comment\nMATRIX_HOMESERVER=http://localhost:8008\nUNRELATED=value\n\nMATRIX_SSL_VERIFY=false\n"
     )
+
+
+def test_upsert_env_values_leaves_exactly_one_assignment(tmp_path: Path) -> None:
+    """Later duplicate assignments, which dotenv would let win, are removed so the upserted value is effective."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "OPENAI_API_KEY=\nUNRELATED=value\nexport OPENAI_API_KEY=your-openai-key-here\nOPENAI_API_KEY=old\n",
+        encoding="utf-8",
+    )
+
+    upsert_env_values(env_path, {"OPENAI_API_KEY": "sk-new"})
+
+    assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-new\nUNRELATED=value\n"
+    assert dotenv_values(env_path)["OPENAI_API_KEY"] == "sk-new"
 
 
 def test_upsert_env_values_creates_parent_directory_and_file(tmp_path: Path) -> None:

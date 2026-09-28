@@ -30,18 +30,27 @@ from mindroom import sensitivity
         "service.password",
     ],
 )
-def test_is_sensitive_config_key_flags_secrets(key: str) -> None:
-    """Secret-bearing config keys are classified sensitive across case/separators."""
-    assert sensitivity.is_sensitive_config_key(key) is True
+def test_strip_sensitive_config_values_removes_secret_keys(key: str) -> None:
+    """Secret-bearing config keys are removed across case/separators and nesting."""
+    assert sensitivity.strip_sensitive_config_values({key: "value", "nested": [{key: "value"}]}) == {"nested": [{}]}
 
 
 @pytest.mark.parametrize(
     "key",
     ["no_reply_token", "token_uri", "model", "id", "base_url", "username", "display_name"],
 )
-def test_is_sensitive_config_key_allows_non_secrets(key: str) -> None:
+def test_strip_sensitive_config_values_keeps_non_secrets(key: str) -> None:
     """Non-secret keys, including the documented exceptions, are not redacted."""
-    assert sensitivity.is_sensitive_config_key(key) is False
+    assert sensitivity.strip_sensitive_config_values({key: "value"}) == {key: "value"}
+
+
+def test_strip_sensitive_config_values_removes_credential_headers() -> None:
+    """Credential headers are removed from header mappings while other headers stay."""
+    config = {"mcp_servers": {"demo": {"headers": {"Authorization": "Bearer x", "Accept": "application/json"}}}}
+
+    assert sensitivity.strip_sensitive_config_values(config) == {
+        "mcp_servers": {"demo": {"headers": {"Accept": "application/json"}}},
+    }
 
 
 def test_config_secret_suffixes_match_historical_set() -> None:

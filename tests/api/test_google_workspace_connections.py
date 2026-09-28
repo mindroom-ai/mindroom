@@ -12,6 +12,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import providers as providers_module
@@ -331,6 +332,7 @@ def test_additional_callback_and_reset_preserve_other_credentials(
         agent_name="personal",
         config=workspace_portal["config"],
         runtime_paths=paths,
+        membership_index=AgentReplyMembershipIndex(),
         execution_identity=ToolExecutionIdentity(
             channel="matrix",
             agent_name="personal",

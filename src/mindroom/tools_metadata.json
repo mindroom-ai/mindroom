@@ -8144,7 +8144,7 @@
         {
           "authored_override": true,
           "default": 30,
-          "description": "Short-lived command and response timeout, from 1 to 120 seconds.",
+          "description": "Short-lived command and response timeout, from 1 to 120 seconds. Shell command starts always wait up to 120 seconds for approval on the computer.",
           "label": "Command Timeout Seconds",
           "name": "timeout_seconds",
           "options": null,
@@ -8157,7 +8157,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Let the agent interact with desktop apps you explicitly allow",
+      "description": "Let the agent use allowed apps, read selected folders, and run shell commands you approve on your computer",
       "display_name": "Matrix Desktop",
       "docs_url": "https://docs.mindroom.chat/tools/desktop/",
       "executes_code": false,

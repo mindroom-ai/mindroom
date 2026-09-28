@@ -617,6 +617,14 @@ class EmbedderConfig(BaseModel):
         """Normalize an optional named credential reference."""
         return None if value is None else validate_service_name(value)
 
+    @field_validator("host")
+    @classmethod
+    def _normalize_blank_host(cls, value: str | None) -> str | None:
+        """Treat a blank host (e.g. a cleared dashboard field) as unset so provider defaults apply."""
+        if value is None:
+            return None
+        return value.strip() or None
+
 
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""

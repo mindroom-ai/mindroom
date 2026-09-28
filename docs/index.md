@@ -18,7 +18,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with mention normalization and light ASR cleanup
 - **Image analysis** - Pass images to vision-capable AI models for analysis
-- **Matrix desktop bridge** - Observe or locally lease control of a computer without opening inbound ports
+- **Matrix desktop bridge** - Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands without opening inbound ports
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP]
@@ -36,19 +36,14 @@ Watch the 2-minute setup video:
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
-# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
-uvx mindroom config init
-
-# Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
-$EDITOR ~/.mindroom/.env
-
-# Generate pair code in https://chat.mindroom.chat:
-# Settings -> Local MindRoom -> Generate Pair Code
-uvx mindroom connect --pair-code ABCD-EFGH
-
-# Start MindRoom
 uvx mindroom run
+# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
+# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
+# then prints a link and QR code: approve it with your MindRoom Chat account,
+# or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
+
+To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
 
 See [Getting Started](getting-started.md) for the full walkthrough and [Hosted Matrix Deployment](deployment/hosted-matrix.md) for architecture details.
 
@@ -166,7 +161,7 @@ mindroom run
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
 | **Images** | Pass user-sent images to vision-capable AI models |
-| **Matrix Desktop Bridge** | Observe or locally lease control of a computer over pinned Matrix E2EE without opening inbound ports |
+| **Matrix Desktop Bridge** | Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands over pinned Matrix E2EE without opening inbound ports |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
 | **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
 | **Authorization** | Fine-grained user and room access control |
@@ -198,7 +193,7 @@ mindroom run
 - [Dashboard](dashboard.md) - Web UI for configuration
 - [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
 - [Tools](tools/index.md) - Available tool integrations
-- [Matrix Desktop Bridge](tools/desktop.md) - Securely observe or locally lease desktop and signed-in browser control over Matrix
+- [Matrix Desktop Bridge](tools/desktop.md) - Securely observe or locally lease desktop and signed-in browser control, read selected folders, and run locally approved shell commands over Matrix
 - [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
 - [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](skills.md) - OpenClaw-compatible skills system

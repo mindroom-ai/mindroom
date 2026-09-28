@@ -70,34 +70,26 @@ from backend.openrouter import (
     CreatedOpenRouterKey,
     OpenRouterConfigurationError,
     OpenRouterError,
+    OpenRouterKeyNotFoundError,
     OpenRouterKeyPlan,
     create_openrouter_key,
     delete_openrouter_key,
+    set_openrouter_key_disabled,
 )
 from backend.pricing import get_plan_details
 from backend.process import run_helm
-from backend.services.instances_data import create_instance, list_instances, update_instance, update_instance_status
+from backend.services.instances_data import (
+    create_instance,
+    get_instance,
+    list_instances,
+    update_instance,
+    update_instance_status,
+)
 from fastapi import BackgroundTasks, HTTPException
 
 _MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
-_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = (
-    "analysis",
-    "automation",
-    "business",
-    "communication",
-    "dev",
-    "docs",
-    "finance",
-    "help",
-    "home",
-    "lobby",
-    "news",
-    "ops",
-    "personal",
-    "productivity",
-    "research",
-    "science",
-)
+# Rooms created by the seeded instance config (cluster/k8s/instance/default-config.yaml).
+_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = ("personal",)
 
 _RESOURCE_PROFILE_HELM_VALUES = {
     "pro": {
@@ -277,6 +269,20 @@ def _instance_secret_name(instance_id: str) -> str:
     return f"mindroom-api-keys-{instance_id}"
 
 
+def _instance_pvc_names(instance_id: str | int) -> list[str]:
+    """Return the chart-managed PVC names that hold one instance's data."""
+    return [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
+
+
+def _instance_secret_names(instance_id: str | int) -> list[str]:
+    """Return every Secret name an instance may own, including ones applied outside Helm."""
+    return [
+        _instance_secret_name(str(instance_id)),
+        f"mindroom-primary-api-key-{instance_id}",
+        f"mindroom-worker-auth-{instance_id}",
+    ]
+
+
 def _instance_secret_hash(secret_data: dict[str, str]) -> str:
     """Return a deterministic rollout hash for instance secret contents."""
     encoded = json.dumps(secret_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -374,9 +380,8 @@ async def _provision_credentials_encryption_key(
 
 async def _existing_instance_storage_class_name(instance_id: str, namespace: str) -> str | None:
     """Return the bound PVC storage class for an existing instance."""
-    pvc_names = [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
     code, out, err = await run_kubectl(
-        ["get", "pvc", *pvc_names, "--ignore-not-found", "-o", "json"], namespace=namespace
+        ["get", "pvc", *_instance_pvc_names(instance_id), "--ignore-not-found", "-o", "json"], namespace=namespace
     )
     if code != 0:
         msg = f"Failed to inspect existing PVC storage class for instance {instance_id}: {err or out}"
@@ -428,6 +433,61 @@ def _stored_openrouter_key_hash(row: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+CLEARED_OPENROUTER_KEY_METADATA = {
+    "openrouter_key_hash": None,
+    "openrouter_key_label": None,
+    "openrouter_key_limit_usd": None,
+    "openrouter_key_limit_reset": None,
+    "openrouter_key_created_at": None,
+}
+
+
+async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], *, disabled: bool) -> None:
+    """Disable or re-enable the platform-paid OpenRouter key of one instance, if it has one.
+
+    A key that no longer exists counts as disabled; re-enabling a missing key raises.
+    """
+    key_hash = _stored_openrouter_key_hash(instance_row)
+    if key_hash is None:
+        return
+    set_disabled = partial(
+        set_openrouter_key_disabled,
+        management_api_key=OPENROUTER_PROVISIONING_API_KEY,
+        key_hash=key_hash,
+        disabled=disabled,
+    )
+    try:
+        await anyio.to_thread.run_sync(set_disabled)
+    except OpenRouterKeyNotFoundError:
+        if not disabled:
+            raise
+        logger.info("OpenRouter key %s for instance %s no longer exists", key_hash, instance_row.get("instance_id"))
+
+
+async def _revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
+    """Delete the platform-paid OpenRouter key of one instance and forget its metadata."""
+    key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
+    if key_hash is None:
+        return
+    delete_key = partial(delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=key_hash)
+    try:
+        await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterKeyNotFoundError:
+        logger.info("OpenRouter key %s for instance %s was already deleted", key_hash, instance_id)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+
+
+async def _delete_resources_outside_release(instance_id: str | int) -> None:
+    """Delete instance PVCs and Secrets that `helm uninstall` does not own or may leave behind."""
+    for kind, names in (("pvc", _instance_pvc_names(instance_id)), ("secret", _instance_secret_names(instance_id))):
+        code, out, err = await run_kubectl(
+            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=_INSTANCES_NAMESPACE
+        )
+        if code != 0:
+            msg = f"Failed to delete {kind} for instance {instance_id}: {err or out}"
+            raise RuntimeError(msg)
+
+
 def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
     """Persist non-secret OpenRouter key metadata for reuse and audit."""
     update_instance(
@@ -459,19 +519,22 @@ async def _provision_openrouter_key(
     tier: str,
     existing_instance_row: Mapping[str, Any] | None,
     namespace: str,
-) -> str:
-    """Return the OpenRouter key value this tenant instance should receive."""
+) -> tuple[str, CreatedOpenRouterKey | None]:
+    """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
+
+    A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
+    or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
+    """
     plan = get_plan_details(tier)
     monthly_limit_usd = plan.included_ai_budget_usd if plan else 0
     if monthly_limit_usd <= 0:
-        return ""
+        return "", None
 
     if _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
         existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         if existing_key:
-            return existing_key
+            return existing_key, None
 
-    superseded_key_hash = _stored_openrouter_key_hash(existing_instance_row)
     create_key = partial(
         create_openrouter_key,
         management_api_key=OPENROUTER_PROVISIONING_API_KEY,
@@ -486,7 +549,13 @@ async def _provision_openrouter_key(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except OpenRouterError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return created_key.key, created_key
 
+
+async def _commit_openrouter_key(
+    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, superseded_key_hash: str | None
+) -> None:
+    """Record a newly published key and revoke the key it replaces."""
     metadata_persisted = False
     try:
         await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
@@ -509,13 +578,27 @@ async def _provision_openrouter_key(
                 instance_id,
                 exc_info=True,
             )
-    return created_key.key
+
+
+async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
+    """Best-effort delete of a key whose Secret was never published, so the next attempt mints a fresh one."""
+    delete_key = partial(
+        delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
+    )
+    try:
+        await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterError:
+        logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
 
 
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
-    sb: Any, *, data: dict, background_tasks: BackgroundTasks | None
+    sb: Any, *, data: dict, background_tasks: BackgroundTasks | None, resume_lifecycle_hold: bool = False
 ) -> dict[str, Any]:
-    """Provision (or re-provision) a tenant instance and return the portal response payload."""
+    """Provision (or re-provision) a tenant instance and return the portal response payload.
+
+    An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
+    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
+    """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
@@ -614,7 +697,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             await _existing_instance_storage_class_name(customer_id, namespace)
         ) or INSTANCE_STORAGE_CLASS_NAME
     try:
-        openrouter_key = await _provision_openrouter_key(
+        openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
             account_id=account_id,
             instance_id=customer_id,
@@ -739,7 +822,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         _append_matrix_oidc_helm_args(helm_args)
         # Apply before Helm so pods restarted by the new secret hash read the new values;
         # Synapse reads its OIDC client secret only at startup.
-        await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        try:
+            await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        except Exception:
+            if created_openrouter_key is not None:
+                await _discard_openrouter_key(created_openrouter_key, customer_id)
+            raise
+        if created_openrouter_key is not None:
+            await _commit_openrouter_key(
+                sb, customer_id, created_openrouter_key, _stored_openrouter_key_hash(existing_instance_row)
+            )
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
@@ -755,6 +847,22 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Failed to deploy instance")
         _mark_instance_provision_error(sb, customer_id, "deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
+
+    if existing_instance_row.get("lifecycle_stopped_at") and not resume_lifecycle_hold:
+        await _scale_tenant_deployments(
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+        )
+        held_row = get_instance(sb, customer_id, columns="instance_id,openrouter_key_hash") or {}
+        await set_instance_openrouter_key_disabled(held_row, disabled=True)
+        update_instance(sb, customer_id, {"status": "stopped"})
+        return {
+            "customer_id": customer_id,
+            "frontend_url": frontend_url,
+            "api_url": api_url,
+            "matrix_url": matrix_url,
+            "success": True,
+            "message": "Instance redeployed but kept stopped because its subscription is inactive",
+        }
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
@@ -850,7 +958,12 @@ async def restart_instance(instance_id: int) -> dict[str, Any]:
 
 
 async def uninstall_instance(instance_id: int) -> dict[str, Any]:
-    """Completely uninstall/deprovision a tenant instance."""
+    """Completely deprovision a tenant instance.
+
+    Removes the Helm release, the instance volumes and Secrets, and the platform-paid OpenRouter key,
+    then marks the instance deprovisioned. Every step tolerates already-deleted resources, so a failed
+    run can simply be repeated.
+    """
     logger.info("Uninstalling instance %s", instance_id)
 
     try:
@@ -867,6 +980,9 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
                 raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         else:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
+
+        await _delete_resources_outside_release(instance_id)
+        await _revoke_instance_openrouter_key(ensure_supabase(), instance_id)
 
         if not update_instance_status(instance_id, "deprovisioned"):
             logger.warning("Failed to update database for instance %s", instance_id)

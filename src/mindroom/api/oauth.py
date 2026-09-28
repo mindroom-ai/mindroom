@@ -28,7 +28,7 @@ from mindroom.api.dashboard_credential_scope import (
     build_dashboard_execution_identity,
     require_agent_oauth_connection_authorized,
 )
-from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection_management
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
@@ -343,11 +343,13 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
         config is None
         or not agent_name
         or not requester_id
-        or not is_sender_allowed_for_agent_oauth_connection_management(
+        or not is_sender_allowed_for_agent_oauth_connection(
             requester_id,
             agent_name,
             config,
             snapshot.runtime_paths,
+            config_lifecycle.app_state(request.app).agent_reply_memberships,
+            requester_owned=target.binding.requester_owned,
         )
     ):
         raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
@@ -378,14 +380,16 @@ def _conversation_connect_context(
     runtime_paths: RuntimePaths,
     target: OAuthConnectTarget,
 ) -> OAuthCredentialContext:
-    config = _verify_conversation_connect_target_authorized(request, target)
     binding = target.binding
     agent_name = binding.requested_agent_name
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
+    # Prove the browser is the link's requester before judging that requester's authority, so a
+    # requester-owned grant is only ever used by its owner and a link holder learns nothing about it.
     if binding.worker_scope != "shared":
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
+    config = _verify_conversation_connect_target_authorized(request, target)
     identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity(agent_name).execution_scope,
@@ -500,6 +504,7 @@ def _verify_browser_reset_intent(
             config=config,
             runtime_paths=runtime_paths,
             agent_name=agent_name,
+            requester_owned=intent.binding.requester_owned,
         )
     try:
         target = resolve_oauth_reset_target(
@@ -508,6 +513,7 @@ def _verify_browser_reset_intent(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
+            membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
         )
     except OAuthResetTargetError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

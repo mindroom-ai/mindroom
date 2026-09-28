@@ -3487,3 +3487,12 @@ def test_runtime_event_journal_postgres_port_contract(port: int) -> None:
         assert command[0] == "pg_isready"
         assert "-p" in command, f"{probe} must check the configured database port"
         assert command[command.index("-p") + 1] == str(port)
+
+
+def test_instance_chart_static_runner_proxies_every_default_worker_execution_tool() -> None:
+    """The hosted seed agent uses coding, so selective sandbox routing must send it to the runner sidecar."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "customer=tenant42", "baseDomain=example.test")
+    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-tenant42"), "mindroom"))
+
+    assert env["MINDROOM_SANDBOX_EXECUTION_MODE"]["value"] == "selective"
+    assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "python", "coding"}

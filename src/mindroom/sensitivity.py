@@ -2,8 +2,11 @@
 
 Several worker-isolation paths must decide whether a *name* denotes a secret:
 
-- projected-config redaction strips sensitive ``config.yaml`` keys from the
-  worker-visible snapshot (:mod:`mindroom.workers.backends.docker_projection`);
+- config redaction (:func:`strip_sensitive_config_values`) strips sensitive
+  ``config.yaml`` keys from worker-visible snapshots: the Docker worker
+  projection (:mod:`mindroom.workers.backends.docker_projection`) and the live
+  config the primary sends with each runner request
+  (:mod:`mindroom.tool_system.sandbox_proxy`);
 - public worker startup-env filtering keeps secret env vars out of worker
   manifests (:mod:`mindroom.runtime_env_policy`);
 - dedicated-worker extra-env validation protects existing file-secret names from
@@ -44,7 +47,7 @@ _NON_SECRET_CONFIG_KEY_EXCEPTIONS = frozenset({"no_reply_token", "token_uri"})
 _SENSITIVE_HEADER_KEYS = frozenset({"authorization", "proxy_authorization"})
 
 
-def normalize_config_key(raw_key: str) -> str:
+def _normalize_config_key(raw_key: str) -> str:
     """Normalize a config key to lowercase-underscore form for classification."""
     return re.sub(r"[^a-z0-9]+", "_", raw_key.strip().lower()).strip("_")
 
@@ -68,9 +71,9 @@ def secret_name_suffixes(
     return tuple(suffixes)
 
 
-def is_sensitive_config_key(raw_key: str) -> bool:
+def _is_sensitive_config_key(raw_key: str) -> bool:
     """Return whether a config key's value should be redacted from worker snapshots."""
-    normalized_key = normalize_config_key(raw_key)
+    normalized_key = _normalize_config_key(raw_key)
     if normalized_key in _NON_SECRET_CONFIG_KEY_EXCEPTIONS:
         return False
     if normalized_key in _SENSITIVE_CONFIG_KEYS:
@@ -78,6 +81,30 @@ def is_sensitive_config_key(raw_key: str) -> bool:
     return normalized_key.endswith(secret_name_suffixes())
 
 
-def is_sensitive_header_key(raw_key: str) -> bool:
+def _is_sensitive_header_key(raw_key: str) -> bool:
     """Return whether an HTTP header name carries a credential to be redacted."""
-    return normalize_config_key(raw_key) in _SENSITIVE_HEADER_KEYS or is_sensitive_config_key(raw_key)
+    return _normalize_config_key(raw_key) in _SENSITIVE_HEADER_KEYS or _is_sensitive_config_key(raw_key)
+
+
+def _config_key_is_header_container(raw_key: str | None) -> bool:
+    if raw_key is None:
+        return False
+    normalized_key = _normalize_config_key(raw_key)
+    return normalized_key == "headers" or normalized_key.endswith("_headers")
+
+
+def strip_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
+    """Return config data without sensitive keys or credential headers, for worker-visible snapshots."""
+    if isinstance(value, dict):
+        redacted: dict[object, object] = {}
+        inside_header_mapping = _config_key_is_header_container(parent_key)
+        for key, item in value.items():
+            if isinstance(key, str) and (
+                _is_sensitive_header_key(key) if inside_header_mapping else _is_sensitive_config_key(key)
+            ):
+                continue
+            redacted[key] = strip_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
+        return redacted
+    if isinstance(value, list):
+        return [strip_sensitive_config_values(item, parent_key=parent_key) for item in value]
+    return value

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
+from PIL import Image
 
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
@@ -82,6 +83,48 @@ class TestUploadFileAsMxc:
         assert kwargs["content_type"] == "text/plain"
         assert kwargs["filename"] == "doc.txt"
         assert kwargs["filesize"] == 5
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_image_upload_reports_dimensions(self, tmp_path: Path, encrypted: bool) -> None:
+        """Image info carries width and height so clients size previews instead of cropping them."""
+        client = _mock_client(encrypted=encrypted)
+        client.upload.return_value = (_upload_response("mxc://localhost/image"), {})
+        file = tmp_path / "chart.png"
+        Image.new("RGB", (1600, 900), "white").save(file)
+
+        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+
+        assert payload is not None
+        assert payload["info"] == {"size": file.stat().st_size, "mimetype": "image/png", "w": 1600, "h": 900}
+
+    @pytest.mark.asyncio
+    async def test_image_upload_reports_exif_rotated_dimensions(self, tmp_path: Path) -> None:
+        """A photo stored sideways reports the dimensions a browser displays after EXIF rotation."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        file = tmp_path / "photo.jpg"
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new("RGB", (400, 300), "white").save(file, exif=exif)
+
+        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/jpeg")
+
+        assert payload is not None
+        assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
+
+    @pytest.mark.asyncio
+    async def test_undecodable_image_upload_omits_dimensions(self, tmp_path: Path) -> None:
+        """Bytes that only claim to be an image still upload, without guessed dimensions."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        file = tmp_path / "broken.png"
+        file.write_bytes(b"not a png")
+
+        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+
+        assert payload is not None
+        assert payload["info"] == {"size": 9, "mimetype": "image/png"}
 
     @pytest.mark.asyncio
     async def test_encrypted_upload_returns_file_payload(self, tmp_path: Path) -> None:

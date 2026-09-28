@@ -5,7 +5,7 @@ FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM oven/bun:1 AS bun
 
 # Builder stage with uv for dependencies
-FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
+FROM mirror.gcr.io/library/python:3.13-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
 # Copy bun for explicit frontend builds in the builder stage
@@ -48,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && rm -rf frontend/node_modules
 
 # Final production stage
-FROM public.ecr.aws/docker/library/python:3.13-slim AS final
+FROM mirror.gcr.io/library/python:3.13-slim AS final
 # Copy uv for runtime (needed for auto-installing tool extras)
 COPY --from=uv /uv /uvx /bin/
 

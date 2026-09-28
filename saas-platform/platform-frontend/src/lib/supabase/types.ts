@@ -1,7 +1,7 @@
 // Database types for Supabase
 type PlanTier = 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
 type AccountStatus = 'active' | 'suspended' | 'deleted' | 'pending_verification'
-type SubscriptionStatus = 'trialing' | 'active' | 'cancelled' | 'past_due' | 'paused'
+type SubscriptionStatus = 'trialing' | 'active' | 'cancelled' | 'past_due' | 'paused' | 'incomplete' | 'incomplete_expired' | 'unpaid'
 
 export type Database = {
   public: {

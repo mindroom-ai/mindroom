@@ -22,6 +22,7 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -36,6 +37,7 @@ import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
@@ -70,11 +72,11 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_workspace_root_path,
     private_instance_scope_root_path,
     resolve_worker_key,
     resolve_worker_target,
+    visible_workspace_roots,
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -2832,6 +2834,209 @@ def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_ref
     assert '"result": 3' in data["result"]
 
 
+def _primary_config_snapshot(*, file_access: str = "workspace") -> dict[str, object]:
+    """Return a live primary config whose `mind` agent the runner's seed config never saw."""
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "memory_backend": "file",
+                "tools": ["shell", "file"],
+                "file_access": file_access,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+) -> None:
+    """Agents added after the runner's config was seeded run through the primary's live config snapshot."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    assert "mind" not in sandbox_runner_module.app_runtime_config(sandbox_runner_app).agents
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    _write_workspace_env_hook(workspace, "export MIND_HOOK=from-mind-workspace\n")
+    request = {
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [["bash", "-c", 'printf "%s" "$MIND_HOOK"']],
+        "execution_env": {"PATH": os.environ["PATH"]},
+        "routing_agent_name": "mind",
+        "tool_init_overrides": {"base_dir": str(workspace)},
+    }
+
+    with pytest.raises(ValueError, match="Unknown agent: mind"):
+        runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={**request, "config_snapshot": _primary_config_snapshot()},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=workspace) == "from-mind-workspace"
+
+
+@pytest.mark.parametrize(("file_access", "readable"), [("workspace", False), ("unrestricted", True)])
+def test_sandbox_runner_enforces_snapshot_agent_file_access_over_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    file_access: str,
+    readable: bool,
+) -> None:
+    """The primary's snapshot decides the agent's settings, so a stale seed cannot widen them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models: {}\nagents:\n  mind:\n    display_name: Mind\n    file_access: unrestricted\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-workspace-contents", encoding="utf-8")
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "kwargs": {"file_name": str(outside)},
+                "routing_agent_name": "mind",
+                "tool_init_overrides": {"base_dir": str(workspace)},
+                "config_snapshot": _primary_config_snapshot(file_access=file_access),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert ("outside-workspace-contents" in data["result"]) is readable
+
+
+def test_sandbox_runner_rejects_invalid_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid primary snapshot is refused instead of falling back to the seed config."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = _primary_config_snapshot(file_access="everything")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "routing_agent_name": "mind",
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every request carries the snapshot, so plugins missing from the runner are dropped without a log line per call."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = {**_primary_config_snapshot(), "plugins": ["./plugins/primary-only"]}
+
+    with capture_logs() as logs:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "routing_agent_name": "mind",
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_static_runner_relies_on_primary_private_template_from_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private template that exists only beside the primary's config does not fail the shared runner's calls."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="mind")
+    assert worker_key is not None
+    private_workspace_relative = f"private_instances/{worker_dir_name(worker_key)}/mind/mind_data"
+    snapshot = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "tools": ["shell"],
+                "private": {"per": "user", "template_dir": "./primary-only-template"},
+            },
+        },
+    }
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", "printf ok"]],
+            "execution_env": {"PATH": os.environ["PATH"]},
+            "worker_key": worker_key,
+            "worker_scope": "user",
+            "routing_agent_name": "mind",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["mind"],
+            "tool_init_overrides": {"base_dir": private_workspace_relative},
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=runtime_paths.storage_root / private_workspace_relative) == "ok"
+
+
 def test_sandbox_runner_applies_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3038,10 +3243,70 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
         storage_root,
         "v1:default:shared:general",
         requested_base_dir,
+        (storage_root.resolve() / requested_base_dir,),
     )
 
     assert resolved == (storage_root / requested_base_dir).resolve()
     assert not resolved.exists()
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "agents/general",
+        "agents/general/sessions",
+        "agents/helper/workspace",
+        "private_instances",
+        "private_instances/{scope}",
+        "private_instances/{scope}/writer",
+        "private_instances/{scope}/writer/sessions",
+        "private_instances/{scope}/other/other_data",
+    ],
+)
+def test_resolve_worker_base_dir_rejects_paths_outside_visible_workspaces(tmp_path: Path, requested: str) -> None:
+    """A worker only works inside its workspaces; the state roots and scopes above them stay out of reach."""
+    worker_key = "v1:default:user:~@alice:localhost"
+    storage_root = tmp_path.resolve()
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General", worker_scope="user"),
+            "writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user", root="writer_data")),
+        },
+    )
+    workspace_roots = visible_workspace_roots(
+        storage_root,
+        worker_key,
+        config.get_agent_policies(),
+        private_agent_names=frozenset(),
+    )
+    paths = local_workers_module.local_worker_state_paths_for_root(storage_root / "workers" / "current")
+    scope = private_instance_scope_root_path(storage_root, worker_key).name
+
+    assert sandbox_worker_prep_module._resolve_worker_base_dir(
+        paths,
+        storage_root,
+        worker_key,
+        f"private_instances/{scope}/writer/writer_data/project",
+        workspace_roots,
+    ) == (storage_root / f"private_instances/{scope}/writer/writer_data/project")
+    assert (
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            storage_root,
+            worker_key,
+            "agents/general/workspace",
+            workspace_roots,
+        )
+        == storage_root / "agents/general/workspace"
+    )
+    with pytest.raises(ValueError, match="visible workspace"):
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            storage_root,
+            worker_key,
+            requested.format(scope=scope),
+            workspace_roots,
+        )
 
 
 def test_resolve_worker_base_dir_keeps_worker_root_paths_independent_of_alias_metadata(tmp_path: Path) -> None:
@@ -3059,45 +3324,46 @@ def test_resolve_worker_base_dir_keeps_worker_root_paths_independent_of_alias_me
             tmp_path,
             worker_key,
             str(requested),
-            frozenset({"writer"}),
+            (),
         )
         == requested
     )
 
 
 @pytest.mark.parametrize("layout", ["symlink", "duplicate_mount"])
-def test_resolve_worker_base_dir_translates_verified_historical_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    layout: str,
-) -> None:
-    """Historical cwd resolves to canonical state on the primary and duplicate worker mounts."""
+def test_resolve_worker_base_dir_never_translates_the_historical_scope_spelling(tmp_path: Path, layout: str) -> None:
+    """The primary sends the canonical workspace, so the worker never reads identity records to translate aliases.
+
+    On the primary host the verified alias is a link that resolves to the canonical workspace; inside a worker it is a
+    second mount of the same directory, whose spelling is not a visible workspace.
+    """
     worker_key = "v1:default:user_agent:~@alice:example.org:writer"
     ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
     canonical = private_instance_scope_root_path(tmp_path, worker_key)
     legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:writer")
+    (canonical / "writer" / "workspace").mkdir(parents=True)
     if layout == "symlink":
         legacy.symlink_to(canonical.name, target_is_directory=True)
     else:
-        legacy.mkdir()
-        original_samefile = Path.samefile
-        monkeypatch.setattr(
-            Path,
-            "samefile",
-            lambda path, other: (path == legacy and other == canonical) or original_samefile(path, other),
-        )
+        (legacy / "writer" / "workspace").mkdir(parents=True)
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
+    workspace_roots = (canonical / "writer" / "workspace",)
 
-    result = sandbox_worker_prep_module._resolve_worker_base_dir(
-        paths,
-        tmp_path,
-        worker_key,
-        str(legacy / "writer/workspace/project"),
-        frozenset({"writer"}),
-    )
+    def resolve(requested: Path) -> Path:
+        return sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            workspace_roots,
+        )
 
-    assert result == canonical / "writer/workspace/project"
-    assert not result.exists()
+    assert resolve(canonical / "writer/workspace/project") == canonical / "writer/workspace/project"
+    if layout == "symlink":
+        assert resolve(legacy / "writer/workspace/project") == canonical / "writer/workspace/project"
+    else:
+        with pytest.raises(ValueError, match="visible workspace"):
+            resolve(legacy / "writer/workspace/project")
 
 
 @pytest.mark.parametrize(
@@ -3138,13 +3404,13 @@ def test_resolve_worker_base_dir_rejects_unverified_historical_scope(
         )
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
 
-    with pytest.raises(ValueError, match="allowed state roots"):
+    with pytest.raises(ValueError, match="visible workspace"):
         sandbox_worker_prep_module._resolve_worker_base_dir(
             paths,
             tmp_path,
             worker_key,
             str(requested),
-            frozenset({"writer"}),
+            (canonical / "writer" / "workspace",),
         )
 
 
@@ -3683,12 +3949,12 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     assert "worker root" in response.json()["detail"]
 
 
-def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_root(
+def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_workspaces(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Scoped workers should reject base_dir overrides outside their visible state roots."""
+    """Scoped workers should reject base_dir overrides outside their visible workspaces."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
@@ -3708,7 +3974,7 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_roo
         )
 
     assert response.status_code == 400
-    assert "allowed state roots" in response.json()["detail"]
+    assert "visible workspace" in response.json()["detail"]
 
 
 def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_paths(
@@ -3747,12 +4013,12 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_roots(
+def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_workspaces(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A user worker addresses its user-scope agents' roots, never agents on other scopes."""
+    """A user worker addresses its user-scope agents' workspaces, never agents on other scopes."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     config_path = tmp_path / "config.yaml"
@@ -3799,7 +4065,7 @@ def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_roots(
     assert allowed.json()["ok"] is True
     assert (storage_root / "agents" / "coder" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
     assert rejected.status_code == 400
-    assert "allowed state roots" in rejected.json()["detail"]
+    assert "visible workspace" in rejected.json()["detail"]
     assert not (storage_root / "agents" / "ops").exists()
 
 
@@ -3828,7 +4094,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
         )
 
     assert response.status_code == 400
-    assert "visible state roots" in response.json()["detail"]
+    assert "visible workspaces" in response.json()["detail"]
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -4328,6 +4594,7 @@ def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
         worker_key=worker_key,
         tool_init_overrides={"base_dir": "agents/general/workspace"},
         runtime_paths=runtime_paths,
+        agent_policies={},
     )
 
     assert prepared.handle is worker_handle
@@ -4367,25 +4634,24 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
         worker_key=worker_key,
         tool_init_overrides={
             "base_dir": str(
-                _private_instance_state_root_path(
-                    runtime_paths.storage_root,
-                    worker_key=worker_key,
-                    agent_name="mind",
-                ),
+                private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "mind" / "mind_data",
             ),
         },
         runtime_paths=runtime_paths,
+        agent_policies={},
         private_agent_names=frozenset({"mind"}),
     )
 
     assert prepared.handle is worker_handle
 
 
+@pytest.mark.parametrize("target", [("other_agent",), ("mind",), ("mind", "sessions"), ()])
 def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agent_workers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    target: tuple[str, ...],
 ) -> None:
-    """User-agent workers must not accept sibling private agent roots."""
+    """User-agent workers accept only their private workspace, not sibling agents or the state above it."""
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -4413,20 +4679,17 @@ def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agen
 
     with pytest.raises(
         sandbox_worker_prep_module.WorkerRequestPreparationError,
-        match="base_dir must stay inside the allowed state roots or worker root",
+        match="base_dir must stay inside a visible workspace or the worker root",
     ):
         sandbox_worker_prep_module.prepare_worker_request(
             worker_key=worker_key,
             tool_init_overrides={
                 "base_dir": str(
-                    _private_instance_state_root_path(
-                        runtime_paths.storage_root,
-                        worker_key=worker_key,
-                        agent_name="other_agent",
-                    ),
+                    private_instance_scope_root_path(runtime_paths.storage_root, worker_key).joinpath(*target),
                 ),
             },
             runtime_paths=runtime_paths,
+            agent_policies={},
             private_agent_names=frozenset({"mind"}),
         )
 
@@ -4461,6 +4724,7 @@ def test_prepare_worker_request_requires_explicit_private_visibility_for_user_ag
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},
             runtime_paths=runtime_paths,
+            agent_policies={},
         )
 
 
@@ -4568,9 +4832,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     assert worker_key is not None
     shared_root = tmp_path / "shared-storage"
     worker_root = shared_root / "workers" / worker_dir_name(worker_key)
-    private_base_dir = _private_instance_state_root_path(shared_root, worker_key=worker_key, agent_name="mind") / (
-        "mind_data"
-    )
+    private_base_dir = private_instance_scope_root_path(shared_root, worker_key) / "mind" / "mind_data"
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
@@ -4624,6 +4886,72 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("route", ["execute", "save-attachment"])
+def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """A workspace missing from the pod is a request error the primary does not count against the worker."""
+    _set_sandbox_token(monkeypatch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    # Only the pod's read-only root filesystem lies where the unmounted workspace belongs.
+    unmounted_parent = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha"
+    unmounted_parent.mkdir(parents=True)
+    unmounted_parent.chmod(0o555)
+    (tmp_path / "config.yaml").write_text(
+        "agents:\n  alpha:\n    display_name: Alpha\n    private:\n      per: user_agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
+
+    request = {
+        "worker_key": worker_key,
+        "routing_agent_name": "alpha",
+        "execution_identity": asdict(identity),
+        "private_agent_names": ["alpha"],
+    }
+    if route == "execute":
+        request |= {"tool_name": "shell", "function_name": "run_shell_command", "args": [["true"]], "kwargs": {}}
+        request["worker_scope"] = "user_agent"
+    else:
+        request |= {
+            "attachment_id": "att_sample",
+            "mindroom_output_path": "incoming/sample.txt",
+            "sha256": hashlib.sha256(b"payload").hexdigest(),
+            "size_bytes": 7,
+            "bytes_b64": base64.b64encode(b"payload").decode("ascii"),
+        }
+    try:
+        response = runner_client.post(f"/api/sandbox-runner/{route}", headers=SANDBOX_HEADERS, json=request)
+    finally:
+        unmounted_parent.chmod(0o755)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["failure_kind"] == "tool"
+    assert "not mounted" in response.json()["error"]
+
+
 def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4646,7 +4974,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
 
     shared_root = tmp_path / "shared-storage"
     worker_root = shared_root / "workers" / worker_dir_name(worker_key)
-    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "mind_data"
+    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "alpha_data"
     private_workspace.mkdir(parents=True, exist_ok=True)
     (private_workspace / "OWNER.txt").write_text("alice\n", encoding="utf-8")
 
@@ -4680,7 +5008,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
             "execution_identity": asdict(identity),
             "private_agent_names": ["alpha"],
             "tool_init_overrides": {
-                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/mind_data",
+                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/alpha_data",
             },
         },
     )

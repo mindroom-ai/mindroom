@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.agent_policy import (
@@ -13,6 +15,7 @@ from mindroom.agent_policy import (
 )
 from mindroom.constants import (
     RuntimePaths,
+    config_relative_path,
     resolve_config_relative_path,
     resolve_config_relative_path_preserving_leaf,
     resolve_session_state_root,
@@ -23,6 +26,8 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
     resolve_worker_key,
+    shared_storage_root,
+    written_by_other_workers,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
@@ -30,11 +35,10 @@ from mindroom.workspaces import (
     resolve_agent_workspace_from_state_path,
     resolve_relative_path_within_root,
     resolve_workspace_relative_path,
+    runs_in_dedicated_worker,
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -204,7 +208,9 @@ def resolve_agent_runtime(
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
 
-    if create and resolved_execution.policy.private_workspace_enabled:
+    # The identity record sits in the private scope above the workspace, which
+    # dedicated workers never mount; only the primary creates or locks it.
+    if create and resolved_execution.policy.private_workspace_enabled and not runs_in_dedicated_worker(runtime_paths):
         execution_identity = resolved_execution.execution_identity
         worker_key = resolved_execution.worker_key
         if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
@@ -299,6 +305,17 @@ def resolve_agent_storage(
     )
 
 
+def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
+    """Resolve one shared knowledge path, following no link below storage that workers write; others follow links."""
+    lexical = Path(os.path.normpath(config_relative_path(raw_path, runtime_paths)))
+    storage_root = shared_storage_root(runtime_paths.storage_root)
+    lexical_storage_root = Path(os.path.normpath(runtime_paths.storage_root.expanduser().absolute()))
+    for spelling in dict.fromkeys((lexical_storage_root, storage_root)):
+        if lexical.is_relative_to(spelling) and written_by_other_workers(relative := lexical.relative_to(spelling)):
+            return resolve_workspace_relative_path(storage_root, relative, field_name="shared knowledge base path")
+    return resolve_config_relative_path(raw_path, runtime_paths).resolve()
+
+
 def resolve_knowledge_binding(
     base_id: str,
     config: Config,
@@ -323,7 +340,7 @@ def resolve_knowledge_binding(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     if effective_agent_name is None:
-        knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
+        knowledge_path = shared_knowledge_path(base_config.path, runtime_paths)
         return ResolvedKnowledgeBinding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
@@ -367,4 +384,5 @@ __all__ = [
     "resolve_agent_storage",
     "resolve_knowledge_binding",
     "resolve_private_requester_scope_root",
+    "shared_knowledge_path",
 ]

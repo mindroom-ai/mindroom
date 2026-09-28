@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -15,7 +16,7 @@ from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
 
@@ -95,6 +96,8 @@ def _joined_members(room_id: str, user_ids: Sequence[str]) -> nio.JoinedMembersR
 async def membership_index(
     config: Config,
     memberships_by_room_key: Mapping[str, set[str]],
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AgentReplyMembershipIndex:
     """Build an authoritative ready membership index for configured grant rooms."""
     runtime_paths = runtime_paths_for(config)
@@ -112,7 +115,7 @@ async def membership_index(
         _joined_members(room_ids[room_key], sorted(memberships_by_room_key[room_key]))
         for room_key in sorted(memberships_by_room_key)
     ]
-    index = AgentReplyMembershipIndex()
+    index = AgentReplyMembershipIndex(clock=clock)
     await index.refresh(config, runtime_paths, client)
     return index
 

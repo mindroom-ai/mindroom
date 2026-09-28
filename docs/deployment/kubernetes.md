@@ -62,7 +62,7 @@ EOF
 
 The authorization header is read from standard input so the token does not appear in curl's process arguments.
 
-Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned, restarted when an inactive subscription stopped it, or re-provisioned when deprovisioned.
 Use the returned `customer_id` with the CLI's `logs <id>` command.
 The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
@@ -197,6 +197,7 @@ This keeps the deployment simple, but all proxied tool calls share the same runn
 The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
 It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
 The primary leases each proxied tool's saved settings to the runner per call.
+The runner's own config file is only the seed the pod started with, so each call also carries the primary's [live config snapshot](sandbox-proxy.md#live-config-snapshots) with sensitive keys removed, and the runner resolves the requesting agent and its settings from it.
 Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
 When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
 See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
@@ -205,7 +206,7 @@ See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-worke
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
 The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
-Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
+Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
@@ -215,8 +216,8 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
-> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
+> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's workspace — this is the strongest isolation available.
+> With `user`, the worker can see the workspaces of every non-private `worker_scope: user` agent, plus that user's own private workspaces, because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility
@@ -241,8 +242,9 @@ The worker mounts that directory from the existing worker-storage PVC with `subP
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.
 
-If the source already lies inside a storage root visible to the worker's existing scope, the existing mount provides access and MindRoom does not add a nested duplicate mount.
+If the source already lies inside a workspace the worker mounts, that writable workspace mount provides access and MindRoom does not add a nested duplicate mount.
 Sources outside the shared worker-storage root are ignored so existing configurations continue to work without granting access to host-only paths.
+MindRoom plans each mount from the configured path, not its link target: a source that is missing or reached through a link is skipped with a warning, and a source inside another agent's workspace, a private instance, or a worker root is refused with an error, because kubelet follows links inside the volume when it mounts and those directories are written by other workers.
 Mount plans that would overlap another knowledge source or contain an existing scoped mount fail closed before a Deployment is created.
 The final knowledge mount list is part of the worker pod-template hash, so reconciliation recreates workers whose mounted assignments are stale.
 
@@ -278,8 +280,8 @@ Important behavior and constraints:
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - `kubernetesWorkerRuntimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers. The runtime chart uses `workers.kubernetes.runtimeClassName`; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
 - Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
-- Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
-- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
+- Dedicated workers need access to the shared instance PVC so they can reach agent workspaces.
+- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
 - Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
@@ -417,7 +419,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
@@ -443,6 +445,34 @@ Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
+
+## Subscription Lifecycle
+
+Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
+Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
+The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
+
+| Subscription state | Instance | Platform OpenRouter key | Data |
+|--------------------|----------|-------------------------|------|
+| `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
+| Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
+| Entitled again while stopped | Started | Re-enabled | Kept |
+| Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
+
+The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
+Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
+A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+Before stopping or resuming a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current status and corrects a stale stored status, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped.
+A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
+A delayed creation event for a Stripe subscription older than the account's current one is ignored.
+Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
+The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
+Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
+Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
+The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 
 ## Deployment Scripts
 

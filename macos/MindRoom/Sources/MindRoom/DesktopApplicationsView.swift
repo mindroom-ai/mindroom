@@ -4,10 +4,11 @@ import UniformTypeIdentifiers
 struct DesktopApplicationsView: View {
     @ObservedObject var store: DesktopControlStore
     var showSetup: () -> Void
-    var onSaved: () -> Void = {}
+    var onSaved: (DesktopStatus) -> Void = { _ in }
     @State private var search = ""
     @State private var showingAppPicker = false
     @State private var confirmingStop = false
+    private static let saveTitle = "Save App Access"
 
     var body: some View {
         AppSectionCard {
@@ -21,36 +22,12 @@ struct DesktopApplicationsView: View {
                 }
                 Text("Check the apps your paired agents may use, then save app access. This does not grant control or change macOS permissions.")
                     .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    Button(selectionAction.title) {
-                        switch selectionAction {
-                        case .setup: showSetup()
-                        case .stopAndSave: confirmingStop = true
-                        case .save: store.saveAllowedApplications(completion: onSaved)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(selectionAction != .setup && !store.hasAppSelectionChanges)
-                    Button("Discard Changes") { store.discardAppSelectionChanges() }
-                        .disabled(!store.hasAppSelectionChanges)
-                    Spacer()
-                    if store.hasAppSelectionChanges {
-                        Text(selectionAction != .setup ? "Unsaved changes" : "Not saved yet")
-                            .foregroundStyle(.orange)
-                    } else if store.status.config.state == "ready" {
-                        Text("Saved").foregroundStyle(.secondary)
-                    }
-                }
-                if selectionAction == .setup {
-                    Text("Connect your agent first. These app choices will be kept while you finish setup.")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else if store.status.canStopBridge {
-                    Text("Saving stops observation and control. Start Observe Only again when you are ready.")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else if store.selectedAppIDs.isEmpty {
-                    Text("No apps are selected. Agents will not have access to any apps.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
+                DesktopAccessSaveBar(
+                    store: store, saveTitle: Self.saveTitle, hasChanges: store.hasAppSelectionChanges,
+                    idleNote: store.selectedAppIDs.isEmpty ? "No apps are selected. Agents will not have access to any apps." : nil,
+                    confirmingStop: $confirmingStop, showSetup: showSetup, save: save,
+                    discard: store.discardAppSelectionChanges
+                )
                 Divider()
                 HStack {
                     TextField("Search apps by name or bundle ID", text: $search)
@@ -100,17 +77,13 @@ struct DesktopApplicationsView: View {
                 if let id = store.addApplication(at: url) { search = id }
             }
         }
-        .confirmationDialog("Stop computer access and save apps?", isPresented: $confirmingStop) {
-            Button("Stop and Save App Access") { store.saveAllowedApplications(completion: onSaved) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This stops observation and revokes control before saving. Computer access stays stopped until you start it again.")
-        }
+        .desktopAccessStopConfirmation(
+            isPresented: $confirmingStop, title: "Stop computer access and save apps?",
+            saveTitle: Self.saveTitle, onConfirm: save
+        )
     }
 
-    private var selectionAction: DesktopAppSelectionAction {
-        store.needsPairing ? .setup : store.status.appSelectionAction
-    }
+    private func save() { store.saveAllowedApplications(completion: onSaved) }
 
     private var applications: [InstalledDesktopApplication] {
         var result = store.applications.filter { $0.id != "primary-screen" }

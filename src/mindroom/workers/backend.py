@@ -62,8 +62,15 @@ class WorkerBackend(Protocol):
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Apply idle cleanup to known workers."""
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
-        """Persist a worker failure for observability."""
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
+        """Persist a worker failure; one from a start the backend has since replaced may be ignored."""
 
 
 @runtime_checkable

@@ -47,11 +47,16 @@ last non-deferred tool.
 
 The hook's third job is history repair: replayed tool-search results are
 stripped down to the request schema, references to tools absent from the
-current request are removed, and search uses missing their result are removed.
+current request are removed, search uses missing their result are removed,
+and response citations are dropped from replayed assistant text blocks.
 These response shapes otherwise produce a 400 on the next request. This is why
 the client proxy is installed unconditionally — the ladder and defer tagging
 gate themselves per request, but a cache-disabled model with no deferred tools
 can still replay poisoned history.
+
+:mod:`mindroom.openrouter_prompt_cache` reuses the public ladder primitives
+here to place the same breakpoints on OpenRouter Chat Completions requests for
+Anthropic-routed models.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.agno_compat_claude import request_kwargs_without_replayed_citations
 from mindroom.agno_compat_model_hooks import install_client_factories
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.hooks.enrichment import is_transient_context
@@ -79,9 +85,9 @@ if TYPE_CHECKING:
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
 # The Anthropic API allows at most four cache_control markers per request.
-_MAX_CACHE_MARKERS = 4
+MAX_CACHE_MARKERS = 4
 # Newest cacheable block plus one fallback boundary in an earlier message.
-_MESSAGE_RUNG_COUNT = 2
+MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
 TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
@@ -182,7 +188,7 @@ async def arefresh_session_backed_bedrock_async_client(model: object) -> None:
             await run_coroutine_until_complete(previous_client.close())
 
 
-def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
+def prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
     """Return the cache_control payload for one breakpoint marker."""
     cache_control: dict[str, str] = {"type": "ephemeral"}
     if extended_cache_time:
@@ -262,7 +268,7 @@ def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
     return count
 
 
-def _mark_message_cache_rungs(
+def mark_message_cache_rungs(
     messages: list[Any],
     cache_control: dict[str, str],
     rung_budget: int,
@@ -306,7 +312,7 @@ def _mark_message_cache_rungs(
     return marked_messages, markers_added
 
 
-def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object, int]:
+def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object, int]:
     """Mark the last non-deferred tool so the tools prefix caches independently.
 
     Deferred tools may not carry ``cache_control`` (the API returns a 400) and
@@ -520,25 +526,40 @@ def _request_kwargs_with_deferred_tool_search(
     return prepared_kwargs
 
 
-def _request_kwargs_with_shared_system_prefix(request_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Keep the shared instructions cacheable independently of session context."""
-    system = request_kwargs.get("system")
-    if not isinstance(system, list) or not system:
-        return request_kwargs
+def split_shared_system_prefix(system: list[Any]) -> list[Any]:
+    """Move a marked first system text block's cache marker to the shared instructions.
+
+    The session-context suffix becomes a separate unmarked block, so dates,
+    summaries, and learning can change without invalidating the shared prefix.
+    Returns the input list unchanged when there is no marked boundary to split.
+    """
+    if not system:
+        return system
     first_block = system[0]
     if not isinstance(first_block, dict) or first_block.get("type") != "text":
-        return request_kwargs
+        return system
     text = first_block.get("text")
     if not isinstance(text, str) or "cache_control" not in first_block:
-        return request_kwargs
+        return system
     shared_text, boundary, session_text = text.partition(SESSION_CONTEXT_BOUNDARY)
     if not boundary or not shared_text.strip():
-        return request_kwargs
+        return system
 
     shared_block = {**first_block, "text": shared_text}
     session_block = {key: value for key, value in first_block.items() if key != "cache_control"}
     session_block["text"] = boundary + session_text
-    return {**request_kwargs, "system": [shared_block, session_block, *system[1:]]}
+    return [shared_block, session_block, *system[1:]]
+
+
+def _request_kwargs_with_shared_system_prefix(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep the shared instructions cacheable independently of session context."""
+    system = request_kwargs.get("system")
+    if not isinstance(system, list):
+        return request_kwargs
+    split_system = split_shared_system_prefix(system)
+    if split_system is system:
+        return request_kwargs
+    return {**request_kwargs, "system": split_system}
 
 
 def _request_kwargs_with_prompt_cache_ladder(
@@ -553,20 +574,20 @@ def _request_kwargs_with_prompt_cache_ladder(
         if reordered_messages != messages:
             prepared_kwargs = {**request_kwargs, "messages": reordered_messages}
 
-    marker_budget = _MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
+    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
     if marker_budget <= 0:
         return prepared_kwargs
     prepared_kwargs = dict(prepared_kwargs)
 
     messages = prepared_kwargs.get("messages")
     if isinstance(messages, list) and messages:
-        rung_budget = min(_MESSAGE_RUNG_COUNT, marker_budget)
-        marked_messages, markers_added = _mark_message_cache_rungs(messages, cache_control, rung_budget)
+        rung_budget = min(MESSAGE_RUNG_COUNT, marker_budget)
+        marked_messages, markers_added = mark_message_cache_rungs(messages, cache_control, rung_budget)
         prepared_kwargs["messages"] = marked_messages
         marker_budget -= markers_added
 
     if marker_budget > 0:
-        marked_tools, tools_marked = _mark_last_tool(prepared_kwargs.get("tools"), cache_control)
+        marked_tools, tools_marked = mark_last_tool(prepared_kwargs.get("tools"), cache_control)
         if tools_marked:
             prepared_kwargs["tools"] = marked_tools
 
@@ -670,13 +691,14 @@ def prepare_claude_request_kwargs(
 ) -> dict[str, Any]:
     """Apply MindRoom's wire transformations to one Claude request payload."""
     prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
         _model_deferred_tool_names(model),
     )
     prepared_kwargs = _request_kwargs_without_provider_execution(prepared_kwargs)
     if model.cache_system_prompt:
-        cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
+        cache_control = prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
         prepared_kwargs = _request_kwargs_with_shared_system_prefix(prepared_kwargs)
         prepared_kwargs = _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
     record_llm_request_tools(prepared_kwargs.get("tools"))

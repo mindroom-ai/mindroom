@@ -43,12 +43,12 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init
 $EDITOR ~/.mindroom/.env
-uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
+# Open the printed link or scan the QR code to approve pairing,
+# or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
 
-Generate the pair code in `https://chat.mindroom.chat` under:
-`Settings -> Local MindRoom`.
+Pairing happens automatically on first run.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).

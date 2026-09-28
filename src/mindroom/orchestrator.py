@@ -55,6 +55,7 @@ from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
+from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -109,6 +110,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
@@ -2988,9 +2990,9 @@ async def _finish_runtime_shutdown(
     finally:
         for task in auxiliary_tasks:
             task.cancel()
-        for task in auxiliary_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        # Auxiliary tasks are non-critical and log their own failures, so none may skip the remaining cleanup
+        # or replace the error that ended the runtime.
+        await asyncio.gather(*auxiliary_tasks, return_exceptions=True)
         if stall_detector is not None:
             stall_detector.stop()
         reset_matrix_sync_health()
@@ -3034,6 +3036,38 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
+def _start_auxiliary_tasks(
+    orchestrator: _MultiAgentOrchestrator,
+    runtime_paths: RuntimePaths,
+    shutdown_requested: asyncio.Event,
+) -> list[asyncio.Task]:
+    """Start the non-critical background tasks that run beside the orchestrator."""
+    auxiliary_specs = [
+        (
+            "config watcher",
+            lambda: _watch_config_task(orchestrator.config_path, orchestrator),
+            "config_watcher_supervisor",
+        ),
+        ("plugins watcher", lambda: watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
+        ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
+    ]
+    tasks = [
+        asyncio.create_task(
+            _run_auxiliary_task_forever(
+                task_name,
+                operation,
+                should_restart=lambda: not shutdown_requested.is_set(),
+            ),
+            name=supervisor_name,
+        )
+        for task_name, operation, supervisor_name in auxiliary_specs
+    ]
+    # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
+    # create_background_task logs an unexpected failure as soon as it happens.
+    tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
+    return tasks
+
+
 async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
@@ -3067,31 +3101,12 @@ async def main(
         # Credential synchronization and storage setup are synchronous. Keep the
         # ordered unit off-loop while retaining exception propagation to startup.
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
+        await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         set_runtime_starting()
-        auxiliary_specs = [
-            (
-                "config watcher",
-                lambda: _watch_config_task(orchestrator.config_path, orchestrator),
-                "config_watcher_supervisor",
-            ),
-            ("plugins watcher", lambda: watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
-            ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
-        ]
-
-        for task_name, operation, supervisor_name in auxiliary_specs:
-            auxiliary_tasks.append(
-                asyncio.create_task(
-                    _run_auxiliary_task_forever(
-                        task_name,
-                        operation,
-                        should_restart=lambda: not shutdown_requested.is_set(),
-                    ),
-                    name=supervisor_name,
-                ),
-            )
+        auxiliary_tasks.extend(_start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested))
 
         if api:
             api_task = asyncio.create_task(

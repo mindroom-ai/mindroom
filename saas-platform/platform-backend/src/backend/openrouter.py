@@ -13,6 +13,7 @@ OPENROUTER_KEYS_URL = "https://openrouter.ai/api/v1/keys"
 
 HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
 HttpDelete = Callable[[str, dict[str, str]], tuple[int, bytes]]
+HttpPatch = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
 
 
 class OpenRouterError(RuntimeError):
@@ -21,6 +22,10 @@ class OpenRouterError(RuntimeError):
 
 class OpenRouterConfigurationError(OpenRouterError):
     """Raised when local OpenRouter provisioning configuration is missing."""
+
+
+class OpenRouterKeyNotFoundError(OpenRouterError):
+    """Raised when OpenRouter reports that a key hash no longer exists."""
 
 
 @dataclass(frozen=True)
@@ -42,28 +47,28 @@ class CreatedOpenRouterKey:
     limit_reset: str
 
 
-def _default_http_post(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+def _send_http_request(method: str, url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
     except urllib.error.URLError as exc:
-        msg = "OpenRouter key creation failed before receiving a response"
+        msg = f"OpenRouter key {method} request failed before receiving a response"
         raise OpenRouterError(msg) from exc
+
+
+def _default_http_post(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+    return _send_http_request("POST", url, headers, body)
 
 
 def _default_http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, data=b"{}", headers=headers, method="DELETE")
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
-            return response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-    except urllib.error.URLError as exc:
-        msg = "OpenRouter key deletion failed before receiving a response"
-        raise OpenRouterError(msg) from exc
+    return _send_http_request("DELETE", url, headers, b"{}")
+
+
+def _default_http_patch(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+    return _send_http_request("PATCH", url, headers, body)
 
 
 def create_openrouter_key(
@@ -109,32 +114,45 @@ def create_openrouter_key(
         raise OpenRouterError(msg) from exc
 
 
-def delete_openrouter_key(
-    *, management_api_key: str, key_hash: str, http_delete: HttpDelete = _default_http_delete
-) -> None:
-    """Delete an OpenRouter API key by hash."""
+def _key_request_target(management_api_key: str, key_hash: str, action: str) -> tuple[str, dict[str, str]]:
+    """Validate management inputs and return the key URL and headers for one key operation."""
     if not isinstance(management_api_key, str):
         msg = "OPENROUTER_PROVISIONING_API_KEY must be a string"
         raise OpenRouterConfigurationError(msg)
     management_api_key = management_api_key.strip()
     if not management_api_key:
-        msg = "OPENROUTER_PROVISIONING_API_KEY is required to delete OpenRouter keys"
+        msg = f"OPENROUTER_PROVISIONING_API_KEY is required to {action} OpenRouter keys"
         raise OpenRouterConfigurationError(msg)
     if not isinstance(key_hash, str):
         msg = "OpenRouter key_hash must be a string"
         raise OpenRouterError(msg)
     key_hash = key_hash.strip()
     if not key_hash:
-        msg = "OpenRouter key_hash is required to delete OpenRouter keys"
+        msg = f"OpenRouter key_hash is required to {action} OpenRouter keys"
         raise OpenRouterError(msg)
 
     quoted_hash = urllib.parse.quote(key_hash, safe="")
     headers = {"Authorization": f"Bearer {management_api_key}", "Content-Type": "application/json"}
-    status, response_body = http_delete(f"{OPENROUTER_KEYS_URL}/{quoted_hash}", headers)
-    if status != 200:
-        error_detail = response_body.decode("utf-8", errors="replace")
-        msg = f"OpenRouter key deletion failed with status {status}: {error_detail}"
-        raise OpenRouterError(msg)
+    return f"{OPENROUTER_KEYS_URL}/{quoted_hash}", headers
+
+
+def _raise_for_key_status(status: int, response_body: bytes, action: str) -> None:
+    if status == 200:
+        return
+    error_detail = response_body.decode("utf-8", errors="replace")
+    msg = f"OpenRouter key {action} failed with status {status}: {error_detail}"
+    if status == 404:
+        raise OpenRouterKeyNotFoundError(msg)
+    raise OpenRouterError(msg)
+
+
+def delete_openrouter_key(
+    *, management_api_key: str, key_hash: str, http_delete: HttpDelete = _default_http_delete
+) -> None:
+    """Delete an OpenRouter API key by hash."""
+    url, headers = _key_request_target(management_api_key, key_hash, "delete")
+    status, response_body = http_delete(url, headers)
+    _raise_for_key_status(status, response_body, "deletion")
 
     decoded_body = response_body.decode("utf-8", errors="replace")
     try:
@@ -148,3 +166,12 @@ def delete_openrouter_key(
     if payload.get("deleted") is not True:
         msg = f"OpenRouter key deletion response did not confirm deletion: {decoded_body}"
         raise OpenRouterError(msg)
+
+
+def set_openrouter_key_disabled(
+    *, management_api_key: str, key_hash: str, disabled: bool, http_patch: HttpPatch = _default_http_patch
+) -> None:
+    """Disable or re-enable an OpenRouter API key by hash without deleting it."""
+    url, headers = _key_request_target(management_api_key, key_hash, "update")
+    status, response_body = http_patch(url, headers, json.dumps({"disabled": disabled}).encode("utf-8"))
+    _raise_for_key_status(status, response_body, "update")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+import shutil
 import stat
 import tempfile
 from dataclasses import replace
@@ -24,9 +25,11 @@ from agno.session import AgentSession
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
+import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
-from mindroom import prompts
+from mindroom import path_confinement, prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
@@ -78,7 +81,6 @@ from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_state_root_path,
     agent_workspace_root_path,
     private_instance_scope_root_path,
@@ -89,10 +91,10 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     shared_storage_root,
     tool_execution_identity,
-    visible_state_roots_for_worker_key,
+    visible_workspace_roots,
     worker_root_path,
 )
-from mindroom.workspaces import _copy_workspace_template
+from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1518,11 +1520,7 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     )
     worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert worker_key is not None
-    canonical_state_root = _private_instance_state_root_path(
-        runtime_paths.storage_root,
-        worker_key=worker_key,
-        agent_name="general",
-    )
+    canonical_state_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "general"
     canonical_state_root.parent.mkdir(parents=True, exist_ok=True)
     outside_root = tmp_path / "outside"
     outside_root.mkdir(parents=True, exist_ok=True)
@@ -1779,15 +1777,73 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert expected_worker_key is not None
     assert runtime.execution.is_private is True
     assert runtime.execution.worker_key == expected_worker_key
-    assert runtime.state_root == _private_instance_state_root_path(
-        tmp_path,
-        worker_key=expected_worker_key,
-        agent_name="general",
-    )
+    assert runtime.state_root == (private_instance_scope_root_path(tmp_path, expected_worker_key) / "general")
     assert runtime.workspace is not None
     assert runtime.workspace.root == runtime.state_root / "mind_data"
     assert runtime.tool_base_dir == runtime.workspace.root
     assert runtime.file_memory_root == runtime.workspace.root
+
+
+def test_dedicated_worker_runtime_resolution_never_writes_the_private_identity_record(tmp_path: Path) -> None:
+    """Workers do not mount the private scope, so only the primary creates or locks its identity record."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="s1",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+    assert worker_key is not None
+    primary_paths = _runtime_paths(tmp_path)
+    worker_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+        },
+    )
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user_agent", root="mind_data")
+    scope_root = private_instance_scope_root_path(tmp_path, worker_key)
+    # The worker sees only the private workspace the primary already materialized.
+    (scope_root / "general" / "mind_data").mkdir(parents=True)
+
+    runtime = resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, worker_paths),
+        worker_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == scope_root / "general" / "mind_data"
+    assert sorted(entry.name for entry in scope_root.iterdir()) == ["general"]
+
+    resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, primary_paths),
+        primary_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) is None
+    shutil.rmtree(scope_root)
+    resolve_agent_runtime(
+        "general",
+        _bind_runtime_paths(config, primary_paths),
+        primary_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="@alice:localhost",
+    )
 
 
 def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_workspace_local_shared_bases(
@@ -1870,6 +1926,33 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
     assert knowledge_link.resolve() == (runtime.workspace.root / "kb_repo").resolve()
+
+
+def test_workspace_knowledge_links_never_follow_a_swapped_knowledge_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A knowledge directory swapped for a link after resolution never receives the primary's links."""
+    workspace = tmp_path / "agents" / "general" / "workspace"
+    research = workspace / "research"
+    research.mkdir(parents=True)
+    (workspace / "knowledge").mkdir()
+    victim_knowledge = tmp_path / "victim-workspace" / "knowledge"
+    victim_knowledge.mkdir(parents=True)
+    resolve_workspace_relative_path = workspaces_module.resolve_workspace_relative_path
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> Path:
+        resolved = resolve_workspace_relative_path(*args, **kwargs)
+        (workspace / "knowledge").rename(workspace / "knowledge-moved")
+        (workspace / "knowledge").symlink_to(victim_knowledge, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(workspaces_module, "resolve_workspace_relative_path", resolve_then_swap)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        workspaces_module.ensure_workspace_knowledge_links(workspace, knowledge_paths={"research": research.resolve()})
+
+    assert list(victim_knowledge.iterdir()) == []
 
 
 def test_resolve_agent_runtime_removes_stale_workspace_knowledge_links(tmp_path: Path) -> None:
@@ -2033,6 +2116,16 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
     script_path = template_dir / "bootstrap.sh"
     script_path.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
     script_path.chmod(0o755)
+    template_mtime_ns = 1_700_000_000_000_000_000
+    os.utime(script_path, ns=(template_mtime_ns, template_mtime_ns))
+    xattrs_supported = False
+    if hasattr(os, "setxattr"):
+        try:
+            os.setxattr(script_path, "user.mindroom-test", b"template")
+        except OSError:
+            pass
+        else:
+            xattrs_supported = True
 
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
@@ -2064,6 +2157,9 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
         copied_script = first_workspace.root / "bootstrap.sh"
         assert copied_script.exists()
         assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
+        assert copied_script.stat().st_mtime_ns == template_mtime_ns
+        if xattrs_supported:
+            assert os.getxattr(copied_script, "user.mindroom-test") == b"template"
         copied_script.write_text("#!/bin/sh\necho edited\n", encoding="utf-8")
         later_file = template_dir / "LATER.md"
         later_file.write_text("later\n", encoding="utf-8")
@@ -2775,35 +2871,8 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (agent_state_root_path(tmp_path, "general"),)
-
-
-def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
-    """User workers should see only user-scope agent roots plus their own private-instance namespace."""
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-1",
-    )
-
-    worker_key = resolve_worker_key("user", identity)
-
-    assert worker_key is not None
-    assert visible_state_roots_for_worker_key(
-        tmp_path,
-        worker_key,
-        user_scope_agent_names=frozenset({"general", "coder"}),
-    ) == (
-        agent_state_root_path(tmp_path, "coder"),
-        agent_state_root_path(tmp_path, "general"),
-        private_instance_scope_root_path(tmp_path, worker_key),
-    )
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
-        private_instance_scope_root_path(tmp_path, worker_key),
+    assert visible_workspace_roots(tmp_path, worker_key, {}, private_agent_names=frozenset()) == (
+        agent_workspace_root_path(tmp_path, "general"),
     )
 
 
@@ -2814,30 +2883,6 @@ def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_
     assert not requires_explicit_private_agent_visibility("v1:tenant:shared:mind")
     assert not requires_explicit_private_agent_visibility("v1:tenant:unscoped:mind")
     assert not requires_explicit_private_agent_visibility("legacy-worker-key")
-
-
-def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(
-    tmp_path: Path,
-) -> None:
-    """Private requester-scoped workers should only see their addressed private state root."""
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-
-    worker_key = resolve_worker_key("user_agent", identity, agent_name="mind")
-
-    assert worker_key is not None
-    assert visible_state_roots_for_worker_key(
-        tmp_path,
-        worker_key,
-        private_agent_names=frozenset({"mind"}),
-    ) == (_private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
@@ -2929,6 +2974,143 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert not canonical_soul.exists()
     assert "Canonical soul context." not in deleted_agent.role
     assert "Updated canonical soul context." not in deleted_agent.role
+
+
+@pytest.mark.parametrize("planted", ["other_instance_link", "primary_file_link", "fifo"])
+def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, planted: str) -> None:
+    """Links out of the workspace and FIFOs are skipped with a warning, never read or waited on."""
+    storage_path = tmp_path / "storage"
+    runtime_paths = _runtime_paths(storage_path)
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    victim_file = storage_path / "private_instances" / "victim-scope" / "general" / "mind_data" / "SOUL.md"
+    victim_file.parent.mkdir(parents=True)
+    victim_file.write_text("victim-only note", encoding="utf-8")
+    primary_file = storage_path / "credentials" / "openai_credentials.json"
+    primary_file.parent.mkdir(parents=True)
+    primary_file.write_text('{"api_key": "primary-only"}', encoding="utf-8")
+    (workspace / "USER.md").write_text("own user notes", encoding="utf-8")
+    soul = workspace / "SOUL.md"
+    if planted == "other_instance_link":
+        soul.symlink_to(victim_file)
+    elif planted == "primary_file_link":
+        soul.symlink_to(primary_file)
+    else:
+        os.mkfifo(soul)
+
+    with capture_logs() as logs:
+        loaded = _load_context_files(
+            ["SOUL.md", "USER.md"],
+            runtime_paths,
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert [chunk.body for chunk in loaded] == ["own user notes"]
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_refused"]
+
+
+def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context file above the read cap is truncated like any long file instead of being dropped."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "SOUL.md").write_text("soul " * 64, encoding="utf-8")
+    read_regular_file_within_root = path_confinement.read_regular_file_within_root
+    monkeypatch.setattr(
+        "mindroom.agents.read_regular_file_within_root",
+        lambda *args, **kwargs: read_regular_file_within_root(*args, **{**kwargs, "max_bytes": 20}),
+    )
+
+    loaded = _load_context_files(
+        ["SOUL.md"],
+        _runtime_paths(storage_path),
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
+
+
+def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_path: Path) -> None:
+    """A workspace an older worker replaced with a link is refused, as the mount planner refuses to mount it."""
+    storage_path = tmp_path / "storage"
+    state_root = storage_path / "agents" / "general"
+    (state_root / "elsewhere").mkdir(parents=True)
+    (state_root / "elsewhere" / "SOUL.md").write_text("planted soul", encoding="utf-8")
+    (state_root / "workspace").symlink_to(state_root / "elsewhere", target_is_directory=True)
+
+    with capture_logs() as logs:
+        loaded = _load_context_files(
+            ["SOUL.md"],
+            _runtime_paths(storage_path),
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert loaded == []
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_refused"]
+
+
+def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_path: Path) -> None:
+    """A context file above the 1 MiB read cap is truncated with a warning instead of read whole."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "SOUL.md").write_text("x" * ((1 << 20) + 10), encoding="utf-8")
+
+    with capture_logs() as logs:
+        [chunk] = _load_context_files(
+            ["SOUL.md"],
+            _runtime_paths(storage_path),
+            agent_name="general",
+            storage_path=storage_path,
+        )
+
+    assert len(chunk.body) == 1 << 20
+    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == ["context_file_truncated"]
+
+
+def test_load_context_files_refuses_a_workspace_file_swapped_after_resolution(tmp_path: Path) -> None:
+    """A private context file resolved at runtime resolution and then replaced by a link is not followed."""
+    storage_path = tmp_path / "storage"
+    runtime_paths = _runtime_paths(storage_path)
+    workspace = storage_path / "private_instances" / "attacker-scope" / "general" / "mind_data"
+    workspace.mkdir(parents=True)
+    context_file = workspace / "SOUL.md"
+    context_file.write_text("attacker soul", encoding="utf-8")
+    victim_file = storage_path / "private_instances" / "victim-scope" / "general" / "mind_data" / "SOUL.md"
+    victim_file.parent.mkdir(parents=True)
+    victim_file.write_text("victim-only note", encoding="utf-8")
+    context_file.unlink()
+    context_file.symlink_to(victim_file)
+
+    loaded = _load_context_files([context_file], runtime_paths, workspace_root=workspace)
+
+    assert loaded == []
+
+
+def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> None:
+    """Links that stay inside the workspace still load under their canonical path."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "docs" / "soul.md").write_text("Linked soul.\n", encoding="utf-8")
+    (workspace / "SOUL.md").symlink_to("docs/soul.md")
+
+    loaded = _load_context_files(
+        ["SOUL.md"],
+        _runtime_paths(storage_path),
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert [(chunk.title, chunk.body) for chunk in loaded] == [
+        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul."),
+    ]
 
 
 def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
@@ -3263,8 +3445,19 @@ def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path)
         _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
 
-def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sandbox_worker(tmp_path: Path) -> None:
-    """Dedicated sandbox workers should not validate control-plane private template paths."""
+@pytest.mark.parametrize(
+    "worker_env",
+    [
+        {"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice"},
+        {},
+    ],
+    ids=["dedicated_worker", "static_runner"],
+)
+def test_bind_runtime_paths_allows_missing_private_template_dir_for_sandbox_runner(
+    tmp_path: Path,
+    worker_env: dict[str, str],
+) -> None:
+    """Sandbox runners should not validate control-plane private template paths the primary already checked."""
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
@@ -3274,10 +3467,7 @@ def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sa
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={
-            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:alice",
-        },
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true", **worker_env},
     )
 
     bound = _bind_runtime_paths(config, runtime_paths)
@@ -3326,14 +3516,7 @@ def test_resolve_agent_runtime_skips_missing_private_template_copy_for_dedicated
         create=True,
     )
 
-    expected_workspace = (
-        _private_instance_state_root_path(
-            shared_root,
-            worker_key=worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    expected_workspace = (private_instance_scope_root_path(shared_root, worker_key) / "general") / "mind_data"
     assert agent_runtime.workspace is not None
     assert agent_runtime.workspace.root == expected_workspace
     assert expected_workspace.is_dir()
@@ -3390,6 +3573,101 @@ def test_copy_workspace_template_rejects_destination_symlink_escape(tmp_path: Pa
 
     with pytest.raises(ValueError, match="workspace template destination must stay within the workspace root"):
         _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+
+def test_planted_link_in_the_default_mind_workspace_never_breaks_agent_builds(tmp_path: Path) -> None:
+    """Worker code writes the workspace, so a planted template destination is logged and skipped, not fatal."""
+    storage_path = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage_path, "mind")
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    (workspace / "SOUL.md").symlink_to(tmp_path / "missing.md")
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                context_files=list(agents_module._DEFAULT_MIND_CONTEXT_FILES),
+            ),
+        },
+    )
+
+    with capture_logs() as logs:
+        agents_module.ensure_default_agent_workspaces(config, storage_path)
+
+    assert any(entry["log_level"] == "warning" for entry in logs)
+    assert not (tmp_path / "missing.md").exists()
+
+
+def test_copy_workspace_template_does_not_follow_predictable_temporary_symlink(tmp_path: Path) -> None:
+    """A worker-planted legacy temporary link must not redirect a primary-process scaffold write."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    (workspace_root / ".AGENTS.md.tmp").symlink_to(outside_file)
+
+    _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+    assert outside_file.read_text(encoding="utf-8") == "outside\n"
+    assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
+    assert not (workspace_root / "AGENTS.md").is_symlink()
+
+
+def test_copy_workspace_template_rejects_dangling_destination_symlink(tmp_path: Path) -> None:
+    """A dangling destination link must be rejected instead of preserved or followed."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "AGENTS.md").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(ValueError, match="workspace template destination must stay within the workspace root"):
+        _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+
+def test_copy_workspace_template_supports_legal_long_filename(tmp_path: Path) -> None:
+    """A valid destination basename must not be duplicated into an oversized temporary name."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    filename = "a" * 230
+    (template_dir / filename).write_text("template\n", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+
+    _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+    assert (workspace_root / filename).read_text(encoding="utf-8") == "template\n"
+
+
+def test_workspace_template_rejects_named_pipe(tmp_path: Path) -> None:
+    """Special files must fail validation before the mutation lock can be blocked by an open."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    os.mkfifo(template_dir / "input")
+
+    with pytest.raises(ValueError, match="must contain only regular files and directories"):
+        validate_workspace_template_dir(template_dir)
+
+
+def test_copy_workspace_template_without_xattr_apis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platforms without extended-attribute APIs must still scaffold workspaces."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "AGENTS.md").write_text("template\n", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+    for name in ("listxattr", "getxattr", "setxattr"):
+        monkeypatch.delattr(os, name, raising=False)
+
+    _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+    assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
 
 
 @patch("mindroom.agent_storage._ConversationSqliteDb")
@@ -3449,14 +3727,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
-    alice_workspace = (
-        _private_instance_state_root_path(
-            tmp_path,
-            worker_key=alice_worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    alice_workspace = (private_instance_scope_root_path(tmp_path, alice_worker_key) / "general") / "mind_data"
     assert (alice_workspace / "USER.md").exists()
     assert (alice_workspace / "MEMORY.md").exists()
     (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
@@ -3475,14 +3746,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
-    bob_workspace = (
-        _private_instance_state_root_path(
-            tmp_path,
-            worker_key=bob_worker_key,
-            agent_name="general",
-        )
-        / "mind_data"
-    )
+    bob_workspace = (private_instance_scope_root_path(tmp_path, bob_worker_key) / "general") / "mind_data"
 
     assert alice_workspace != bob_workspace
     assert "Alice private root context." in alice_agent.role
@@ -4634,6 +4898,11 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("learning", "private.root must not use reserved runtime directory 'learning'"),
         ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
         ("chroma", "private.root must not use reserved runtime directory 'chroma'"),
+        ("memory_files", "private.root must not use reserved runtime directory 'memory_files'"),
+        ("calls/notes", "private.root must not use reserved runtime directory 'calls'"),
+        ("agent_modes.json", "private.root must not use reserved runtime directory 'agent_modes.json'"),
+        ("agent_modes.lock", "private.root must not use reserved runtime directory 'agent_modes.lock'"),
+        (".sessions-recovery.lock", "private.root must not use reserved runtime directory '.sessions-recovery.lock'"),
     ],
 )
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:

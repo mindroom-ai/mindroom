@@ -42,6 +42,14 @@ def test_parse_native_request_accepts_app_selection_update() -> None:
 
 
 @pytest.mark.parametrize(
+    "action",
+    ["set_local_access", "decide_shell", "grant_shell", "revoke_shell", "kill_shell_handle"],
+)
+def test_parse_native_request_accepts_local_access_actions(action: str) -> None:
+    assert parse_native_request(_request(action=action)).action == action
+
+
+@pytest.mark.parametrize(
     ("line", "code"),
     [
         (b"{", "invalid_json"),

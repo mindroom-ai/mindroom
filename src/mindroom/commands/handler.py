@@ -191,7 +191,7 @@ def _format_welcome_message(
         if entity_name is None:
             continue
         description = _format_agent_description(entity_name, config)
-        entity_entry = f"• **@{entity_name}**"
+        entity_entry = f"• **{config.entity_display_name(entity_name)}** (alias `{entity_name}`)"
         if description:
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
