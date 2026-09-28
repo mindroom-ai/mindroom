@@ -15,6 +15,7 @@ from mindroom.cli.doctor import (
     _check_memory_config,
     _check_memory_embedder,
     _check_pairing,
+    _check_single_provider,
     _classify_vertexai_claude_error,
     doctor,
 )
@@ -90,6 +91,27 @@ def _openai_embedder_config(host: str | None = None) -> Config:
 
 def _doctor_runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+
+def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A skipped first-run key leaves the starter placeholder, which doctor reports as not set instead of invalid."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    validated: list[object] = []
+    monkeypatch.setattr(
+        "mindroom.cli.doctor._validate_provider_key",
+        lambda *args: validated.append(args) or (False, "HTTP 401"),
+    )
+
+    result = _check_single_provider("openai", Config(router=RouterConfig(model="default")), set(), runtime_paths)
+
+    assert result == (0, 0, 1)
+    assert validated == []
+    assert "openai: OPENAI_API_KEY not set" in capsys.readouterr().out
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

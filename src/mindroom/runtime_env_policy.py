@@ -100,13 +100,6 @@ ENV_TEMPLATE_PLACEHOLDERS: Mapping[str, str] = MappingProxyType(
         VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]: "your-gcp-project-id",
     },
 )
-
-
-def is_unset_env_value(name: str, value: str) -> bool:
-    """Return whether an env value is blank or an unedited starter-template placeholder, so it counts as unset."""
-    return not value.strip() or value == ENV_TEMPLATE_PLACEHOLDERS.get(name)
-
-
 AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
@@ -489,6 +482,11 @@ def is_worker_extra_env_name(name: str) -> bool:
     if name in _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES:
         return True
     return name not in _VENDOR_TELEMETRY_ENV_NAMES and not is_runtime_control_env_name(name)
+
+
+def is_unset_env_value(name: str, value: str) -> bool:
+    """Return whether an env value is blank or an unedited starter-template placeholder, so it counts as unset."""
+    return not value.strip() or value == ENV_TEMPLATE_PLACEHOLDERS.get(name)
 
 
 def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:

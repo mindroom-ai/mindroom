@@ -15,7 +15,7 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
@@ -361,7 +361,7 @@ def _validate_vertexai_claude_connection(
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
     region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
-    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value(project_env)
+    project_id = extra_kwargs.get("project_id") or get_secret_from_env(project_env, runtime_paths=runtime_paths)
     region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
     missing = []
     if not project_id:
@@ -520,7 +520,7 @@ def _check_single_provider(
         return 0, 0, 0
     validated_keys.add(env_key)
 
-    api_key = runtime_paths.env_value(env_key)
+    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
@@ -604,7 +604,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
+    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
@@ -664,7 +664,7 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
 
     env_key = env_key_for_provider(emb.provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
+    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",

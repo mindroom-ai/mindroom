@@ -190,7 +190,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if canonical_provider_key == "vertexai_claude":
         if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
+            project_id = get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
             if project_id:
                 extra_kwargs["project_id"] = project_id
         if "region" not in extra_kwargs:

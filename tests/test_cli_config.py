@@ -2266,13 +2266,13 @@ class TestRunFirstRunSetup:
         assert "openai: Set OPENAI_API_KEY" in normalize_console_output(result.output)
         assert len(started) == 1
 
-    def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Services and piped runs never prompt, even when only one stream is a terminal."""
-        monkeypatch.undo()
-        for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
-            monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
-            monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
-            assert _terminal_is_interactive() is expected
+
+def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Services and piped runs never prompt, even when only one stream is a terminal."""
+    for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
+        monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
+        assert _terminal_is_interactive() is expected
 
 
 # ---------------------------------------------------------------------------
