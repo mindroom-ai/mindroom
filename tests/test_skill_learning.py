@@ -2701,6 +2701,35 @@ def test_skill_manage_refuses_a_support_file_past_the_listing_cap(tmp_path: Path
     assert not (references / "zz.md").exists()
 
 
+def test_the_listing_cap_counts_files_the_listing_leaves_out(tmp_path: Path) -> None:
+    """Skill loading caps a listing before leaving out files too large to read, so the check counts those files too."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=False)
+    references = root / "deploy-checks" / "references"
+    references.mkdir()
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILL_LISTING_ENTRIES - 1):
+        (references / f"note-{index:03d}.md").write_text("n")
+    (references / "big.md").write_text("x" * (workspace_skills_module.MAX_SKILL_FILE_BYTES + 1))
+    with pytest.raises(library.SkillEditError, match="already lists"):
+        library.write_skill_file(root, "deploy-checks", "references/zz.md", "z", expected_digest=None, learner=False)
+
+
+def test_the_prompt_budget_counts_only_the_skills_loading_reads(tmp_path: Path) -> None:
+    """Directories past the skill count never load, so they never count against a change's prompt budget."""
+    root = tmp_path / "skills"
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS - 1):
+        _write_skill(root, f"a-{index:03d}", HANDWRITTEN.replace("handwritten", f"a-{index:03d}"))
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    for index in range(9):
+        name = f"z-{index}"
+        _write_skill(root, name, f"---\nname: {name}\ndescription: Large\n---\n" + "x" * 1_000_000 + "\n")
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    edited = LEARNED.replace("1. Run the smoke test.", "1. Run smoke.")
+    library.write_skill_file(root, "deploy-checks", "SKILL.md", edited, expected_digest=current.digest, learner=True)
+    assert (root / "deploy-checks" / "SKILL.md").read_text() == edited
+
+
 @pytest.mark.parametrize("change", ["create", "edit"])
 def test_skill_manage_refuses_changes_past_the_workspace_prompt_budget(tmp_path: Path, change: str) -> None:
     """Skill loading stops at the prompt budget and skips the rest, so a change that would pass it is refused."""

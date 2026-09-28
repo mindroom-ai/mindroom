@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
-FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
 WORKSPACE_SKILLS_DIRNAME = "skills"
 MAX_WORKSPACE_SKILLS = 256
@@ -154,10 +154,24 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
     return fields
 
 
-def _strict_frontmatter(text: str) -> Any:  # noqa: ANN401
-    """Parse frontmatter that worker code can write with PyYAML's pure-Python loader, like Agno's LocalSkills."""
+def match_frontmatter(content: str) -> re.Match[str] | None:
+    """Match a SKILL.md's frontmatter and body.
+
+    The pattern needs a closing ``---`` at the start of a line; without one it would backtrack quadratically through
+    whitespace that worker code planted after the opening ``---``, so such content never reaches it and has no
+    frontmatter either way.
+    """
+    return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
+
+
+def _strict_frontmatter(text: str, *, trusted: bool) -> Any:  # noqa: ANN401
+    """Parse frontmatter with the loader its writer's trust calls for.
+
+    Workspace frontmatter, which worker code can write, gets PyYAML's pure-Python loader like Agno's LocalSkills, with
+    the refusals of ``yaml_io.safe_load_untrusted``; operator-owned skill roots keep the fast safe loader.
+    """
     try:
-        return yaml_io.safe_load_untrusted(text) or {}
+        return (yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}
     except YAMLError:
         raise
     except Exception as exc:
@@ -171,17 +185,18 @@ def normalized_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str, Any], str]:
+def parse_skill_markdown(content: str, *, loose: bool = False, trusted: bool = False) -> tuple[dict[str, Any], str]:
     """Split SKILL.md into its frontmatter mapping and instruction body.
 
-    Ownership and edit checks need strict YAML; ``loose`` loads a skill for the agent the way Agno does.
+    Ownership and edit checks need strict YAML; ``loose`` loads a skill for the agent the way Agno does, and
+    ``trusted`` marks content from an operator-owned skill root rather than a workspace.
     """
     content = normalized_newlines(content)
-    match = FRONTMATTER_PATTERN.match(content)
+    match = match_frontmatter(content)
     if match is None:
         return {}, content
     try:
-        frontmatter = _strict_frontmatter(match.group(1))
+        frontmatter = _strict_frontmatter(match.group(1), trusted=trusted)
     except YAMLError:
         if not loose:
             raise
@@ -280,17 +295,23 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """
     skills: list[Skill] = []
     loaded_bytes = 0
-    for skill in _each_skill_directory(
-        skills_root,
-        lambda skill_fd, directory: _load_workspace_skill(skill_fd, skills_root, directory),
-        limit=MAX_WORKSPACE_SKILLS,
-    ):
-        loaded_bytes += skill_prompt_bytes(skill)
+    for _directory, skill, size in _measured_skills(skills_root):
+        loaded_bytes += size
         if loaded_bytes > MAX_WORKSPACE_SKILLS_BYTES:
             logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
             break
         skills.append(skill)
     return skills
+
+
+def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, int]]:
+    """Yield the skills loading reads, each with its budget share, measured inside the guard that skips one skill."""
+
+    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | None:
+        skill = _load_workspace_skill(skill_fd, skills_root, directory)
+        return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
+
+    return _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS)
 
 
 def skill_prompt_bytes(skill: Skill) -> int:
@@ -300,13 +321,17 @@ def skill_prompt_bytes(skill: Skill) -> int:
 
 
 def workspace_skill_prompt_bytes(skills_root: Path) -> dict[str, int]:
-    """Return every workspace skill directory's share of the prompt budget, as skill loading measures it."""
+    """Return the prompt-budget share of every skill directory loading reads, as it measures them."""
+    return {directory: size for directory, _skill, size in _measured_skills(skills_root)}
 
-    def share(skill_fd: int, directory: str) -> tuple[str, int] | None:
-        skill = _load_workspace_skill(skill_fd, skills_root, directory)
-        return None if skill is None else (directory, skill_prompt_bytes(skill))
 
-    return dict(_each_skill_directory(skills_root, share))
+def support_entry_count(skill_fd: int, directory: str) -> int:
+    """Return how many visible regular files one support directory holds, the entries its listing cap counts."""
+    try:
+        with open_directory_within_root(skill_fd, directory) as support_fd:
+            return len(list_entries(support_fd, directories=False))
+    except FileNotFoundError:
+        return 0
 
 
 def workspace_skill_directories(skills_root: Path) -> list[str]:

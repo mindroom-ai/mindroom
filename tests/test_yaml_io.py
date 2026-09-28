@@ -110,3 +110,20 @@ def test_prefers_libyaml_classes_when_available() -> None:
         pytest.skip("PyYAML built without libyaml")
     assert yaml_io.SafeLoader is yaml.CSafeLoader
     assert yaml_io._SAFE_DUMPER is yaml.CSafeDumper
+
+
+@pytest.mark.parametrize(
+    "document",
+    ["a: &a [x]\nb: *a", "n: 1:0:0", "n: 0x" + "f" * 2000],
+    ids=["alias", "base-60 integer", "oversized integer"],
+)
+def test_untrusted_loads_refuse_what_grows_beyond_the_input(document: str) -> None:
+    """Aliases expand, base-60 integers build in quadratic time, and oversized ones cannot be written back."""
+    with pytest.raises(yaml.YAMLError):
+        yaml_io.safe_load_untrusted(document)
+    assert yaml_io.safe_load(document) is not None
+
+
+def test_untrusted_loads_keep_ordinary_integers() -> None:
+    """Integers of ordinary size and base still load."""
+    assert yaml_io.safe_load_untrusted("a: 42\nb: 0x1f\nc: -7") == {"a": 42, "b": 31, "c": -7}

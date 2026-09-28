@@ -10,7 +10,8 @@ shares, goes through ``safe_load_untrusted`` instead: libyaml's composer
 recurses in C, so deeply nested input overflows the C stack and kills the
 process, where the pure-Python loader raises ``RecursionError``. It also
 refuses aliases, because a few hundred bytes of nested aliases expand to
-gigabytes once anything serializes the result.
+gigabytes once anything serializes the result, and base-60 or oversized
+integers, which take quadratic time to build or cannot be written back.
 
 ``SafeLoader`` is also the base for custom safe loaders, so they share the
 same libyaml preference and pure-Python fallback.
@@ -25,6 +26,7 @@ from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
 from yaml.composer import ComposerError
+from yaml.constructor import ConstructorError
 
 try:
     from yaml import CSafeDumper
@@ -57,8 +59,16 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     return yaml.load(stream, Loader=SafeLoader)
 
 
+# Python refuses to convert integers of more than 4300 digits to text; a hexadecimal literal this short stays below.
+_MAX_UNTRUSTED_INT_CHARS = 1000
+
+
 class _UntrustedSafeLoader(yaml.SafeLoader):
-    """Pure-Python safe loader that refuses aliases, which untrusted input can nest into an expansion bomb."""
+    """Pure-Python safe loader for input untrusted code can write, refusing what grows beyond the input's size.
+
+    Aliases can nest into an expansion bomb, a YAML 1.1 base-60 integer takes quadratic time to build, and an integer
+    too long to convert back to text fails whatever serializes the result.
+    """
 
     def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node | None:
         if self.check_event(yaml.AliasEvent):
@@ -66,6 +76,16 @@ class _UntrustedSafeLoader(yaml.SafeLoader):
             message = "YAML aliases are not accepted in untrusted input"
             raise ComposerError(None, None, message, event.start_mark)
         return super().compose_node(parent, index)
+
+    def construct_yaml_int(self, node: yaml.ScalarNode) -> int:
+        value = str(self.construct_scalar(node))
+        if ":" in value or len(value) > _MAX_UNTRUSTED_INT_CHARS:
+            message = "base-60 and oversized integers are not accepted in untrusted input"
+            raise ConstructorError(None, None, message, node.start_mark)
+        return super().construct_yaml_int(node)
+
+
+_UntrustedSafeLoader.add_constructor("tag:yaml.org,2002:int", _UntrustedSafeLoader.construct_yaml_int)
 
 
 def safe_load_untrusted(stream: str) -> Any:  # noqa: ANN401

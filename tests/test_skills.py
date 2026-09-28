@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import threading
+import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -669,6 +670,34 @@ def test_frontmatter_aliases_neither_stall_loading_nor_hide_other_skills(tmp_pat
     )
     _write_skill(workspace_skills, "zeta", "Loaded after the aliased skill")
     assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["alpha", "zeta"]
+
+
+def test_planted_frontmatter_never_stalls_loading_or_hides_other_skills(tmp_path: Path) -> None:
+    """Whitespace without a closing fence, and integers too long to write back, neither stall loading nor hide skills."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "alpha").mkdir()
+    (workspace_skills / "alpha" / "SKILL.md").write_text("---" + "\n" * 40_000, encoding="utf-8")
+    (workspace_skills / "beta").mkdir()
+    (workspace_skills / "beta" / "SKILL.md").write_text(
+        "---\nname: beta\ndescription: Big number\nmetadata: {size: 0x" + "f" * 4000 + "}\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _write_skill(workspace_skills, "zeta", "Loaded after the planted skills")
+    started = time.monotonic()
+    names = _skill_names(_load_agent_skills(tmp_path, storage))
+    assert time.monotonic() - started < 2
+    assert names == ["alpha", "beta", "zeta"]
+
+
+def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:
+    """Operator-owned roots keep the trusted YAML loader, so a skill using aliases stays listed."""
+    skill_dir = tmp_path / "aliased"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: aliased\ndescription: &d Shared words\nmetadata: {summary: *d}\n---\nbody\n",
+        encoding="utf-8",
+    )
+    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path])] == ["aliased"]
 
 
 def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:

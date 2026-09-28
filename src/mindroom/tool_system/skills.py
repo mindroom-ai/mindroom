@@ -24,10 +24,10 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.tool_system.workspace_skills import (
-    FRONTMATTER_PATTERN,
     SKILL_FILENAME,
     WORKSPACE_SKILLS_DIRNAME,
     load_workspace_skills,
+    match_frontmatter,
     parse_skill_markdown,
     parse_skill_metadata,
     read_support_file,
@@ -476,14 +476,14 @@ def _read_skill_frontmatter(
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
 
-    if not FRONTMATTER_PATTERN.match(content):
+    if match_frontmatter(content) is None:
         if allow_missing:
             return {}
         logger.warning("Skill missing frontmatter", path=str(skill_path))
         return None
 
     try:
-        return parse_skill_markdown(content)[0]
+        return parse_skill_markdown(content, trusted=True)[0]
     except Exception as exc:
         logger.warning("Failed to parse skill frontmatter", path=str(skill_path), error=str(exc))
         return None

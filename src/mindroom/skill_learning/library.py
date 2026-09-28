@@ -42,6 +42,7 @@ from mindroom.tool_system.workspace_skills import (
     parse_skill_metadata,
     read_text_at,
     skill_prompt_bytes,
+    support_entry_count,
     update_skill_usage,
     workspace_skill,
     workspace_skill_name,
@@ -312,8 +313,7 @@ def write_skill_file(
             _validate_markdown(markdown.name, content, new=False, learner=learner)
             _require_prompt_budget(skills_root, name, content, skill_fd=skill_fd)
         elif current is None:
-            listed = list_support_files(skill_fd, skills_root / name, directory)
-            if len(listed) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+            if support_entry_count(skill_fd, directory) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
                 msg = (
                     f"{directory}/ already lists {MAX_WORKSPACE_SKILL_LISTING_ENTRIES} files, the most skill loading "
                     "offers; extend an existing file instead."
