@@ -652,10 +652,7 @@ def connect(
                 "existing agents keep working, and new agents get the new namespace.",
             )
             if not force:
-                if not _stdin_is_interactive():
-                    console.print("Run `mindroom connect --force` to pair again.")
-                    raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
-                typer.confirm("Pair again?", abort=True)
+                _confirm_reconnect()
         cancelled = False
 
         def request_cancel(_signum: int, _frame: FrameType | None) -> None:
@@ -668,7 +665,8 @@ def connect(
                 raise typer.Exit(_CONNECT_CANCELLED_EXIT_CODE)
             return False
 
-        _ = signal.signal(signal.SIGTERM, request_cancel) if graceful_cancel else None
+        if graceful_cancel:
+            signal.signal(signal.SIGTERM, request_cancel)
         try:
             cli_connect.pair_local_install(
                 runtime_paths,
@@ -689,6 +687,14 @@ def connect(
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
+
+
+def _confirm_reconnect() -> None:
+    """Confirm re-pairing in a terminal, or let the macOS app ask via exit code 3."""
+    if not _stdin_is_interactive():
+        console.print("Run `mindroom connect --force` to pair again.")
+        raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
+    typer.confirm("Pair again?", abort=True)
 
 
 def _stdin_is_interactive() -> bool:
