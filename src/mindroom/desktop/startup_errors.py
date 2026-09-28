@@ -20,7 +20,7 @@ def desktop_startup_error(error: Exception) -> NativeProtocolError:
     if any(isinstance(item, ssl.SSLCertVerificationError | aiohttp.ClientConnectorCertificateError) for item in causes):
         return NativeProtocolError(
             "tls_certificate_error",
-            f"{error} The server's TLS certificate could not be verified.",
+            "The Matrix server's TLS certificate could not be verified.",
             recovery=(
                 "Update MindRoom, then retry Start Access. If this continues, check your network's certificate "
                 "settings with your administrator. Your saved connection has been kept."

@@ -5617,6 +5617,7 @@ expose = [
     "create_matrix_http_client",
     "login",
     "login_flows",
+    "matrix_certificate_error",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
@@ -5633,7 +5634,12 @@ expose = [
     "require_runtime_paths_arg",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing", "mindroom.desktop.session"]
+visibility = [
+    "mindroom.matrix._owned_session",
+    "mindroom.matrix.typing",
+    "mindroom.desktop.session",
+    "mindroom.orchestration.runtime",
+]
 
 [[interfaces]]
 expose = [

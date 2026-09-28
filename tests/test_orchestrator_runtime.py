@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import os
 import signal
+import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
@@ -3216,6 +3217,60 @@ class TestMultiAgentOrchestrator:
         )
 
         assert responses == []
+
+    @pytest.mark.asyncio
+    async def test_wait_for_matrix_homeserver_fails_fast_on_certificate_verification_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An untrusted homeserver certificate stops startup with an actionable error instead of waiting forever."""
+        calls = 0
+        verify_contexts: list[object] = []
+
+        class _FakeAsyncClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args
+                verify_contexts.append(kwargs["verify"])
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                del exc_type, exc, tb
+
+            async def get(self, _url: str) -> httpx.Response:
+                nonlocal calls
+                calls += 1
+                verification_error = ssl.SSLCertVerificationError(
+                    1,
+                    "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate",
+                )
+                raise httpx.ConnectError(str(verification_error)) from verification_error
+
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={"MATRIX_HOMESERVER": "https://matrix.example.org"},
+        )
+
+        with pytest.raises(PermanentMatrixStartupError) as raised:
+            await wait_for_matrix_homeserver(
+                runtime_paths=runtime_paths,
+                timeout_seconds=1.0,
+                retry_interval_seconds=0,
+            )
+
+        message = str(raised.value)
+        assert "https://matrix.example.org" in message
+        assert "self-signed certificate" in message
+        assert "SSL_CERT_FILE" in message
+        assert calls == 1
+        # The readiness probe trusts exactly what Matrix logins trust.
+        assert len(verify_contexts) == 1
+        assert isinstance(verify_contexts[0], ssl.SSLContext)
+        assert verify_contexts[0].verify_mode == ssl.CERT_REQUIRED
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_times_out_when_never_ready(

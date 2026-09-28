@@ -18,6 +18,7 @@ import nio
 import pytest
 from nio.durable import DurableSyncConfig
 from nio.store.database import DefaultStore, SqliteStore
+from structlog.testing import capture_logs
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -994,3 +995,177 @@ def test_matrix_tls_respects_explicit_trust_configuration(monkeypatch: pytest.Mo
 
     assert context is not None
     assert context.cert_store_stats()["x509_ca"] == 0
+
+
+def _connection_key(host: str, port: int) -> aiohttp.client_reqrep.ConnectionKey:
+    return aiohttp.client_reqrep.ConnectionKey(host, port, True, True, None, None, None)
+
+
+def _certificate_failure() -> aiohttp.ClientConnectorCertificateError:
+    verification_error = ssl.SSLCertVerificationError(
+        1,
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate",
+    )
+    return aiohttp.ClientConnectorCertificateError(_connection_key("matrix.example.org", 443), verification_error)
+
+
+def _connection_refused() -> aiohttp.ClientConnectorError:
+    return aiohttp.ClientConnectorError(
+        _connection_key("matrix.example.org", 443),
+        ConnectionRefusedError(111, "Connection refused"),
+    )
+
+
+def _install_scripted_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    *outcomes: object,
+) -> tuple[list[int], asyncio.Event]:
+    """Make nio HTTP sessions raise or return each outcome in turn, then block until cancelled."""
+    requests: list[int] = []
+    blocked = asyncio.Event()
+
+    class ScriptedSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.connector = SimpleNamespace(connect=lambda: None)
+
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            requests.append(1)
+            if len(requests) <= len(outcomes):
+                outcome = outcomes[len(requests) - 1]
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+            blocked.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("nio.client.async_client.ClientSession", ScriptedSession)
+    return requests, blocked
+
+
+@pytest.mark.asyncio
+async def test_certificate_verification_failure_fails_login_fast_with_actionable_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An untrusted homeserver certificate is a permanent startup error, not an endless nio timeout retry."""
+    requests, _blocked = _install_scripted_transport(monkeypatch, _certificate_failure())
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    with pytest.raises(PermanentMatrixStartupError) as raised:
+        await asyncio.wait_for(
+            client_session.login(
+                "https://matrix.example.org",
+                "@mindroom_router:example.org",
+                "password",
+                runtime_paths,
+            ),
+            timeout=1.0,
+        )
+
+    message = str(raised.value)
+    assert "https://matrix.example.org" in message
+    assert "self-signed certificate" in message
+    assert "SSL_CERT_FILE" in message
+    assert "MATRIX_SSL_VERIFY=false" in message
+    assert requests == [1]
+
+
+@pytest.mark.asyncio
+async def test_certificate_failure_after_authentication_keeps_retrying_and_names_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-run certificate failure (captive portal, TLS interception) may heal, so nio keeps retrying."""
+    requests, blocked = _install_scripted_transport(monkeypatch, _certificate_failure())
+    client = MindRoomAsyncClient("https://matrix.example.org", "@mindroom_router:example.org")
+    client.access_token = "token"  # noqa: S105
+
+    with capture_logs() as logs:
+        sync = asyncio.create_task(client._send(nio.SyncResponse, "GET", "/_matrix/client/v3/sync?timeout=0"))
+        await asyncio.wait_for(blocked.wait(), timeout=1.0)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sync
+
+    assert requests == [1, 1]
+    [failure] = [entry for entry in logs if entry["event"] == "matrix_request_transport_failed"]
+    assert failure["log_level"] == "warning"
+    assert "Could not verify the TLS certificate" in failure["error"]
+    assert "self-signed certificate" in failure["error"]
+
+
+@pytest.mark.asyncio
+async def test_transient_transport_failure_logs_the_underlying_error_before_nio_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each retried transport failure names its real cause instead of only nio's generic timeout line."""
+    requests, blocked = _install_scripted_transport(monkeypatch, _connection_refused())
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    with capture_logs() as logs:
+        login = asyncio.create_task(
+            client_session.login(
+                "https://matrix.example.org",
+                "@mindroom_router:example.org",
+                "password",
+                runtime_paths,
+            ),
+        )
+        await asyncio.wait_for(blocked.wait(), timeout=1.0)
+        login.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await login
+
+    assert requests == [1, 1]
+    transport_errors = [entry for entry in logs if entry["event"] == "matrix_request_transport_failed"]
+    assert len(transport_errors) == 1
+    assert transport_errors[0]["homeserver"] == "https://matrix.example.org"
+    assert transport_errors[0]["error_type"] == "ClientConnectorError"
+    assert "Connection refused" in transport_errors[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An outage warns once per client; repeats drop to debug until a request gets through again."""
+    success = object()
+    _install_scripted_transport(monkeypatch, _connection_refused(), TimeoutError(), success, _connection_refused())
+    client = MindRoomAsyncClient("https://matrix.example.org", "@mindroom_router:example.org")
+
+    with capture_logs() as logs:
+        for expected in (aiohttp.ClientConnectorError, TimeoutError):
+            with pytest.raises(expected):
+                await client.send("GET", "/_matrix/client/v3/sync")
+        assert await client.send("GET", "/_matrix/client/v3/sync") is success
+        with pytest.raises(aiohttp.ClientConnectorError):
+            await client.send("GET", "/_matrix/client/v3/sync")
+
+    failures = [entry for entry in logs if entry["event"] == "matrix_request_transport_failed"]
+    assert [(entry["log_level"], entry["error_type"]) for entry in failures] == [
+        ("warning", "ClientConnectorError"),
+        ("debug", "TimeoutError"),
+        ("warning", "ClientConnectorError"),
+    ]
+    assert failures[1]["error"] == "TimeoutError"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),
+        aiohttp.ClientConnectorSSLError(
+            _connection_key("matrix.example.org", 443),
+            ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"),
+        ),
+        aiohttp.ClientConnectorError(
+            _connection_key("matrix.example.org", 443),
+            ConnectionRefusedError(111, "Connection refused"),
+        ),
+    ],
+)
+def test_matrix_certificate_error_ignores_other_tls_and_connection_failures(error: BaseException) -> None:
+    """Only certificate verification failures are classified as permanent."""
+    assert client_session.matrix_certificate_error("https://matrix.example.org", error) is None

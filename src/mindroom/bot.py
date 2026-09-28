@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import nio
 from nio import AuthenticatedToDeviceEvent
-from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
@@ -2101,7 +2101,8 @@ class AgentBot:
         @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_not_exception_type(PermanentStartupError),
+            # Tenacity sees BaseException too; never retry a cancelled start.
+            retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(PermanentStartupError),
             reraise=True,
         )
         async def _start_with_retry() -> None:
