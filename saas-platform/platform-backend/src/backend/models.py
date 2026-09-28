@@ -25,6 +25,8 @@ class InstanceOut(BaseModel):
     updated_at: str | None = None
     kubernetes_synced_at: str | None = None
     status_hint: str | None = None
+    lifecycle_stopped_at: str | None = None
+    teardown_after: str | None = None
 
 
 class InstancesResponse(BaseModel):
@@ -39,7 +41,9 @@ class SubscriptionOut(BaseModel):
     id: str
     account_id: str
     tier: Literal["free", "byok", "hobby", "pro", "enterprise"]
-    status: Literal["active", "cancelled", "past_due", "trialing", "paused", "incomplete"]
+    status: Literal[
+        "active", "cancelled", "past_due", "trialing", "paused", "incomplete", "incomplete_expired", "unpaid"
+    ]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
     current_period_start: str | None = None
@@ -371,6 +375,40 @@ class AdminDashboardMetricsResponse(BaseModel):
     subscriptions_by_tier: dict[str, int]
     recent_signups: list[dict[str, Any]]
     recent_instances: list[dict[str, Any]]
+
+
+class CleanupRunOut(BaseModel):
+    """One recorded run of the nightly cleanup job."""
+
+    started_at: str
+    finished_at: str
+    ok: bool
+    summary: dict[str, Any]
+
+
+class LifecycleInstanceOut(BaseModel):
+    """An instance as seen by the subscription lifecycle."""
+
+    instance_id: int | str
+    account_id: str | None = None
+    account_email: str | None = None
+    subscription_status: str | None = None
+    status: str
+    lifecycle_stopped_at: str | None = None
+    teardown_after: str | None = None
+    lifecycle_error: str | None = None
+    lifecycle_error_at: str | None = None
+    problem: str | None = None
+
+
+class AdminInstanceLifecycleResponse(BaseModel):
+    """Nightly cleanup health, instances pending teardown, and stuck lifecycle states."""
+
+    cleanup_scheduler_enabled: bool
+    teardown_grace_days: int
+    last_run: CleanupRunOut | None
+    pending_teardown: list[LifecycleInstanceOut]
+    stuck: list[LifecycleInstanceOut]
 
 
 class AdminLogoutResponse(BaseModel):

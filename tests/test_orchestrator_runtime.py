@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import ipaddress
 import os
 import signal
+import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -19,6 +22,10 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
@@ -49,6 +56,7 @@ from mindroom.hooks import (
     ConfigReloadedContext,
     HookRegistry,
 )
+from mindroom.matrix import client_session
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -232,7 +240,7 @@ def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
 
 @pytest.fixture(autouse=True)
@@ -1740,6 +1748,52 @@ class TestAgentBot(AgentBotTestBase):
         mock_reset_worker_manager.assert_called_once_with()
         assert shutdown_calls == [{}]
         mock_orchestrator.stop.assert_awaited_once()
+
+
+@asynccontextmanager
+async def _self_signed_matrix_server(tmp_path: Path) -> AsyncIterator[tuple[str, Path]]:
+    """Serve a minimal Matrix `/versions` response over TLS with a self-signed certificate for 127.0.0.1."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+    )
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(certificate_path, key_path)
+    body = b'{"versions": ["v1.11"]}'
+
+    async def _answer_versions(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            + body,
+        )
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(_answer_versions, "127.0.0.1", 0, ssl=server_context)
+    async with server:
+        yield f"https://127.0.0.1:{server.sockets[0].getsockname()[1]}", certificate_path
 
 
 class TestMultiAgentOrchestrator:
@@ -3299,6 +3353,61 @@ class TestMultiAgentOrchestrator:
         )
 
         assert responses == []
+
+    @pytest.mark.asyncio
+    async def test_wait_for_matrix_homeserver_fails_fast_on_certificate_verification_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A real TLS handshake with an untrusted certificate stops startup instead of waiting for the timeout."""
+        async with _self_signed_matrix_server(tmp_path) as (homeserver, _certificate_path):
+            runtime_paths = resolve_runtime_paths(
+                config_path=tmp_path / "config.yaml",
+                storage_path=tmp_path,
+                process_env={"MATRIX_HOMESERVER": homeserver},
+            )
+            with pytest.raises(PermanentStartupError) as raised:
+                await wait_for_matrix_homeserver(
+                    runtime_paths=runtime_paths,
+                    timeout_seconds=10.0,
+                    retry_interval_seconds=10.0,
+                )
+
+        message = str(raised.value)
+        assert homeserver in message
+        assert "certificate verify failed" in message
+        assert "SSL_CERT_FILE" in message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("trust", ["ssl_verify_disabled", "matrix_login_trust"])
+    async def test_wait_for_matrix_homeserver_accepts_certificates_matrix_logins_accept(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        trust: str,
+    ) -> None:
+        """The probe trusts exactly what Matrix logins trust, so fail-fast never rejects a usable homeserver."""
+        async with _self_signed_matrix_server(tmp_path) as (homeserver, certificate_path):
+            process_env = {"MATRIX_HOMESERVER": homeserver}
+            if trust == "ssl_verify_disabled":
+                process_env["MATRIX_SSL_VERIFY"] = "false"
+            else:
+                # Only the Matrix login trust accepts the certificate; httpx's default trust does not.
+                monkeypatch.setattr(
+                    client_session,
+                    "_verifying_ssl_context",
+                    lambda _runtime_paths: ssl.create_default_context(cafile=certificate_path),
+                )
+            runtime_paths = resolve_runtime_paths(
+                config_path=tmp_path / "config.yaml",
+                storage_path=tmp_path,
+                process_env=process_env,
+            )
+            await wait_for_matrix_homeserver(
+                runtime_paths=runtime_paths,
+                timeout_seconds=10.0,
+                retry_interval_seconds=10.0,
+            )
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_times_out_when_never_ready(

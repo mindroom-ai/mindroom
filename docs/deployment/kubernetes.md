@@ -62,7 +62,7 @@ EOF
 
 The authorization header is read from standard input so the token does not appear in curl's process arguments.
 
-Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned, restarted when an inactive subscription stopped it, or re-provisioned when deprovisioned.
 Use the returned `customer_id` with the CLI's `logs <id>` command.
 The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
@@ -419,7 +419,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
@@ -445,6 +445,34 @@ Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
+
+## Subscription Lifecycle
+
+Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
+Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
+The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
+
+| Subscription state | Instance | Platform OpenRouter key | Data |
+|--------------------|----------|-------------------------|------|
+| `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
+| Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
+| Entitled again while stopped | Started | Re-enabled | Kept |
+| Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
+
+The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
+Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
+A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+Before stopping or resuming a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current status and corrects a stale stored status, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped.
+A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
+A delayed creation event for a Stripe subscription older than the account's current one is ignored.
+Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
+The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
+Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
+Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
+The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 
 ## Deployment Scripts
 

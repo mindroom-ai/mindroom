@@ -11,7 +11,11 @@ from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
-from mindroom.matrix.provisioning_env import local_client_headers, local_provisioning_client_credentials_from_env
+from mindroom.matrix.provisioning_env import (
+    local_client_headers,
+    local_pairing_required,
+    local_provisioning_client_credentials_from_env,
+)
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -25,7 +29,8 @@ def required_local_provisioning_client_credentials_for_registration(
         return None
 
     creds = local_provisioning_client_credentials_from_env(runtime_paths)
-    if creds is None:
+    # Unpaired installs with a shared secret register through it, matching the run's decision to skip pairing.
+    if creds is None and local_pairing_required(runtime_paths):
         msg = "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. Run `mindroom connect` first."
         raise matrix_startup_error(msg, permanent=True)
     return creds

@@ -10,7 +10,7 @@ import time
 from contextlib import suppress
 from io import BytesIO
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -550,6 +550,74 @@ def test_knowledge_files_use_the_checked_root_instead_of_resolving_it_again(
     assert "secret.md" not in files_response.text
 
 
+def _victim_and_workspace_docs(tmp_path: Path) -> tuple[Path, Path]:
+    storage = tmp_path / "mindroom_data"
+    victim = storage / "private_instances" / "victim-scope" / "mind" / "mind_data"
+    victim.mkdir(parents=True)
+    docs = storage / "agents" / "helper" / "workspace" / "docs"
+    docs.mkdir(parents=True)
+    return victim, docs
+
+
+def _swap_for_link_after_path_check(monkeypatch: pytest.MonkeyPatch, folder: Path, victim: Path) -> None:
+    """Swap ``folder`` for a link to ``victim`` right after the last path check, as a racing worker can."""
+    checked = knowledge_api._reject_unmanaged_knowledge_file_path
+
+    def check_then_swap(config: Config, base_id: str, relative_path: str) -> None:
+        checked(config, base_id, relative_path)
+        if not folder.is_symlink():
+            folder.rename(folder.with_name(f"{folder.name}-moved"))
+            folder.symlink_to(victim, target_is_directory=True)
+
+    async def mark_source_changed(*_args: object, **_kwargs: object) -> bool:
+        # The worker restores the real folder while this re-resolves the base, then swaps it back.
+        return False
+
+    monkeypatch.setattr(knowledge_api, "_reject_unmanaged_knowledge_file_path", check_then_swap)
+    monkeypatch.setattr(knowledge_api, "_mark_committed_mutation_and_schedule_refresh", mark_source_changed)
+
+
+@pytest.mark.parametrize(("folder", "path"), [("", "secret.md"), ("notes", "notes/secret.md")])
+def test_delete_never_follows_a_folder_swapped_for_a_link_after_the_path_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    folder: str,
+    path: str,
+) -> None:
+    """A workspace base folder replaced by a link after the path check never deletes the link target's file."""
+    client = _test_client(tmp_path)
+    victim, docs = _victim_and_workspace_docs(tmp_path)
+    (victim / "secret.md").write_text("victim-only note", encoding="utf-8")
+    (docs / folder).mkdir(exist_ok=True)
+    (docs / path).write_text("own notes", encoding="utf-8")
+    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    _swap_for_link_after_path_check(monkeypatch, docs / folder, victim)
+
+    with pytest.raises(OSError, match=f"'{(docs / folder).name}'"):
+        client.delete(f"/api/knowledge/bases/research/files/{path}")
+
+    assert (victim / "secret.md").read_text(encoding="utf-8") == "victim-only note"
+
+
+def test_upload_never_publishes_through_a_base_swapped_for_a_link_after_the_path_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workspace base replaced by a link after the path check never receives the uploaded file."""
+    client = _test_client(tmp_path)
+    victim, docs = _victim_and_workspace_docs(tmp_path)
+    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    _swap_for_link_after_path_check(monkeypatch, docs, victim)
+
+    with pytest.raises(OSError, match="'docs'"):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("planted.md", b"planted", "text/markdown"))],
+        )
+
+    assert list(victim.iterdir()) == []
+
+
 def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> None:
     """Git-backed API file counts should match the tracked files the indexer can search."""
     client = _test_client(tmp_path)
@@ -1047,8 +1115,8 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     scheduler = _RecordingRefreshScheduler()
     config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
-    async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
-        destination.write_text("partial", encoding="utf-8")
+    async def _cancel_stream(_upload: UploadFile, destination: BinaryIO, _filename: str) -> None:
+        destination.write(b"partial")
         raise asyncio.CancelledError
 
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
@@ -1088,8 +1156,8 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     scheduler = _RecordingRefreshScheduler()
     config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
-    async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
-        destination.write_text("partial", encoding="utf-8")
+    async def _cancel_stream(_upload: UploadFile, destination: BinaryIO, _filename: str) -> None:
+        destination.write(b"partial")
         raise asyncio.CancelledError
 
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
@@ -1224,20 +1292,20 @@ def test_upload_replace_failure_schedules_refresh_for_partial_commit(
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
     config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
-    original_replace = type(docs).replace
+    original_replace = os.replace
     replace_count = 0
 
-    def _fail_second_replace(self: object, target: object) -> object:
+    def _fail_second_replace(source: str, destination: str, **dir_fds: int) -> None:
         nonlocal replace_count
-        if isinstance(self, type(docs)) and self.name.endswith(".upload.tmp"):
+        if str(source).endswith(".upload.tmp"):
             replace_count += 1
             if replace_count == 2:
                 msg = "replace failed"
                 raise RuntimeError(msg)
-        return original_replace(self, target)
+        original_replace(source, destination, **dir_fds)
 
     with (
-        patch("pathlib.Path.replace", _fail_second_replace),
+        patch("os.replace", _fail_second_replace),
         patch("mindroom.api.knowledge.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="replace failed"),
     ):
@@ -1692,7 +1760,7 @@ def test_delete_filesystem_failure_leaves_ready_index_unchanged_and_skips_refres
         raise RuntimeError(msg)
 
     with (
-        patch("pathlib.Path.unlink", _fail_delete_stage),
+        patch("os.unlink", _fail_delete_stage),
         patch(
             "mindroom.api.knowledge.mark_knowledge_source_changed_async",
             side_effect=AssertionError("no source change"),

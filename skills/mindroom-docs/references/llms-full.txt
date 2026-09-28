@@ -324,6 +324,7 @@ On first run, MindRoom automatically initiates pairing.
 It prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
 
 After pairing completes, MindRoom starts the runtime and dashboard.
 
@@ -341,7 +342,8 @@ Notes:
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
-**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
+**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
+Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.
 
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
@@ -1582,7 +1584,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline, except that a certificate verification failure stops startup immediately without retrying (see [Matrix TLS trust](https://docs.mindroom.chat/architecture/matrix/#tls-trust)) | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
@@ -2185,11 +2187,15 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
+The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png` when present, then the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images, and otherwise the stock `mind-logo` image, which wheel installs (`uvx`) use because they lack bundled files.
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
-Machines without internet access simply get no stock avatar.
+When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
+Agent, team, and root Space avatars are retried the next time MindRoom starts after that window.
+Managed room avatars are only chosen when a room is created, so run `mindroom avatars sync` to fill them in.
+`mindroom avatars sync` also clears recent failures, so it retries immediately and lets the next start retry agent and team avatars.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
-To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
+To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 
 MindRoom can also generate custom avatars for agents, teams, rooms, and the optional root Matrix Space.
 Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.
@@ -20212,6 +20218,14 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
+### TLS Trust
+
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: OpenSSL's default CA file and directory plus certifi's roots.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default location, and setting either one stops MindRoom from adding certifi's roots.
+A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
+Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
+Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+
 ## Agent Users
 
 Each agent, team, and router has its own Matrix user.
@@ -20437,7 +20451,7 @@ matrix_space:
   name: MindRoom       # Display name for the Space
 ```
 
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets, falling back to the stock `mind-logo` image.
 The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
@@ -21979,6 +21993,10 @@ On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 
+After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
+In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+Under a service or the macOS app, it prints the approving account without asking.
+
 Pair code behavior:
 
 - Valid for 600 seconds (10 minutes).
@@ -22060,6 +22078,8 @@ On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https
 It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
 
 Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
+`mindroom connect` refuses to pair a non-mindroom.chat homeserver, including an unset `MATRIX_HOMESERVER` (which defaults to `http://localhost:8008`), unless `MINDROOM_PROVISIONING_URL` is set or `--provisioning-url` is given.
+Without a provisioning service, register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead of pairing.
 
 # Bridges
 
@@ -24353,7 +24373,7 @@ EOF
 
 The authorization header is read from standard input so the token does not appear in curl's process arguments.
 
-Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned, restarted when an inactive subscription stopped it, or re-provisioned when deprovisioned.
 Use the returned `customer_id` with the CLI's `logs <id>` command.
 The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
@@ -24710,7 +24730,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
@@ -24736,6 +24756,34 @@ Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
+
+## Subscription Lifecycle
+
+Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
+Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
+The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
+
+| Subscription state | Instance | Platform OpenRouter key | Data |
+|--------------------|----------|-------------------------|------|
+| `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
+| `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, or free tier | Stopped | Disabled | Kept until the teardown date |
+| Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
+| Entitled again while stopped | Started | Re-enabled | Kept |
+| Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
+
+The grace period defaults to 30 days, is at least 1 day, and is set with `cleanupScheduler.teardownGraceDays` (`INSTANCE_TEARDOWN_GRACE_DAYS`).
+Only the lifecycle sets `instances.lifecycle_stopped_at` and `instances.teardown_after`, so an instance a customer or admin stopped manually is never restarted automatically.
+A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+Before stopping or resuming a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current status and corrects a stale stored status, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped.
+A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
+A delayed creation event for a Stripe subscription older than the account's current one is ignored.
+Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
+The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
+Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
+Customers whose instance is stopped for an inactive subscription see a dashboard banner with the teardown date and a link to billing.
+The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 
 ## Deployment Scripts
 
@@ -25767,6 +25815,9 @@ Use `--no-confirm` for non-interactive setup.
 
 Show MindRoom service status and recent logs.
 
+While the running service still waits for pairing, the status adds a `pairing: required` line.
+This decision uses the config and storage paths saved in the installed service, so it reflects the service even when you run the command from another config directory.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -25837,6 +25888,7 @@ Runs a series of checks in one pass:
 - **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
+- **Pairing** — on hosted installs, reports whether this machine is paired with MindRoom Chat; before the first run it passes with a `Not paired yet` line instead of warning, because `mindroom run` pairs automatically
 - **Storage** — confirms the storage directory is writable
 - **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
@@ -26173,7 +26225,27 @@ Open the link or scan the QR code while signed in to MindRoom Chat and approve t
 Add `--open-browser` to open the approval link in your default browser.
 
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+The 10-minute limit also applies while the provisioning service is unreachable, with one extra minute of grace for an approval made just before expiry.
+When the service rate-limits polling, for example because several machines share one public address, `connect` and `run` wait longer between polls, up to 30 seconds.
 You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
+
+After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
+Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
+Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
+If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+
+If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
+`connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
+You can revoke the unused entry in MindRoom Chat → Settings → Local MindRoom.
+
+Pairing is only for hosted mindroom.chat or your own provisioning service.
+When no provisioning URL is configured and the effective homeserver is not mindroom.chat, `connect` refuses without contacting anything or writing files.
+This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+Self-hosted servers register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead.
+Pass `--provisioning-url` to pair with your own provisioning service anyway.
 
 If this machine is already connected, pairing again creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
 In a terminal, `connect` asks before pairing again.

@@ -622,6 +622,78 @@ class TestMatrixRegistration:
         mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
+    async def test_register_user_falls_back_to_shared_secret_when_unpaired_hosted_install_has_one(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A shared secret registers agents without pairing even when a provisioning URL is configured."""
+        test_pass = "test_pass"  # noqa: S105
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MATRIX_REGISTRATION_SHARED_SECRET="shared-secret-value",  # noqa: S106
+            MATRIX_REGISTRATION_TOKEN="",
+            MINDROOM_LOCAL_CLIENT_ID="",
+            MINDROOM_LOCAL_CLIENT_SECRET="",
+        )
+        mock_client = AsyncMock()
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+        with (
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_sequence_client(
+                    captured_requests,
+                    [
+                        httpx.Response(200, json={"nonce": "nonce-123"}),
+                        httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                    ],
+                ),
+            ),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                test_pass,
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
+
+        assert user_id == "@test_user:localhost"
+        assert [request[0:2] for request in captured_requests] == [
+            ("GET", "http://localhost:8008/_synapse/admin/v1/register"),
+            ("POST", "http://localhost:8008/_synapse/admin/v1/register"),
+        ]
+
+    def test_unpaired_hosted_install_without_another_registration_method_must_pair(self, tmp_path: Path) -> None:
+        """Missing client credentials stay a startup error when pairing is the only way to register."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MATRIX_REGISTRATION_SHARED_SECRET="",
+            MATRIX_REGISTRATION_SHARED_SECRET_FILE="",
+            MATRIX_REGISTRATION_TOKEN="",
+            MINDROOM_LOCAL_CLIENT_ID="",
+            MINDROOM_LOCAL_CLIENT_SECRET="",
+        )
+
+        with pytest.raises(PermanentMatrixStartupError, match="local client credentials are missing"):
+            provisioning.required_local_provisioning_client_credentials_for_registration(
+                provisioning_url="https://provisioning.example",
+                registration_token=None,
+                runtime_paths=runtime_paths,
+            )
+
+    @pytest.mark.asyncio
     async def test_register_user_uses_provisioning_service_register_agent_when_configured(
         self,
         tmp_path: Path,

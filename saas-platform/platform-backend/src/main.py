@@ -18,7 +18,7 @@ from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMEN
 from backend.metrics import instrument_app
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
-from backend.tasks.cleanup import cleanup_unentitled_instances, run_all_cleanup_tasks
+from backend.tasks.cleanup import run_cleanup_job
 from backend.routes import (
     accounts,
     admin,
@@ -49,14 +49,13 @@ if TYPE_CHECKING:
 
 
 async def _run_cleanup_job() -> None:
-    """Execute periodic cleanup tasks with logging."""
-    try:
-        result = run_all_cleanup_tasks()
-        result["subscription_lifecycle"] = await cleanup_unentitled_instances()
-        logger = logging.getLogger("mindroom.cleanup")
-        logger.info("Cleanup job completed", extra={"result": result})
-    except Exception:  # noqa: BLE001
-        logging.getLogger("mindroom.cleanup").exception("Scheduled cleanup job failed")
+    """Execute the nightly cleanup job with logging."""
+    logger = logging.getLogger("mindroom.cleanup")
+    run = await run_cleanup_job()
+    if run["ok"]:
+        logger.info("Cleanup job completed", extra={"result": run})
+    else:
+        logger.error("Cleanup job finished with errors", extra={"result": run})
 
 
 @asynccontextmanager

@@ -115,7 +115,7 @@ def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(
 @pytest.mark.asyncio
 async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None:
     """Replacing a stored OpenRouter key should revoke the superseded key hash."""
-    from backend.services.provisioner_service import _provision_openrouter_key
+    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
 
     sb = MagicMock()
     sb.table().update().eq().execute.return_value = Mock()
@@ -134,7 +134,7 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
         patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
         patch("backend.services.provisioner_service.delete_openrouter_key", create=True) as delete_key,
     ):
-        result = await _provision_openrouter_key(
+        result, pending_key = await _provision_openrouter_key(
             sb=sb,
             account_id="acc_123",
             instance_id="123",
@@ -146,6 +146,8 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
             },
             namespace="mindroom-instances",
         )
+        assert pending_key == created_key
+        await _commit_openrouter_key(sb, "123", created_key, "old_hash")
 
     assert result == "sk-or-v1-new-customer"
     delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="old_hash")
@@ -154,7 +156,7 @@ async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None
 @pytest.mark.asyncio
 async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(caplog: pytest.LogCaptureFixture) -> None:
     """Superseded key deletion failure should be visible but not lose the replacement key."""
-    from backend.services.provisioner_service import _provision_openrouter_key
+    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
 
     sb = MagicMock()
     sb.table().update().eq().execute.return_value = Mock()
@@ -178,7 +180,7 @@ async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(capl
             create=True,
         ),
     ):
-        result = await _provision_openrouter_key(
+        result, pending_key = await _provision_openrouter_key(
             sb=sb,
             account_id="acc_123",
             instance_id="123",
@@ -190,6 +192,8 @@ async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(capl
             },
             namespace="mindroom-instances",
         )
+        assert pending_key == created_key
+        await _commit_openrouter_key(sb, "123", created_key, "old_hash")
 
     assert result == "sk-or-v1-new-customer"
     assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
@@ -1158,11 +1162,24 @@ class TestProvisionerEndpoints:
         assert "not found" in response.json()["detail"]
 
     def test_uninstall_instance_success(
-        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
+        self,
+        client: TestClient,
+        mock_helm: AsyncMock,
+        mock_kubectl: AsyncMock,
+        mock_update_status: Mock,
+        valid_auth_header: dict,
     ):
-        """Test uninstalling an instance successfully."""
-        # Make request
-        response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
+        """Uninstall removes the release, volumes, out-of-release Secrets, and the OpenRouter key."""
+        with (
+            patch("backend.services.provisioner_service.ensure_supabase", return_value=MagicMock()),
+            patch(
+                "backend.services.provisioner_service.get_instance", return_value={"openrouter_key_hash": "hash_123"}
+            ),
+            patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+            patch("backend.services.provisioner_service.delete_openrouter_key") as delete_key,
+            patch("backend.services.provisioner_service.update_instance") as update_instance,
+        ):
+            response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -1173,10 +1190,44 @@ class TestProvisionerEndpoints:
 
         # Verify helm was called
         mock_helm.assert_called_with(["uninstall", "instance-123", "--namespace=mindroom-instances"])
+        mock_kubectl.assert_has_calls(
+            [
+                call(
+                    [
+                        "delete",
+                        "pvc",
+                        "mindroom-storage-123",
+                        "synapse-storage-123",
+                        "--ignore-not-found",
+                        "--wait=false",
+                    ],
+                    namespace="mindroom-instances",
+                ),
+                call(
+                    [
+                        "delete",
+                        "secret",
+                        "mindroom-api-keys-123",
+                        "mindroom-primary-api-key-123",
+                        "mindroom-worker-auth-123",
+                        "--ignore-not-found",
+                        "--wait=false",
+                    ],
+                    namespace="mindroom-instances",
+                ),
+            ]
+        )
+        delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="hash_123")
+        assert update_instance.call_args[0][2]["openrouter_key_hash"] is None
         mock_update_status.assert_called_with(123, "deprovisioned")
 
     def test_uninstall_instance_already_uninstalled(
-        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
+        self,
+        client: TestClient,
+        mock_helm: AsyncMock,
+        mock_update_status: Mock,
+        valid_auth_header: dict,
+        stub_uninstall_cleanup: AsyncMock,  # noqa: ARG002
     ):
         """Test uninstalling an already uninstalled instance."""
         # Setup

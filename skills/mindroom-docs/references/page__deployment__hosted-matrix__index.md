@@ -58,6 +58,10 @@ On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 
+After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
+In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+Under a service or the macOS app, it prints the approving account without asking.
+
 Pair code behavior:
 
 - Valid for 600 seconds (10 minutes).
@@ -139,3 +143,5 @@ On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https
 It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
 
 Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
+`mindroom connect` refuses to pair a non-mindroom.chat homeserver, including an unset `MATRIX_HOMESERVER` (which defaults to `http://localhost:8008`), unless `MINDROOM_PROVISIONING_URL` is set or `--provisioning-url` is given.
+Without a provisioning service, register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead of pairing.

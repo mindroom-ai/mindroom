@@ -22,7 +22,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
-from mindroom.managed_avatars import room_avatar_path, root_space_avatar_path
+from mindroom.managed_avatars import clear_failed_stock_downloads, room_avatar_path, root_space_avatar_path
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import create_agent_http_client
@@ -354,6 +354,8 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     console.print("[green]✓ Using router account[/green]")
 
     config = _load_validated_config(runtime_paths)
+    # An explicit sync retries stock downloads that failed recently instead of waiting out the retry window.
+    clear_failed_stock_downloads(runtime_paths)
     failed_labels: list[str] = []
     try:
         success_count, skip_count, failed_labels = await _sync_configured_room_avatars(

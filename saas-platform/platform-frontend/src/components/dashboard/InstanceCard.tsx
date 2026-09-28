@@ -14,9 +14,13 @@ function subscriptionCanRunInfrastructure(subscription: Subscription | null | un
   if (subscription === undefined) return true
   if (typeof subscription?.can_run_instances === 'boolean') return subscription.can_run_instances
   if (!subscription || !INFRASTRUCTURE_TIERS.has(subscription.tier)) return false
-  if (subscription.status === 'active') return true
+  if (subscription.status === 'active' || subscription.status === 'past_due') return true
   if (subscription.status !== 'trialing' || !subscription.trial_ends_at) return false
   return new Date(subscription.trial_ends_at).getTime() > Date.now()
+}
+
+function formatDate(dateStr: string) {
+  return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
 }
 
 function subscriptionAccessMessage(subscription: Subscription | null | undefined) {
@@ -230,6 +234,21 @@ export function InstanceCard({
           <span className="text-sm font-medium">{getStatusText()}</span>
         </div>
       </div>
+
+      {instance.status === 'stopped' && instance.teardown_after && (
+        <div
+          role="alert"
+          className="mb-4 rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-800 dark:border-yellow-800/50 dark:bg-yellow-900/20 dark:text-yellow-200"
+        >
+          <p>
+            Your instance is paused because your subscription is no longer active.
+            Its data will be deleted on <strong>{formatDate(instance.teardown_after)}</strong> unless you resubscribe.
+          </p>
+          <Link href="/dashboard/billing" className="mt-2 inline-block font-semibold underline">
+            Go to billing
+          </Link>
+        </div>
+      )}
 
       {(statusHint || lastSynced) && (
         <div className="mb-3 space-y-1">

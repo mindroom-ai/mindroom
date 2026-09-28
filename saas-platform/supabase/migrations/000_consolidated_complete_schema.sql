@@ -78,7 +78,7 @@ CREATE TABLE subscriptions (
     stripe_subscription_id TEXT UNIQUE,
     stripe_price_id TEXT,
     tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
-    status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'cancelled', 'past_due', 'paused')),
+    status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'cancelled', 'past_due', 'paused', 'incomplete', 'incomplete_expired', 'unpaid')),
 
     -- Limits based on tier
     max_agents INTEGER DEFAULT 1,
@@ -141,6 +141,12 @@ CREATE TABLE instances (
 
     -- Kubernetes sync tracking
     kubernetes_synced_at TIMESTAMPTZ,
+
+    -- Subscription lifecycle (set only when an inactive subscription stops the instance)
+    lifecycle_stopped_at TIMESTAMPTZ,
+    teardown_after TIMESTAMPTZ,
+    lifecycle_error TEXT,
+    lifecycle_error_at TIMESTAMPTZ,
 
     -- Lifecycle timestamps
     deprovisioned_at TIMESTAMPTZ,
@@ -250,6 +256,17 @@ CREATE TABLE usage (
 CREATE INDEX idx_usage_subscription_id ON usage(subscription_id);
 CREATE INDEX idx_usage_instance_id ON usage(instance_id);
 CREATE INDEX idx_usage_recorded_at ON usage(recorded_at DESC);
+
+-- ============================================================================
+-- CLEANUP RUNS TABLE (nightly cleanup job results, service role only)
+-- ============================================================================
+CREATE TABLE cleanup_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ NOT NULL,
+    ok BOOLEAN NOT NULL,
+    summary JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 
 -- ============================================================================
 -- UPDATE TRIGGERS
@@ -464,6 +481,7 @@ ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cleanup_runs ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
 -- RLS POLICIES
@@ -579,6 +597,8 @@ GRANT ALL ON TABLE payments TO service_role;
 GRANT ALL ON TABLE webhook_events TO service_role;
 GRANT ALL ON TABLE audit_logs TO service_role;
 GRANT ALL ON TABLE usage TO service_role;
+GRANT ALL ON TABLE cleanup_runs TO service_role;
+REVOKE ALL ON TABLE cleanup_runs FROM PUBLIC, anon, authenticated;
 
 -- Grant sequence permissions (required for instance_id generation)
 -- Only USAGE is required for nextval(), SELECT allows currval()
@@ -611,6 +631,9 @@ COMMENT ON COLUMN payments.account_id IS
 
 COMMENT ON TABLE webhook_events IS
 'Stores Stripe webhook events. Service role can insert/update. Users can only view their own events via RLS.';
+
+COMMENT ON TABLE cleanup_runs IS
+'Nightly cleanup job results (retention tasks and instance lifecycle). Service role only.';
 
 COMMENT ON COLUMN webhook_events.account_id IS
 'Account ID for tenant isolation. Required for all new webhook events to ensure proper data segregation.';

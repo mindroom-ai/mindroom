@@ -126,7 +126,7 @@ MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
 # register-agent and heartbeat errors by these exact strings; a contract test keeps the two sides in sync.
 CONNECTION_REVOKED_DETAIL = "Connection revoked"
 NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
-# The CLI only shows this detail; it does not classify device poll errors by string.
+# `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
