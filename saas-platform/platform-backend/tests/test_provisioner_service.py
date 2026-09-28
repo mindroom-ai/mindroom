@@ -122,6 +122,17 @@ class TestHelmArgsAssembly:
         assert "sandboxRunnerResources.limits.ephemeral-storage" in default_keys
         assert default_keys <= set(provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"])
 
+    def test_pro_resource_profile_keeps_ephemeral_storage_requests_small(self):
+        """Every tenant's requests count against the shared node's allocatable ephemeral storage."""
+        pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+        requests = {key: value for key, value in pro.items() if key.endswith(".requests.ephemeral-storage")}
+
+        assert requests == {
+            "mindroomResources.requests.ephemeral-storage": "64Mi",
+            "synapseResources.requests.ephemeral-storage": "64Mi",
+            "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
+        }
+
     def test_resource_profile_helm_args_unknown_profile_is_noop(self):
         """Unknown resource profiles add no Helm arguments."""
         helm_args: list[str] = []

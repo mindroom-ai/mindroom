@@ -1202,18 +1202,22 @@ def test_instance_chart_renders_configurable_control_plane_resources() -> None:
     synapse = _resource(docs, "Deployment", "synapse-demo")
 
     assert _container(mindroom, "mindroom")["resources"] == {
-        "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "1Gi"},
+        "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "64Mi"},
         "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "8Gi"},
     }
     assert _container(synapse, "synapse")["resources"] == {
-        "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "256Mi"},
+        "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "64Mi"},
         "limits": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "2Gi"},
     }
 
 
 @pytest.mark.parametrize("workspace_size_limit", [None, "2Gi"])
 def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(workspace_size_limit: str | None) -> None:
-    """Tenant tool code shares a node with other tenants, so no instance container may fill its disk."""
+    """Tenant tool code shares a node with other tenants, so no instance container may fill its disk.
+
+    Requests stay small because every tenant's requests count against the node's allocatable ephemeral storage,
+    and large ones would leave new tenant pods unschedulable; the limits provide the protection.
+    """
     set_args = () if workspace_size_limit is None else (f"sandboxRunnerWorkspaceSizeLimit={workspace_size_limit}",)
     docs = _render_chart(Path("cluster/k8s/instance"), *set_args)
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
@@ -1225,7 +1229,7 @@ def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(works
     ]
 
     for container in containers:
-        assert "ephemeral-storage" in container["resources"]["requests"], container["name"]
+        assert container["resources"]["requests"]["ephemeral-storage"] == "64Mi", container["name"]
         assert "ephemeral-storage" in container["resources"]["limits"], container["name"]
     assert _volumes_by_name(mindroom)["sandbox-workspace"] == {
         "name": "sandbox-workspace",
