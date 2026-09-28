@@ -377,10 +377,10 @@ Expiry or revocation stops future automatic decisions without cancelling decisio
 Changes to configured bindings or room membership invalidate matching grants.
 Clients show approval or revocation as submitted until a backend card edit acknowledges the durable change.
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
-Inside text, approval redaction hides only one word for each detected secret, so command text around a secret stays visible.
-A secret that contains spaces or shell punctuation shows everything after its first word.
-A field whose name marks it as secret, such as `password` or `credentials`, is hidden entirely while the card still shows the field name.
-Deny the call when a hidden word or field could change what runs.
+Approval cards hide a field entirely when its name marks it as secret, such as `password`, `credentials`, or an `Authorization` header, and the card still shows the field name.
+Inside text, approval cards hide only credentials in known token formats, such as `sk-…`, `ghp_…`, `github_pat_…`, `xoxb-…`, `AIza…`, and JSON Web Tokens, so the rest of a command is shown exactly as it will run.
+Other secrets written inline, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, are shown on the card, so keep secrets in credentials or secret-named fields.
+Deny the call when a hidden field could change what runs.
 A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.
 When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander.
 They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.

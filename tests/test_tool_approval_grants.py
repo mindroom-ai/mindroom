@@ -735,18 +735,22 @@ async def test_redacted_arguments_keep_timed_approval(
 @pytest.mark.parametrize(
     ("command", "shown"),
     [
-        ("export TOKEN=abc; rm -rf ~/important", "export TOKEN=***redacted***; rm -rf ~/important"),
+        (
+            "export OPENAI_API_KEY=sk-live-abc123; rm -rf ~/important",
+            "export OPENAI_API_KEY=***redacted***; rm -rf ~/important",
+        ),
+        ("export TOKEN=abc; rm -rf ~/important", "export TOKEN=abc; rm -rf ~/important"),
         ("rm -rf ~/important # 'token:' ", "rm -rf ~/important # 'token:' "),
     ],
 )
 @pytest.mark.asyncio
-async def test_redaction_keeps_commands_after_a_secret_visible(
+async def test_approval_card_shows_commands_as_written(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     command: str,
     shown: str,
 ) -> None:
-    """The approver sees every command that follows a secret, and the card stays approvable."""
+    """The approver sees the command as it will run, with only known token formats hidden."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:

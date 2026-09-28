@@ -168,7 +168,7 @@ def sanitize_failure_text(value: str, *, max_length: int = _MAX_STRING_LENGTH) -
     return redact_sensitive_text(value, max_length=max_length)
 
 
-def sanitize_failure_value(value: object, *, depth: int = 0, precise: bool = False) -> _JsonValue:
+def sanitize_failure_value(value: object, *, depth: int = 0, tokens_only: bool = False) -> _JsonValue:
     """Recursively redact and bound one arbitrary value for durable failure logging."""
     max_depth = max(_MAX_REDACTION_DEPTH - depth, 0) if depth > 0 else _MAX_REDACTION_DEPTH
     return redact_sensitive_data(
@@ -176,7 +176,7 @@ def sanitize_failure_value(value: object, *, depth: int = 0, precise: bool = Fal
         max_string_length=_MAX_STRING_LENGTH,
         max_collection_items=_MAX_COLLECTION_ITEMS,
         max_depth=max_depth,
-        precise=precise,
+        tokens_only=tokens_only,
     )
 
 

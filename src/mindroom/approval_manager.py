@@ -116,7 +116,7 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
 
 
 def _build_event_arguments_preview(arguments: dict[str, Any]) -> dict[str, Any]:
-    sanitized = sanitize_failure_value(arguments, precise=True)
+    sanitized = sanitize_failure_value(arguments, tokens_only=True)
     if not isinstance(sanitized, dict):
         return {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
@@ -139,7 +139,8 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _full_arguments_json_bytes(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
+    # Tool arguments parsed from JSON may carry lone surrogates, which strict UTF-8 cannot encode.
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8", "surrogatepass"))
 
 
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -149,7 +150,7 @@ def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | N
         or _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES
     ):
         return None
-    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, precise=True))
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, tokens_only=True))
     return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
 
 
