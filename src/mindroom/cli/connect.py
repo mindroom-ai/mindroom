@@ -588,7 +588,7 @@ def _should_note_missing_administrator(config_path: Path, owner_user_id: str) ->
     """Return True when the config's administrators list omits the user.
 
     Return False when the config cannot be read, is not a mapping, or has a non-list administrators value.
-    An empty or null administrators value counts as an empty list.
+    A missing or null administrators value counts as an empty list.
     """
     try:
         data, _ = load_yaml_config_source(config_path)
