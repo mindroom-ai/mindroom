@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
@@ -112,6 +112,35 @@ class TestUploadFileAsMxc:
 
         assert payload is not None
         assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("orientation", "expected"), [(None, (4000, 3000)), (6, (3000, 4000))])
+    async def test_png_dimensions_never_decode_pixel_data(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        orientation: int | None,
+        expected: tuple[int, int],
+    ) -> None:
+        """PNG size and header EXIF come from chunks before the image data, so a compressed bomb is never inflated."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        file = tmp_path / "large.png"
+        exif = Image.Exif()
+        if orientation is not None:
+            exif[274] = orientation
+        Image.new("L", (4000, 3000)).save(file, exif=exif)
+
+        def refuse_decode(_image: PngImagePlugin.PngImageFile) -> None:
+            msg = "PNG pixel data must not be decoded for upload metadata"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(PngImagePlugin.PngImageFile, "load", refuse_decode)
+
+        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+
+        assert payload is not None
+        assert (payload["info"]["w"], payload["info"]["h"]) == expected
 
     @pytest.mark.asyncio
     async def test_undecodable_image_upload_omits_dimensions(self, tmp_path: Path) -> None:

@@ -231,7 +231,9 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
     try:
         with Image.open(io.BytesIO(media_bytes)) as image:
             width, height = image.size
-            orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
+            # Pillow's PNG getexif() decodes the whole raster to look for an eXIf chunk after the image data.
+            header_exif_only = image.format != "PNG" or "exif" in image.info
+            orientation = image.getexif().get(_EXIF_ORIENTATION_TAG) if header_exif_only else None
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return {}
     if orientation in _EXIF_ROTATED_ORIENTATIONS:
