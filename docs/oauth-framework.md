@@ -58,6 +58,7 @@ That rejection is logged as `oauth_credentials_refresh_failed` with `reason="tok
 Google tool wrappers instead refresh through google-auth against the stored `token_uri` without re-resolving endpoints, and Google providers always store Google's fixed token endpoint there.
 A reconnect keeps an earlier refresh token that the provider did not replace only when the verified identity, OAuth client, and `token_uri` all match.
 Dynamic client registrations record the token endpoint they were issued for, and discovery registers a new client when the resolved token endpoint changes.
+A code exchange or refresh also refuses a dynamically registered client whose recorded token endpoint differs from the endpoint it is about to use.
 The SQLite store is authoritative on every OAuth credential read.
 Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.

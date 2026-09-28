@@ -126,7 +126,7 @@ def _oauth_mcp_server_config() -> MCPServerConfig:
     )
 
 
-def _auto_oauth_mcp_server_config() -> MCPServerConfig:
+def _auto_oauth_mcp_server_config(*, dynamic_client_registration: bool = True) -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example.test/mcp",
@@ -139,6 +139,7 @@ def _auto_oauth_mcp_server_config() -> MCPServerConfig:
             "scopes": ["mcp.read"],
             "extra_auth_params": {"audience": "example"},
             "extra_token_params": {"resource": "https://mcp.example.test/mcp"},
+            "dynamic_client_registration": dynamic_client_registration,
         },
     )
 
@@ -649,8 +650,18 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_token_endpoint_moves(
         "authorization_server",
         "https://moved.example.test",
     )
-    assert await _authorized_client_id(provider, runtime_paths) == "client-of-moved.example.test"
+    with capture_logs() as logs:
+        assert await _authorized_client_id(provider, runtime_paths) == "client-of-moved.example.test"
 
+    assert [entry for entry in logs if entry["event"] == "oauth_dynamic_client_reregistered"] == [
+        {
+            "event": "oauth_dynamic_client_reregistered",
+            "log_level": "warning",
+            "provider_id": "mcp_demo",
+            "previous_token_endpoint_origin": "https://auth.example.test",
+            "current_token_endpoint_origin": "https://moved.example.test",
+        },
+    ]
     assert [url for url, _payload in _MovableAuthorizationServerDiscoveryClient.posts] == [
         "https://auth.example.test/register",
         "https://moved.example.test/register",
@@ -683,9 +694,45 @@ async def test_mcp_oauth_rejects_dynamic_registration_after_move_to_server_witho
 
 
 @pytest.mark.asyncio
+async def test_mcp_oauth_refuses_bound_dynamic_client_after_move_with_registration_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling registration never lets a client registered at one server be sent to another."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", _UnexpectedTokenClient)
+    assert (
+        await _authorized_client_id(mcp_oauth_provider("demo", _auto_oauth_mcp_server_config()), runtime_paths)
+        == "client-of-auth.example.test"
+    )
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config(dynamic_client_registration=False))
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://moved.example.test",
+    )
+
+    with pytest.raises(OAuthProviderError, match="belongs to a different token endpoint"):
+        await _authorized_client_id(provider, runtime_paths)
+    with pytest.raises(OAuthProviderError, match="belongs to a different token endpoint"):
+        await provider.exchange_code(
+            "authorization-code",
+            runtime_paths,
+            token_url="https://moved.example.test/token",  # noqa: S106
+            code_verifier=provider.issue_pkce_code_verifier(),
+        )
+    assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dynamic_client_registration", [True, False], ids=["registration", "no-registration"])
 async def test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    dynamic_client_registration: bool,
 ) -> None:
     """A registration stored before endpoint recording keeps its client and is bound on first use."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -701,7 +748,10 @@ async def test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endp
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", legacy_registration)
-    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    provider = mcp_oauth_provider(
+        "demo",
+        _auto_oauth_mcp_server_config(dynamic_client_registration=dynamic_client_registration),
+    )
 
     assert await _authorized_client_id(provider, runtime_paths) == "legacy-client-id"
 

@@ -197,22 +197,25 @@ def is_terminal_oauth_refresh_error_code(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
 
 
-def _token_endpoint_origin(token_url: object) -> str | None:
+def token_endpoint_origin(token_url: object) -> str | None:
     """Return a token endpoint's scheme and host for logs, without userinfo, path, or query."""
     if not isinstance(token_url, str):
         return None
-    parsed = urlparse(token_url)
+    try:
+        parsed = urlparse(token_url)
+    except ValueError:
+        return None
     host = parsed.netloc.rpartition("@")[2]
     return f"{parsed.scheme}://{host}" if parsed.scheme and host else None
 
 
 class OAuthTokenEndpointChangedError(OAuthRefreshRejectedError):
-    """Raised before refreshing credentials that are not bound to the currently resolved token endpoint."""
+    """Raised before a token request whose credentials or client are bound to a different token endpoint."""
 
     def __init__(self, stored_token_url: object, current_token_url: str) -> None:
         super().__init__("OAuth token endpoint binding is missing or changed since authorization")
-        self.stored_token_endpoint_origin = _token_endpoint_origin(stored_token_url)
-        self.current_token_endpoint_origin = _token_endpoint_origin(current_token_url)
+        self.stored_token_endpoint_origin = token_endpoint_origin(stored_token_url)
+        self.current_token_endpoint_origin = token_endpoint_origin(current_token_url)
 
 
 class OAuthClaimValidationError(OAuthProviderError):
@@ -722,6 +725,19 @@ class OAuthProvider:
             return resolution.config
         raise self._missing_client_config_error()
 
+    async def _require_client_config_for_token_url(
+        self,
+        runtime_paths: RuntimePaths,
+        token_url: str,
+    ) -> OAuthClientConfig:
+        """Return client settings, refusing a dynamic registration issued for a different token endpoint."""
+        resolution = await self.client_config_resolution_async(runtime_paths)
+        if resolution is None:
+            raise self._missing_client_config_error()
+        if resolution.dynamically_registered and resolution.registered_token_url != token_url:
+            raise OAuthTokenEndpointChangedError(resolution.registered_token_url, token_url)
+        return resolution.config
+
     def _missing_client_config_error(self) -> _OAuthProviderNotConfiguredError:
         """Build one safe client-configuration error."""
         services = ", ".join(self.all_client_config_services) or "a *_oauth_client credential service"
@@ -817,7 +833,7 @@ class OAuthProvider:
         if endpoints.token_url != token_url:
             msg = "OAuth token endpoint changed since authorization"
             raise OAuthProviderError(msg)
-        client_config = await self.require_client_config_async(runtime_paths)
+        client_config = await self._require_client_config_for_token_url(runtime_paths, token_url)
         if self.pkce_code_challenge_method is not None and not code_verifier:
             msg = "OAuth provider requires a PKCE code verifier"
             raise OAuthProviderError(msg)
@@ -902,7 +918,7 @@ class OAuthProvider:
         # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authorization
         if stored_token_url != endpoints.token_url:
             raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
-        client_config = await self.require_client_config_async(runtime_paths)
+        client_config = await self._require_client_config_for_token_url(runtime_paths, endpoints.token_url)
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
