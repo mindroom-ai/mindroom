@@ -196,7 +196,7 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
-    """Return every visible support file of one workspace skill as ``directory/filename``."""
+    """Return the support files one workspace skill offers as ``directory/filename``, like its skill loading lists them."""
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
         return [
             f"{directory}/{filename}"

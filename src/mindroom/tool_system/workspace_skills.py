@@ -22,7 +22,7 @@ from yaml import YAMLError
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -82,19 +82,12 @@ def open_skills_root(skills_root: Path, *, create: bool = False) -> Iterator[int
 
 def read_text_at(directory_fd: int, relative_path: str) -> str | None:
     """Return one bounded UTF-8 regular file without following links, or None when it is absent."""
-    chunks: list[bytes] = []
-    size = 0
     try:
-        with open_regular_file_within_root(directory_fd, relative_path) as file_fd:
-            while chunk := os.read(file_fd, 65536):
-                size += len(chunk)
-                if size > MAX_SKILL_FILE_BYTES:
-                    msg = f"{relative_path} exceeds {MAX_SKILL_FILE_BYTES} bytes"
-                    raise ValueError(msg)
-                chunks.append(chunk)
+        return read_regular_file_within_root(directory_fd, relative_path, max_bytes=MAX_SKILL_FILE_BYTES).decode(
+            "utf-8",
+        )
     except FileNotFoundError:
         return None
-    return b"".join(chunks).decode("utf-8")
 
 
 def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
@@ -111,11 +104,15 @@ def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
         )
 
 
-def _readable_size(directory_fd: int, filename: str) -> bool:
+def _readable_size(directory_fd: int, directory: str, filename: str) -> bool:
     try:
-        return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_size <= MAX_SKILL_FILE_BYTES
+        size = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_size
     except FileNotFoundError:
         return False
+    if size > MAX_SKILL_FILE_BYTES:
+        logger.warning("Refused a workspace skill file", path=f"{directory}/{filename}", size=size)
+        return False
+    return True
 
 
 def list_support_files(skill_fd: int, directory: str) -> list[str]:
@@ -133,7 +130,7 @@ def list_support_files(skill_fd: int, directory: str) -> list[str]:
             return [
                 filename
                 for filename in filenames[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
-                if _readable_size(support_fd, filename)
+                if _readable_size(support_fd, directory, filename)
             ]
     except FileNotFoundError:
         return []
@@ -223,8 +220,6 @@ def _each_skill_directory[Result](
     Worker code can plant entries in a shared workspace, so one never hides the others or fails the caller, and an
     unavailable root yields nothing.
     """
-    if not skills_root.is_dir():
-        return
     try:
         with open_skills_root(skills_root) as root_fd:
             with suppress(FileNotFoundError):
@@ -253,6 +248,8 @@ def _each_skill_directory[Result](
                     continue
                 if result is not None:
                     yield result
+    except FileNotFoundError:
+        return
     except OSError as exc:
         logger.warning("Workspace skill root is unavailable", path=str(skills_root), error=str(exc))
 
@@ -263,10 +260,14 @@ def _each_skill_directory[Result](
 # extension point, so workspace roots build the same Skill fields from descriptor-bound reads.
 # Upstream issue: tracking gap; no Agno issue or PR proposes caller-owned file access for LocalSkills.
 # Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
-# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery.
+# Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery; the
+# workspace count, budget, name, description, listing, and file-size limits remain MindRoom policy.
 # Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
-# tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
-# tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
+# tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
+# tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno,
+# tests/test_skills.py::test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning,
+# tests/test_skills.py::test_workspace_skills_stay_within_a_file_cap_and_a_total_budget, and
+# tests/test_skills.py::test_workspace_skill_names_and_listings_cannot_bloat_the_prompt.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries.
 

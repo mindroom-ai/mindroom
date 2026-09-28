@@ -110,10 +110,10 @@ class _MindroomSkillsLoader(SkillLoader):
 class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
     """Load one workspace's ``skills`` directory through no-follow descriptors."""
 
-    workspace_root: Path
+    skills_root: Path
 
     def _candidate_skills(self) -> list[Skill]:
-        return load_workspace_skills(self.workspace_root / WORKSPACE_SKILLS_DIRNAME)
+        return load_workspace_skills(self.skills_root)
 
 
 class MindroomSkills(Skills):
@@ -166,8 +166,7 @@ class MindroomSkills(Skills):
     # Upstream PR: none identified.
     # Remove when: Skills exposes a load callback and reads support files through the loader's reader; the
     # execution block for workspace scripts remains MindRoom policy.
-    # Coverage: tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links,
-    # tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
+    # Coverage: tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
     # tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not, and
     # tests/test_skills.py::test_workspace_skill_script_read_allowed_but_execute_blocked.
     def _get_skill_instructions(self, skill_name: str) -> str:
@@ -231,6 +230,7 @@ class MindroomSkills(Skills):
         try:
             content = read_support_file(Path(skill.source_path), directory, filename)
         except (OSError, ValueError) as exc:
+            logger.warning("Refused a workspace skill file", path=f"{skill.source_path}/{directory}/{filename}")
             return json.dumps(
                 {"error": f"Error reading {directory} file: {exc}", "skill_name": skill.name, key: filename},
             )
@@ -272,11 +272,7 @@ def build_agent_skills(
         runtime_paths=runtime_paths,
         env_vars=env_vars,
         credential_keys=resolved_credential_keys,
-        workspace_root=(
-            workspace_root
-            if workspace_root is not None
-            else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
-        ),
+        skills_root=agent_workspace_skills_root(runtime_paths, agent_name, workspace_root=workspace_root),
     )
 
     loaders: list[SkillLoader]

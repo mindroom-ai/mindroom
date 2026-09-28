@@ -541,14 +541,15 @@ def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path)
     assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
 
 
-def _workspace_skills_root(storage: Path) -> Path:
-    root = agent_workspace_root_path(storage, "code") / "skills"
-    root.mkdir(parents=True)
-    return root
+def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    return storage, workspace_skills
 
 
-def _load(tmp_path: Path, storage: Path, allowlist: list[str] | None = None) -> Skills:
-    skills = build_agent_skills(
+def _load_agent_skills(tmp_path: Path, storage: Path, allowlist: list[str] | None = None) -> Skills | None:
+    return build_agent_skills(
         "code",
         _base_config(allowlist or []),
         _runtime_paths(storage),
@@ -556,17 +557,14 @@ def _load(tmp_path: Path, storage: Path, allowlist: list[str] | None = None) -> 
         env_vars={},
         credential_keys=set(),
     )
-    assert skills is not None
-    return skills
 
 
 def test_workspace_loader_skips_links_and_special_files(tmp_path: Path) -> None:
     """Workspace skills load through no-follow reads, so planted links and FIFOs are never opened."""
-    storage = tmp_path / "storage"
+    storage, workspace_skills = _workspace_skills(tmp_path)
     outside = _write_skill(tmp_path / "outside", "secret", "Outside the workspace")
     (outside.parent / "references").mkdir()
     (outside.parent / "references" / "keys.md").write_text("private", encoding="utf-8")
-    workspace_skills = _workspace_skills_root(storage)
     (workspace_skills / "linked-dir").symlink_to(outside.parent, target_is_directory=True)
     (workspace_skills / "linked-file").mkdir()
     (workspace_skills / "linked-file" / "SKILL.md").symlink_to(outside)
@@ -578,33 +576,12 @@ def test_workspace_loader_skips_links_and_special_files(tmp_path: Path) -> None:
     (good.parent / "scripts" / "check.sh").write_text("echo ok", encoding="utf-8")
     (good.parent / "scripts" / "linked.sh").symlink_to(outside)
 
-    skills = _load(tmp_path, storage)
+    skills = _load_agent_skills(tmp_path, storage)
+    assert skills is not None
     assert _skill_names(skills) == ["good"]
     skill = skills.get_skill("good")
     assert skill is not None
     assert (skill.scripts, skill.references) == (["check.sh"], [])
-
-
-def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> None:
-    """Worker code can replace the skills directory with a link to another workspace; the primary never follows it."""
-    storage = tmp_path / "storage"
-    other_skills = _write_skill(
-        tmp_path / "other" / "skills",
-        "private-notes",
-        "Another requester's notes",
-    ).parent.parent
-    workspace_root = agent_workspace_root_path(storage, "code")
-    workspace_root.mkdir(parents=True)
-    (workspace_root / "skills").symlink_to(other_skills, target_is_directory=True)
-    skills = build_agent_skills(
-        "code",
-        _base_config([]),
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is None
 
 
 @pytest.mark.parametrize(
@@ -627,8 +604,7 @@ def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
     newline: str,
 ) -> None:
     """Frontmatter that strict YAML refuses falls back to key: value lines, and line endings read, as in LocalSkills."""
-    storage = tmp_path / "storage"
-    root = _workspace_skills_root(storage)
+    storage, root = _workspace_skills(tmp_path)
     skill_dir = root / "deploy-checks"
     skill_dir.mkdir()
     content = f"---\nname: deploy-checks\n{frontmatter}---\nRun the smoke test.\nThen check logs.\n"
@@ -636,7 +612,8 @@ def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
     (skill_dir / "references").mkdir()
     (skill_dir / "references" / "notes.md").write_bytes(f"one{newline}two{newline}".encode())
     _write_skill(root, "good", "Good")
-    skills = _load(tmp_path, storage)
+    skills = _load_agent_skills(tmp_path, storage)
+    assert skills is not None
     assert _skill_names(skills) == ["deploy-checks", "good"]
     skill = skills.get_skill("deploy-checks")
     assert skill is not None
@@ -648,8 +625,7 @@ def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
 
 def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path) -> None:
     """Nesting that overflows libyaml's C stack must fall back like LocalSkills, not kill the process."""
-    storage = tmp_path / "storage"
-    root = _workspace_skills_root(storage)
+    storage, root = _workspace_skills(tmp_path)
     (root / "nested").mkdir()
     depth = 30_000
     (root / "nested" / "SKILL.md").write_text(
@@ -657,13 +633,12 @@ def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path
         encoding="utf-8",
     )
     _write_skill(root, "good", "Good")
-    assert _skill_names(_load(tmp_path, storage)) == ["good", "nested"]
+    assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["good", "nested"]
 
 
 def test_a_skill_removed_while_the_workspace_is_listed_hides_no_other(tmp_path: Path) -> None:
     """An entry that disappears between listing and inspection is skipped, like LocalSkills skips it."""
-    storage = tmp_path / "storage"
-    root = _workspace_skills_root(storage)
+    storage, root = _workspace_skills(tmp_path)
     for name in ("aaa", "bbb", "ccc"):
         _write_skill(root, name, name)
     real_scandir = os.scandir
@@ -682,65 +657,49 @@ def test_a_skill_removed_while_the_workspace_is_listed_hides_no_other(tmp_path: 
             yield entries(listing)
 
     with patch("mindroom.tool_system.workspace_skills.os.scandir", scandir_removing_bbb):
-        assert _skill_names(_load(tmp_path, storage)) == ["aaa", "ccc"]
+        assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["aaa", "ccc"]
 
 
 def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:
     """Only skills/<name>/SKILL.md loads; LocalSkills loaded skills/SKILL.md alone and hid every skill beside it."""
-    storage = tmp_path / "storage"
-    root = _workspace_skills_root(storage)
+    storage, root = _workspace_skills(tmp_path)
     (root / "SKILL.md").write_text("---\nname: rooted\ndescription: d\n---\nbody\n", encoding="utf-8")
     _write_skill(root, "good", "Good")
     with capture_logs() as logs:
-        skills = _load(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
+        assert skills is not None
     assert _skill_names(skills) == ["good"]
     assert any(log["event"] == "Ignoring SKILL.md directly in the workspace skills directory" for log in logs)
 
 
 def test_workspace_skill_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
     """A SKILL.md over the read limit does not load, and a support file over it is not offered."""
-    storage = tmp_path / "storage"
-    root = _workspace_skills_root(storage)
+    storage, root = _workspace_skills(tmp_path)
     skill_path = _write_skill(root, "guide", "Guide")
     (skill_path.parent / "references").mkdir()
     (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
     (skill_path.parent / "references" / "manual.md").write_text("x" * (MAX_SKILL_FILE_BYTES + 1), encoding="utf-8")
     huge = _write_skill(root, "huge", "Huge")
     huge.write_text(huge.read_text(encoding="utf-8") + "x" * MAX_SKILL_FILE_BYTES, encoding="utf-8")
-    skills = _load(tmp_path, storage)
+    with capture_logs() as logs:
+        skills = _load_agent_skills(tmp_path, storage)
+    assert skills is not None
     assert _skill_names(skills) == ["guide"]
     skill = skills.get_skill("guide")
     assert skill is not None
     assert skill.references == ["notes.md"]
-
-
-def test_workspace_support_reads_refuse_swapped_links(tmp_path: Path) -> None:
-    """A reference replaced by a link after loading is refused instead of read through the link."""
-    storage = tmp_path / "storage"
-    skill_path = _write_skill(_workspace_skills_root(storage), "guide", "Guide")
-    (skill_path.parent / "references").mkdir()
-    reference = skill_path.parent / "references" / "notes.md"
-    reference.write_text("workspace notes", encoding="utf-8")
-    skills = _load(tmp_path, storage)
-    get_reference = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference").entrypoint
-    assert json.loads(get_reference(skill_name="guide", reference_path="notes.md"))["content"] == "workspace notes"
-
-    secret = tmp_path / "secret.txt"
-    secret.write_text("primary secret", encoding="utf-8")
-    reference.unlink()
-    reference.symlink_to(secret)
-    result = json.loads(get_reference(skill_name="guide", reference_path="notes.md"))
-    assert "error" in result
-    assert "primary secret" not in json.dumps(result)
+    refused = [str(entry.get("path", "")) for entry in logs if entry["log_level"] == "warning"]
+    assert any(path.endswith("huge/SKILL.md") for path in refused)
+    assert any(path.endswith("references/manual.md") for path in refused)
 
 
 def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
     """Loading a workspace skill feeds the learner's inactivity clock; configured skill roots stay untouched."""
-    storage = tmp_path / "storage"
-    workspace_skills = _workspace_skills_root(storage)
+    storage, workspace_skills = _workspace_skills(tmp_path)
     _write_skill(workspace_skills, "local", "Workspace skill")
     _write_skill(tmp_path / "global", "shared", "Configured skill")
-    skills = _load(tmp_path, storage, ["shared"])
+    skills = _load_agent_skills(tmp_path, storage, ["shared"])
+    assert skills is not None
     get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
     get_instructions(skill_name="local")
     get_instructions(skill_name="local")
@@ -755,10 +714,10 @@ def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_pat
 @pytest.mark.asyncio
 async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
     """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""
-    storage = tmp_path / "storage"
-    workspace_skills = _workspace_skills_root(storage)
+    storage, workspace_skills = _workspace_skills(tmp_path)
     _write_skill(workspace_skills, "local", "Workspace skill")
-    skills = _load(tmp_path, storage, [])
+    skills = _load_agent_skills(tmp_path, storage, [])
+    assert skills is not None
     get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
     writers: list[threading.Thread] = []
     record = skills_module.record_skill_use
@@ -775,24 +734,6 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
     assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1
 
 
-def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
-    storage = tmp_path / "storage"
-    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
-    workspace_skills.mkdir(parents=True)
-    return storage, workspace_skills
-
-
-def _load_workspace_only(tmp_path: Path, storage: Path) -> Skills | None:
-    return build_agent_skills(
-        "code",
-        _base_config([]),
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-    )
-
-
 def _get_skill_reference(skills: Skills, skill_name: str, reference_path: str) -> dict[str, object]:
     reference_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference")
     assert reference_tool.entrypoint is not None
@@ -807,7 +748,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
     (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
     _write_skill(workspace_skills, "own", "Own skill")
 
-    skills = _load_workspace_only(tmp_path, storage)
+    skills = _load_agent_skills(tmp_path, storage)
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
@@ -838,7 +779,7 @@ def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Pa
                 skill_file.truncate(65 << 20)
 
     with capture_logs() as logs:
-        skills = _load_workspace_only(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
 
     assert _skill_names(skills) == []
     if layout != "linked_skills_dir":
@@ -858,7 +799,7 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     (references / "planted.md").symlink_to(secret)
     os.mkfifo(references / "pipe.md")
 
-    skills = _load_workspace_only(tmp_path, storage)
+    skills = _load_agent_skills(tmp_path, storage)
     assert skills is not None
     skill = skills.get_skill("docs")
     assert skill is not None
@@ -867,9 +808,11 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     (references / "swapped.md").symlink_to(secret)
 
     assert _get_skill_reference(skills, "docs", "guide.md")["content"] == "own guide"
-    swapped = _get_skill_reference(skills, "docs", "swapped.md")
+    with capture_logs() as logs:
+        swapped = _get_skill_reference(skills, "docs", "swapped.md")
     assert "victim-only note" not in json.dumps(swapped)
     assert "error" in swapped
+    assert any(str(entry.get("path", "")).endswith("references/swapped.md") for entry in logs)
     assert "error" in _get_skill_reference(skills, "docs", "planted.md")
 
 
@@ -1148,7 +1091,7 @@ def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_pat
         _write_skill(workspace_skills, f"skill-{index:04d}", "Numbered skill")
 
     with capture_logs() as logs:
-        skills = _load_workspace_only(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
 
     assert len(_skill_names(skills)) == workspace_skills_module._MAX_WORKSPACE_SKILLS
     assert any(
@@ -1171,7 +1114,7 @@ def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Pa
             skill_file.write("x" * (900 << 10))
 
     with capture_logs() as logs:
-        skills = _load_workspace_only(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
 
     names = _skill_names(skills)
     assert "huge" not in names
@@ -1188,7 +1131,7 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
         _write_skill(workspace_skills, f"skill-{index:02d}", "d" * (900 << 10))
 
     with capture_logs() as logs:
-        skills = _load_workspace_only(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
 
     assert skills is not None
     assert len(skills.get_system_prompt_snippet()) < 1 << 20
@@ -1214,7 +1157,7 @@ def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Pa
             (skill_dir / "scripts" / f"script-{index:05d}-{'s' * 150}.sh").touch()
 
     with capture_logs() as logs:
-        skills = _load_workspace_only(tmp_path, storage)
+        skills = _load_agent_skills(tmp_path, storage)
 
     assert skills is None or len(skills.get_system_prompt_snippet()) < 1 << 20
     assert any(entry["log_level"] == "warning" for entry in logs)
