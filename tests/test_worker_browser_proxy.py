@@ -5,6 +5,7 @@ import ipaddress
 import os
 import shutil
 import socket
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -102,7 +103,12 @@ async def test_computer_mcp_binding_allows_own_preview_and_blocks_proxy_recursio
             writer.close()
             await writer.wait_closed()
         for host in ["127.0.0.1", "::1", "::ffff:127.0.0.1"]:
-            reader, writer, status = await socks5_connect(proxy.endpoint, host, urlsplit(proxy.endpoint).port, literal=True)
+            reader, writer, status = await socks5_connect(
+                proxy.endpoint,
+                host,
+                urlsplit(proxy.endpoint).port,
+                literal=True,
+            )
             assert status != 0
             assert await reader.read() == b""
             writer.close()
@@ -255,6 +261,7 @@ async def test_validated_numeric_address_is_dialed_once(monkeypatch: pytest.Monk
         allow_loopback: bool,
     ) -> list[ipaddress.IPv4Address]:
         assert not allow_loopback
+        assert threading.current_thread().name.startswith("mindroom-browser-dns")
         resolved.append((host, port, allow_private_networks))
         return [ipaddress.IPv4Address("8.8.8.8")]
 

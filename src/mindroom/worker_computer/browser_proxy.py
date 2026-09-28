@@ -8,6 +8,7 @@ import socket
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from mindroom.browser_fetch_guard import run_browser_dns_lookup
 from mindroom.server_fetch_url import validated_connect_addresses
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ class BrowserDestinationProxy:
         return host, port
 
     async def _connect(self, host: str, port: int) -> tuple[StreamReader, StreamWriter]:
-        addresses = await asyncio.to_thread(
+        addresses = await run_browser_dns_lookup(
             validated_connect_addresses,
             host,
             port=port,

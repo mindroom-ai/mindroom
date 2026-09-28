@@ -22,6 +22,7 @@ import pytest_asyncio
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom import browser_fetch_guard
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -1655,14 +1656,9 @@ async def test_host_browser_keeps_configured_upstream_proxy_for_every_destinatio
         await tool.aclose()
 
 
-def _validation_ran_on_event_loop(calls: list[bool]) -> Callable[..., str]:
+def _recording_validation(threads: list[str]) -> Callable[..., str]:
     def validate(url: str, **_kwargs: object) -> str:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            calls.append(False)
-        else:
-            calls.append(True)
+        threads.append(threading.current_thread().name)
         return url
 
     return validate
@@ -1675,10 +1671,10 @@ async def test_host_url_validation_resolves_hostnames_off_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Requester-chosen hostnames resolve in a worker thread, never on the shared event loop."""
-    calls: list[bool] = []
+    threads: list[str] = []
     monkeypatch.setattr(
         "mindroom.custom_tools.browser.validate_server_fetch_url",
-        _validation_ran_on_event_loop(calls),
+        _recording_validation(threads),
     )
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     monkeypatch.setattr(tool, "_open_tab", AsyncMock(return_value={"status": "ok"}))
@@ -1686,16 +1682,18 @@ async def test_host_url_validation_resolves_hostnames_off_event_loop(
 
     await tool.browser(action=action, targetUrl="https://slow-dns.example")
 
-    assert calls == [False]
+    # Requester-chosen hostnames resolve only on the threads reserved for browser DNS, never on the loop.
+    assert len(threads) == 1
+    assert threads[0].startswith("mindroom-browser-dns")
 
 
 @pytest.mark.asyncio
 async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Desktop open validation also resolves requester-chosen hostnames off the event loop."""
-    calls: list[bool] = []
+    threads: list[str] = []
     monkeypatch.setattr(
         "mindroom.custom_tools.browser.validate_server_fetch_url",
-        _validation_ran_on_event_loop(calls),
+        _recording_validation(threads),
     )
     context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
     request = AsyncMock(
@@ -1716,7 +1714,9 @@ async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypa
 
     await tool.browser(action="open", targetUrl="https://slow-dns.example")
 
-    assert calls == [False]
+    # Requester-chosen hostnames resolve only on the threads reserved for browser DNS, never on the loop.
+    assert len(threads) == 1
+    assert threads[0].startswith("mindroom-browser-dns")
     assert request.await_args.args[1].parameters["browser_parameters"] == {"targetUrl": "https://slow-dns.example"}
 
 
@@ -1798,14 +1798,14 @@ async def test_ensure_profile_installs_server_fetch_route(
     context.route.assert_awaited_once()
     route_pattern, route_handler = context.route.await_args.args
     assert route_pattern == "**/*"
-    to_thread_calls = 0
+    lookup_threads: list[str] = []
+    original_validate = browser_fetch_guard.validate_browser_fetch_url
 
-    async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
-        nonlocal to_thread_calls
-        to_thread_calls += 1
-        return function(*args, **kwargs)
+    def validate(url: str, **kwargs: bool) -> str:
+        lookup_threads.append(threading.current_thread().name)
+        return original_validate(url, **kwargs)
 
-    monkeypatch.setattr("mindroom.browser_fetch_guard.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr(browser_fetch_guard, "validate_browser_fetch_url", validate)
 
     unsafe_route = SimpleNamespace(
         request=SimpleNamespace(url="http://127.0.0.1/admin"),
@@ -1816,7 +1816,7 @@ async def test_ensure_profile_installs_server_fetch_route(
 
     unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
     unsafe_route.continue_.assert_not_called()
-    assert to_thread_calls == 1
+    assert len(lookup_threads) == 1
 
     malformed_route = SimpleNamespace(
         request=SimpleNamespace(url="http://[::1"),
@@ -1827,7 +1827,9 @@ async def test_ensure_profile_installs_server_fetch_route(
 
     malformed_route.abort.assert_awaited_once_with("blockedbyclient")
     malformed_route.continue_.assert_not_called()
-    assert to_thread_calls == 2
+    # Page-driven lookups run on the threads reserved for browser DNS, never on the loop or default executor.
+    assert len(lookup_threads) == 2
+    assert all(name.startswith("mindroom-browser-dns") for name in lookup_threads)
 
 
 @pytest.mark.asyncio
