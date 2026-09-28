@@ -34,6 +34,7 @@ from tests.conftest import (
     make_relation_lookup,
     make_visible_message,
     patch_response_runner_module,
+    redactions_applied_by_homeserver,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -974,6 +975,7 @@ async def test_deleted_initial_cannot_demote_another_principals_eventless_turn(
         second_store.deps,
         redacted_event_ids=second.redacted_event_ids,
         event_admitted_in_room=second.event_admitted_in_room,
+        redaction_applied=redactions_applied_by_homeserver,
     )
     target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
     room = nio.MatrixRoom(ROOM_ID, BOT_USER_ID)

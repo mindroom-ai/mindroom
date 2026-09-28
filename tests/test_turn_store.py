@@ -58,6 +58,7 @@ from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     make_visible_message,
+    redactions_applied_by_homeserver,
     request_envelope,
     runtime_paths_for,
     seed_session,
@@ -84,6 +85,7 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
@@ -433,6 +435,7 @@ async def _store_with_storage(
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1252,6 +1255,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1324,6 +1328,7 @@ async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1408,6 +1413,77 @@ async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
     cleaned = store.get_turn_record("$user_msg")
     assert cleaned is not None
     assert cleaned.pending_redaction_cleanup_event_ids == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("applied", [True, False])
+async def test_redaction_destroys_history_only_when_the_homeserver_applied_it(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+    applied: bool,
+) -> None:
+    """An unauthorized redaction the homeserver passed along keeps its tombstone but leaves history intact."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                agent_id="agent",
+                session_id=target.session_id,
+                metadata={"matrix_event_id": "$user_msg"},
+            ),
+        ],
+    )
+    storage = _seeded_storage_with_runs(tmp_path, session)
+    store = await _store_with_storage(journal_store, storage)
+    homeserver = AsyncMock(return_value=applied)
+    store.deps = replace(store.deps, redaction_applied=homeserver)
+    await store.record_turn(_owned_turn_record(target))
+
+    marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+    assert marked is not None
+    assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
+    suppressed = await store._prepare_response_for_redactions(target=target, source_event_ids=("$user_msg",))
+
+    homeserver.assert_awaited_once_with("!room:example.org", "$user_msg")
+    assert suppressed is True
+    assert store.is_handled("$user_msg")
+    assert _stored_run_ids(storage, session) == ([] if applied else ["run-1"])
+    assert store.get_turn_record("$user_msg").pending_redaction_cleanup_event_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_redaction_cleanup_waits_when_the_homeserver_cannot_answer(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A homeserver that cannot answer now leaves the cleanup owed for the next preparation."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                agent_id="agent",
+                session_id=target.session_id,
+                metadata={"matrix_event_id": "$user_msg"},
+            ),
+        ],
+    )
+    storage = _seeded_storage_with_runs(tmp_path, session)
+    store = await _store_with_storage(journal_store, storage)
+    store.deps = replace(store.deps, redaction_applied=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
+    await store.record_turn(_owned_turn_record(target))
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+
+    with pytest.raises(RuntimeError, match="homeserver unavailable"):
+        await store._prepare_response_for_redactions(target=target, source_event_ids=("$user_msg",))
+
+    assert _stored_run_ids(storage, session) == ["run-1"]
+    assert store.get_turn_record("$user_msg").pending_redaction_cleanup_event_ids == ("$user_msg",)
 
 
 @pytest.mark.asyncio
@@ -1686,6 +1762,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -3399,6 +3476,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
                 turn_records=journal_store.turn_records("router"),
                 redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
                 event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+                redaction_applied=redactions_applied_by_homeserver,
                 legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
                     ConversationStateWriterDeps(

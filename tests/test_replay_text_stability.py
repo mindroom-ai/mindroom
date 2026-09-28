@@ -46,7 +46,7 @@ from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
-from tests.conftest import make_pending_event, request_envelope
+from tests.conftest import make_pending_event, redactions_applied_by_homeserver, request_envelope
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -103,6 +103,7 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
             turn_records=journal_store.turn_records(_AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),

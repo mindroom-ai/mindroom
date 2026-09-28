@@ -106,6 +106,7 @@ from scripts.testing.fuzz_live_matrix import (
     chaos_scenario_from_seed,
     saturation_scenario,
 )
+from tests.conftest import redactions_applied_by_homeserver
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator
@@ -6044,6 +6045,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
             turn_records=journal.turn_records("general"),
             redacted_event_ids=journal.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=Mock(),
             resolver=Mock(),

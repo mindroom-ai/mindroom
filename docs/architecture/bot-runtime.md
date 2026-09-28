@@ -44,6 +44,7 @@ It is still coupled to the current persistence split, but its workflow boundary 
 `TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
 The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 A redaction naming an event whose turn or revision owner is recorded in another room changes nothing, and one naming an event no turn has placed yet needs the journal to have admitted that event from the redaction's room.
+Before removing persisted history for a tombstone, `TurnStore` asks the homeserver whether it serves the target redacted; if not, the tombstone stays and the history is kept, and if the homeserver cannot answer, the cleanup stays owed for the next response in that conversation.
 
 ## Current Problems
 

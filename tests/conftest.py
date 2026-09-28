@@ -319,6 +319,11 @@ def _configure_uncached_structlog(
     )
 
 
+async def redactions_applied_by_homeserver(_room_id: str, _event_id: str) -> bool:
+    """Stand in for a homeserver that applied every redaction a test delivers."""
+    return True
+
+
 async def activate_interactive_prompt(
     store: PrincipalStore,
     *,

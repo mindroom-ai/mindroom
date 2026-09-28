@@ -598,6 +598,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.redaction_proof"
+depends_on = []
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.matrix.relation_lookup"
 depends_on = [
     "mindroom.logging_config",
@@ -3993,6 +3998,7 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.model_catalog_receiver",
+    "mindroom.matrix.redaction_proof",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
     "mindroom.agents",

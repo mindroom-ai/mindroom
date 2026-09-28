@@ -77,6 +77,9 @@ class TurnStoreDeps:
     redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
     # Proves which room an event belongs to when no turn has recorded one yet.
     event_admitted_in_room: Callable[[str, str], Awaitable[bool]]
+    # Whether the homeserver applied a redaction, asked before persisted
+    # history is destroyed for it; raises when it cannot answer now.
+    redaction_applied: Callable[[str, str], Awaitable[bool]]
     # The JSON ledger this agent used before its records moved into the
     # database, imported once on first load. An installation that has been
     # answering messages keeps all of its terminal truth there, and a runtime
@@ -784,7 +787,10 @@ class TurnStore:
             for revision_id, revision in (owner.revision_replay or {}).items():
                 if not revision.cleanup_pending:
                     continue
-                if _has_redaction_cleanup_context(owner):
+                if _has_redaction_cleanup_context(owner) and await self._redaction_applied(
+                    owner.conversation_target,
+                    revision_id,
+                ):
                     assert owner.conversation_target is not None
                     assert owner.requester_id is not None
                     await run_coroutine_until_complete(
@@ -810,16 +816,34 @@ class TurnStore:
             assert recorded_requester_user_id is not None
             if recorded_target.session_id != target.session_id:
                 continue
-            # Session storage is synchronous and can walk a whole conversation,
-            # so it stays off the loop. Only the ledger write above is awaited.
-            await asyncio.to_thread(
-                self._remove_redacted_event_from_recorded_scopes,
-                target=recorded_target,
-                requester_user_id=recorded_requester_user_id,
-                redacted_event_id=redacted_event_id,
-            )
+            if await self._redaction_applied(recorded_target, redacted_event_id):
+                # Session storage is synchronous and can walk a whole conversation,
+                # so it stays off the loop. Only the ledger write above is awaited.
+                await asyncio.to_thread(
+                    self._remove_redacted_event_from_recorded_scopes,
+                    target=recorded_target,
+                    requester_user_id=recorded_requester_user_id,
+                    redacted_event_id=redacted_event_id,
+                )
             await self._clear_pending_redaction_cleanup(redacted_event_id)
         return self._any_source_redacted(source_event_ids)
+
+    async def _redaction_applied(self, target: MessageTarget | None, redacted_event_id: str) -> bool:
+        """Confirm with the homeserver before destroying persisted history for one redaction.
+
+        Every cleanup this store owes runs through here, whichever path queued
+        it. A redaction the homeserver did not apply keeps its tombstone, so the
+        event is still not replayed, but the history it names stays intact.
+        """
+        assert target is not None
+        if await self.deps.redaction_applied(target.room_id, redacted_event_id):
+            return True
+        logger.warning(
+            "Keeping persisted history for a redaction the homeserver did not apply",
+            room_id=target.room_id,
+            redacted_event_id=redacted_event_id,
+        )
+        return False
 
     async def _reconcile_journal_redactions(self, target: MessageTarget) -> None:
         """Recover admitted cleanup before an earlier FIFO source can consume its context."""

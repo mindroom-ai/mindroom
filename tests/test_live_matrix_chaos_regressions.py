@@ -37,6 +37,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_record import RevisionReplay, TurnRecord
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing import fuzz_live_matrix as live_fuzz
+from tests.conftest import redactions_applied_by_homeserver
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1548,6 +1549,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
             turn_records=journal_store.turn_records("general"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=Mock(spec=ConversationStateWriter),
             resolver=_redaction_observer_store().deps.resolver,

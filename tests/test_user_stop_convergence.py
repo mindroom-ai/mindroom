@@ -22,6 +22,7 @@ from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtim
 from mindroom.message_target import MessageTarget
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
+from tests.conftest import redactions_applied_by_homeserver
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -104,6 +105,7 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),

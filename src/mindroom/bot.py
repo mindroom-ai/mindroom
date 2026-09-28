@@ -6,7 +6,7 @@ import asyncio
 import time
 from contextvars import Context
 from dataclasses import replace
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
@@ -54,6 +54,7 @@ from mindroom.matrix.health import (
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
+from mindroom.matrix.redaction_proof import homeserver_applied_redaction
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
@@ -685,6 +686,7 @@ class AgentBot:
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
                 event_admitted_in_room=self._journal_store.principal(self._journal_principal_id).event_admitted_in_room,
+                redaction_applied=partial(homeserver_applied_redaction, self._runtime_view),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,

@@ -120,6 +120,7 @@ from tests.conftest import (
     make_pending_event,
     make_relation_lookup,
     make_visible_message,
+    redactions_applied_by_homeserver,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -507,6 +508,7 @@ def _build_harness(
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_principal.redacted_event_ids,
             event_admitted_in_room=journal_principal.event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=resolver,

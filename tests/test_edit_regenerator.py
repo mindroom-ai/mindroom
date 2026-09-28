@@ -44,7 +44,12 @@ from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore, TurnStoreDeps
-from tests.conftest import make_relation_lookup, make_visible_message, request_envelope
+from tests.conftest import (
+    make_relation_lookup,
+    make_visible_message,
+    redactions_applied_by_homeserver,
+    request_envelope,
+)
 from tests.identity_helpers import entity_ids
 from tests.test_response_delivery_gateway import _gateway
 
@@ -1070,6 +1075,7 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -1164,6 +1170,7 @@ async def test_edit_aborts_when_physical_record_loses_discovery_alias(
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -2177,6 +2184,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=principal.redacted_event_ids,
             event_admitted_in_room=principal.event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2320,6 +2328,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2422,6 +2431,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2549,6 +2559,7 @@ async def test_lane_serialized_sibling_edits_regenerate_without_spinning(
             turn_records=journal_store.turn_records(AGENT_NAME),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
+            redaction_applied=redactions_applied_by_homeserver,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
