@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_left
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
@@ -16,7 +17,7 @@ from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_lo
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -25,7 +26,11 @@ if TYPE_CHECKING:
 
 _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
+_EXPLICIT_MENTION_BOUNDARY = r"(?<![-A-Za-z0-9._=/+])"
+_ALIAS_LOCALPART_PATTERN = re.compile(r"(?<![\w])@(\w+)")
+_NON_WHITESPACE_RUN = re.compile(r"\S+")
 # Each scanner resolves at most this many @ tokens per body, so one message costs bounded CPU on the shared loop.
+# A body that reaches the budget is searched once more, in C, for mentions of configured entities only.
 _MAX_MENTION_TOKENS_PER_SCANNER = 256
 
 
@@ -36,6 +41,15 @@ class _MentionToken:
     localpart: str
     has_server_name: bool = False
     explicit_user_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _MentionScan:
+    """Budgeted mention tokens from one body, with its prose ranges and whether a budget ran out."""
+
+    tokens: list[_MentionToken]
+    prose_ranges: list[tuple[int, int]]
+    budget_exhausted: bool
 
 
 @dataclass(frozen=True)
@@ -89,18 +103,14 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    tokens = _scan_mention_tokens(text)
-    if not tokens:
-        return text, [], text
-
-    registry = entity_identity_registry(config, runtime_paths)
-    replacements = _resolve_mention_tokens(
-        tokens,
-        registry=registry,
-        config=config,
+    replacements = _mention_replacements(
+        text,
+        config,
+        runtime_paths,
         allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
-
+    if not replacements:
+        return text, [], text
     return (
         _apply_replacements(text, replacements, use_markdown=False),
         _mentioned_user_ids_from_replacements(replacements),
@@ -114,18 +124,41 @@ def resolve_mentioned_user_ids_from_text(
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Resolve visible text mention tokens to Matrix user IDs."""
-    tokens = _scan_mention_tokens(text)
-    if not tokens:
+    replacements = _mention_replacements(text, config, runtime_paths, allow_generated_agent_localparts=False)
+    return _mentioned_user_ids_from_replacements(replacements)
+
+
+def _mention_replacements(
+    text: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_generated_agent_localparts: bool,
+) -> list[_MentionReplacement]:
+    """Return render-ready replacements for every resolvable mention in one body."""
+    scan = _scan_mention_tokens(text)
+    if not scan.tokens and not scan.budget_exhausted:
         return []
 
     registry = entity_identity_registry(config, runtime_paths)
-    replacements = _resolve_mention_tokens(
+    tokens = scan.tokens
+    if scan.budget_exhausted:
+        tokens = _with_uncapped_entity_tokens(
+            text,
+            scan,
+            entity_user_ids=[current_id.full_id for current_id in registry.current_ids.values()],
+            names_entity=partial(
+                _entity_name_for_mention_localpart,
+                entity_names=_entity_names_by_lowercase(config),
+                allow_generated_agent_localparts=allow_generated_agent_localparts,
+            ),
+        )
+    return _resolve_mention_tokens(
         tokens,
         registry=registry,
         config=config,
-        allow_generated_agent_localparts=False,
+        allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
-    return _mentioned_user_ids_from_replacements(replacements)
 
 
 def format_entity_mention(
@@ -147,22 +180,31 @@ def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement
     return list(dict.fromkeys(replacement.user_id for replacement in replacements))
 
 
-def _scan_mention_tokens(text: str) -> list[_MentionToken]:
-    """Return ordered mention tokens from one message body."""
+def _scan_mention_tokens(text: str) -> _MentionScan:
+    """Return ordered mention tokens from one message body, within the per-scanner token budget."""
     if "@" not in text:
-        return []
+        return _MentionScan(tokens=[], prose_ranges=[], budget_exhausted=False)
 
     # Fences span whole lines, so no token crosses a fence boundary and prose can be scanned on its own.
     prose_ranges = _ranges_outside(markdown_fenced_code_ranges(text), len(text))
-    tokens = _scan_explicit_matrix_id_tokens(text, prose_ranges)
+    explicit_matches, explicit_exhausted = _budgeted_prose_matches(
+        _FULL_MATRIX_ID_CANDIDATE_PATTERN,
+        text,
+        prose_ranges,
+    )
+    tokens = _scan_explicit_matrix_id_tokens(explicit_matches)
+    alias_matches, alias_exhausted = _budgeted_prose_matches(_ENTITY_MENTION_PATTERN, text, prose_ranges)
     tokens.extend(
         _scan_entity_alias_tokens(
-            text,
-            prose_ranges,
+            alias_matches,
             occupied_spans=_DisjointSpans.from_spans((token.start, token.end) for token in tokens),
         ),
     )
-    return sorted(tokens, key=lambda token: token.start)
+    return _MentionScan(
+        tokens=sorted(tokens, key=lambda token: token.start),
+        prose_ranges=prose_ranges,
+        budget_exhausted=explicit_exhausted or alias_exhausted,
+    )
 
 
 def _ranges_outside(ranges: list[tuple[int, int]], text_length: int) -> list[tuple[int, int]]:
@@ -179,40 +221,50 @@ def _ranges_outside(ranges: list[tuple[int, int]], text_length: int) -> list[tup
 
 
 def _prose_matches(pattern: re.Pattern[str], text: str, prose_ranges: list[tuple[int, int]]) -> Iterator[re.Match[str]]:
-    """Yield at most the per-scanner token budget of pattern matches from prose ranges, in text order."""
-    matches = (match for start, end in prose_ranges for match in pattern.finditer(text, start, end))
-    return islice(matches, _MAX_MENTION_TOKENS_PER_SCANNER)
+    """Yield pattern matches from prose ranges, in text order."""
+    return (match for start, end in prose_ranges for match in pattern.finditer(text, start, end))
 
 
-def _scan_explicit_matrix_id_tokens(text: str, prose_ranges: list[tuple[int, int]]) -> list[_MentionToken]:
-    """Return explicit full-MXID tokens from prose text."""
+def _budgeted_prose_matches(
+    pattern: re.Pattern[str],
+    text: str,
+    prose_ranges: list[tuple[int, int]],
+) -> tuple[list[re.Match[str]], bool]:
+    """Return at most the per-scanner token budget of prose matches, and whether more remained."""
+    matches = list(islice(_prose_matches(pattern, text, prose_ranges), _MAX_MENTION_TOKENS_PER_SCANNER + 1))
+    return matches[:_MAX_MENTION_TOKENS_PER_SCANNER], len(matches) > _MAX_MENTION_TOKENS_PER_SCANNER
+
+
+def _scan_explicit_matrix_id_tokens(matches: list[re.Match[str]]) -> list[_MentionToken]:
+    """Return explicit full-MXID tokens from candidate matches."""
     tokens: list[_MentionToken] = []
-    for match in _prose_matches(_FULL_MATRIX_ID_CANDIDATE_PATTERN, text, prose_ranges):
+    for match in matches:
         user_id = _extract_longest_valid_matrix_user_id(match.group(0))
         if user_id is None:
             continue
-        matrix_id = MatrixID.parse(user_id)
-        tokens.append(
-            _MentionToken(
-                start=match.start(),
-                end=match.start() + len(user_id),
-                localpart=matrix_id.username,
-                has_server_name=True,
-                explicit_user_id=matrix_id.full_id,
-            ),
-        )
+        tokens.append(_explicit_token(match.start(), user_id))
     return tokens
 
 
+def _explicit_token(start: int, user_id: str) -> _MentionToken:
+    matrix_id = MatrixID.parse(user_id)
+    return _MentionToken(
+        start=start,
+        end=start + len(user_id),
+        localpart=matrix_id.username,
+        has_server_name=True,
+        explicit_user_id=matrix_id.full_id,
+    )
+
+
 def _scan_entity_alias_tokens(
-    text: str,
-    prose_ranges: list[tuple[int, int]],
+    matches: list[re.Match[str]],
     *,
     occupied_spans: _DisjointSpans,
 ) -> list[_MentionToken]:
-    """Return alias-style mention tokens from prose text that do not overlap explicit tokens."""
+    """Return alias-style mention tokens from matches that do not overlap explicit tokens."""
     tokens: list[_MentionToken] = []
-    for match in _prose_matches(_ENTITY_MENTION_PATTERN, text, prose_ranges):
+    for match in matches:
         if occupied_spans.overlaps(match.start(), match.end()):
             continue
         tokens.append(
@@ -224,6 +276,95 @@ def _scan_entity_alias_tokens(
             ),
         )
     return tokens
+
+
+def _with_uncapped_entity_tokens(
+    text: str,
+    scan: _MentionScan,
+    *,
+    entity_user_ids: Collection[str],
+    names_entity: Callable[[str], str | None],
+) -> list[_MentionToken]:
+    """Add configured-entity mentions beyond the token budget, so junk tokens cannot hide a real one."""
+    capped_explicit = [token for token in scan.tokens if token.explicit_user_id is not None]
+    capped_explicit_spans = _DisjointSpans.from_spans((token.start, token.end) for token in capped_explicit)
+    explicit = [
+        *capped_explicit,
+        *(
+            token
+            for token in _scan_entity_user_id_tokens(text, scan.prose_ranges, entity_user_ids)
+            if not capped_explicit_spans.overlaps(token.start, token.end)
+        ),
+    ]
+    explicit_spans = _DisjointSpans.from_spans((token.start, token.end) for token in explicit)
+    aliases = [
+        token
+        for token in scan.tokens
+        if token.explicit_user_id is None and not explicit_spans.overlaps(token.start, token.end)
+    ]
+    occupied_spans = _DisjointSpans.from_spans((token.start, token.end) for token in [*explicit, *aliases])
+    aliases.extend(
+        token
+        for token in _scan_entity_alias_occurrences(text, scan.prose_ranges, names_entity)
+        if not occupied_spans.overlaps(token.start, token.end)
+    )
+    return sorted([*explicit, *aliases], key=lambda token: token.start)
+
+
+def _scan_entity_user_id_tokens(
+    text: str,
+    prose_ranges: list[tuple[int, int]],
+    entity_user_ids: Collection[str],
+) -> list[_MentionToken]:
+    """Return explicit mentions of configured entity user IDs anywhere in prose."""
+    if not entity_user_ids:
+        return []
+    pattern = re.compile(f"{_EXPLICIT_MENTION_BOUNDARY}(?:{_longest_first_alternation(entity_user_ids)})")
+    tokens: list[_MentionToken] = []
+    validations = 0
+    for match in _prose_matches(pattern, text, prose_ranges):
+        user_id = match.group(0)
+        run = _NON_WHITESPACE_RUN.match(text, match.start())
+        if run is not None and run.group(0) != user_id:
+            # A longer token may extend the host or port, so it names this entity only if its longest valid prefix does.
+            if validations == _MAX_MENTION_TOKENS_PER_SCANNER:
+                continue
+            validations += 1
+            if _extract_longest_valid_matrix_user_id(run.group(0)) != user_id:
+                continue
+        tokens.append(_explicit_token(match.start(), user_id))
+    return tokens
+
+
+def _longest_first_alternation(values: Iterable[str]) -> str:
+    """Return a regex alternation that prefers longer literals where one is a prefix of another."""
+    ordered: list[str] = sorted(values, key=lambda value: len(value), reverse=True)
+    return "|".join(re.escape(value) for value in ordered)
+
+
+def _scan_entity_alias_occurrences(
+    text: str,
+    prose_ranges: list[tuple[int, int]],
+    names_entity: Callable[[str], str | None],
+) -> list[_MentionToken]:
+    """Return alias-style mentions whose localpart names a configured entity, anywhere in prose."""
+    found = {
+        localpart.lower()
+        for start, end in prose_ranges
+        for localpart in set(_ALIAS_LOCALPART_PATTERN.findall(text, start, end))
+    }
+    mentioned = {localpart for localpart in found if names_entity(localpart) is not None}
+    if not mentioned:
+        return []
+    pattern = re.compile(
+        rf"(?<![\w])@(?P<localpart>{_longest_first_alternation(mentioned)})(?![\w])(?P<server>:[^\s]+)?",
+        flags=re.IGNORECASE,
+    )
+    return [
+        _MentionToken(start=match.start(), end=match.end(), localpart=match.group("localpart"))
+        for match in _prose_matches(pattern, text, prose_ranges)
+        if match.group("server") is None and match.group("localpart").lower() in mentioned
+    ]
 
 
 def _mention_localpart(mention_text: str) -> str:
@@ -238,15 +379,21 @@ def _resolve_mention_tokens(
     config: Config,
     allow_generated_agent_localparts: bool,
 ) -> list[_MentionReplacement]:
-    """Resolve scanned tokens into render-ready replacements."""
+    """Resolve scanned tokens into render-ready replacements, resolving each distinct token once."""
+    entity_names = _entity_names_by_lowercase(config)
+    resolutions: dict[tuple[str | None, str, bool], _MentionResolution | None] = {}
     replacements: list[_MentionReplacement] = []
     for token in tokens:
-        resolution = _resolve_mention_token(
-            token,
-            registry=registry,
-            config=config,
-            allow_generated_agent_localparts=allow_generated_agent_localparts,
-        )
+        key = (token.explicit_user_id, token.localpart, token.has_server_name)
+        if key not in resolutions:
+            resolutions[key] = _resolve_mention_token(
+                token,
+                registry=registry,
+                config=config,
+                entity_names=entity_names,
+                allow_generated_agent_localparts=allow_generated_agent_localparts,
+            )
+        resolution = resolutions[key]
         if resolution is None:
             continue
         replacements.append(
@@ -266,6 +413,7 @@ def _resolve_mention_token(
     *,
     registry: EntityIdentityRegistry,
     config: Config,
+    entity_names: Mapping[str, str],
     allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one scanned mention token into an entity or literal-user target."""
@@ -280,6 +428,7 @@ def _resolve_mention_token(
         has_server_name=token.has_server_name,
         registry=registry,
         config=config,
+        entity_names=entity_names,
         allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
 
@@ -311,14 +460,15 @@ def _resolve_entity_alias_token(
     has_server_name: bool,
     registry: EntityIdentityRegistry,
     config: Config,
+    entity_names: Mapping[str, str],
     allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent or team, if any."""
     if has_server_name:
         return None
-    if entity_name := _find_matching_entity_name_for_localpart(
+    if entity_name := _entity_name_for_mention_localpart(
         localpart,
-        config,
+        entity_names,
         allow_generated_agent_localparts=allow_generated_agent_localparts,
     ):
         return _entity_mention_resolution(
@@ -383,39 +533,30 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
     return True
 
 
-def _find_matching_entity_name_for_localpart(
+def _entity_names_by_lowercase(config: Config) -> dict[str, str]:
+    """Map each lowercased configured agent or team name to its first configured spelling."""
+    names: dict[str, str] = {}
+    for entity_name in (*config.agents, *config.teams):
+        if entity_name != ROUTER_AGENT_NAME:
+            names.setdefault(entity_name.lower(), entity_name)
+    return names
+
+
+def _entity_name_for_mention_localpart(
     localpart: str,
-    config: Config,
+    entity_names: Mapping[str, str],
     *,
     allow_generated_agent_localparts: bool,
 ) -> str | None:
-    """Return the configured agent or team name matched by one localpart string, if any."""
-    entities = [*config.agents, *config.teams]
-
-    if entity_name := _find_matching_entity_name(localpart, entities):
+    """Return the entity one mention localpart names, trying generated ``mindroom_<name>`` aliases second."""
+    if entity_name := entity_names.get(localpart.lower()):
         return entity_name
-
     if not allow_generated_agent_localparts:
         return None
-
     generated_name = unnamespaced_agent_name_from_username_localpart(localpart)
     if generated_name is None or generated_name.lower().startswith("user_"):
         return None
-    return _find_matching_entity_name(generated_name, entities)
-
-
-def _find_matching_entity_name(
-    localpart: str,
-    entities: list[str],
-) -> str | None:
-    """Return the configured entity name matched by one localpart candidate."""
-    lower_localpart = localpart.lower()
-    for entity_name in entities:
-        if entity_name == ROUTER_AGENT_NAME:
-            continue
-        if entity_name.lower() == lower_localpart:
-            return entity_name
-    return None
+    return entity_names.get(generated_name.lower())
 
 
 def resolve_entity_name_for_mention_localpart(
@@ -425,9 +566,9 @@ def resolve_entity_name_for_mention_localpart(
     allow_generated_agent_localparts: bool = True,
 ) -> str | None:
     """Return the configured agent or team name matched by one Matrix mention localpart."""
-    return _find_matching_entity_name_for_localpart(
+    return _entity_name_for_mention_localpart(
         localpart,
-        config,
+        _entity_names_by_lowercase(config),
         allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
 

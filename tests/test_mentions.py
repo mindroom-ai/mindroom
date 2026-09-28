@@ -924,6 +924,33 @@ def _count_calls(monkeypatch: pytest.MonkeyPatch, name: str) -> list[object]:
 class TestMentionScanCost:
     """Mention scanning stays linear in the body so one message cannot stall the shared event loop."""
 
+    def test_junk_tokens_beyond_the_budget_cannot_hide_an_agent_mention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Agent mentions after the token budget still resolve, while junk costs only the budgeted validations."""
+        config = _make_config(_default_runtime_paths())
+        validated = _count_calls(monkeypatch, "parse_current_matrix_user_id")
+        junk = "@x " * _MAX_MENTION_TOKENS_PER_SCANNER + "@property\n" * _MAX_MENTION_TOKENS_PER_SCANNER
+
+        user_ids = resolve_mentioned_user_ids_from_text(
+            f"{junk}@calculator and @actual_general:localhost please",
+            config,
+            _runtime_paths_for(config),
+        )
+        processed, formatted_ids, _markdown = _parse_mentions_in_text(f"{junk}@mindroom_code thanks", config)
+
+        assert user_ids == ["@actual_calculator:localhost", "@actual_general:localhost"]
+        assert formatted_ids == ["@actual_code:localhost"]
+        assert processed.endswith("@actual_code:localhost thanks")
+        assert len(validated) == 0
+
+    def test_literal_users_beyond_the_budget_are_not_resolved(self) -> None:
+        """Only configured entities are searched past the budget; later literal users stay unresolved."""
+        config = _make_config(_default_runtime_paths())
+        text = "@x " * _MAX_MENTION_TOKENS_PER_SCANNER + "@alice:example.org @calculator"
+
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+
+        assert user_ids == ["@actual_calculator:localhost"]
+
     def test_overlong_explicit_matrix_id_token_validates_bounded_prefixes(
         self,
         monkeypatch: pytest.MonkeyPatch,
