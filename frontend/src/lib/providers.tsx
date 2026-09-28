@@ -174,6 +174,16 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
 };
 
 // Helper function to get provider info with fallback
+// Keyless providers the picker does not list; the backend drops a configured key for them.
+const UNLISTED_KEYLESS_PROVIDER_IDS = new Set([
+  "codex",
+  "openai_codex",
+  "kimi",
+  "kimi_code",
+  "bedrock_claude",
+  "synthetic",
+]);
+
 export function getProviderInfo(providerId: string): ProviderInfo {
   return (
     PROVIDERS[providerId] || {
@@ -181,7 +191,7 @@ export function getProviderInfo(providerId: string): ProviderInfo {
       name: providerId,
       color: "bg-gray-500/10 text-gray-600 dark:text-gray-400",
       icon: (className = "h-5 w-5") => <Brain className={className} />,
-      requiresApiKey: true,
+      requiresApiKey: !UNLISTED_KEYLESS_PROVIDER_IDS.has(providerId),
     }
   );
 }

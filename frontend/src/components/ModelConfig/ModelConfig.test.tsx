@@ -346,26 +346,51 @@ describe("ModelConfig", () => {
     });
   });
 
-  function addKeyedOpenAIModel(fields: Record<string, unknown>) {
+  function addModels(models: Record<string, Record<string, unknown>>) {
     vi.mocked(useConfigStore).mockReturnValue({
       ...mockStore,
       config: {
         ...mockStore.config,
-        models: {
-          ...mockStore.config.models,
-          keyed: { provider: "openai", id: "gpt-6-astra", ...fields },
-        },
+        models: { ...mockStore.config.models, ...models },
       },
     } as unknown as ReturnType<typeof useConfigStore>);
   }
 
-  function switchKeyedModelToDeepSeek(): HTMLElement {
+  function addKeyedOpenAIModel(fields: Record<string, unknown>) {
+    addModels({ keyed: { provider: "openai", id: "gpt-6-astra", ...fields } });
+  }
+
+  function editKeyedRow(): HTMLElement {
     fireEvent.click(screen.getByText("keyed"));
     const row = screen.getByDisplayValue("keyed").closest("tr");
     if (!row) throw new Error("row not found");
-    fireEvent.click(within(row).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /DeepSeek/i }));
     return row;
+  }
+
+  function chooseProvider(row: HTMLElement, name: RegExp) {
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name }));
+  }
+
+  async function renderWithSavedKeyedModelKey() {
+    keyStatusByService["model:keyed"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-op...1234",
+    };
+    render(<ModelConfig />);
+    await waitFor(() => {
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
+    });
+  }
+
+  function deleteCallsFor(service: string) {
+    return fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        url === `/api/credentials/${service}` &&
+        typeof init === "object" &&
+        init?.method === "DELETE",
+    );
   }
 
   it.each([
@@ -376,7 +401,8 @@ describe("ModelConfig", () => {
     async (keyFields) => {
       addKeyedOpenAIModel(keyFields);
       render(<ModelConfig />);
-      const row = switchKeyedModelToDeepSeek();
+      const row = editKeyedRow();
+      chooseProvider(row, /DeepSeek/i);
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
@@ -394,30 +420,61 @@ describe("ModelConfig", () => {
 
   it("clears a saved dashboard key when changing provider", async () => {
     addKeyedOpenAIModel({});
-    keyStatusByService["model:keyed"] = {
-      has_key: true,
-      source: "ui",
-      masked_key: "sk-op...1234",
-    };
-    render(<ModelConfig />);
-    await waitFor(() => {
-      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
-    });
+    await renderWithSavedKeyedModelKey();
 
-    const row = switchKeyedModelToDeepSeek();
+    const row = editKeyedRow();
+    chooseProvider(row, /DeepSeek/i);
     expect(
-      within(row).getByText("Custom key will be removed on save."),
-    ).toBeTruthy();
-    expect(
-      within(row).getByRole("button", { name: "Undo clear key" }),
+      within(row).getByText(
+        "Custom key will be removed on save because the provider changed.",
+      ),
     ).toBeTruthy();
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/credentials/model:keyed", {
-        method: "DELETE",
-      });
+      expect(deleteCallsFor("model:keyed")).toHaveLength(1);
     });
+  });
+
+  it("keeps the saved key when the provider is switched back before saving", async () => {
+    addKeyedOpenAIModel({ api_key: "sk-openai-config" });
+    await renderWithSavedKeyedModelKey();
+
+    const row = editKeyedRow();
+    chooseProvider(row, /DeepSeek/i);
+    chooseProvider(row, /OpenAI/i);
+    expect(
+      within(row).getByText("This model keeps its saved custom key."),
+    ).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "keyed"],
+        { provider: "openai", id: "gpt-6-astra", api_key: "sk-openai-config" },
+      );
+    });
+    expect(deleteCallsFor("model:keyed")).toHaveLength(0);
+  });
+
+  it("shows no key status for providers that authenticate without a key", async () => {
+    addModels({
+      codex_model: { provider: "codex", id: "gpt-6-astra" },
+      vertex_model: { provider: "vertexai_claude", id: "claude-opus-5" },
+    });
+    keyStatusByService["vertexai_claude"] = { has_key: true, source: "env" };
+    render(<ModelConfig />);
+
+    for (const modelName of ["codex_model", "vertex_model"]) {
+      const row = screen.getByText(modelName).closest("tr");
+      if (!row) throw new Error("row not found");
+      expect(within(row).getByText("N/A")).toBeTruthy();
+    }
+    fireEvent.click(screen.getByText("vertex_model"));
+    const row = screen.getByDisplayValue("vertex_model").closest("tr");
+    if (!row) throw new Error("row not found");
+    expect(within(row).getByText(/^No key needed for/)).toBeTruthy();
+    expect(within(row).queryByPlaceholderText("Paste new API key")).toBeNull();
   });
 
   it("labels a config.yaml key without offering to copy it", async () => {

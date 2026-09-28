@@ -179,18 +179,34 @@ def test_configured_api_key_reaches_providers_with_own_key_handling(
     assert model.api_key == "sk-config"
 
 
-def test_missing_model_api_key_provider_honors_configured_key(tmp_path: Path) -> None:
+def test_missing_model_api_key_provider_honors_model_credentials(tmp_path: Path) -> None:
     """First-run provider setup must not ask for a shared key a model does not use."""
     runtime_paths = test_runtime_paths(tmp_path)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("model:dashboard", {"api_key": "sk-ui"})
     config = Config(
         models={
             "keyed": ModelConfig(provider="openai", id="gpt-6-astra", api_key="sk-config"),
+            "dashboard": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "token": ModelConfig(provider="anthropic", id="claude-sonnet-5", extra_kwargs={"auth_token": "tok"}),
             "unkeyed": ModelConfig(provider="openai", id="gpt-6-astra"),
         },
     )
 
-    assert missing_model_api_key_provider(config, runtime_paths, "keyed") is None
-    assert missing_model_api_key_provider(config, runtime_paths, "unkeyed") == "openai"
+    assert [name for name in config.models if missing_model_api_key_provider(config, runtime_paths, name)] == [
+        "unkeyed",
+    ]
+
+
+def test_alternative_auth_model_never_gets_the_shared_key(tmp_path: Path) -> None:
+    """A model that authenticates with Anthropic's auth_token must not also send the shared API key."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5", extra_kwargs={"auth_token": "tok"})
+    config = bind_runtime_paths(Config(models={"target": model_config}), runtime_paths)
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert model.api_key is None
 
 
 def test_model_config_rejects_api_key_in_both_fields_without_echoing_keys() -> None:

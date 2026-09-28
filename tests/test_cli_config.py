@@ -36,6 +36,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -1803,25 +1804,33 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "Missing environment variables" not in result.output
 
+    @pytest.mark.parametrize("key_source", ["config", "dashboard"])
     def test_validate_skips_shared_key_for_models_with_their_own_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
     ) -> None:
         """Config validate does not ask for a shared key that every model of the provider replaces."""
         cfg = tmp_path / "config.yaml"
+        storage = tmp_path / "storage"
+        own_key = "    api_key: sk-config\n" if key_source == "config" else ""
         cfg.write_text(
             "models:\n"
-            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
-            "  azure:\n    provider: azure\n    id: deployment\n    api_key: sk-config\n"
+            f"  default:\n    provider: openai\n    id: gpt-6-astra\n{own_key}"
+            f"  azure:\n    provider: azure\n    id: deployment\n{own_key}"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
+        if key_source == "dashboard":
+            _save_dashboard_model_key(cfg, storage, "default")
+            _save_dashboard_model_key(cfg, storage, "azure")
         for env_key in ("OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
             monkeypatch.delenv(env_key, raising=False)
             monkeypatch.delenv(f"{env_key}_FILE", raising=False)
 
-        output = normalize_console_output(runner.invoke(app, ["config", "validate", "--path", str(cfg)]).output)
+        result = _invoke_with_runtime(["config", "validate", "--path", str(cfg)], cfg, storage_path=storage)
+        output = normalize_console_output(result.output)
 
         assert "azure: Set AZURE_OPENAI_ENDPOINT" in output
         assert "Set AZURE_OPENAI_API_KEY" not in output
@@ -2956,6 +2965,29 @@ _VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
 )
 
 
+def _save_dashboard_model_key(cfg: Path, storage: Path, model_name: str) -> None:
+    """Save a model's own key the way the dashboard Models editor does."""
+    runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage.resolve())
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        f"model:{model_name}",
+        {"api_key": "sk-dashboard"},
+    )
+
+
+def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
+    """Make every doctor HTTP probe succeed and record its URL and headers."""
+    requests: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.httpx.get",
+        lambda url, headers=None, **_kw: requests.append((str(url), headers or {})) or httpx.Response(200, json={}),
+    )
+    return requests
+
+
 def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch httpx.get to simulate a reachable homeserver."""
     resp = httpx.Response(200, json={"versions": ["v1.1"]})
@@ -3156,46 +3188,61 @@ class TestDoctor:
         assert "ANTHROPIC_API_KEY not set" in result.output
         assert "2 warnings" in result.output
 
+    @pytest.mark.parametrize("key_source", ["config", "dashboard"])
     def test_model_with_own_api_key_does_not_need_provider_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
     ) -> None:
         """Doctor does not warn about a shared key that every model of the provider replaces."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(_VALID_CONFIG.replace("id: claude-sonnet-5\n", "id: claude-sonnet-5\n    api_key: sk-config\n"))
+        storage = tmp_path / "storage"
+        if key_source == "config":
+            cfg.write_text(
+                _VALID_CONFIG.replace("id: claude-sonnet-5\n", "id: claude-sonnet-5\n    api_key: sk-config\n"),
+            )
+        else:
+            cfg.write_text(_VALID_CONFIG)
+            _save_dashboard_model_key(cfg, storage, "default")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         _patch_homeserver_ok(monkeypatch)
 
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" not in result.output
 
+    @pytest.mark.parametrize("key_source", ["config", "dashboard", "unreadable-store"])
     def test_shared_key_is_never_sent_to_endpoint_of_model_with_own_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
     ) -> None:
-        """Doctor validates the shared key at the endpoint of models that use it, never another model's endpoint."""
+        """Doctor sends the shared key only to endpoints of models that use it, and to the default one when unsure."""
         cfg = tmp_path / "config.yaml"
+        storage = tmp_path / "storage"
         cfg.write_text(
-            "models:\n  default:\n    provider: openai\n    id: m\n    api_key: tg-own\n"
-            "    extra_kwargs:\n      base_url: https://api.together.xyz/v1\n"
+            "models:\n  default:\n    provider: openai\n    id: m\n"
+            "  together:\n    provider: openai\n    id: m\n"
+            + ("    api_key: tg-own\n" if key_source == "config" else "")
+            + "    extra_kwargs:\n      base_url: https://api.together.xyz/v1\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-        requests: list[tuple[str, dict[str, str]]] = []
-        monkeypatch.setattr(
-            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
-            lambda *_args, **_kwargs: "http://localhost:8008",
-        )
-        monkeypatch.setattr(
-            "mindroom.cli.doctor.httpx.get",
-            lambda url, headers=None, **_kw: requests.append((str(url), headers or {})) or httpx.Response(200, json={}),
-        )
+        if key_source == "dashboard":
+            _save_dashboard_model_key(cfg, storage, "together")
+        if key_source == "unreadable-store":
 
-        _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+            def _unreadable_store(*_args: object) -> None:
+                msg = "credential store unreadable"
+                raise OSError(msg)
+
+            monkeypatch.setattr("mindroom.model_loading.get_runtime_shared_credentials_manager", _unreadable_store)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
+
+        _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
         assert shared_key_urls == ["https://api.openai.com/v1/models"]
@@ -3696,20 +3743,32 @@ class TestDoctor:
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        sent_headers: list[dict[str, str]] = []
-        monkeypatch.setattr(
-            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
-            lambda *_args, **_kwargs: "http://localhost:8008",
-        )
-        monkeypatch.setattr(
-            "mindroom.cli.doctor.httpx.get",
-            lambda *_a, headers=None, **_kw: sent_headers.append(headers or {}) or httpx.Response(200, json={}),
-        )
+        requests = _record_doctor_requests(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
         assert "OPENAI_API_KEY not set" not in result.output
         assert "Memory LLM: openai/m API key valid" in result.output
-        assert {"Authorization": "Bearer sk-mem"} in sent_headers
+        assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
+
+    def test_memory_llm_host_is_not_the_endpoint_for_non_ollama_providers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The runtime drops host for non-Ollama memory LLMs, so doctor validates their default endpoint."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            _VALID_CONFIG
+            + "memory:\n  llm:\n    provider: openai\n    config:\n      model: m\n      host: https://gateway.example/v1\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
+
+        _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
+        assert shared_key_urls == ["https://api.openai.com/v1/models"]
 
     def test_memory_llm_openai_base_url_used_when_host_absent(
         self,

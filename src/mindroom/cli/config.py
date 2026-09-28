@@ -860,6 +860,22 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
+def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the providers with a model that has no credential of its own, so it needs the shared key."""
+    # model_loading pulls in the Agno runtime, which CLI startup must not import.
+    from mindroom.model_loading import model_uses_own_credential  # noqa: PLC0415
+
+    try:
+        return {
+            model.provider
+            for name, model in config.models.items()
+            if not model_uses_own_credential(name, model, runtime_paths)
+        }
+    except (OSError, ValueError):
+        # Without the credential store, dashboard keys are unknown, so every provider needs its shared key.
+        return {model.provider for model in config.models.values()}
+
+
 def _find_missing_env_keys(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -868,8 +884,7 @@ def _find_missing_env_keys(
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
-    # Providers with a model that has no key of its own in config, so it needs the shared key.
-    shared_key_providers = {model.provider for model in config.models.values() if not model.configured_api_key()}
+    shared_key_providers = _shared_key_providers(config, runtime_paths)
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "bedrock_claude":
