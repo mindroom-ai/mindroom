@@ -185,7 +185,8 @@ Revoking clears auto-approval, rejects a waiting request, and stops every runnin
 
 A command still running after its inline wait keeps running as a handle instead of being killed.
 The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops the command with `kill_shell`.
-Every shell result reports `next_offset`, the byte just past the returned output, while `output_bytes` stays the total captured size.
+Every shell result reports `output_start` and `next_offset`, the byte range the returned output covers, while `output_bytes` stays the total captured size.
+An `output_start` above the requested offset, 0 without one, means earlier output was skipped, as in a running command's newest-output reply, and a `check_shell` from that earlier offset reads it.
 Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and more output is available while `next_offset` is below `output_bytes`.
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.

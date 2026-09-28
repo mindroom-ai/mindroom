@@ -976,8 +976,8 @@ class DesktopBridge:
     ) -> dict[str, object]:
         """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
 
-        Output starts at byte ``offset``; without one, a running command shows its newest output. ``next_offset``
-        is the byte just past the returned output, where the next check continues.
+        Output starts at byte ``offset``; without one, a running command shows its newest output. The returned
+        output covers ``[output_start, next_offset)``, and the next check continues from ``next_offset``.
         """
         output = result.output
         size = output.size
@@ -989,6 +989,7 @@ class DesktopBridge:
             "output_bytes": size,
             "output_truncated": output.truncated,
             "output_attachment": None,
+            "output_start": offset or 0,
             "next_offset": size,
         }
         if result.state == "running":
@@ -1066,8 +1067,10 @@ class DesktopBridge:
 
         def reply(start: int) -> dict[str, object]:
             shown = text[start:]
-            truncated = bool(payload["output_truncated"]) or len(shown.encode()) < requested
-            return {**payload, "output": shown, "output_truncated": truncated}
+            shown_bytes = len(shown.encode())
+            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
+            output_start = cast("int", payload["next_offset"]) - shown_bytes
+            return {**payload, "output": shown, "output_truncated": truncated, "output_start": output_start}
 
         # Dropping older characters never grows the reply, so search for the fewest to drop.
         start = self._leftmost_fitting(command, 0, len(text), reply)

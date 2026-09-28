@@ -926,7 +926,9 @@ async def test_check_shell_polls_from_an_offset_and_returns_where_to_continue(mo
     assert request.await_count == 1
     properties = tool.async_functions["desktop"].parameters["properties"]
     assert "check_shell" in properties["offset"]["description"]
-    assert "next_offset" in (tool.async_functions["desktop"].description or "")
+    description = tool.async_functions["desktop"].description or ""
+    assert "next_offset" in description
+    assert "an output_start above the offset you asked for" in description
 
 
 @pytest.mark.asyncio

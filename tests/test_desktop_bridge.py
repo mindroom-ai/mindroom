@@ -1123,6 +1123,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
         "output_bytes": 6,
         "output_truncated": False,
         "output_attachment": None,
+        "output_start": 0,
         "next_offset": 6,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=2)))
@@ -1138,6 +1139,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
         "output_bytes": 10,
         "output_truncated": False,
         "output_attachment": None,
+        "output_start": 6,
         "next_offset": 10,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
@@ -1214,6 +1216,37 @@ async def _wait_for_finished_handle(bridge: DesktopBridge, handle: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_running_tail_reports_where_its_output_starts_so_skipped_output_stays_readable(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A trimmed newest-output reply says where it begins, and polling from 0 still returns the beginning."""
+    content = b"".join(f"line {number:05}\n".encode() for number in range(10_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("cat log; while [ ! -f release ]; do sleep 0.05; done", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence)))
+        tail = _response(transport).result
+        if tail["output_bytes"] == len(content):
+            break
+        await asyncio.sleep(0.01)
+    shown = str(tail["output"]).encode()
+    assert 0 < tail["output_start"] == len(content) - len(shown)
+    assert (tail["next_offset"], content[tail["output_start"] :]) == (len(content), shown)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=700, offset=0)))
+    head = _response(transport).result
+    assert (head["output_start"], content.startswith(str(head["output"]).encode())) == (0, True)
+    assert head["next_offset"] == len(str(head["output"]).encode())
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_offset_polls_leave_later_output_of_a_running_command_intact(
     transport: AsyncMock,
     tmp_path: Path,
@@ -1280,7 +1313,7 @@ async def test_check_shell_offset_polls_every_byte_once_without_splitting_charac
         reply = _response(transport)
         assert reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
         shown = str(reply.result["output"]).encode()
-        assert reply.result["next_offset"] == offset + len(shown)
+        assert (reply.result["output_start"], reply.result["next_offset"]) == (offset, offset + len(shown))
         assert reply.result["output_truncated"] is (reply.result["next_offset"] < reply.result["output_bytes"])
         received, offset = received + shown, offset + len(shown)
         polls += bool(shown)
@@ -1527,6 +1560,7 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output": "",
         "output_bytes": len(expected),
         "output_truncated": False,
+        "output_start": 0,
         "next_offset": len(expected),
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
@@ -1688,6 +1722,7 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
             "output_bytes": len(output.encode()),
             "output_truncated": False,
             "output_attachment": None,
+            "output_start": 0,
             "next_offset": len(output.encode()),
             "metrics": _WIDEST_METRICS,
         },
