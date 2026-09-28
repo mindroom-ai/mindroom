@@ -85,7 +85,7 @@ These bounds hold for trusted and untrusted callers alike, because the cost of o
 
 | Input | Bound | Above the bound |
 |---|---|---|
-| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because they authenticate before reading the form, accept only file parts, which spool to disk, and enforce their own per-file limit |
+| Dashboard API request bodies | 1 MiB by default, 4 KiB for the anonymous `/api/auth/session`, and 16 MiB for `/v1`, which authenticates before reading its body; checked against `Content-Length` and while the body streams | 413 before any route decodes the body, in the OpenAI error shape under `/v1`; multipart knowledge uploads are exempt because they authenticate before reading the form, accept only file parts, which spool to disk, and enforce their own per-file limit |
 | `@` mentions in message text | 256 explicit user ID tokens and 256 alias tokens per body, outside fenced code; each explicit token validates at most seven structural prefixes within the 255-byte user ID limit; resolved IDs are deduplicated by hash and checked against one entity registry per message | Later `@` tokens in the same body are not resolved as mentions; structured `m.mentions` are unaffected |
 | Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from PNG, JPEG, GIF, and WebP header data | Pixel data is never decoded, so an eXIf chunk after PNG image data is ignored and other formats upload without dimensions |
 | `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
