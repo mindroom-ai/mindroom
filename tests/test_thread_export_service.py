@@ -415,6 +415,42 @@ async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path)
     build_export_groups.assert_not_called()
 
 
+@pytest.mark.parametrize("link_target", ["sibling_export", "agents_directory"])
+@pytest.mark.asyncio
+async def test_a_link_planted_below_the_trusted_root_fails_only_its_own_target(
+    tmp_path: Path,
+    link_target: str,
+) -> None:
+    """Worker code linking its own export folder elsewhere cannot take another agent's exports down with it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    agents_dir = runtime_paths.storage_root / "agents"
+    victim_output_dir = agents_dir / "victim" / "workspace" / "thread_exports"
+    victim_output_dir.mkdir(parents=True)
+    planted_output_dir = agents_dir / "planter" / "workspace" / "thread_exports"
+    planted_output_dir.parent.mkdir(parents=True)
+    planted_output_dir.symlink_to(
+        victim_output_dir if link_target == "sibling_export" else agents_dir,
+        target_is_directory=True,
+    )
+    targets = (
+        ThreadExportTarget(planted_output_dir, trusted_root=runtime_paths.storage_root),
+        ThreadExportTarget(victim_output_dir, trusted_root=runtime_paths.storage_root),
+    )
+
+    stats = await export_threads_to_sources(
+        config=config,
+        runtime_paths=runtime_paths,
+        sources=(),
+        targets=targets,
+        full_pass=False,
+    )
+
+    assert [item.failures for item in stats] == [1, 0]
+    assert "Refusing symlinked thread export root" in stats[0].failed_items[0].error
+    assert (victim_output_dir / _ROOT_MARKER_FILENAME).is_file()
+
+
 @pytest.mark.parametrize("nested_first", [False, True])
 @pytest.mark.asyncio
 async def test_nested_target_output_directories_are_all_skipped(
