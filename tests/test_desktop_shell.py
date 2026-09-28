@@ -523,6 +523,26 @@ async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path:
     await shell.close()
 
 
+@pytest.mark.parametrize("first_kill", ["local", "kill_shell"])
+@pytest.mark.asyncio
+async def test_kill_shell_after_an_earlier_kill_still_replies_killed(tmp_path: Path, first_kill: str) -> None:
+    """Once a handle is killed, a later kill_shell never contradicts the check that follows it."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, timeout=1))
+    assert running.handle is not None
+    if first_kill == "local":
+        shell.kill_handle(running.handle)
+    else:
+        assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = shell.check(REQUESTER, AGENT, running.handle)
+    assert killed.state == "killed"
+    killed.output.release()
+    await shell.close()
+
+
 @pytest.mark.asyncio
 async def test_handle_capacity_evicts_completed_handles_before_refusing(
     tmp_path: Path,

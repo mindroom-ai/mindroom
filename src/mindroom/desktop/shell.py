@@ -479,7 +479,8 @@ class DesktopShell:
 
     def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
         if record.process.returncode is not None:
-            return "completed"
+            # An earlier kill stays the reason it ended, matching what the next check reports.
+            return "killed" if self._handles[handle].killed else "completed"
         kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
         self._handles[handle] = replace(self._handles[handle], killed=True)
         return "killed"
