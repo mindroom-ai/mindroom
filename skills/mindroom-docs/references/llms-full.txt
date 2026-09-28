@@ -6680,7 +6680,8 @@ read_url("https://docs.mindroom.chat")
 - Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
 - Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
 - Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
-- Each page and redirect hop is requested uncompressed and read up to 2 MiB; a larger page, or one the server compresses anyway, fails instead of being buffered in the primary process.
+- Each page and redirect hop is requested uncompressed and read up to 1 MiB; a larger page is parsed from its first 1 MiB and its text ends with a truncation note.
+- A page the server compresses anyway (`gzip`, `x-gzip`, `deflate`, `br`, or `zstd`) fails instead of being inflated in the primary process.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
@@ -20001,7 +20002,7 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 - **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
-- **16 MiB request bodies** — like every dashboard API route, `/v1` answers 413 to a request body above 16 MiB, including inline image data that MindRoom would ignore anyway
+- **16 MiB request bodies** — `/v1` answers an OpenAI-style 413 error (`code: request_too_large`) to a request body above 16 MiB, including inline image data that MindRoom would ignore anyway
 
 # Architecture
 
@@ -21370,6 +21371,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
+| CalculatorTools computes factorial for any argument, although `json.dumps` refuses results above 4300 digits, and trial-divides `is_prime` without a bound, so either call can stall the process for minutes. | Tracking gap: refuse unserializable factorial arguments and bound prime-check work; no matching issue or PR has been verified. | `custom_tools/calculator.py`; `tests/test_calculator_tool.py`. |
+| SleepTools blocks a thread in `time.sleep` for any requested duration. | Tracking gap: await `asyncio.sleep` instead of holding a thread; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
 | Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py`; project discovery tests cover multiple pages, empty results, and provider errors. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
@@ -21453,6 +21456,8 @@ Small owner-adjacent boundaries use the same source records:
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
+| `custom_tools/calculator.py` | Refuse `factorial()` above 1558 and `is_prime()` above 10**12 before Agno's unbounded computation. | The caps are MindRoom policy for the process shared by every agent; the other calculator functions and JSON result shapes stay upstream. |
+| `custom_tools/sleep.py` | Replace Agno's thread-blocking `sleep()` with an awaited one under the same toolkit name and config fields. | The 300-second cap and the refusal of negative durations are MindRoom policy and remain after an upstream async fix. |
 | `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
@@ -21569,11 +21574,12 @@ These bounds hold for trusted and untrusted callers alike, because the cost of o
 
 | Input | Bound | Above the bound |
 |---|---|---|
-| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because they authenticate before reading the form, accept only file parts, which spool to disk, and enforce their own per-file limit |
-| Explicit Matrix user IDs in message text | Each `@` token validates at most seven structural prefixes within the 255-byte user ID limit, and span overlaps use a sorted search | Mention scanning stays linear in the body length |
+| Dashboard API request bodies | 1 MiB by default, 4 KiB for the anonymous `/api/auth/session`, and 16 MiB for `/v1`, which authenticates before reading its body; checked against `Content-Length` and while the body streams | 413 before any route decodes the body, in the OpenAI error shape under `/v1`; multipart knowledge uploads are exempt because they authenticate before reading the form, accept only file parts, which spool to disk, and enforce their own per-file limit |
+| `@` mentions in message text | 256 explicit user ID tokens and 256 alias tokens per body, outside fenced code; each explicit token validates at most seven structural prefixes within the 255-byte user ID limit; resolved IDs are deduplicated by hash and checked against one entity registry per message | Later `@` tokens in the same body are not resolved as mentions; structured `m.mentions` are unaffected |
 | Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from PNG, JPEG, GIF, and WebP header data | Pixel data is never decoded, so an eXIf chunk after PNG image data is ignored and other formats upload without dimensions |
-| `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
-| Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams | The sidecar stays unresolved |
+| `website` pages and redirect hops | 1 MiB of raw body each, requested with identity encoding | Only the first 1 MiB is parsed and the extracted text is marked as truncated; a response compressed with `gzip`, `x-gzip`, `deflate`, `br`, or `zstd` is refused rather than inflated |
+| Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams, and at most eight chained sidecars per message | The sidecar stays unresolved, and every strict read of its conversation retries it; see the known gap below |
+| Matrix media downloads for images, voice, and files | 64 MiB, checked against `Content-Length` and while the payload streams; rate limits, lost connections, and timeouts are retried up to three attempts | The media is dropped |
 | `calculator` | `factorial()` up to 1558 and `is_prime()` up to 10**12 | A JSON error payload, returned before any computation |
 | `sleep` | 300 seconds, awaited on the event loop so no thread is held | An error message, returned without waiting |
 
@@ -21586,6 +21592,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
+- Any room member can post a message whose long-text sidecar points at media that is missing, oversized, or not a JSON event, and the projection then keeps that message as an unresolved debt. Each download is bounded, but every strict read of that conversation by every agent downloads it again, and the read fails instead of returning a page, so work that needs that conversation's history fails until the message is edited or redacted. Serving an explicit unreadable placeholder needs the sidecar download to tell permanent failures from transient ones such as rate limits or an unreachable homeserver, because installing a placeholder for a transient failure would replace a real message's text for good.
 
 ## Intentional behaviors
 
