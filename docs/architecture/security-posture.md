@@ -85,9 +85,9 @@ These bounds hold for trusted and untrusted callers alike, because the cost of o
 
 | Input | Bound | Above the bound |
 |---|---|---|
-| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because their file parts spool to disk and they enforce their own per-file limit |
-| Explicit Matrix user IDs in message text | Only prefixes within the 255-byte user ID limit are validated, and span overlaps use a sorted search | Mention scanning stays linear in the body length |
-| Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from header data | PNG pixel data is never decoded, so an eXIf chunk after the image data is ignored |
+| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because they authenticate before reading the form, accept only file parts, which spool to disk, and enforce their own per-file limit |
+| Explicit Matrix user IDs in message text | Each `@` token validates at most seven structural prefixes within the 255-byte user ID limit, and span overlaps use a sorted search | Mention scanning stays linear in the body length |
+| Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from PNG, JPEG, GIF, and WebP header data | Pixel data is never decoded, so an eXIf chunk after PNG image data is ignored and other formats upload without dimensions |
 | `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
 | Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams | The sidecar stays unresolved |
 | `calculator` | `factorial()` up to 1558 and `is_prime()` up to 10**12 | A JSON error payload, returned before any computation |
