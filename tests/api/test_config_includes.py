@@ -182,7 +182,7 @@ class TestEmptyDirectoryIncludes:
         path.write_text(include_source, encoding="utf-8")
         monkeypatch.setattr(
             ConfigManagerTools,
-            "_configuration_mutation_authorization_error",
+            "_platform_administrator_error",
             staticmethod(lambda _config: None),
         )
         manager = ConfigManagerTools(runtime_paths)
