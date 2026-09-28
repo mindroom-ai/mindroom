@@ -1084,7 +1084,7 @@ The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png`
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
 When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
-Agent, team, and root Space avatars are retried at the next start or config reload after that window.
+Agent, team, and root Space avatars are retried the next time MindRoom starts after that window.
 Managed room avatars are only chosen when a room is created, so run `mindroom avatars sync` to fill them in.
 `mindroom avatars sync` also clears recent failures, so it retries immediately and lets the next start retry agent and team avatars.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
