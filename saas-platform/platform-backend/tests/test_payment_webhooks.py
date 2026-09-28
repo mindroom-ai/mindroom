@@ -208,6 +208,17 @@ def test_payment_succeeded_records_payment(db: _SchemaCheckedSupabase) -> None:
     assert "error" not in event
 
 
+@pytest.mark.parametrize("status_transitions", [None, {"paid_at": None}])
+def test_payment_without_paid_at_is_dated_at_invoice_creation(
+    db: _SchemaCheckedSupabase, status_transitions: dict[str, Any] | None
+) -> None:
+    invoice = _invoice() | {"status_transitions": status_transitions}
+
+    assert _deliver("invoice.payment_succeeded", invoice) == {"received": True, "error": None}
+
+    assert db.row("payments", invoice_id="in_1")["created_at"] == "2026-08-17T20:53:20+00:00"  # invoice["created"]
+
+
 def test_payment_succeeded_falls_back_to_subscription_account(db: _SchemaCheckedSupabase) -> None:
     db.row("accounts", id=ACCOUNT_ID)["stripe_customer_id"] = "cus_other"
 
