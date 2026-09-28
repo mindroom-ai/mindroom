@@ -2982,6 +2982,68 @@ def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
     assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
 
 
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A runner started without any config registers plugin tools, and validates their overrides, from the snapshot."""
+    plugin_root = tmp_path / "plugins" / "snapshot-only"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "snapshot_only_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class SnapshotOnlyTool(Toolkit):\n"
+        "    def __init__(self, greeting: str = 'hello') -> None:\n"
+        "        self.greeting = greeting\n"
+        "        super().__init__(name='snapshot_only_plugin', tools=[self.greet])\n"
+        "\n"
+        "    def greet(self) -> str:\n"
+        "        return self.greeting\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='snapshot_only_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Snapshot Only Plugin',\n"
+        "    description='Greets with the configured greeting',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='greeting', label='Greeting', type='text', required=False)],\n"
+        "    function_names=('greet',),\n"
+        ")\n"
+        "def snapshot_only_plugin_tools():\n"
+        "    return SnapshotOnlyTool\n",
+        encoding="utf-8",
+    )
+    # The runner gets no config file, as in every chart; the plugin directory is visible beside its config path.
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    assert sandbox_runner_module.app_runtime_config(sandbox_runner_app).plugins == []
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "snapshot_only_plugin",
+                "function_name": "greet",
+                "tool_config_overrides": {"greeting": "from the snapshot"},
+                "config_snapshot": {"plugins": [{"path": "./plugins/snapshot-only", "enabled": True}]},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "result": "from the snapshot", "error": None, "failure_kind": None}
+
+
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_static_runner_relies_on_primary_private_template_from_snapshot(
     runner_client: TestClient,

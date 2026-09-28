@@ -864,7 +864,6 @@ async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: 
             sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
                 runtime_paths=runtime_paths,
                 config=config,
-                tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
             ),
         ),
@@ -908,7 +907,6 @@ async def test_sandbox_runner_save_attachment_rejects_sha_mismatch_and_unsafe_pa
             sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
                 runtime_paths=runtime_paths,
                 config=config,
-                tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
             ),
         ),
@@ -964,7 +962,6 @@ async def test_sandbox_runner_save_attachment_rejects_unsafe_path_before_decodin
             sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
                 runtime_paths=runtime_paths,
                 config=config,
-                tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
             ),
         ),
@@ -1001,7 +998,6 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
             sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
                 runtime_paths=runtime_paths,
                 config=config,
-                tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
             ),
         ),
@@ -5130,7 +5126,10 @@ def _live_primary_config(runtime_paths: RuntimePaths) -> Config:
                     "display_name": "Mind",
                     "memory_backend": "file",
                     "instructions": ["live-agent-instructions"],
-                    "tools": ["shell", {"custom_api": {"base_url": "https://user:live-tool-override-secret@api.example.org"}}],
+                    "tools": [
+                        "shell",
+                        {"custom_api": {"base_url": "https://user:live-tool-override-secret@api.example.org"}},
+                    ],
                 },
                 "vault": {
                     "display_name": "Vault",

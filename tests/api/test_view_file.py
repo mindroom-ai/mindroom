@@ -42,7 +42,6 @@ def view_file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[T
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=Config(agents={}, models={}),
-        tool_metadata={},
         runner_token=TOKEN,
     )
     app.include_router(sandbox_runner.router)
@@ -201,7 +200,6 @@ async def test_view_file_endpoint_prefers_prepared_worker_workspace(
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=Config(agents={}, models={}),
-        tool_metadata={},
         runner_token=TOKEN,
     )
     monkeypatch.setattr(

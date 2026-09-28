@@ -333,7 +333,6 @@ def initialize_sandbox_runner_app(
     api_app.state.sandbox_runner_context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
-        tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
 
@@ -579,7 +578,6 @@ class _SandboxRunnerCliState:
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
-    tool_metadata: dict[str, Any]
     runner_token: str | None
     cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
 
@@ -625,8 +623,8 @@ def app_runtime_config(app: FastAPI) -> Config:
 def request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None) -> Config:
     """Return the config one request runs under: the primary's live snapshot when sent, else the startup config.
 
-    The runner's own config file is only a seed, so agents added or edited after
-    seeding exist only in the snapshot the authenticated primary sends.
+    Deployments give runners no config file from the primary, so agents exist only
+    in the allowlisted snapshot the authenticated primary sends.
     Plugins missing from this runner are skipped silently here, because every
     request carries the snapshot and would otherwise repeat the same log line.
     """
@@ -1965,10 +1963,11 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
-    tool_metadata = context.tool_metadata
+    # Plugin tools come from the request's config, not from a startup config runners never receive.
+    _ensure_registry_loaded_with_config(runtime_paths, config)
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
-    _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
+    _validate_execute_request_payload(payload, tool_metadata=TOOL_METADATA)
     credential_overrides: dict[str, object] = {}
     if payload.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(
