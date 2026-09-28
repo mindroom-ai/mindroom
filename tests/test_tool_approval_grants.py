@@ -33,7 +33,7 @@ from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
+from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 
@@ -704,29 +704,64 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
 
 
 @pytest.mark.asyncio
-async def test_sanitized_call_does_not_reuse_active_timed_grant(
+async def test_redacted_arguments_keep_timed_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A hidden argument value must force a fresh one-time card despite an active grant."""
+    """Redacting a secret still shows the complete call, so every approval option remains."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:
-        first = await _card(journal, manager, "first")
-        assert (await _approve(manager, first)).consumed
-
-        await _card(journal, manager, "sanitized", command="api_key=sk-test-approval-value")
-
-        continuation = await journal.principal("agent@code").approval_continuation("sanitized")
-        assert continuation is not None
-        assert continuation.calls[0].decision is None
+        card = await _card(journal, manager, "redacted", command="api_key=sk-test-approval-value")
         stored = await journal.principal("router@shared").pending_approval_card(
             room_id="!room:test",
-            card_event_id="$card-sanitized",
+            card_event_id=card,
         )
         assert stored is not None
+        assert stored.card["content"]["arguments"] == {"command": "api_key=***redacted***"}
         assert stored.card["content"].get("approvable", True) is True
+        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+
+        assert (await _approve(manager, card)).consumed
+        grant = await journal.principal("router@shared").approval_grant_for_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert grant is not None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_arguments_beyond_redaction_depth_cannot_be_approved(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Redaction truncates deeply nested arguments, so the approver cannot see the whole call."""
+    nested: object = "rm -rf ~/important"
+    for _ in range(40):
+        nested = {"child": nested}
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "nested", command=nested)
+        stored = await journal.principal("router@shared").pending_approval_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert stored is not None
+        assert stored.card["content"]["approvable"] is False
+        assert "full_arguments" not in stored.card["content"]
         assert "auto_approve_options" not in stored.card["content"]
+
+        result = await _approve(manager, card, seconds=None)
+
+        assert result.consumed
+        assert result.error_reason is not None
+        continuation = await journal.principal("agent@code").approval_continuation("nested")
+        assert continuation is not None
+        assert continuation.calls[0].decision is not None
+        assert continuation.calls[0].decision.value == "denied"
     finally:
         await manager.shutdown()
 
@@ -1158,8 +1193,7 @@ async def _card(
     requester: str = "@human:test",
     thread: str | None = "$thread",
     operation: str | None = "binding:shell",
-    approvable: bool = True,
-    command: str | None = None,
+    command: object = None,
 ) -> str:
     responder = journal.principal("agent@" + agent)
     await responder.admit(
@@ -1205,7 +1239,7 @@ async def _card(
         response_event_id=continuation.response_event_id,
         tool_call_id="call-" + name,
         tool_name="shell",
-        arguments={"command": name if command is None else command} if approvable else {"command": "x" * 300000},
+        arguments={"command": name if command is None else command},
         room_id="!room:test",
         requester_id=requester,
         approver_user_id=requester,
@@ -1244,7 +1278,7 @@ async def _approve(
     manager: ApprovalManager,
     card: str,
     *,
-    seconds: int = 600,
+    seconds: int | None = 600,
     sender: str = "@human:test",
 ) -> ApprovalActionResult:
     return await manager.handle_card_response(

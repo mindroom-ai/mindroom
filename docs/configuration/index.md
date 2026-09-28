@@ -365,10 +365,8 @@ React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
 Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
-When the complete reviewable arguments differ from the original call after redaction or normalization, the exact call can still be approved once, but reusable and timed auto-approval are unavailable for that card.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.
 Subsequent matching calls do not publish another approval card.
-Calls whose complete reviewable arguments differ from the original after redaction or normalization still publish a one-time approval card even when a timed approval is active.
 For generic MCP dispatch, the server and remote tool name are part of the operation, so approving one remote operation does not approve every tool on that server.
 Timed approval requires a canonical thread and complete reviewable arguments; native tool-authored confirmations and background-script approvals remain per-call.
 The backend fixes the grant deadline when it accepts the originating call and preserves it across restarts; replaying an approval never extends or recreates the grant.
@@ -378,9 +376,11 @@ Expiry or revocation stops future automatic decisions without cancelling decisio
 Changes to configured bindings or room membership invalidate matching grants.
 Clients show approval or revocation as submitted until a backend card edit acknowledges the durable change.
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
-When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander and the call stays approvable.
+A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.
+When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander.
 They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
-When the complete redacted arguments cannot be delivered or remain structurally truncated after sanitization — over the 2MB completeness cap, beyond the sanitizer's nesting limit, or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
+When the complete redacted arguments cannot be delivered, the card sets `approvable: false` and any approve action is converted into a denial.
+This happens when the arguments exceed the 2MB completeness cap, when they nest deeper than the 32 levels redaction inspects, or when the sidecar upload fails.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.

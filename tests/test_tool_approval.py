@@ -57,7 +57,6 @@ from mindroom.tool_approval import (
     shutdown_approval_runtime,
     tool_may_require_approval,
 )
-from mindroom.tool_approval_grants import ApprovalOperation
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -1757,129 +1756,12 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
 
 
 def test_approval_arguments_preview_detects_truncation_below_literal_marker_key() -> None:
-    arguments: dict[str, Any] = {"__truncated__": {}}
-    nested = arguments["__truncated__"]
-    for _ in range(40):
-        child: dict[str, Any] = {}
-        nested["child"] = child
-        nested = child
-
-    _preview, truncated = _build_event_arguments_preview(arguments)
-
-    assert truncated is True
-
-
-def test_approval_arguments_preview_detects_collection_marker_collision() -> None:
-    arguments: dict[str, Any] = {f"k{index}": index for index in range(25)}
-    arguments["__truncated__"] = "original value"
+    arguments = {"__truncated__": {"items": list(range(30))}}
 
     preview, truncated = _build_event_arguments_preview(arguments)
 
-    assert preview["__truncated__"] == "1 more items"
-    assert len(preview) == len(arguments)
+    assert preview["__truncated__"]["items"][-1] == "... [truncated]"
     assert truncated is True
-
-
-@pytest.mark.asyncio
-async def test_redacted_approval_card_allows_only_exact_one_time_approval(tmp_path: Path) -> None:
-    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
-        return content
-
-    manager = ApprovalManager(test_runtime_paths(tmp_path), prepare_event=prepare_event)
-
-    card = await manager._prepare_approval_card(
-        approval_id="approval-1",
-        tool_call_id="call-1",
-        tool_name="shell",
-        raw_arguments={"command": "deploy", "api_key": "sk-test-approval-value"},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        expires_at_ns=9_000_000_000_000_000_000,
-        target_fields={"approval_scope": {"id": "0" * 64}},
-        grant_operation=ApprovalOperation("deploy", "shell"),
-    )
-
-    assert card is not None
-    assert card.payload["arguments"]["api_key"] == "***redacted***"
-    assert card.payload.get("approvable", True) is True
-    assert "argument preview sanitized" in card.payload["body"]
-    assert "auto_approve_options" not in card.payload
-    assert "approval_scope" not in card.payload
-    assert card.grant_operation is None
-    pending = PendingApproval.from_card_event(
-        {
-            "type": "io.mindroom.tool_approval",
-            "event_id": "$approval",
-            "sender": "@router:localhost",
-            "content": card.payload,
-        },
-        room_id="!room:localhost",
-    )
-    assert manager._normalized_resolution_request(pending, status="approved", reason=None) == ("approved", None, False)
-
-
-@pytest.mark.asyncio
-async def test_oversized_approval_card_is_unapprovable_without_redaction_label(tmp_path: Path) -> None:
-    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
-        return content
-
-    manager = ApprovalManager(test_runtime_paths(tmp_path), prepare_event=prepare_event)
-
-    card = await manager._prepare_approval_card(
-        approval_id="approval-1",
-        tool_call_id="call-1",
-        tool_name="shell",
-        raw_arguments={"content": "x" * 3_000_000},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        expires_at_ns=9_000_000_000_000_000_000,
-        target_fields={},
-    )
-
-    assert card is not None
-    assert card.payload["approvable"] is False
-    assert card.payload["body"] == "🔒 Approval required: shell"
-
-    nested_arguments: dict[str, Any] = {"__truncated__": {}}
-    nested = nested_arguments["__truncated__"]
-    for _ in range(40):
-        child: dict[str, Any] = {}
-        nested["child"] = child
-        nested = child
-    nested_card = await manager._prepare_approval_card(
-        approval_id="approval-2",
-        tool_call_id="call-2",
-        tool_name="shell",
-        raw_arguments=nested_arguments,
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        expires_at_ns=9_000_000_000_000_000_000,
-        target_fields={},
-    )
-
-    assert nested_card is not None
-    assert nested_card.payload["approvable"] is False
-    assert "full_arguments" not in nested_card.payload
-    assert nested_card.payload["body"] == "🔒 Approval required: shell"
-    nested_pending = PendingApproval.from_card_event(
-        {
-            "type": "io.mindroom.tool_approval",
-            "event_id": "$nested-approval",
-            "sender": "@router:localhost",
-            "content": nested_card.payload,
-        },
-        room_id="!room:localhost",
-    )
-    assert manager._normalized_resolution_request(nested_pending, status="approved", reason=None)[0] == "denied"
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:

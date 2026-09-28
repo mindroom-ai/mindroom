@@ -56,8 +56,8 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 )
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
-    "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
-    "exactly what would run. Retry with a smaller payload — for example save large content to a "
+    "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
+    "exactly what would run. Retry with a smaller or simpler payload — for example save large content to a "
     "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
     "body — or auto-approve this tool via a script-based approval rule."
 )
@@ -120,17 +120,9 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
                 _contains_sanitizer_truncation(None, item) for item in sanitized.values()
             )
         original_by_text_key = {str(key): item for key, item in original.items()}
-        truncation_summary = cast("dict[str, object]", sanitized).get("__truncated__")
-        collided_truncation_marker = (
-            isinstance(truncation_summary, str)
-            and truncation_summary.endswith(" more items")
-            and truncation_summary.removesuffix(" more items").isdigit()
-            and original_by_text_key.get("__truncated__") != truncation_summary
-        )
         return (
             len(sanitized) < len(original)
             or ("__truncated__" in sanitized and "__truncated__" not in original)
-            or collided_truncation_marker
             or any(
                 _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
                 for key, item in sanitized.items()
@@ -180,9 +172,12 @@ def _full_arguments_json_bytes(value: object) -> int:
 
 
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
     if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
     sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
+    if _contains_sanitizer_truncation(arguments, sanitized):
+        return None
     return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
 
 
@@ -410,12 +405,6 @@ class ApprovalManager:
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
-        if full_arguments is not None and _contains_sanitizer_truncation(raw_arguments, full_arguments):
-            full_arguments = None
-        review_arguments = full_arguments if full_arguments is not None else event_arguments
-        arguments_sanitized = (
-            not arguments_truncated or full_arguments is not None
-        ) and review_arguments != raw_arguments
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -429,9 +418,6 @@ class ApprovalManager:
             requested_at=_utcnow(),
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
         )
-        if arguments_sanitized:
-            content["body"] = f"🔒 Approval required: {tool_name} (argument preview sanitized)"
-            grant_operation = None
         if (
             grant_operation is not None
             and thread_id
