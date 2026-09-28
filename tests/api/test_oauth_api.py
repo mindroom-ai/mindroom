@@ -1279,7 +1279,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
-    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, token_url=provider.token_url))
     refreshed = asyncio.run(
         provider.refresh_token_data(
             {
@@ -1821,7 +1821,14 @@ def test_pkce_provider_exchange_sends_code_verifier(
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
 
-    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+    result = asyncio.run(
+        provider.exchange_code(
+            "auth-code",
+            runtime_paths,
+            token_url=provider.token_url,
+            code_verifier="pkce-verifier",
+        ),
+    )
 
     assert seen["fetch"] == {
         "url": provider.token_url,
@@ -1877,7 +1884,7 @@ def test_custom_token_parser_exchange_receives_provider_payload_and_core_stamps_
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
 
-    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, token_url=provider.token_url))
 
     assert seen_response == {"access_token": "access-token"}
     assert result.token_data["token_uri"] == provider.token_url
@@ -1913,7 +1920,14 @@ def test_pkce_custom_token_exchanger_receives_code_verifier(tmp_path: Path) -> N
         token_exchanger=_exchange,
     )
 
-    result = asyncio.run(provider.exchange_code("test-code", runtime_paths, code_verifier="pkce-verifier"))
+    result = asyncio.run(
+        provider.exchange_code(
+            "test-code",
+            runtime_paths,
+            token_url=provider.token_url,
+            code_verifier="pkce-verifier",
+        ),
+    )
 
     assert seen == {"code": "test-code", "code_verifier": "pkce-verifier"}
     assert result.token_data["token"] == "custom_pkce_drive-access-token"
@@ -1946,7 +1960,7 @@ def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> N
         token_exchanger=_exchange,
     )
 
-    result = asyncio.run(provider.exchange_code("test-code", runtime_paths))
+    result = asyncio.run(provider.exchange_code("test-code", runtime_paths, token_url=provider.token_url))
     safe_result = provider.token_result_with_safe_claims(result)
 
     assert safe_result.token_data["_source"] == "oauth"
@@ -3160,6 +3174,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         execution_scope_override=None,
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
+        token_url=provider.token_url,
     )
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
@@ -3210,6 +3225,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
         execution_scope_override=None,
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
+        token_url=provider.token_url,
     )
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
@@ -3929,27 +3945,6 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
-def test_refresh_token_is_not_preserved_across_token_endpoint_change() -> None:
-    existing = {
-        "refresh_token": "old-refresh-token",
-        "token_uri": "https://old.example.test/token",
-        "client_id": "client-id",
-        "_oauth_claims": {"sub": "subject-1"},
-        "_oauth_claims_verified": True,
-    }
-    replacement = {
-        "token": "new-access-token",
-        "token_uri": "https://new.example.test/token",
-        "client_id": "client-id",
-        "_oauth_claims": {"sub": "subject-1"},
-        "_oauth_claims_verified": True,
-    }
-
-    result = oauth_lifecycle._token_data_preserving_refresh_token(existing, replacement)
-
-    assert "refresh_token" not in result
-
-
 @pytest.mark.asyncio
 async def test_callback_saves_exchanged_credentials_before_propagating_cancellation(
     tmp_path: Path,
@@ -4005,6 +4000,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         execution_scope_override=None,
         payload=await oauth_api._target_binding_payload(provider, target),
         code_verifier=None,
+        token_url=provider.token_url,
     )
 
     async def allow_request(_request: StarletteRequest) -> None:
@@ -4084,6 +4080,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         execution_scope_override=None,
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
+        token_url=provider.token_url,
     )
     verification_started = asyncio.Event()
     release_verification = asyncio.Event()
@@ -5529,6 +5526,47 @@ def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
 
     assert callback_response.status_code == 400
     assert "does not match" in callback_response.json()["detail"]
+
+
+@pytest.mark.parametrize("binding", ["changed", "missing"])
+def test_callback_exchanges_code_only_at_token_endpoint_bound_during_connect(tmp_path: Path, binding: str) -> None:
+    """A code is never sent to a token endpoint other than the one resolved when its authorization URL was built."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+
+    def unexpected_exchange(*_args: object) -> OAuthTokenResult:
+        pytest.fail("the authorization code must not be exchanged")
+
+    provider = replace(_fake_provider(), token_exchanger=unexpected_exchange)
+    providers = {provider.id: provider}
+    issue_pending_oauth_state = oauth_api.issue_pending_oauth_state
+
+    def issue_state_without_token_endpoint(*args: Any, **kwargs: Any) -> str:  # noqa: ANN401
+        return issue_pending_oauth_state(*args, **{**kwargs, "token_url": None})
+
+    state_issuer = issue_state_without_token_endpoint if binding == "missing" else issue_pending_oauth_state
+    with (
+        patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value=providers),
+        patch("mindroom.api.oauth.issue_pending_oauth_state", side_effect=state_issuer),
+        TestClient(api_app) as client,
+    ):
+        _login(client)
+        connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+        state = _state_from_auth_url(connect_response.json()["auth_url"])
+        if binding == "changed":
+            providers[provider.id] = replace(provider, token_url="https://moved.example.test/token")
+        callback_response = client.get(f"/api/oauth/{provider.id}/callback?code=test-code&state={state}")
+
+    assert callback_response.status_code == 400
+    assert callback_response.json()["detail"] == "OAuth callback could not be completed"
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
 
 
 def test_callback_rejects_changed_credential_target(tmp_path: Path) -> None:

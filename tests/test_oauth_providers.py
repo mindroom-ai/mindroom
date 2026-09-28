@@ -11,7 +11,7 @@ import pytest
 from mindroom import credentials as credentials_module
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth.providers import OAuthProvider, OAuthRuntimeEndpoints
+from mindroom.oauth.providers import OAuthProvider, OAuthRuntimeEndpoints, OAuthTokenEndpointChangedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,3 +84,18 @@ async def test_async_client_config_file_reads_stay_off_event_loop(
     assert resolution.custom is True
     assert bootstrap_calls == int(bootstrap_required)
     assert read_threads
+
+
+def test_token_endpoint_change_error_keeps_only_loggable_origins() -> None:
+    """Endpoint-change diagnostics must not carry userinfo, paths, or queries into logs."""
+    error = OAuthTokenEndpointChangedError(
+        "https://client:secret@auth.example.test:8443/tenant/token?key=value",
+        "https://attacker.example.test/token",
+    )
+
+    assert (error.stored_token_endpoint_origin, error.current_token_endpoint_origin) == (
+        "https://auth.example.test:8443",
+        "https://attacker.example.test",
+    )
+    unparseable = OAuthTokenEndpointChangedError(None, "not a url")
+    assert (unparseable.stored_token_endpoint_origin, unparseable.current_token_endpoint_origin) == (None, None)

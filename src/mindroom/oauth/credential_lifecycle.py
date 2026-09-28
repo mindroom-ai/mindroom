@@ -27,6 +27,7 @@ from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthProviderError,
     OAuthRefreshRejectedError,
+    OAuthTokenEndpointChangedError,
     OAuthTokenResult,
     is_terminal_oauth_refresh_error_code,
 )
@@ -547,14 +548,16 @@ async def exchange_and_store_oauth_credentials(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     expected_connection_generation: str,
 ) -> dict[str, Any]:
-    """Exchange one code and publish its credential snapshot atomically."""
+    """Exchange one code at its authorization-bound token endpoint and publish the snapshot atomically."""
     return await _run_oauth_transaction(
         _exchange_and_store_oauth_credentials_transaction(
             context,
             code,
             code_verifier,
+            token_url=token_url,
             expected_connection_generation=expected_connection_generation,
         ),
     )
@@ -565,6 +568,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     expected_connection_generation: str,
 ) -> dict[str, Any]:
     async with oauth_credential_transaction(context) as transaction:
@@ -575,6 +579,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
             context,
             code,
             code_verifier,
+            token_url=token_url,
             transaction=transaction,
         )
 
@@ -584,6 +589,7 @@ async def _exchange_and_store_oauth_credentials_locked(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     transaction: OAuthCredentialTransaction,
 ) -> dict[str, Any]:
     adapter_scope = _oauth_provider_adapter_active.set(True)
@@ -591,6 +597,7 @@ async def _exchange_and_store_oauth_credentials_locked(
         result = await context.provider.exchange_code(
             code,
             context.runtime_paths,
+            token_url=token_url,
             code_verifier=code_verifier,
         )
         await asyncio.to_thread(context.provider.validate_claims, result, context.runtime_paths)
@@ -691,7 +698,18 @@ async def _invalidate_rejected_credentials(
     _attach_oauth_refresh_failure_context(exc, credentials)
     await transaction.reset(None)
     await transaction.commit()
-    _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
+    endpoint_change = exc.__cause__
+    if isinstance(endpoint_change, OAuthTokenEndpointChangedError):
+        _log_oauth_refresh_failed(
+            context,
+            credentials,
+            exc,
+            reason="token_endpoint_changed",
+            stored_token_endpoint_origin=endpoint_change.stored_token_endpoint_origin,
+            current_token_endpoint_origin=endpoint_change.current_token_endpoint_origin,
+        )
+    else:
+        _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
 
 
 async def _raise_normalized_refresh_error(
@@ -750,6 +768,7 @@ def _log_oauth_refresh_failed(
     exc: OAuthProviderError,
     *,
     reason: str,
+    **fields: str | None,
 ) -> None:
     logger.warning(
         "oauth_credentials_refresh_failed",
@@ -758,6 +777,7 @@ def _log_oauth_refresh_failed(
         error_type=type(exc).__name__,
         oauth_error=_safe_oauth_error_code_for_logging(exc.oauth_error),
         **_oauth_refresh_failure_diagnostics(exc),
+        **fields,
     )
 
 
@@ -972,17 +992,6 @@ def _same_oauth_client(existing_credentials: dict[str, Any] | None, token_data: 
     return isinstance(token_client_id, str) and token_client_id.strip() == existing_client_id.strip()
 
 
-def _same_token_endpoint(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
-    existing_token_uri = (existing_credentials or {}).get("token_uri")
-    token_uri = token_data.get("token_uri")
-    return (
-        isinstance(existing_token_uri, str)
-        and bool(existing_token_uri)
-        and isinstance(token_uri, str)
-        and token_uri == existing_token_uri
-    )
-
-
 def _token_data_preserving_refresh_token(
     existing_credentials: dict[str, Any] | None,
     safe_token_data: dict[str, Any],
@@ -995,7 +1004,6 @@ def _token_data_preserving_refresh_token(
         and existing_refresh_token
         and _same_external_identity(existing_credentials, token_data)
         and _same_oauth_client(existing_credentials, token_data)
-        and _same_token_endpoint(existing_credentials, token_data)
     ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data

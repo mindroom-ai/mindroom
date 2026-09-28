@@ -37,6 +37,7 @@ from mindroom.oauth.providers import (
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -292,7 +293,14 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
         lambda *_args: {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
     )
 
-    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+    result = asyncio.run(
+        provider.exchange_code(
+            "auth-code",
+            runtime_paths,
+            token_url=provider.token_url,
+            code_verifier="pkce-verifier",
+        ),
+    )
 
     assert result.token_data["scopes"] == list(provider.scopes)
 
@@ -725,7 +733,8 @@ def test_google_oauth_provider_bootstrapped_client_authorization_uses_pkce(
     assert code_verifier is not None
 
     auth_url = asyncio.run(
-        provider.authorization_uri_async(
+        oauth_authorization_url(
+            provider,
             runtime_paths,
             state="test-state",
             code_verifier=code_verifier,

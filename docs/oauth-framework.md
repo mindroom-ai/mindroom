@@ -49,8 +49,12 @@ Automatic discovery first checks protected-resource metadata at the resource ori
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
-Each authorization binds refresh credentials to the resolved token endpoint.
-If a later refresh resolves a different endpoint, or an older credential has no endpoint binding, MindRoom rejects the refresh and requires reconnection.
+Starting a connection resolves the provider's endpoints once, builds the authorization URL from them, and records the resolved token endpoint in the pending OAuth state.
+The callback fails without contacting any token endpoint when the provider now resolves a different one; otherwise the built-in exchange sends the authorization code, PKCE verifier, and client secret to that recorded endpoint.
+Stored credentials record the same endpoint as `token_uri`, including credentials produced by custom token exchangers and parsers.
+A refresh sends the refresh token only when the stored `token_uri` matches the currently resolved token endpoint.
+When it differs, or an older credential has no recorded endpoint, MindRoom deletes the credential without contacting the token endpoint and requires reconnection.
+That rejection is logged as `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and the stored and current endpoint origins, so an authorization-server change is distinguishable from a revoked grant.
 The SQLite store is authoritative on every OAuth credential read.
 Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.

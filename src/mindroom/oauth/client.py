@@ -37,7 +37,6 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
-    require_token_endpoint_pin,
 )
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
@@ -591,7 +590,6 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
             return None
         if not credentials.refresh_token:
             return None
-        require_token_endpoint_pin(current, self._oauth_provider.token_url)
         try:
             credentials.refresh(request)
         except GoogleAuthError as exc:

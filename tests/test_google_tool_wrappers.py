@@ -14,7 +14,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Never
-from unittest.mock import MagicMock
 
 import pytest
 from agno.tools.function import Function
@@ -51,12 +50,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
-from mindroom.oauth.providers import (
-    OAuthConnectionRequired,
-    OAuthProviderError,
-    OAuthRefreshRejectedError,
-    OAuthTokenResult,
-)
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
 from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -1330,69 +1324,6 @@ def test_google_drive_refreshes_expired_readonly_grant(
     assert tool.creds.token == "refreshed-readonly-token"  # noqa: S105
 
 
-@pytest.mark.parametrize("token_uri", [None, "https://changed.example.test/token"], ids=["missing", "changed"])
-def test_google_refresh_rejects_invalid_endpoint_pin_before_provider_call(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_paths: RuntimePaths,
-    token_uri: str | None,
-) -> None:
-    """The Google adapter must not send an unbound refresh token to its configured endpoint."""
-    refresh = MagicMock()
-    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", refresh)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=None,
-    )
-
-    token_data = {
-        "token": "expired-token",
-        "refresh_token": "stored-refresh-token",
-        "client_id": "client-id",
-        "expires_at": 1.0,
-        "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
-    }
-    if token_uri is not None:
-        token_data["token_uri"] = token_uri
-
-    with pytest.raises(OAuthRefreshRejectedError, match="missing or changed"):
-        tool._refresh_google_token_data(
-            token_data,
-            object(),
-            force=True,
-        )
-
-    refresh.assert_not_called()
-
-
-def test_google_refresh_allows_valid_access_token_without_endpoint_pin(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """A still-valid access token does not expose its refresh grant and may finish normally."""
-    refresh = MagicMock()
-    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", refresh)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=None,
-    )
-
-    result = tool._refresh_google_token_data(
-        {
-            "token": "valid-token",
-            "refresh_token": "stored-refresh-token",
-            "client_id": "client-id",
-            "expires_at": 4_102_444_800.0,
-            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
-        },
-        object(),
-    )
-
-    assert result is None
-    refresh.assert_not_called()
-
-
 def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
@@ -2004,6 +1935,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
             callback_context,
             "account-b-code",
             "pkce-verifier",
+            token_url=callback_context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         )
 
@@ -2083,6 +2015,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
         callback_context,
         "account-b-code",
         "pkce-verifier",
+        token_url=callback_context.provider.token_url,
         expected_connection_generation=issued_connection_generation,
     )
 

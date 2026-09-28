@@ -196,12 +196,22 @@ def is_terminal_oauth_refresh_error_code(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
 
 
-def require_token_endpoint_pin(token_data: Mapping[str, Any], token_url: str) -> None:
-    """Require the authorization-time token endpoint before refreshing."""
-    stored_token_url = token_data.get("token_uri")
-    if not isinstance(stored_token_url, str) or stored_token_url != token_url:
-        msg = "OAuth token endpoint binding is missing or changed since authorization"
-        raise OAuthRefreshRejectedError(msg)
+def _token_endpoint_origin(token_url: object) -> str | None:
+    """Return a token endpoint's scheme and host for logs, without userinfo, path, or query."""
+    if not isinstance(token_url, str):
+        return None
+    parsed = urlparse(token_url)
+    host = parsed.netloc.rpartition("@")[2]
+    return f"{parsed.scheme}://{host}" if parsed.scheme and host else None
+
+
+class OAuthTokenEndpointChangedError(OAuthRefreshRejectedError):
+    """Raised before refreshing credentials that are not bound to the currently resolved token endpoint."""
+
+    def __init__(self, stored_token_url: object, current_token_url: str) -> None:
+        super().__init__("OAuth token endpoint binding is missing or changed since authorization")
+        self.stored_token_endpoint_origin = _token_endpoint_origin(stored_token_url)
+        self.current_token_endpoint_origin = _token_endpoint_origin(current_token_url)
 
 
 class OAuthClaimValidationError(OAuthProviderError):
@@ -759,12 +769,12 @@ class OAuthProvider:
     async def authorization_uri_async(
         self,
         runtime_paths: RuntimePaths,
+        endpoints: OAuthRuntimeEndpoints,
         *,
         state: str,
         code_verifier: str | None = None,
     ) -> str:
-        """Build the provider authorization URL, resolving lazy runtime metadata first."""
-        endpoints = await self.runtime_endpoints(runtime_paths)
+        """Build the provider authorization URL from endpoints the caller resolved and bound to the state."""
         client_config = await self.require_client_config_async(runtime_paths)
         client = OAuth2Session(
             client_id=client_config.client_id,
@@ -795,10 +805,14 @@ class OAuthProvider:
         code: str,
         runtime_paths: RuntimePaths,
         *,
+        token_url: str,
         code_verifier: str | None = None,
     ) -> OAuthTokenResult:
-        """Exchange an authorization code for normalized credentials."""
+        """Exchange an authorization code at the token endpoint bound when the authorization URL was built."""
         endpoints = await self.runtime_endpoints(runtime_paths)
+        if endpoints.token_url != token_url:
+            msg = "OAuth token endpoint changed since authorization"
+            raise OAuthProviderError(msg)
         client_config = await self.require_client_config_async(runtime_paths)
         if self.pkce_code_challenge_method is not None and not code_verifier:
             msg = "OAuth provider requires a PKCE code verifier"
@@ -817,13 +831,13 @@ class OAuthProvider:
                     self,
                     result,
                     client_id=client_config.client_id,
-                    token_url=endpoints.token_url,
+                    token_url=token_url,
                 )
             return _token_result_with_core_metadata(
                 self,
                 await cast("Awaitable[OAuthTokenResult]", result),
                 client_id=client_config.client_id,
-                token_url=endpoints.token_url,
+                token_url=token_url,
             )
 
         async with AsyncOAuth2Client(
@@ -843,7 +857,7 @@ class OAuthProvider:
                 if self.pkce_code_challenge_method is not None:
                     fetch_kwargs["code_verifier"] = code_verifier
                 token_response = await client.fetch_token(
-                    endpoints.token_url,
+                    token_url,
                     **fetch_kwargs,
                 )
             except (AuthlibBaseError, HTTPError) as exc:
@@ -859,7 +873,7 @@ class OAuthProvider:
             self,
             result,
             client_id=client_config.client_id,
-            token_url=endpoints.token_url,
+            token_url=token_url,
         )
 
     async def refresh_token_data(
@@ -873,7 +887,9 @@ class OAuthProvider:
         refresh_token = cast("str", token_data["refresh_token"])
 
         endpoints = await self.runtime_endpoints(runtime_paths)
-        require_token_endpoint_pin(token_data, endpoints.token_url)
+        stored_token_url = token_data.get("token_uri")
+        if stored_token_url != endpoints.token_url:
+            raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
         client_config = await self.require_client_config_async(runtime_paths)
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
