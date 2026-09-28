@@ -292,7 +292,9 @@ A running child whose record reaches a cap fails, so very long delegations that 
 A record already above these caps is unreadable, so a delegation that resumes with one fails.
 MindRoom keeps each record's state in memory and reads the whole event log only on the record's first use in a process and when it renders `transcript.md` at the finish.
 Only MindRoom writes `events.jsonl`, so while it keeps a record's state, a log whose size or modification time changed, or that was replaced, fails that delegation as tampered; changing its permissions or access time does not.
-Finished records leave memory first when kept states grow past 64 MiB, and a record that left is read again on its next use; running and paused records always stay.
+Finished records leave memory first when kept states grow past 64 MiB, and a record that left is read again on its next use.
+A running or paused record stays in memory until it finishes, or until its start or finish fails or its log is refused as tampered, so only delegations MindRoom can still settle keep state.
+A failure to open or read a record, such as running out of file descriptors, fails only that attempt; a refusal of the record's content is remembered while the log stays unchanged.
 The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
 Completed task results include a reference to the child's record.
 
