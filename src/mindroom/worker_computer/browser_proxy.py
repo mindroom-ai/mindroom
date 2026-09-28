@@ -167,19 +167,35 @@ def browser_egress(
     return BrowserEgress(http=scheme_proxy("http_proxy"), https=scheme_proxy("https_proxy"), no_proxy=no_proxy)
 
 
+_PRIMARY_TUNNEL_REQUIREMENT = (
+    "The primary browser tunnels to the IP address it validated, so its egress proxy must allow CONNECT to IP "
+    "addresses on ports 80 and 443; proxies that allow only hostnames are unsupported for the primary browser."
+)
+_RUNNER_TUNNEL_REQUIREMENT = (
+    "Browsers tunnel every connection, plain HTTP included, with CONNECT, so the egress proxy must allow CONNECT "
+    "to the allowed hostnames on ports 80 and 443."
+)
+
+
 class _UpstreamTunnelRefusedError(OSError):
     """The operator's egress proxy denied a destination, so no other address or route is tried."""
 
-    def __init__(self) -> None:
-        super().__init__("Browser upstream proxy refused the tunnel.")
+    def __init__(self, status: str) -> None:
+        super().__init__(f"Browser upstream proxy refused the tunnel with HTTP {status}.")
+        self.status = status
 
 
-async def _open_upstream_tunnel(upstream: _UpstreamProxy, target: str, port: int) -> tuple[StreamReader, StreamWriter]:
+async def _open_upstream_tunnel(
+    upstream: _UpstreamProxy,
+    target: str,
+    port: int,
+    tls: ssl.SSLContext | None,
+) -> tuple[StreamReader, StreamWriter]:
     """Open one HTTP CONNECT tunnel through an operator proxy."""
     reader, writer = await asyncio.open_connection(
         upstream.host,
         upstream.port,
-        ssl=ssl.create_default_context() if upstream.tls else None,
+        ssl=tls if upstream.tls else None,
         limit=_MAX_UPSTREAM_RESPONSE_HEAD,
     )
     try:
@@ -199,7 +215,7 @@ async def _open_upstream_tunnel(upstream: _UpstreamProxy, target: str, port: int
         return reader, writer
     writer.transport.abort()
     if len(status) >= 2 and status[1].startswith(b"4"):
-        raise _UpstreamTunnelRefusedError
+        raise _UpstreamTunnelRefusedError(status[1].decode("ascii", "replace"))
     msg = "Browser upstream proxy could not open the tunnel."
     raise OSError(msg)
 
@@ -226,6 +242,10 @@ class BrowserDestinationProxy:
         self._allow_private_networks = allow_private_networks
         self._allow_loopback = allow_loopback
         self._egress = egress or BrowserEgress()
+        upstreams = (self._egress.http, self._egress.https)
+        self._upstream_tls = (
+            ssl.create_default_context() if any(proxy is not None and proxy.tls for proxy in upstreams) else None
+        )
         self._server: asyncio.Server | None = None
         self._port = 0
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
@@ -369,8 +389,14 @@ class BrowserDestinationProxy:
                 target = host if self._egress.by_hostname else address.compressed
                 if target not in tunnel_targets:
                     tunnel_targets.add(target)
-                    return await _open_upstream_tunnel(upstream, target, port)
-            except _UpstreamTunnelRefusedError:
+                    return await _open_upstream_tunnel(upstream, target, port, self._upstream_tls)
+            except _UpstreamTunnelRefusedError as refused:
+                logger.warning(
+                    "browser_egress_proxy_refused_tunnel",
+                    destination=f"{target}:{port}",
+                    status=refused.status,
+                    requirement=_RUNNER_TUNNEL_REQUIREMENT if self._egress.by_hostname else _PRIMARY_TUNNEL_REQUIREMENT,
+                )
                 raise
             except OSError:
                 continue
@@ -383,6 +409,8 @@ class BrowserDestinationProxy:
             while data := await reader.read(64 * 1024):
                 writer.write(data)
                 await writer.drain()
-            writer.write_eof()
+            # TLS to an upstream proxy cannot half-close; the tunnel then ends with the other direction.
+            if writer.can_write_eof():
+                writer.write_eof()
         except OSError:
             writer.transport.abort()

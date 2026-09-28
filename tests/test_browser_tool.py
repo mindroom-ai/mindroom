@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
+from structlog.testing import capture_logs
 
 from mindroom import browser_fetch_guard
 from mindroom.agents import build_agent_toolkit
@@ -50,8 +51,13 @@ from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.browser_egress_helpers import (
+    EGRESS_PROXY_CONNECT_PORTS,
+    SQUID_DEFAULT_CONNECT_PORTS,
+    SquidLikeUpstream,
+    socks5_connect,
+)
 from tests.browser_lifecycle_helpers import LifecycleBrowser
-from tests.browser_socks_helpers import socks5_connect
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.test_worker_computer_runtime import FakeDisplay
 
@@ -1172,32 +1178,10 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
     tmp_path: Path,
 ) -> None:
     """The relay tunnels external destinations through the worker proxy by name and dials local previews itself."""
-    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
-    if executable is None:
-        pytest.skip("Chromium required for proxy integration")
-    requests: list[bytes] = []
-
-    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            headers = await reader.readuntil(b"\r\n\r\n")
-            requests.append(headers.split(b"\r\n", 1)[0])
-            if headers.startswith(b"CONNECT 8.8.8.8:80 "):
-                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                await reader.readuntil(b"\r\n\r\n")
-                body = b"<title>Forwarded HTTP</title>"
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-            else:
-                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-            await writer.drain()
-        except (ConnectionError, asyncio.IncompleteReadError):
-            pass
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
     tool = _headless_real_browser("computer", monkeypatch, tmp_path)
-    proxy = await asyncio.start_server(upstream, "127.0.0.1", 0)
-    monkeypatch.setenv("all_proxy", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
+    squid = SquidLikeUpstream(allowed_hosts=frozenset({"8.8.8.8"}), title="Forwarded HTTP")
+    monkeypatch.setenv("all_proxy", await squid.start())
+    requests = squid.requests
     port, _private_host, hits = local_preview_server
     try:
         for host in ["localhost", "127.0.0.1", "[::ffff:127.0.0.1]", "localhost."]:
@@ -1209,8 +1193,8 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
         assert result["title"] == "Forwarded HTTP"
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in requests
         with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
-            await tool.browser(action="open", targetUrl="https://8.8.8.8/denied")
-        assert b"CONNECT 8.8.8.8:443 HTTP/1.1" in requests
+            await tool.browser(action="open", targetUrl="https://9.9.9.9/denied")
+        assert b"CONNECT 9.9.9.9:443 HTTP/1.1" in requests
         # Redirects the page route never sees are still refused at dial time, before any proxy.
         for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
             with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
@@ -1221,8 +1205,84 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
             await tool.browser(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
     finally:
         await tool.aclose()
-        proxy.close()
-        await proxy.wait_closed()
+        await squid.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connect_ports", "loads"),
+    [(SQUID_DEFAULT_CONNECT_PORTS, False), (EGRESS_PROXY_CONNECT_PORTS, True)],
+)
+async def test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80(
+    connect_ports: frozenset[int],
+    loads: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plain HTTP reaches an egress proxy as CONNECT to port 80, which Squid's default SSL_ports rule refuses."""
+    squid = SquidLikeUpstream(connect_ports=connect_ports)
+    tool = _headless_real_browser("headless", monkeypatch, tmp_path, {"HTTP_PROXY": await squid.start()})
+    try:
+        with capture_logs() as logs:
+            if loads:
+                result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/plain"))
+                assert result["title"] == "Via egress proxy"
+            else:
+                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                    await tool.browser(action="open", targetUrl="http://8.8.8.8/plain")
+        assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in squid.requests
+        refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
+        assert bool(refusals) is not loads
+        assert all("CONNECT to the allowed hostnames on ports 80 and 443" in entry["requirement"] for entry in refusals)
+    finally:
+        await tool.aclose()
+        await squid.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("binding", "loads"), [("unbound", False), ("headless", True)])
+async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_primary(
+    binding: str,
+    loads: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary tunnels to the validated IP, which a hostname-only proxy refuses; a runner tunnels by name."""
+    squid = SquidLikeUpstream(allowed_hosts=frozenset({"allowed.example"}))
+    tool = _headless_real_browser(binding, monkeypatch, tmp_path, {"HTTP_PROXY": await squid.start()})
+    real_getaddrinfo = socket.getaddrinfo
+
+    def public_getaddrinfo(
+        host: str | bytes | None,
+        service: str | bytes | int | None,
+        *args: int,
+        **kwargs: int,
+    ) -> object:
+        if host != "allowed.example":
+            return real_getaddrinfo(host, service, *args, **kwargs)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", service))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", public_getaddrinfo)
+    try:
+        with capture_logs() as logs:
+            if loads:
+                result = json.loads(await tool.browser(action="open", targetUrl="http://allowed.example/page"))
+                assert result["title"] == "Via egress proxy"
+                assert b"CONNECT allowed.example:80 HTTP/1.1" in squid.requests
+            else:
+                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                    await tool.browser(action="open", targetUrl="http://allowed.example/page")
+                assert b"CONNECT 93.184.216.34:80 HTTP/1.1" in squid.requests
+        refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
+        if not loads:
+            assert refusals
+            assert (
+                "proxies that allow only hostnames are unsupported for the primary browser"
+                in (refusals[0]["requirement"])
+            )
+    finally:
+        await tool.aclose()
+        await squid.close()
 
 
 def _install_fake_persistent_playwright(
@@ -1458,10 +1518,17 @@ async def test_headless_host_browser_dials_only_validated_addresses(
         await tool.aclose()
 
 
-def _headless_real_browser(binding: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> BrowserTools:
+def _headless_real_browser(
+    binding: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    proxy_env: dict[str, str] | None = None,
+) -> BrowserTools:
     """Return a real-Chromium toolkit with the given binding; only the Computer display launch becomes headless."""
     executable = _chromium_executable()
     _clear_proxy_env(monkeypatch)
+    for name, value in (proxy_env or {}).items():
+        monkeypatch.setenv(name, value)
     original_launch = _persistent_launch_kwargs
 
     def headless_launch(
@@ -1644,8 +1711,8 @@ async def test_host_browser_keeps_configured_upstream_proxy_for_every_destinatio
 class _LocalForwardingProxy:
     """An upstream HTTP proxy that resolves names itself, the way a local forwarding proxy reaches internal services.
 
-    It forwards CONNECT tunnels and absolute-form requests for ``internal_names`` to the loopback service,
-    serves a fixed page inside CONNECT tunnels to 8.8.8.8:80, and refuses everything else.
+    It forwards CONNECT tunnels and absolute-form requests for ``internal_names`` to the loopback service and
+    refuses everything else.
     """
 
     def __init__(self, loopback_port: int, internal_names: frozenset[str]) -> None:
@@ -1671,13 +1738,7 @@ class _LocalForwardingProxy:
             method, target, _version = request_line.decode("ascii").split(" ", 2)
             authority = target if method == "CONNECT" else urlsplit(target).netloc
             host = authority.rsplit(":", 1)[0].strip("[]")
-            if method == "CONNECT" and authority == "8.8.8.8:80":
-                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                await reader.readuntil(b"\r\n\r\n")
-                body = b"<title>Via egress proxy</title>"
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-                await writer.drain()
-            elif host in self._internal_names:
+            if host in self._internal_names:
                 remote_reader, remote_writer = await asyncio.open_connection("127.0.0.1", self._loopback_port)
                 if method == "CONNECT":
                     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -1764,25 +1825,23 @@ async def test_page_websocket_to_loopback_is_refused_beside_an_egress_proxy(
 
 @pytest.mark.asyncio
 async def test_primary_browser_uses_scheme_proxies_beside_an_unused_socks_all_proxy(
-    loopback_service: tuple[int, list[str]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Proxy clients such as Clash export http(s)_proxy plus a SOCKS all_proxy; curl precedence never uses the latter."""
     tool = _headless_real_browser("unbound", monkeypatch, tmp_path)
-    port, _hits = loopback_service
-    forwarder = _LocalForwardingProxy(port, frozenset())
-    upstream = await forwarder.start()
+    clash = SquidLikeUpstream()
+    upstream = await clash.start()
     monkeypatch.setenv("http_proxy", upstream)
     monkeypatch.setenv("https_proxy", upstream)
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
     try:
         result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/clash"))
         assert result["title"] == "Via egress proxy"
-        assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in forwarder.requests
+        assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in clash.requests
     finally:
         await tool.aclose()
-        await forwarder.close()
+        await clash.close()
 
 
 @pytest.mark.asyncio

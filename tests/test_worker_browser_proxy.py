@@ -6,13 +6,20 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
 from aiohttp import web
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
@@ -26,8 +33,8 @@ from mindroom.worker_computer.browser_proxy import (
     _UpstreamProxy,
     browser_egress,
 )
+from tests.browser_egress_helpers import SQUID_DEFAULT_CONNECT_PORTS, SquidLikeUpstream, socks5_connect
 from tests.browser_lifecycle_helpers import LifecycleBrowser
-from tests.browser_socks_helpers import socks5_connect
 
 _WORKER = _UpstreamProxy(host="worker", port=3128, tls=False)
 _OTHER = _UpstreamProxy(host="other", port=3128, tls=False)
@@ -374,6 +381,113 @@ async def test_one_page_cannot_hold_more_than_its_share_of_browser_dns_threads(m
         await fast.close()
         echo.close()
         await echo.wait_closed()
+
+
+def _tls_contexts(tmp_path: Path) -> tuple[ssl.SSLContext, ssl.SSLContext]:
+    """Return a TLS server context for 127.0.0.1 and a client context that trusts only its test CA."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "relay test proxy")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]),
+            critical=False,
+        )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "proxy.pem", tmp_path / "proxy.key"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+    )
+    server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server.load_cert_chain(cert_path, key_path)
+    client = ssl.create_default_context(cafile=str(cert_path))
+    return server, client
+
+
+@pytest.mark.asyncio
+async def test_relay_tunnels_through_an_https_egress_proxy_and_survives_client_half_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A TLS connection to the proxy cannot half-close, so a client EOF must not end the tunnel early."""
+    _resolve_as(monkeypatch, {"public.example": "8.8.8.8"})
+    server_tls, client_tls = _tls_contexts(tmp_path)
+    requests: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        requests.append((await reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0])
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        payload = await reader.readexactly(4)
+        writer.write(payload.upper())
+        await writer.drain()
+        writer.close()
+
+    upstream_server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_tls)
+    upstream = _UpstreamProxy(host="127.0.0.1", port=upstream_server.sockets[0].getsockname()[1], tls=True)
+    proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream, https=upstream))
+    proxy._upstream_tls = client_tls
+    await proxy.start()
+    try:
+        reader, writer, status = await socks5_connect(proxy.endpoint, "public.example", 443)
+        assert status == 0
+        writer.write(b"ping")
+        writer.write_eof()
+        assert await asyncio.wait_for(reader.readexactly(4), 5) == b"PING"
+        assert await asyncio.wait_for(reader.read(), 5) == b""
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await proxy.close()
+        upstream_server.close()
+        await upstream_server.wait_closed()
+    assert requests == [b"CONNECT 8.8.8.8:443 HTTP/1.1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("by_hostname", "requirement"),
+    [
+        (False, "must allow CONNECT to IP addresses on ports 80 and 443"),
+        (True, "must allow CONNECT to the allowed hostnames on ports 80 and 443"),
+    ],
+)
+async def test_proxy_refusal_logs_the_connect_requirement(
+    by_hostname: bool,
+    requirement: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Squid-style refusal of CONNECT to port 80 fails the connection and names what the proxy must allow."""
+    _resolve_as(monkeypatch, {"public.example": "8.8.8.8"})
+    squid = SquidLikeUpstream(connect_ports=SQUID_DEFAULT_CONNECT_PORTS)
+    url = urlsplit(await squid.start())
+    upstream = _UpstreamProxy(host=url.hostname, port=url.port, tls=False)
+    proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream, https=upstream, by_hostname=by_hostname))
+    await proxy.start()
+    try:
+        with capture_logs() as logs:
+            assert await _relay_reply(proxy, "public.example", 80) != 0
+    finally:
+        await proxy.close()
+        await squid.close()
+    target = b"public.example" if by_hostname else b"8.8.8.8"
+    assert squid.requests == [b"CONNECT " + target + b":80 HTTP/1.1"]
+    [refusal] = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
+    assert refusal["status"] == "403"
+    assert requirement in refusal["requirement"]
 
 
 @pytest.mark.asyncio

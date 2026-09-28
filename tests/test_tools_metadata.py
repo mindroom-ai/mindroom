@@ -74,7 +74,7 @@ from mindroom.tools import crawl4ai as crawl4ai_module
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
-from tests.browser_socks_helpers import socks5_connect
+from tests.browser_egress_helpers import socks5_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
