@@ -28,13 +28,14 @@ from mindroom.config.main import (
     load_config_or_user_error,
 )
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
+from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
-from mindroom.redaction import redact_sensitive_text
+from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -102,6 +103,20 @@ def _normalize_patch_changes(
             raise _ConfigPatchError(msg) from exc
         normalized.append(model)
     return normalized
+
+
+def _reject_redaction_markers(changes: list[_ConfigPatchChange]) -> None:
+    """Reject values copied from redacted inspection output before they replace hidden real values."""
+    for change in changes:
+        location = redaction_marker_location(change.value)
+        if location is None:
+            continue
+        pointer = "".join(f"/{token.replace('~', '~0').replace('/', '~1')}" for token in location)
+        msg = (
+            f"{change.path + pointer!r} contains the redaction marker {REDACTED!r}, which inspection shows "
+            "in place of a hidden value; set that field to its real value or leave it out of the patch"
+        )
+        raise _ConfigPatchError(msg)
 
 
 def _reject_normalized_root_nulls(changes: list[_ConfigPatchChange], validated_authored: dict[str, Any]) -> None:
@@ -621,6 +636,7 @@ class ConfigManagerTools(Toolkit):
         try:
             authored = config.authored_model_dump()
             normalized_changes = _normalize_patch_changes(changes)
+            _reject_redaction_markers(normalized_changes)
             candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
             validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
             _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())

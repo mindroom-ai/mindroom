@@ -1747,12 +1747,12 @@ def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
         (
             "set mcp_servers.home.env '{HOMEASSISTANT_TOKEN: \"${HOMEASSISTANT_TOKEN}\"}'",
             "mcp_servers.home.env",
-            True,
+            False,
         ),
         (
-            "set mcp_servers.remote.headers '{X-Api-Version: \"${API_VERSION}\"}'",
+            "set mcp_servers.remote.headers '{Authorization: \"${API_AUTHORIZATION}\"}'",
             "mcp_servers.remote.headers",
-            True,
+            False,
         ),
         ('set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"', "agents.assistant.role", True),
     ],
@@ -1919,6 +1919,46 @@ async def test_expired_in_memory_config_change_is_discarded() -> None:
 
     assert resolved is None
     assert _written_pending_states(client) == [{}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "field_path"),
+    [
+        ("set models.default.api_key '***redacted***'", "models.default.api_key"),
+        (
+            "set models.default.extra_kwargs \"{base_url: '***redacted***', temperature: 0.2}\"",
+            "models.default.extra_kwargs.base_url",
+        ),
+        ('set agents.assistant.role "Uses Bearer ***redacted*** tokens"', "agents.assistant.role"),
+    ],
+)
+async def test_config_set_rejects_copied_redaction_markers(tmp_path: Path, command: str, field_path: str) -> None:
+    """Round-tripping redacted output must never replace the hidden real value with the marker."""
+    config_path = _write_config_with_secrets(tmp_path)
+    original = config_path.read_text(encoding="utf-8")
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert f"`{field_path}` contains the redaction marker" in response
+    assert "real value" in response
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_config_get_shows_environment_references_in_secret_fields(tmp_path: Path) -> None:
+    """An environment reference names where a secret lives, so secret fields show it unmasked."""
+    config_path = _write_config_with_secrets(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["mcp_servers"]["home"]["env"]["NOTION_KEY"] = "${NOTION_KEY}"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    response, _ = await handle_config_command("get mcp_servers.home.env", _runtime_paths_for_config(config_path))
+
+    assert "NOTION_KEY: ${NOTION_KEY}" in response
+    assert "HOMEASSISTANT_TOKEN: '***redacted***'" in response
+    assert "sentinel" not in response
 
 
 @pytest.mark.asyncio

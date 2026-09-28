@@ -383,6 +383,35 @@ def test_platform_administrator_reads_redacted_agent_config(tmp_path: Path) -> N
     assert missing == "Error: Agent 'absent' not found."
 
 
+@pytest.mark.parametrize(
+    ("change", "pointer"),
+    [
+        ({"op": "replace", "path": "/mcp_servers/home/env/HOMEASSISTANT_TOKEN", "value": "***redacted***"}, ""),
+        (
+            {"op": "replace", "path": "/models/default/extra_kwargs", "value": {"default_headers": "***redacted***"}},
+            "/default_headers",
+        ),
+    ],
+)
+def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: dict[str, Any], pointer: str) -> None:
+    """Patching inspected output back must never replace hidden real values with the redaction marker."""
+    config_path = tmp_path / "config.yaml"
+    config = _config_with_schema_secrets(tmp_path)
+    write_config_yaml(config, config_path)
+    original = config_path.read_text(encoding="utf-8")
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = config_manager.manage_config(operation="patch", changes=[change])
+
+    assert f"'{change['path']}{pointer}' contains the redaction marker" in result
+    assert "real value" in result
+    assert "Changes were NOT applied." in result
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_available_models_masks_host_credentials(tmp_path: Path) -> None:
     """Any requester may list models, so credentials embedded in a model host stay masked."""
     config_path = tmp_path / "config.yaml"

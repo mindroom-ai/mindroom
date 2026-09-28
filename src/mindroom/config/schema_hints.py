@@ -1,5 +1,6 @@
 """JSON-schema annotations that let the dashboard render config fields and let displays mask secrets."""
 
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -46,13 +47,19 @@ def _is_secret_schema(schema: Mapping[str, Any]) -> bool:
     return isinstance(hint, dict) and hint.get("secret") is True
 
 
+# An environment reference names where a secret lives, so it is shown rather than masked.
+_ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
 def _mask_secret_value(value: object) -> object:
     """Replace every value inside one secret subtree, keeping mapping keys and list shape."""
     if isinstance(value, Mapping):
         return {key: _mask_secret_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_mask_secret_value(item) for item in value]
-    return None if value is None else REDACTED
+    if value is None or (isinstance(value, str) and _ENV_PLACEHOLDER_PATTERN.fullmatch(value)):
+        return value
+    return REDACTED
 
 
 _JSON_TYPES: dict[str, tuple[type, ...]] = {
@@ -159,13 +166,35 @@ def _redact_value_for_display(
     return value
 
 
+def redaction_marker_location(value: object) -> tuple[str, ...] | None:
+    """Return the key path to the first string holding the display redaction marker, or None.
+
+    Writers reject such values: they are copies of redacted output, and saving
+    them would replace the hidden real value with the marker.
+    """
+    if isinstance(value, str):
+        return () if REDACTED in value else None
+    if isinstance(value, Mapping):
+        entries = [(str(key), item) for key, item in value.items()]
+    elif isinstance(value, list):
+        entries = [(str(index), item) for index, item in enumerate(value)]
+    else:
+        return None
+    for key, item in entries:
+        location = redaction_marker_location(item)
+        if location is not None:
+            return (key, *location)
+    return None
+
+
 def redact_config_for_display(value: object, schema: Mapping[str, Any]) -> object:
     """Redact config data described by ``schema`` before showing it to a requester or model.
 
     ``schema`` is a root JSON schema with its ``$defs``, such as the dashboard
     config schema. The schema decides for typed fields: every value inside a
     field carrying ``dashboard_hint(secret=True)`` is masked, keeping mapping
-    keys and list shape as the dashboard does, and other typed fields keep
+    keys, list shape, and ``${NAME}`` environment references as the dashboard
+    does, and other typed fields keep
     their values. Entries of free-form maps, such as tool overrides or extra
     OAuth parameters, are also masked by credential-like key names, and every
     remaining string still has credential patterns such as URL passwords and

@@ -18,8 +18,10 @@ from mindroom.config.main import (
     load_config_or_user_error,
     redact_authored_config,
 )
+from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
+from mindroom.redaction import REDACTED
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -230,6 +232,14 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
         # Parse the value - YAML parsing handles both quoted and unquoted formats
         value = _parse_value(value_str)
+        marker_location = redaction_marker_location(value)
+        if marker_location is not None:
+            field_path = ".".join((config_path_str, *marker_location))
+            return (
+                f"❌ `{field_path}` contains the redaction marker `{REDACTED}`, which `!config show` and "
+                "`!config get` print in place of a hidden value. Set that field to its real value instead."
+                f"\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+            ), None
 
         # Get the current value for comparison
         try:
