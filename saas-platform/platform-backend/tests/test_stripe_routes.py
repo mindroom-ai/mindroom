@@ -1,5 +1,6 @@
 """Comprehensive HTTP API tests for Stripe route endpoints."""
 
+import time
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -214,8 +215,13 @@ class TestStripeRoutesEndpoints:
 
         assert response.status_code == 200
         mock_stripe.Subscription.list.assert_called_once_with(customer="cus_test_123", status="all", limit=100)
-        subscription_data = mock_stripe.checkout.Session.create.call_args.kwargs["subscription_data"]
-        assert ("trial_period_days" in subscription_data) is expects_trial
+        params = mock_stripe.checkout.Session.create.call_args.kwargs
+        assert ("trial_period_days" in params["subscription_data"]) is expects_trial
+        # A trial session expires soon, so one opened alongside another cannot be completed later for a second trial;
+        # Stripe accepts 30 minutes to 24 hours.
+        assert ("expires_at" in params) is expects_trial
+        if expects_trial:
+            assert 30 * 60 < params["expires_at"] - time.time() < 24 * 60 * 60
 
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock

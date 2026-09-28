@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
+from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
 from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.models import (
     ActionResult,
@@ -579,37 +579,17 @@ async def admin_delete_account_complete(
         f"Admin {admin['user_id']} initiating complete deletion of account {account_id} ({account.get('email')})"
     )
 
-    # 1. First, get all instances for this account
+    # 1. Cancel Stripe billing and uninstall every instance; the rows are the only record of what to tear down,
+    # so they stay until this succeeds.
     instances = instances_data.get_instances_for_account(sb, account_id)
+    try:
+        await instance_lifecycle.tear_down_account(account_id)
+    except Exception as e:
+        logger.exception("Tearing down account %s failed; its rows are kept", account_id)
+        detail = f"Failed to cancel billing or uninstall instances; nothing was deleted: {e!s}"
+        raise HTTPException(status_code=500, detail=detail) from e
 
-    # 2. Deprovision all instances
-    for instance in instances:
-        instance_id = instance.get("instance_id")
-        if instance.get("status") not in ["deprovisioned", "terminated"]:
-            logger.info(f"Deprovisioning instance {instance_id} for account {account_id}")
-            try:
-                await provisioner_service.uninstall_instance(instance_id)
-            except Exception as e:
-                logger.error(f"Failed to deprovision instance {instance_id}: {e}")
-                # Continue with other instances even if one fails
-
-    # 3. Cancel any active Stripe subscriptions
-    if account.get("stripe_customer_id"):
-        try:
-            # List and cancel all subscriptions for this customer
-            subscriptions = stripe.Subscription.list(customer=account["stripe_customer_id"], status="active")
-            for subscription in subscriptions.data:
-                logger.info(f"Canceling Stripe subscription {subscription.id}")
-                stripe.Subscription.cancel(subscription.id)
-
-            # Delete the Stripe customer (optional - you may want to keep for records)
-            # stripe.Customer.delete(account["stripe_customer_id"])
-
-        except Exception as e:
-            logger.error(f"Failed to cancel Stripe subscriptions: {e}")
-            # Continue with deletion even if Stripe fails
-
-    # 4. Delete the account (cascade deletion will handle related records)
+    # 2. Delete the account (cascade deletion will handle related records)
     try:
         sb.table("accounts").delete().eq("id", account_id).execute()
 

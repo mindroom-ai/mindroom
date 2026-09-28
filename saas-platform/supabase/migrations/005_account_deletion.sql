@@ -1,4 +1,5 @@
--- Account deletion changes only the account, and each subscription owns at most one instance.
+-- Account deletion changes only the account, can be cancelled only until cleanup claims it, and keeps
+-- payment and webhook records without their account link.
 -- Fresh installs get the same schema from 000_consolidated_complete_schema.sql.
 --
 -- Safe to paste into the Supabase SQL editor: it runs in one transaction and every
@@ -6,12 +7,35 @@
 
 BEGIN;
 
+-- Set once the nightly cleanup starts tearing a deleted account down; from then on it can no longer be restored.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS hard_delete_started_at TIMESTAMPTZ NULL;
+
+-- Payment records and webhook idempotency keys outlive the account; only their account link goes,
+-- like audit_logs. Drop every existing account foreign key on them, whatever an older schema named it.
+DO $$
+DECLARE
+    account_fk RECORD;
+BEGIN
+    FOR account_fk IN
+        SELECT conrelid::regclass AS table_name, conname FROM pg_constraint
+        WHERE contype = 'f'
+            AND confrelid = 'accounts'::regclass
+            AND conrelid IN ('payments'::regclass, 'webhook_events'::regclass)
+    LOOP
+        EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', account_fk.table_name, account_fk.conname);
+    END LOOP;
+END$$;
+ALTER TABLE payments
+    ADD CONSTRAINT payments_account_id_fkey FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL;
+ALTER TABLE webhook_events
+    ADD CONSTRAINT webhook_events_account_id_fkey FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL;
+
 -- Soft delete and restore no longer rewrite subscription or instance status.
--- The backend cancels Stripe billing and the instance lifecycle stops the account's instances
--- when deletion is requested; restoring the account resumes them only while Stripe or the
--- lifecycle says the subscription is entitled. Restore is refused after the 7-day grace period,
--- because cleanup then uninstalls the account's instances before deleting its rows, and it only
--- undoes what soft delete set, so a suspension that lands meanwhile is never lifted.
+-- The backend lets Stripe billing end with the paid period and the instance lifecycle stops the account's
+-- instances when deletion is requested; restoring the account resumes them only while Stripe or the
+-- lifecycle says the subscription is entitled. Restore is refused after the 7-day grace period and once
+-- cleanup claimed the account, because cleanup then uninstalls the account's instances before deleting its
+-- rows, and it only undoes what soft delete set, so a suspension that lands meanwhile is never lifted.
 CREATE OR REPLACE FUNCTION soft_delete_account(
     target_account_id UUID,
     reason TEXT DEFAULT 'user_request',
@@ -67,7 +91,8 @@ BEGIN
     -- Only what soft delete set is undone; a suspended account stays suspended and pending deletion.
     AND status = 'deleted'
     -- After the grace period, cleanup may already have uninstalled everything the account ran.
-    AND deleted_at > NOW() - INTERVAL '7 days';
+    AND deleted_at > NOW() - INTERVAL '7 days'
+    AND hard_delete_started_at IS NULL;
 
     IF NOT FOUND THEN
         RETURN FALSE;
@@ -90,12 +115,32 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 REVOKE EXECUTE ON FUNCTION restore_account(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION restore_account(UUID) TO service_role;
 
--- Hard delete only an account still pending deletion, so a restored account keeps its rows.
+-- Claim an account whose grace period ended for teardown, using the database clock like restore_account.
+-- A claimed account can no longer be restored, and it stays claimed so a failed teardown is simply retried.
+CREATE OR REPLACE FUNCTION claim_account_hard_delete(
+    target_account_id UUID
+) RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE accounts
+    SET hard_delete_started_at = COALESCE(hard_delete_started_at, NOW())
+    WHERE id = target_account_id
+    AND deleted_at IS NOT NULL
+    AND deleted_at <= NOW() - INTERVAL '7 days';
+    RETURN FOUND;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+REVOKE EXECUTE ON FUNCTION claim_account_hard_delete(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION claim_account_hard_delete(UUID) TO service_role;
+
+-- Hard delete only an account cleanup claimed, so a restored account keeps its rows.
 CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id AND deleted_at IS NOT NULL) THEN
+    IF NOT EXISTS (
+        SELECT 1 FROM accounts WHERE id = target_account_id AND hard_delete_started_at IS NOT NULL
+    ) THEN
         RETURN;
     END IF;
 
@@ -118,21 +163,5 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- One instance per subscription, enforced by the database so concurrent provision requests on
--- different backend replicas cannot both insert. If this fails because a subscription already has
--- several instance rows, resolve them first: each row maps to a live Helm release and OpenRouter key.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'instances'::regclass AND conname = 'instances_subscription_id_key'
-    ) THEN
-        ALTER TABLE instances ADD CONSTRAINT instances_subscription_id_key UNIQUE (subscription_id);
-    END IF;
-END$$;
-
--- The unique constraint's index replaces the plain lookup index.
-DROP INDEX IF EXISTS idx_instances_subscription_id;
 
 COMMIT;

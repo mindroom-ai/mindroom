@@ -25,6 +25,12 @@ class TestInstancesEndpoints:
             mock.return_value = sb
             yield sb
 
+    @pytest.fixture(autouse=True)
+    def account_not_pending_deletion(self):
+        """These tests use accounts that are not pending deletion; test_instance_lifecycle covers the refusal."""
+        with patch("backend.services.instance_lifecycle.account_may_run_instances", return_value=True):
+            yield
+
     @pytest.fixture
     def mock_verify_user(self):
         """Mock user verification."""

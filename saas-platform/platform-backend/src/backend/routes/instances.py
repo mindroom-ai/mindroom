@@ -172,6 +172,12 @@ async def list_user_instances(
     return {"instances": enhanced_instances}
 
 
+def _assert_account_may_run_instances(account_id: str) -> None:
+    """Refuse to run instances for an account pending deletion, whatever its subscription says."""
+    if not instance_lifecycle.account_may_run_instances(ensure_supabase(), account_id):
+        raise HTTPException(status_code=409, detail="This account is pending deletion and cannot run instances")
+
+
 def _existing_instance_response(existing: dict[str, Any], message: str, *, success: bool = True) -> dict[str, Any]:
     """Return provision-route metadata for an instance that already exists."""
     return {
@@ -203,6 +209,7 @@ async def provision_user_instance(
     if subscription is None:
         raise HTTPException(status_code=404, detail="No subscription found")
     assert_instance_entitlement(subscription, "provision")
+    _assert_account_may_run_instances(account_id)
 
     inst_result = (
         sb.table("instances")
@@ -275,6 +282,7 @@ async def _verify_instance_ownership_and_run(
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")
         assert_instance_entitlement(sub_result.data[0], "run")
+        _assert_account_may_run_instances(user["account_id"])
         if instance.get("lifecycle_stopped_at"):
             # Resuming also re-enables the OpenRouter key and clears the teardown schedule.
             summary = await instance_lifecycle.reconcile_subscription_instances(instance["subscription_id"])

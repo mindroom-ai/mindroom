@@ -113,8 +113,9 @@ _RESOURCE_PROFILE_HELM_VALUES = {
 }
 
 _INSTANCES_NAMESPACE = "mindroom-instances"
-# PostgreSQL unique_violation, raised when a second instance row is inserted for one subscription.
+# PostgreSQL unique_violation of the constraint that allows one instance per subscription (migration 007).
 _UNIQUE_VIOLATION = "23505"
+_ONE_INSTANCE_PER_SUBSCRIPTION = "instances_subscription_id_key"
 _QUANTITY = re.compile(r"(\d+(?:\.\d+)?)([KMGTPE]i|[kMGTPE])?")
 _QUANTITY_FACTORS = {
     **{suffix: 1024**power for power, suffix in enumerate(("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei"))},
@@ -128,10 +129,10 @@ def _env_flag_enabled(value: str) -> bool:
 
 
 async def _background_mark_running_when_ready(instance_id: str, namespace: str = _INSTANCES_NAMESPACE) -> None:
-    """Background task: wait longer and mark instance running when ready."""
+    """Background task: wait longer and mark instance running when ready, unless the lifecycle held it meanwhile."""
     try:
         ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
-        if ready:
+        if ready and not _held_by_lifecycle(ensure_supabase(), instance_id):
             try:
                 update_instance(ensure_supabase(), instance_id, {"status": "running"})
             except Exception:
@@ -700,7 +701,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         except HTTPException:
             raise
         except Exception as e:
-            if isinstance(e, PostgrestAPIError) and e.code == _UNIQUE_VIOLATION:
+            if (
+                isinstance(e, PostgrestAPIError)
+                and e.code == _UNIQUE_VIOLATION
+                and _ONE_INSTANCE_PER_SUBSCRIPTION in (e.message or "")
+            ):
                 # A concurrent request inserted this subscription's instance first; the database allows only one.
                 raise HTTPException(status_code=409, detail="This subscription already has an instance") from e
             logger.exception("Failed to insert instance")
@@ -907,24 +912,25 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         _mark_instance_provision_error(sb, customer_id, "deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
 
-    if existing_instance_row.get("lifecycle_stopped_at") and not resume_lifecycle_hold:
-        await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
-        )
-        held_row = get_instance(sb, customer_id, columns="instance_id,openrouter_key_hash") or {}
-        await set_instance_openrouter_key_disabled(held_row, disabled=True)
-        update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
-        return {
-            "customer_id": customer_id,
-            "frontend_url": frontend_url,
-            "api_url": api_url,
-            "matrix_url": matrix_url,
-            "success": True,
-            "message": "Instance redeployed but kept stopped because its subscription is inactive",
-        }
+    held_response = {
+        "customer_id": customer_id,
+        "frontend_url": frontend_url,
+        "api_url": api_url,
+        "matrix_url": matrix_url,
+        "success": True,
+        "message": "Instance redeployed but kept stopped because its subscription or account cannot run it",
+    }
+    # The lifecycle holds instances without the provisioning request knowing, and Helm just set every replica back
+    # to one, so a hold that exists now, or lands during the readiness wait, keeps the instance stopped.
+    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+        await _keep_held_instance_stopped(sb, customer_id, tier)
+        return held_response
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
+    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+        await _keep_held_instance_stopped(sb, customer_id, tier)
+        return held_response
     try:
         # The tier is recorded only once deployed; the subscription lifecycle redeploys an instance whose tier differs.
         update_instance(sb, customer_id, {"status": "running" if ready else "provisioning", "tier": tier})
@@ -946,6 +952,22 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         "success": True,
         "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
     }
+
+
+def _held_by_lifecycle(sb: Any, instance_id: str | int) -> bool:
+    """Return whether the subscription lifecycle holds the instance right now."""
+    row = get_instance(sb, instance_id, columns="lifecycle_stopped_at") or {}
+    return row.get("lifecycle_stopped_at") is not None
+
+
+async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> None:
+    """Scale a freshly deployed instance the lifecycle holds back to zero with its platform key disabled."""
+    await _scale_tenant_deployments(
+        tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+    )
+    held_row = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
+    await set_instance_openrouter_key_disabled(held_row, disabled=True)
+    update_instance(sb, instance_id, {"status": "stopped", "tier": tier})
 
 
 async def start_instance(instance_id: int) -> dict[str, Any]:

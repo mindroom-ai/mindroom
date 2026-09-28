@@ -1,7 +1,10 @@
 """Stripe payment and subscription routes."""
 
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+import anyio
 from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import UrlResponse
@@ -10,6 +13,28 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
+
+# A trial checkout expires soon (Stripe allows no less than 30 minutes), so a session opened alongside another one
+# cannot be completed much later for a second trial; the subscription-created webhook ends such a trial anyway.
+_TRIAL_CHECKOUT_LIFETIME = timedelta(minutes=31)
+
+
+@dataclass(frozen=True)
+class _CustomerSubscriptions:
+    """What checkout needs from a Stripe customer's subscription history."""
+
+    running_subscription_id: str | None  # An active or trialing subscription, managed through the portal instead
+    had_trial: bool
+
+
+def _customer_subscriptions(customer_id: str) -> _CustomerSubscriptions:
+    running_subscription_id = None
+    had_trial = False
+    for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
+        had_trial = had_trial or sub.trial_start is not None
+        if running_subscription_id is None and sub.status in ["active", "trialing"]:
+            running_subscription_id = sub.id
+    return _CustomerSubscriptions(running_subscription_id, had_trial)
 
 
 class CheckoutRequest(BaseModel):
@@ -45,19 +70,19 @@ async def create_checkout_session(
         sb.table("accounts").update({"stripe_customer_id": customer_id}).eq("id", user["account_id"]).execute()
 
     # Check if customer already has an active subscription, and whether any past one had a trial
-    had_trial = False
-    for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
-        had_trial = had_trial or sub.trial_start is not None
-        if sub.status in ["active", "trialing"]:
-            # Customer already has a subscription - they should use the portal to manage it
-            logger.warning(
-                "Customer %s already has an active subscription %s, redirecting to portal", customer_id, sub.id
-            )
-            # Create a portal session instead
-            portal_session = stripe.billing_portal.Session.create(
-                customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"
-            )
-            return {"url": portal_session.url}
+    history = await anyio.to_thread.run_sync(_customer_subscriptions, customer_id)
+    if history.running_subscription_id is not None:
+        # Customer already has a subscription - they should use the portal to manage it
+        logger.warning(
+            "Customer %s already has an active subscription %s, redirecting to portal",
+            customer_id,
+            history.running_subscription_id,
+        )
+        # Create a portal session instead
+        portal_session = stripe.billing_portal.Session.create(
+            customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"
+        )
+        return {"url": portal_session.url}
 
     checkout_params = {
         "line_items": [{"price": price_id, "quantity": 1}],
@@ -76,8 +101,9 @@ async def create_checkout_session(
     }
 
     # Add trial period if enabled for this plan; each customer gets one trial, since cancelling keeps it in Stripe
-    if is_trial_enabled_for_plan(payload.tier) and not had_trial:
+    if is_trial_enabled_for_plan(payload.tier) and not history.had_trial:
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
+        checkout_params["expires_at"] = int((datetime.now(UTC) + _TRIAL_CHECKOUT_LIFETIME).timestamp())
 
     checkout_params["customer"] = customer_id
 

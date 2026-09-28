@@ -292,6 +292,10 @@ class TestProvisionerEndpoints:
         """Mock Supabase client."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock:
             sb = MagicMock()
+            # Instance lookups by id find no lifecycle hold unless a test says otherwise.
+            sb.table.return_value.select.return_value.eq.return_value.execute.return_value = Mock(
+                data=[{"lifecycle_stopped_at": None}]
+            )
             mock.return_value = sb
             yield sb
 

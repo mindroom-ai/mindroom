@@ -21,9 +21,10 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
     Hard delete accounts that have been soft-deleted for longer than grace period.
     This ensures GDPR compliance while giving users time to recover accounts.
 
-    Each account's hosted instances are uninstalled and its Stripe billing is cancelled before its rows go,
-    because those rows are the only record of what to tear down. An account whose teardown or delete fails
-    keeps its rows, is reported in `errors`, and is retried by the next run.
+    Each account is first claimed, which ends its restore window, then its Stripe billing is cancelled and its
+    hosted instances are uninstalled before its rows go, because those rows are the only record of what to tear
+    down. An account whose teardown or delete fails keeps its rows, is reported in `errors`, and is retried by the
+    next run.
     """
     sb = ensure_supabase()
     cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
@@ -43,6 +44,10 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
     for account in result.data or []:
         account_id = account["id"]
         try:
+            # The claim uses the database clock, like restore_account, so a restore can never land mid-teardown.
+            if not sb.rpc("claim_account_hard_delete", {"target_account_id": account_id}).execute().data:
+                logger.info("Skipping account %s: it was restored or its grace period has not ended", account_id)
+                continue
             await tear_down_account(account_id)
             sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
         except Exception as exc:

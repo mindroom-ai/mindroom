@@ -56,12 +56,18 @@ def mock_supabase():
 
 @pytest.fixture
 def mock_lifecycle():
-    """Stub the instance lifecycle steps the deletion routes run after their RPC."""
+    """Stub the Stripe billing and instance lifecycle steps around the deletion RPCs; every step succeeds."""
+    lifecycle = "backend.routes.gdpr.instance_lifecycle"
     with (
-        patch("backend.routes.gdpr.instance_lifecycle.cancel_account_billing", new=AsyncMock()) as cancel_billing,
-        patch("backend.routes.gdpr.instance_lifecycle.reconcile_account_instances", new=AsyncMock()) as reconcile,
+        patch(f"{lifecycle}.end_account_billing_at_period_end", new=AsyncMock()) as end_billing,
+        patch(f"{lifecycle}.resume_account_billing", new=AsyncMock()) as resume_billing,
+        patch(f"{lifecycle}.reconcile_account_instances", new=AsyncMock(return_value=[])) as reconcile,
     ):
-        yield MagicMock(cancel_account_billing=cancel_billing, reconcile_account_instances=reconcile)
+        yield MagicMock(
+            end_account_billing_at_period_end=end_billing,
+            resume_account_billing=resume_billing,
+            reconcile_account_instances=reconcile,
+        )
 
 
 def _function_body(sql: str, name: str) -> str:
@@ -71,9 +77,10 @@ def _function_body(sql: str, name: str) -> str:
 
 
 def test_account_deletion_functions_change_only_the_account() -> None:
-    """Soft delete and restore change only the account, restore ends with the grace period and never lifts a
-    suspension, and hard delete spares a restored account."""
-    migration = (MIGRATIONS_DIR / "005_account_deletion_and_instance_uniqueness.sql").read_text(encoding="utf-8")
+    """Soft delete and restore change only the account, restore ends with the grace period or a cleanup claim and
+    never lifts a suspension, and hard delete only removes a claimed account.
+    """
+    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
     baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
 
     assert migration.lstrip().startswith("--")
@@ -87,6 +94,7 @@ def test_account_deletion_functions_change_only_the_account() -> None:
             assert "instances" not in body
         restore = _function_body(sql, "restore_account")
         assert "AND deleted_at > NOW() - INTERVAL '7 days'" in restore
+        assert "AND hard_delete_started_at IS NULL;" in restore
         assert "RETURN FALSE;" in restore
         assert "RETURN TRUE;" in restore
         assert re.search(r"FUNCTION restore_account\(\s*target_account_id UUID\s*\) RETURNS BOOLEAN", sql)
@@ -95,7 +103,27 @@ def test_account_deletion_functions_change_only_the_account() -> None:
         assert "status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END" in _function_body(
             sql, "soft_delete_account"
         )
-        assert "deleted_at IS NOT NULL) THEN" in _function_body(sql, "hard_delete_account")
+        assert "hard_delete_started_at IS NOT NULL" in _function_body(sql, "hard_delete_account")
+        claim = _function_body(sql, "claim_account_hard_delete")
+        assert "AND deleted_at <= NOW() - INTERVAL '7 days';" in claim
+        assert "RETURN FOUND;" in claim
+
+
+def test_hard_delete_keeps_payment_and_webhook_records_without_their_account_link() -> None:
+    """Every subscriber has payment or webhook rows, so they must not block the account's hard delete."""
+    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
+    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
+
+    for table in ("payments", "webhook_events"):
+        assert re.search(
+            rf"CREATE TABLE {table} \(.*?account_id UUID REFERENCES accounts\(id\) ON DELETE SET NULL",
+            baseline,
+            re.DOTALL,
+        ), table
+        assert (
+            f"ADD CONSTRAINT {table}_account_id_fkey FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL"
+            in migration
+        ), table
 
 
 def test_delete_and_cancel_round_trip_never_makes_an_unpaid_subscription_provisionable() -> None:
@@ -250,13 +278,14 @@ class TestGDPREndpoints:
         mock_rpc.execute.return_value = MagicMock(data=None)
         mock_supabase.rpc.return_value = mock_rpc
 
-        async def cancel_billing_before_soft_delete(_account_id: str) -> None:
+        async def end_billing_before_soft_delete(_account_id: str) -> None:
             mock_rpc.execute.assert_not_called()
 
-        async def hold_after_soft_delete(_account_id: str) -> None:
+        async def hold_after_soft_delete(_account_id: str) -> list[str]:
             mock_rpc.execute.assert_called_once_with()
+            return []
 
-        mock_lifecycle.cancel_account_billing.side_effect = cancel_billing_before_soft_delete
+        mock_lifecycle.end_account_billing_at_period_end.side_effect = end_billing_before_soft_delete
         mock_lifecycle.reconcile_account_instances.side_effect = hold_after_soft_delete
 
         response = client.post(
@@ -281,24 +310,54 @@ class TestGDPREndpoints:
                 "requested_by": mock_user["account_id"],
             },
         )
-        # Billing ends before the account is marked pending deletion, and its instances are held after.
-        mock_lifecycle.cancel_account_billing.assert_awaited_once_with(mock_user["account_id"])
+        # Billing is set to end with its period before the account is marked pending deletion; instances stop after.
+        mock_lifecycle.end_account_billing_at_period_end.assert_awaited_once_with(mock_user["account_id"])
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
-        assert "cancelled" in data["message"]
+        assert "Your hosted instances were stopped." in data["message"]
+        assert "end at the end of their current billing period" in data["message"]
 
-    def test_request_deletion_changes_nothing_when_stripe_cannot_cancel(
+    def test_request_deletion_reports_instances_that_could_not_be_stopped(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """The deletion is recorded, and the message says the stop failed instead of claiming it happened."""
+        mock_lifecycle.reconcile_account_instances.return_value = ["instance 7: kubectl scale failed"]
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 200
+        assert "Stopping your hosted instances failed and is retried automatically." in response.json()["message"]
+
+    def test_request_deletion_changes_nothing_when_stripe_cannot_schedule_the_end_of_billing(
         self, client, mock_verify_user, mock_supabase, mock_lifecycle
     ):
         """A Stripe failure is reported before the soft delete, so the request can simply be retried."""
-        mock_lifecycle.cancel_account_billing.side_effect = stripe.APIConnectionError("stripe unavailable")
+        mock_lifecycle.end_account_billing_at_period_end.side_effect = stripe.APIConnectionError("stripe unavailable")
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
         )
 
         assert response.status_code == 502
-        assert "nothing was deleted" in response.json()["detail"]
+        assert "your account was not deleted" in response.json()["detail"]
         mock_supabase.rpc.assert_not_called()
+        mock_supabase.table.assert_not_called()
+        mock_lifecycle.reconcile_account_instances.assert_not_awaited()
+
+    def test_failed_soft_delete_resumes_the_billing_it_had_scheduled_to_end(
+        self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
+    ):
+        """If the deletion cannot be recorded, billing goes back to renewing, so the request changed nothing."""
+        mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Your account was not deleted and your billing is unchanged. Try again."
+        mock_lifecycle.resume_account_billing.assert_awaited_once_with(mock_user["account_id"])
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
     def test_cancel_deletion(self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle):
@@ -331,8 +390,28 @@ class TestGDPREndpoints:
         mock_supabase.rpc.assert_called_once_with("restore_account", {"target_account_id": mock_user["account_id"]})
         mock_rpc.execute.assert_called_once_with()
         mock_supabase.table.assert_called_once_with("accounts")
-        # Held instances resume only when their subscription is entitled.
+        # Billing the deletion set to end renews again, and held instances resume only when their subscription is
+        # entitled.
+        mock_lifecycle.resume_account_billing.assert_awaited_once_with(mock_user["account_id"])
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
+        assert "Stripe could not resume" not in data["message"]
+
+    def test_cancel_deletion_reports_billing_stripe_could_not_resume(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """The account is restored either way; the message says the subscription still ends if Stripe failed."""
+        deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+        mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=True)
+        mock_lifecycle.resume_account_billing.side_effect = stripe.APIConnectionError("stripe unavailable")
+        mock_lifecycle.reconcile_account_instances.return_value = ["instance 7: helm failed"]
+
+        response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
+
+        assert response.status_code == 200
+        message = response.json()["message"]
+        assert "still ends at the end of its billing period" in message
+        assert "Restarting your hosted instances failed and is retried automatically." in message
 
     def test_cancel_deletion_reports_a_restore_the_database_refused(
         self, client, mock_verify_user, mock_supabase, mock_lifecycle
@@ -348,6 +427,7 @@ class TestGDPREndpoints:
         mock_supabase.rpc.assert_called_once_with(
             "restore_account", {"target_account_id": "00000000-0000-0000-0000-000000000002"}
         )
+        mock_lifecycle.resume_account_billing.assert_not_awaited()
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):

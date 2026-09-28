@@ -51,6 +51,7 @@ CREATE TABLE accounts (
     deletion_reason TEXT NULL,
     deletion_requested_by UUID NULL,
     deletion_requested_at TIMESTAMPTZ NULL,
+    hard_delete_started_at TIMESTAMPTZ NULL, -- Set once cleanup claims the account; it can no longer be restored
 
     -- Consent tracking (GDPR)
     consent_marketing BOOLEAN DEFAULT FALSE,
@@ -185,7 +186,7 @@ CREATE INDEX idx_usage_metrics_subscription_date ON usage_metrics(subscription_i
 -- ============================================================================
 CREATE TABLE payments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID REFERENCES accounts(id), -- For tenant isolation
+    account_id UUID REFERENCES accounts(id) ON DELETE SET NULL, -- For tenant isolation; kept after account deletion
     invoice_id TEXT UNIQUE,
     subscription_id TEXT,
     customer_id TEXT,
@@ -204,7 +205,7 @@ CREATE INDEX idx_payments_account_id ON payments(account_id);
 -- ============================================================================
 CREATE TABLE webhook_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID REFERENCES accounts(id), -- For tenant isolation
+    account_id UUID REFERENCES accounts(id) ON DELETE SET NULL, -- For tenant isolation; kept after account deletion
     stripe_event_id TEXT UNIQUE NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -409,7 +410,8 @@ BEGIN
     -- Only what soft delete set is undone; a suspended account stays suspended and pending deletion.
     AND status = 'deleted'
     -- After the grace period, cleanup may already have uninstalled everything the account ran.
-    AND deleted_at > NOW() - INTERVAL '7 days';
+    AND deleted_at > NOW() - INTERVAL '7 days'
+    AND hard_delete_started_at IS NULL;
 
     IF NOT FOUND THEN
         RETURN FALSE;
@@ -429,13 +431,30 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- Claim an account whose grace period ended for teardown, using the database clock like restore_account.
+-- A claimed account can no longer be restored, and it stays claimed so a failed teardown is simply retried.
+CREATE OR REPLACE FUNCTION claim_account_hard_delete(
+    target_account_id UUID
+) RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE accounts
+    SET hard_delete_started_at = COALESCE(hard_delete_started_at, NOW())
+    WHERE id = target_account_id
+    AND deleted_at IS NOT NULL
+    AND deleted_at <= NOW() - INTERVAL '7 days';
+    RETURN FOUND;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 -- Hard delete function (for permanent deletion after grace period)
 CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
-    -- Only an account still pending deletion is deleted, so a restored account keeps its rows.
-    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id AND deleted_at IS NOT NULL) THEN
+    -- Only an account cleanup claimed is deleted, so a restored account keeps its rows.
+    IF NOT EXISTS (
+        SELECT 1 FROM accounts WHERE id = target_account_id AND hard_delete_started_at IS NOT NULL
+    ) THEN
         RETURN;
     END IF;
 
@@ -578,6 +597,7 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
 GRANT EXECUTE ON FUNCTION is_admin() TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION soft_delete_account TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
+GRANT EXECUTE ON FUNCTION claim_account_hard_delete TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 
 GRANT ALL ON TABLE accounts TO service_role;

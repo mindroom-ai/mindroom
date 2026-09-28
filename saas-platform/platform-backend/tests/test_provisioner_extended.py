@@ -31,6 +31,10 @@ class TestProvisionerExtended:
         """Mock Supabase client."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock:
             sb = MagicMock()
+            # Instance lookups by id find no lifecycle hold unless a test says otherwise.
+            sb.table.return_value.select.return_value.eq.return_value.execute.return_value = Mock(
+                data=[{"lifecycle_stopped_at": None}]
+            )
             mock.return_value = sb
             yield sb
 
@@ -64,6 +68,7 @@ class TestProvisionerExtended:
                 mock_db = MagicMock()
                 mock_sb.return_value = mock_db
                 mock_db.table().update().eq().execute.return_value = Mock()
+                mock_db.table().select().eq().execute.return_value = Mock(data=[{"lifecycle_stopped_at": None}])
 
                 await _background_mark_running_when_ready("test-instance", "test-ns")
 
@@ -71,6 +76,25 @@ class TestProvisionerExtended:
                 mock_db.table.assert_called_with("instances")
                 update_call = mock_db.table().update.call_args[0][0]
                 assert update_call["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_background_readiness_leaves_an_instance_the_lifecycle_held_meanwhile(self):
+        """A hold that lands while the deployment gets ready keeps the instance stopped."""
+        from backend.services.provisioner_service import _background_mark_running_when_ready
+
+        with (
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", return_value=True),
+            patch("backend.services.provisioner_service.ensure_supabase") as mock_sb,
+        ):
+            mock_db = MagicMock()
+            mock_sb.return_value = mock_db
+            mock_db.table().select().eq().execute.return_value = Mock(
+                data=[{"lifecycle_stopped_at": "2026-09-28T03:00:00+00:00"}]
+            )
+
+            await _background_mark_running_when_ready("test-instance", "test-ns")
+
+            mock_db.table().update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_background_mark_running_when_ready_not_ready(self):

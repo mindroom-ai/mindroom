@@ -135,6 +135,29 @@ def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) ->
     return rows[0]["account_id"] if rows else None
 
 
+def _end_repeated_trial(subscription: dict) -> dict:
+    """Return the subscription to store, with its trial ended when the customer had an earlier trial.
+
+    Checkout grants one trial per customer, but checkout sessions opened side by side can each carry one; only the
+    earliest trial is kept, so two parallel checkouts never both lose theirs.
+    """
+    if subscription.get("trial_start") is None:
+        return subscription
+    order = (subscription["created"], subscription["id"])
+    history = stripe.Subscription.list(customer=subscription["customer"], status="all", limit=100).auto_paging_iter()
+    if not any(other.trial_start is not None and (other.created, other.id) < order for other in history):
+        return subscription
+    current = stripe.Subscription.retrieve(subscription["id"])
+    if current["status"] != "trialing":
+        return current
+    logger.warning(
+        "Ending the trial of Stripe subscription %s: customer %s already had one",
+        subscription["id"],
+        subscription["customer"],
+    )
+    return stripe.Subscription.modify(subscription["id"], trial_end="now")
+
+
 def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     """Handle Stripe subscription creation events.
 
@@ -154,8 +177,6 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         return False, None
 
     account_id = account_result.data["id"]
-    subscription_data = _subscription_fields(subscription)
-    subscription_data["account_id"] = account_id
 
     # Check if subscription already exists for this account
     existing = sb.table("subscriptions").select("id,stripe_subscription_id").eq("account_id", account_id).execute()
@@ -169,6 +190,8 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
             )
             return True, account_id
 
+    subscription_data = _subscription_fields(_end_repeated_trial(subscription))
+    subscription_data["account_id"] = account_id
     if existing.data:
         # Update existing subscription
         sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
