@@ -68,7 +68,8 @@ class _PendingConfigChange:
     room_id: str
     thread_id: str | None
     config_path: str
-    old_value: Any
+    # Persisted in room state that every member can read, so it never holds a credential;
+    # handle_config_command refuses credential-bearing values before a preview exists.
     new_value: Any
     requester: str  # User who requested the change
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -90,7 +91,6 @@ class _PendingConfigChange:
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "config_path": self.config_path,
-            "old_value": self.old_value,
             "new_value": self.new_value,
             "requester": self.requester,
             "created_at": self.created_at.isoformat(),
@@ -110,7 +110,6 @@ class _PendingConfigChange:
             room_id=data["room_id"],
             thread_id=data.get("thread_id"),
             config_path=data["config_path"],
-            old_value=data["old_value"],
             new_value=data["new_value"],
             requester=data["requester"],
             created_at=created_at,
@@ -511,7 +510,6 @@ async def ensure_pending_change(
     room_id: str,
     thread_id: str | None,
     config_path: str,
-    old_value: Any,  # noqa: ANN401
     new_value: Any,  # noqa: ANN401
     requester: str,
 ) -> None:
@@ -529,7 +527,6 @@ async def ensure_pending_change(
             room_id=room_id,
             thread_id=thread_id,
             config_path=config_path,
-            old_value=old_value,
             new_value=new_value,
             requester=requester,
         )

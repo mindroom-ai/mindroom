@@ -329,7 +329,7 @@ Changes are validated against the Pydantic config schema before applying.
 !config get agents.analyst.display_name
 ```
 
-Shown values are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
+Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
 
 **Modify configuration:**
 
@@ -357,6 +357,8 @@ When you use `!config set`, MindRoom:
 
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
+Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores only the path, the new value, and the decision, never the current value.
+`!config set` therefore refuses any new value that redaction would mask; set credentials in the configuration file or the dashboard instead.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.

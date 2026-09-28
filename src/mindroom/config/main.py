@@ -1154,12 +1154,7 @@ class Config(BaseModel):
 
     def redacted_authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config for display, masking schema-marked secrets and credential-named keys."""
-        masked = redact_secret_hinted_values(
-            self.authored_model_dump(),
-            dashboard_config_schema(),
-            replacement=REDACTED,
-        )
-        return cast("dict[str, Any]", redact_sensitive_data(masked))
+        return redact_authored_config(self.authored_model_dump())
 
     def with_runtime_knowledge_base_overlay(
         self,
@@ -2030,6 +2025,12 @@ class Config(BaseModel):
 def dashboard_config_schema() -> dict[str, Any]:
     """Return the Config JSON schema with dashboard hints and default-factory values."""
     return Config.model_json_schema(schema_generator=DashboardJsonSchema)
+
+
+def redact_authored_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mask schema-marked secret fields and credential-named keys in one authored config payload."""
+    masked = redact_secret_hinted_values(payload, dashboard_config_schema(), replacement=REDACTED)
+    return cast("dict[str, Any]", redact_sensitive_data(masked))
 
 
 def failed_config_source_fingerprint(exc: BaseException) -> str | None:

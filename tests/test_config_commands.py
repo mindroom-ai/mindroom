@@ -79,7 +79,6 @@ def _pending_config_change(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester=requester,
     )
@@ -751,7 +750,6 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     )
     change_info = {
         "config_path": "defaults.markdown",
-        "old_value": True,
         "new_value": False,
     }
     with (
@@ -778,7 +776,6 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         room_id="!room:example.org",
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@alice:example.org",
     )
@@ -822,7 +819,6 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
     )
     change_info = {
         "config_path": "defaults.markdown",
-        "old_value": True,
         "new_value": False,
     }
 
@@ -1175,7 +1171,6 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         room_id=room_id,
         thread_id="$thread",
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
@@ -1256,7 +1251,6 @@ async def test_confirmation_send_failure_keeps_replay_state(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
@@ -1400,7 +1394,6 @@ async def test_config_preview_recovery_preserves_committed_decision(
             room_id=pending_change.room_id,
             thread_id=None,
             config_path="defaults.markdown",
-            old_value=False,
             new_value=True,
             requester="@other:example.org",
         )
@@ -1422,7 +1415,6 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
@@ -1659,9 +1651,7 @@ async def test_handle_config_command_masks_schema_secret_fields(tmp_path: Path, 
     assert "sentinel" not in response
 
 
-@pytest.mark.asyncio
-async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path: Path) -> None:
-    """Config set preview should redact old and new sensitive leaf values."""
+def _write_config_with_secrets(tmp_path: Path) -> Path:
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -1670,28 +1660,81 @@ async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path:
                     "default": {
                         "provider": "openai",
                         "id": "gpt-6-astra",
-                        "api_key": "sk-old-config-secret",
+                        "api_key": "sk-old-config-sentinel",
                     },
                 },
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "mcp_servers": {
+                    "home": {
+                        "transport": "stdio",
+                        "command": "mcp-home",
+                        "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
+                    },
+                },
             },
         ),
         encoding="utf-8",
     )
+    return config_path
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "set models.default.api_key sk-new-config-sentinel",
+        "set mcp_servers.home.env {HOMEASSISTANT_TOKEN: new-env-sentinel}",
+        "set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}",
+    ],
+)
+async def test_handle_config_command_set_refuses_credential_values(tmp_path: Path, command: str) -> None:
+    """A pending set lives in readable room state, so credential values are refused before any preview."""
+    config_path = _write_config_with_secrets(tmp_path)
+    original = config_path.read_text(encoding="utf-8")
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert "holds credentials" in response
+    assert "sentinel" not in response
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_config_set_pending_state_carries_no_current_secret(tmp_path: Path) -> None:
+    """Replacing a secret-bearing field must not publish its current value in the pending room state."""
+    config_path = _write_config_with_secrets(tmp_path)
     response, change_info = await handle_config_command(
-        "set models.default.api_key sk-new-config-secret",
+        "set mcp_servers.home.env {}",
         _runtime_paths_for_config(config_path),
     )
-
     assert change_info is not None
-    assert "Configuration Change Preview" in response
-    assert "***redacted***" in response
-    assert "sk-old-config-secret" not in response
-    assert "sk-new-config-secret" not in response
-    assert change_info["old_value"] == "sk-old-config-secret"
-    assert change_info["new_value"] == "sk-new-config-secret"
+    assert "sentinel" not in response
+
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            requester="@admin:example.org",
+        )
+
+    persisted = client.room_put_state.await_args.kwargs["content"]
+    assert persisted["new_value"] == {}
+    assert "old_value" not in persisted
+    assert "sentinel" not in json.dumps(persisted)
 
 
 @pytest.mark.asyncio
@@ -1976,9 +2019,9 @@ class TestConfigCommandHandling:
             assert change_info is not None  # set command should return change info for confirmation
             assert "Configuration Change Preview" in response
             assert "New Name" in response
-            # Verify the change_info contains the correct values
-            assert change_info["old_value"] == "Old Name"
+            # Verify the change_info carries the new value but never the current one
             assert change_info["new_value"] == "New Name"
+            assert "old_value" not in change_info
         finally:
             config_path.unlink()
 
