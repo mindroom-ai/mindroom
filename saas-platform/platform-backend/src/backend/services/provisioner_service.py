@@ -666,7 +666,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         raise HTTPException(status_code=503, detail=error_msg) from None
     except Exception as e:
         logger.warning("Could not create namespace (may already exist): %s", e)
-    await _enforce_pod_security_baseline(namespace)
 
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
@@ -707,6 +706,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             await _existing_instance_storage_class_name(customer_id, namespace)
         ) or INSTANCE_STORAGE_CLASS_NAME
     try:
+        await _enforce_pod_security_baseline(namespace)
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
             account_id=account_id,

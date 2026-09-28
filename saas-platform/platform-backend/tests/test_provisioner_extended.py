@@ -230,7 +230,7 @@ class TestProvisionerExtended:
     def test_provision_stops_when_the_tenant_namespace_cannot_be_labeled(
         self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
     ):
-        """Without enforced Pod Security, no tenant workload may be deployed."""
+        """Without enforced Pod Security, no tenant workload is deployed and the instance can be retried."""
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
         mock_kubectl.side_effect = lambda args, **_kwargs: (1, "", "forbidden") if args[0] == "label" else (0, "", "")
@@ -244,6 +244,8 @@ class TestProvisionerExtended:
         assert response.status_code == 500
         assert "Pod Security" in response.json()["detail"]
         mock_helm.assert_not_called()
+        updates = [call.args[0] for call in mock_supabase.table().update.call_args_list]
+        assert updates[-1]["status"] == "error"
 
     def test_provision_url_update_failure(
         self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
