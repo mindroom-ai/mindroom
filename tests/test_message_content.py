@@ -1,8 +1,9 @@
 """Tests for centralized message content extraction with large message support."""
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -33,8 +34,15 @@ from mindroom.matrix.visible_body import (
     visible_body_from_event_source,
     visible_content_from_content,
 )
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    bind_runtime_paths,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
 
 def _trusted_entity_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -87,23 +95,22 @@ async def test_sidecar_chain_preserves_full_content_and_event_relation(ending: s
         "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged"},
     }
     client = _make_client()
-    final_response = nio.DownloadResponse(
-        json.dumps(terminal if ending == "complete" else first).encode(),
-        "application/json",
-        None,
-    )
+    final_payload: bytes | None = json.dumps(terminal if ending == "complete" else first).encode()
     if ending == "missing":
-        final_response = nio.DownloadError("M_NOT_FOUND")
+        final_payload = None
     elif ending == "invalid":
-        final_response = nio.DownloadResponse(b"not JSON", "application/json", None)
-    client.download.side_effect = [
-        nio.DownloadResponse(json.dumps({"m.new_content": second}).encode(), "application/json", None),
-        final_response,
+        final_payload = b"not JSON"
+    client.send.side_effect = [
+        media_response(json.dumps({"m.new_content": second}).encode()),
+        media_response(final_payload),
     ]
 
     resolved = await resolve_event_source_content(source, client)
 
-    assert client.download.await_count == 2
+    assert [requested_mxc(call.args[1]) for call in client.send.await_args_list] == [
+        "mxc://server/first",
+        "mxc://server/second",
+    ]
     assert resolved["content"]["m.relates_to"] == relation
     if ending == "complete":
         assert resolved["content"] == {**terminal, "m.relates_to": relation}
@@ -123,11 +130,9 @@ async def test_sidecar_chain_has_a_bounded_download_budget() -> None:
         }
 
     client = _make_client()
-    client.download.side_effect = [
-        nio.DownloadResponse(json.dumps(preview(index)).encode(), "application/json", None) for index in range(1, 10)
-    ]
+    client.send.side_effect = [media_response(json.dumps(preview(index)).encode()) for index in range(1, 10)]
     resolved = await resolve_event_source_content({"content": preview(0)}, client)
-    assert client.download.await_count == 8
+    assert client.send.await_count == 8
     assert holds_unresolved_sidecar(resolved["content"])
 
 
@@ -190,10 +195,9 @@ class TestResolvedMessageExtraction:
             },
         )
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(original_content).encode("utf-8"),
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(original_content).encode("utf-8"),
             ),
         )
         resolved = await extract_and_resolve_message(event, client)
@@ -233,10 +237,9 @@ class TestResolvedMessageExtraction:
             },
         )
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(canonical_content).encode("utf-8"),
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(canonical_content).encode("utf-8"),
             ),
         )
 
@@ -260,10 +263,9 @@ class TestResolvedMessageExtraction:
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         }
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(canonical_content).encode("utf-8"),
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(canonical_content).encode("utf-8"),
             ),
         )
 
@@ -307,19 +309,19 @@ class TestResolvedMessageExtraction:
             },
         )
         client = _make_client()
-        client.download = AsyncMock()
+        client.send = AsyncMock()
 
         resolved = await extract_and_resolve_message(event, client)
 
         assert resolved["body"] == "Preview body"
         assert resolved["content"]["body"] == "Preview body"
-        client.download.assert_not_called()
+        client.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_edit_body_leaves_legacy_v1_preview_untouched(self) -> None:
         """Unsupported v1 edit sidecars should keep the preview body/content coherent."""
         client = _make_client()
-        client.download = AsyncMock()
+        client.send = AsyncMock()
 
         body, content = await extract_edit_body(
             {
@@ -351,7 +353,7 @@ class TestResolvedMessageExtraction:
             },
             "url": "mxc://server/legacy-edit-sidecar",
         }
-        client.download.assert_not_called()
+        client.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_event_source_content_hydrates_v2_edit_payload(self) -> None:
@@ -367,10 +369,9 @@ class TestResolvedMessageExtraction:
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         }
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(canonical_content).encode("utf-8"),
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(canonical_content).encode("utf-8"),
             ),
         )
 
@@ -406,10 +407,9 @@ class TestResolvedMessageExtraction:
         of which conversation the message joins - a thread nothing about the event agrees with.
         """
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(
                     {
                         "msgtype": "m.text",
                         "body": "Full text",
@@ -451,10 +451,9 @@ class TestResolvedMessageExtraction:
     async def test_hydration_cannot_give_a_relation_free_event_a_relation(self) -> None:
         """An event that relates to nothing still relates to nothing once its text arrives."""
         client = _make_client()
-        client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(
+        client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(
                     {
                         "msgtype": "m.text",
                         "body": "Full text",
@@ -923,27 +922,27 @@ class TestDownloadMxcText:
     @pytest.mark.asyncio
     async def test_successful_download(self) -> None:
         """Test successful text download."""
-        client = AsyncMock()
-        client.user_id = "@alice:localhost"
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"Downloaded text content"
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = media_response(b"Downloaded text content")
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result == "Downloaded text content"
-        client.download.assert_called_once_with(mxc="mxc://server/media123")
+        client.send.assert_awaited_once_with(
+            "GET",
+            "/_matrix/client/v1/media/download/server/media123?allow_remote=true",
+            headers={"Authorization": f"Bearer {TEST_ACCESS_TOKEN}"},
+        )
+        assert client.send.return_value.released
         assert await _download_mxc_text(client, "mxc://server/media123") == "Downloaded text content"
-        assert client.download.await_count == 2
+        assert client.send.await_count == 2
 
     @pytest.mark.asyncio
     async def test_successful_encrypted_download(self) -> None:
         """Encrypted sidecars should use the JWK key value emitted by nio."""
         plaintext = b"Downloaded encrypted text content"
         encrypted, file_info = crypto.attachments.encrypt_attachment(plaintext)
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = encrypted
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = media_response(encrypted)
 
         assert await _download_mxc_text(client, "mxc://server/encrypted", file_info) == plaintext.decode()
 
@@ -956,37 +955,72 @@ class TestDownloadMxcText:
         own invalidation, and one that missed a redaction would serve deleted
         content.
         """
-        client = AsyncMock()
-        client.user_id = "@alice:localhost"
-        first_response = MagicMock(spec=nio.DownloadResponse)
-        first_response.body = b"first"
-        second_response = MagicMock(spec=nio.DownloadResponse)
-        second_response.body = b"second"
-        client.download.side_effect = [first_response, second_response]
+        client = _make_client()
+        client.send.side_effect = [media_response(b"first"), media_response(b"second")]
 
         assert await _download_mxc_text(client, "mxc://server/incomplete") == "first"
         assert await _download_mxc_text(client, "mxc://server/incomplete") == "second"
-        assert client.download.await_count == 2
+        assert client.send.await_count == 2
 
     @pytest.mark.asyncio
     async def test_download_failure(self) -> None:
         """Test handling of download failure."""
-        client = AsyncMock()
-        client.download.return_value = MagicMock(spec=nio.DownloadError)
+        client = _make_client()
+        client.send.return_value = media_response(None)
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result is None
+        assert client.send.return_value.released
 
     @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oversized sidecar bytes should not be decoded."""
         monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"123456"
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = FakeMediaResponse(chunks=[b"123", b"456"])
 
         assert await _download_mxc_text(client, "mxc://server/oversized") is None
+        assert client.send.return_value.released
+
+    @pytest.mark.asyncio
+    async def test_download_rejects_declared_length_over_byte_limit_without_reading(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Content-Length above the limit is refused before any body byte is read."""
+        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
+
+        def unread_body() -> Iterator[bytes]:
+            pytest.fail("Read the body of a sidecar that declared an oversized length")
+            yield b""
+
+        client = _make_client()
+        client.send.return_value = FakeMediaResponse(chunks=unread_body(), content_length=6)
+
+        assert await _download_mxc_text(client, "mxc://server/declared-oversized") is None
+        assert client.send.return_value.released
+
+    @pytest.mark.asyncio
+    async def test_download_stops_reading_once_the_payload_crosses_the_limit(self) -> None:
+        """A sidecar pointing at huge media never buffers more than the limit.
+
+        nio's download reads the whole body before its size can be checked, so the
+        payload is streamed from the homeserver instead.
+        """
+        chunk = b"x" * (64 * 1024)
+        served: list[int] = []
+
+        def body() -> Iterator[bytes]:
+            for index in range(128):
+                served.append(index)
+                yield chunk
+
+        client = _make_client()
+        client.download.side_effect = lambda **_kwargs: nio.DownloadResponse(b"".join(body()), "text/plain", None)
+        client.send.return_value = FakeMediaResponse(chunks=body())
+
+        assert await _download_mxc_text(client, "mxc://server/huge") is None
+        assert len(served) * len(chunk) <= message_content_module._MXC_TEXT_MAX_BYTES + len(chunk)
 
     @pytest.mark.asyncio
     async def test_download_rejects_encrypted_sidecar_over_byte_limit_before_decrypt(
@@ -995,10 +1029,8 @@ class TestDownloadMxcText:
     ) -> None:
         """Oversized encrypted sidecars should be rejected before decryption allocates plaintext."""
         monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"123456"
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = media_response(b"123456")
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
 
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment") as mock_decrypt:
@@ -1011,10 +1043,8 @@ class TestDownloadMxcText:
     async def test_download_rejects_decrypted_sidecar_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Decrypted sidecar bytes should be capped before UTF-8 decode and JSON parsing."""
         monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"small"
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = media_response(b"small")
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
 
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
@@ -1029,10 +1059,10 @@ class TestCanonicalContentResolution:
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:
         """Large-message v2 previews should resolve canonical content keys from the sidecar."""
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b'{"body":"Full body","msgtype":"m.text","io.mindroom.tool_trace":{"version":1,"events":[{"tool":"shell"}]}}'
-        client.download.return_value = response
+        client = _make_client()
+        client.send.return_value = media_response(
+            b'{"body":"Full body","msgtype":"m.text","io.mindroom.tool_trace":{"version":1,"events":[{"tool":"shell"}]}}',
+        )
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -1060,13 +1090,11 @@ class TestCanonicalContentResolution:
     @pytest.mark.asyncio
     async def test_extract_edit_body_hydrates_v2_sidecar_new_content(self) -> None:
         """Edit extraction should use canonical m.new_content from a v2 sidecar payload."""
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = (
+        client = _make_client()
+        client.send.return_value = media_response(
             b'{"msgtype":"m.text","body":"* Full edit wrapper","m.new_content":{"body":"Full edit body","msgtype":"m.text",'
-            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}}}'
+            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}}}',
         )
-        client.download.return_value = response
         event_source = {
             "content": {
                 "body": "* Preview edit",

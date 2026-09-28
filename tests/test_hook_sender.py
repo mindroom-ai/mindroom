@@ -61,6 +61,7 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
@@ -77,6 +78,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.matrix_media_helpers import media_response
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
@@ -1283,10 +1285,10 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    bot.client.access_token = TEST_ACCESS_TOKEN
+    bot.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "@mindroom_code:localhost what is 99+1?",

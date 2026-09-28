@@ -58,6 +58,7 @@ from mindroom.streaming import build_cancelled_response_update, build_restart_in
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
+    TEST_ACCESS_TOKEN,
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
@@ -66,6 +67,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.matrix_media_helpers import media_response
 from tests.test_response_delivery_gateway import _gateway
 from tests.test_turn_store import _store
 
@@ -1705,10 +1707,10 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
             ),
         ),
     )
-    client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "body": "* Handoff",
                     "msgtype": "m.text",
@@ -1742,7 +1744,7 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
             original_sender_id=USER_ID,
         ),
     ]
-    client.download.assert_awaited()
+    client.send.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -2539,10 +2541,10 @@ async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> N
     )
     client.room_messages.return_value = _room_messages_response(preview_event)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
-    client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(sidecar_payload).encode("utf-8"),
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(sidecar_payload).encode("utf-8"),
         ),
     )
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
@@ -2586,7 +2588,7 @@ async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp
     )
     client.room_messages.return_value = _room_messages_response(user_sidecar_event, stale_bot_message)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
-    client.download = AsyncMock()
+    client.send = AsyncMock()
 
     with patch(
         "mindroom.matrix.stale_stream_cleanup.edit_message_result",
@@ -2596,7 +2598,7 @@ async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp
 
     assert cleaned == 1
     assert interrupted == []
-    client.download.assert_not_awaited()
+    client.send.assert_not_awaited()
     assert mock_edit.await_args.args[2] == "$bot-message"
 
 
@@ -2620,7 +2622,7 @@ async def test_cleanup_sidecar_hydration_failure_retains_retryable_response(tmp_
     )
     client.room_messages.return_value = _room_messages_response(preview_event)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
-    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadError))
+    client.send = AsyncMock(return_value=media_response(None))
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
     with pytest.raises(RuntimeError, match="Cannot resolve owned recovery response"):
@@ -2669,10 +2671,10 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
     )
     client.room_messages.return_value = _room_messages_response(original, edit)
     client.room_get_event_relations = MagicMock(return_value=_aiter())
-    client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(sidecar_payload).encode("utf-8"),
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(sidecar_payload).encode("utf-8"),
         ),
     )
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))

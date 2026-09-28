@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -47,6 +47,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.matrix_media_helpers import FakeMediaResponse, media_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -1018,7 +1019,7 @@ async def test_exact_source_pages_and_resolves_sidecar_with_revision_proof(
     resolver.deps = replace(resolver.deps, conversation_reader=reader)
     monkeypatch.setattr("mindroom.conversation_resolver.HYDRATED_PROMPT_WINDOW_MESSAGES", 1)
 
-    async def download(*_args: object, **_kwargs: object) -> nio.DownloadResponse:
+    async def send(*_args: object, **_kwargs: object) -> FakeMediaResponse:
         if newer_during_download:
             edit = _event(
                 {
@@ -1034,16 +1035,13 @@ async def test_exact_source_pages_and_resolves_sidecar_with_revision_proof(
             )
             snapshot = await principal.read_conversation(room_id=_ROOM_ID, thread_id=_PARENT, limit=10)
             assert any(message.revision_event_id == "$latest-edit" for message in snapshot.messages), snapshot
-        return MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps({"msgtype": "m.text", "body": "FULL_SIDECAR_BODY"}).encode(),
-        )
+        return media_response(json.dumps({"msgtype": "m.text", "body": "FULL_SIDECAR_BODY"}).encode())
 
     assert runtime.client is not None
     response = nio.RoomGetEventResponse()
     response.event = sidecar
     monkeypatch.setattr(runtime.client, "room_get_event", AsyncMock(return_value=response))
-    monkeypatch.setattr(runtime.client, "download", download)
+    monkeypatch.setattr(runtime.client, "send", send)
     target = MessageTarget.resolve(_ROOM_ID, _PARENT, source_id)
     resolved = await resolver.resolve_exact_source(
         target=target,

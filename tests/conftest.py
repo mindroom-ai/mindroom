@@ -1164,6 +1164,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.
     client.device_id = "TESTDEVICE"
+    client.access_token = TEST_ACCESS_TOKEN
     client.olm = None
     client.rooms = _AutoRoomCache(user_id)
     client.invited_rooms = {}

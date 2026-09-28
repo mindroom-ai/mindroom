@@ -41,6 +41,8 @@ from mindroom.matrix.conversation_reads import (
     projected_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from tests.conftest import TEST_ACCESS_TOKEN
+from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -167,6 +169,7 @@ class FakeClient:
     # count of how many times each was actually fetched.
     sidecars: dict[str, str] = field(default_factory=dict)
     downloads: list[str] = field(default_factory=list)
+    access_token: str = TEST_ACCESS_TOKEN
     # Whether this device has crypto set up at all. nio only attempts
     # decryption when it does, so neither does anything reading through it.
     olm: object | None = None
@@ -192,13 +195,13 @@ class FakeClient:
             raise nio.EncryptionError(msg)
         return parse(cleartext)
 
-    async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
-        """Return one stored attachment."""
+    async def send(self, method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+        """Return one stored attachment the way a media download request receives it."""
+        assert method == "GET"
+        mxc = requested_mxc(path)
         self.downloads.append(mxc)
         payload = self.sidecars.get(mxc)
-        if payload is None:
-            return nio.DownloadError("M_NOT_FOUND")
-        return nio.DownloadResponse(payload.encode(), "application/json", None)
+        return media_response(None if payload is None else payload.encode())
 
     async def room_get_event(
         self,

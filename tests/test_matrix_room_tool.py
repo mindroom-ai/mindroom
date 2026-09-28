@@ -30,6 +30,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.matrix_media_helpers import media_response
 
 _NEXT_BATCH_PAGE_TOKEN = "next_batch"  # noqa: S105
 _THREAD_PAGE_TOKEN = "tok123"  # noqa: S105
@@ -662,10 +663,9 @@ async def test_threads_preview_resolves_large_file_root_through_canonical_visibl
     """Threads should hydrate large streamed m.file roots before building previews."""
     tool = MatrixRoomTools()
     ctx = _make_context()
-    ctx.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    ctx.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "Final large root message\n\n⏳ Preparing isolated worker...",
@@ -1136,10 +1136,9 @@ async def test_threads_resolves_large_bundled_replacement_through_canonical_visi
     """Threads should hydrate large bundled latest edits before building previews."""
     tool = MatrixRoomTools()
     ctx = _make_context()
-    ctx.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    ctx.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",

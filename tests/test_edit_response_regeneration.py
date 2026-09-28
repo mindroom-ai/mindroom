@@ -73,6 +73,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.matrix_media_helpers import media_response
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
@@ -550,28 +551,25 @@ async def test_bot_edit_hooks_see_best_available_sidecar_edit_body(
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    download_response = (
-        MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
-                {
-                    "body": "* @test_agent what is 99+1?",
+    sidecar_payload = (
+        json.dumps(
+            {
+                "body": "* @test_agent what is 99+1?",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "@test_agent what is 99+1?",
                     "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "@test_agent what is 99+1?",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {
-                        "event_id": "$original:example.com",
-                        "rel_type": "m.replace",
-                    },
                 },
-            ).encode("utf-8"),
-        )
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+        ).encode("utf-8")
         if download_succeeds
-        else nio.DownloadError("missing")
+        else None
     )
-    bot.client.download = AsyncMock(return_value=download_response)
+    bot.client.send = AsyncMock(return_value=media_response(sidecar_payload))
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
 
@@ -660,10 +658,9 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    bot.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "body": "* @test_agent what is 99+1?",
                     "msgtype": "m.text",

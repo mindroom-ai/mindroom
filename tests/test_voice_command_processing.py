@@ -43,6 +43,7 @@ from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    TEST_ACCESS_TOKEN,
     bind_runtime_paths,
     drain_coalescing,
     install_edit_message_mock,
@@ -55,6 +56,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.matrix_media_helpers import media_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -313,10 +315,10 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    bot.client.access_token = TEST_ACCESS_TOKEN
+    bot.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "!schedule tomorrow at 9am @mindroom_home:localhost turn off the lights",
@@ -392,10 +394,10 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    bot.client.access_token = TEST_ACCESS_TOKEN
+    bot.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "!schedule tomorrow at 9am @mindroom_home:localhost turn off the lights",
@@ -476,10 +478,10 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(
+    bot.client.access_token = TEST_ACCESS_TOKEN
+    bot.client.send = AsyncMock(
+        return_value=media_response(
+            json.dumps(
                 {
                     "msgtype": "m.text",
                     "body": "!skill demo summarize the release notes",
@@ -545,7 +547,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
-    bot.client.download = AsyncMock()
+    bot.client.send = AsyncMock()
 
     room = _make_room("@mindroom_router:example.com", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -574,7 +576,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
 
-    bot.client.download.assert_not_awaited()
+    bot.client.send.assert_not_awaited()
     mock_schedule.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(
         TurnRecord.create([event.event_id]),

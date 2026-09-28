@@ -34,7 +34,9 @@ from mindroom.thread_export.projected_history import (
     export_conversation_reader,
     fetch_projected_thread_history,
 )
+from tests.conftest import TEST_ACCESS_TOKEN
 from tests.journal_membership_helpers import admit_room_membership
+from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -126,6 +128,7 @@ class FakeHomeserver:
     relation_calls: int = 0
     messages_calls: int = 0
     download_calls: int = 0
+    access_token: str = TEST_ACCESS_TOKEN
 
     @property
     def history_calls(self) -> int:
@@ -181,13 +184,12 @@ class FakeHomeserver:
         self.messages_calls += 1
         return nio.RoomMessagesResponse(ROOM, [], "start", None)
 
-    async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
-        """Return one stored long-text sidecar."""
+    async def send(self, method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+        """Return one stored long-text sidecar the way a media download request receives it."""
+        assert method == "GET"
         self.download_calls += 1
-        payload = self.sidecars.get(mxc)
-        if payload is None:
-            return nio.DownloadError("M_NOT_FOUND")
-        return nio.DownloadResponse(payload.encode(), "application/json", None)
+        payload = self.sidecars.get(requested_mxc(path))
+        return media_response(None if payload is None else payload.encode())
 
 
 @pytest.fixture
@@ -530,28 +532,29 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(
             yield nio.Event.parse_event(source)
 
     client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = homeserver.access_token
     client.room_get_event.side_effect = homeserver.room_get_event
     client.room_get_event_relations = Mock(side_effect=relations)
-    client.download.side_effect = homeserver.download
+    client.send.side_effect = homeserver.send
     if encrypted:
 
-        async def download(mxc: str) -> nio.DownloadResponse:
-            if mxc == SIDECAR_URL:
-                return nio.DownloadResponse(encrypted_payload, "application/octet-stream", None)
-            return await homeserver.download(mxc)
+        async def send(method: str, path: str, *args: object, **kwargs: object) -> FakeMediaResponse:
+            if requested_mxc(path) == SIDECAR_URL:
+                return media_response(encrypted_payload)
+            return await homeserver.send(method, path, *args, **kwargs)
 
-        client.download.side_effect = download
+        client.send.side_effect = send
     reader = export_conversation_reader(client=client, config=Config(), store=router, self_sender=ROUTER)
     messages = await export(reader)
     assert bodies(messages) == ["root", SIDECAR_TEXT]
     assert await router.conversation_is_complete(room_id=ROOM, thread_id=ROOT)
     client.room_get_event.reset_mock()
     client.room_get_event_relations.reset_mock()
-    client.download.reset_mock()
+    client.send.reset_mock()
     assert bodies(await export(reader)) == ["root", SIDECAR_TEXT]
     client.room_get_event.assert_not_awaited()
     client.room_get_event_relations.assert_not_called()
-    client.download.assert_not_awaited()
+    client.send.assert_not_awaited()
 
 
 async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_preview(
