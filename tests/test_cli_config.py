@@ -583,7 +583,9 @@ class TestConfigInit:
         assert "knowledge_bases" not in config
         assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
         assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace").exists()
-        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+        env_content = env_path.read_text()
+        assert env_content.startswith("ANTHROPIC_API_KEY=sk-existing\n")
+        assert "MINDROOM_STORAGE_PATH" not in env_content
 
     def test_init_mindroom_chat_writes_hosted_matrix_defaults(self, tmp_path: Path) -> None:
         """mindroom.chat should prefill hosted Matrix defaults and explain that pairing replaces the token."""
@@ -1082,7 +1084,7 @@ class TestConfigInit:
         """Config init should ask separately about overwriting .env when it exists."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
-        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\nMINDROOM_API_KEY=dashboard-existing\n")
         # Answer 'n' to .env overwrite prompt
         result = runner.invoke(
             app,
@@ -1090,7 +1092,8 @@ class TestConfigInit:
             input="n\n",
         )
         assert result.exit_code == 0
-        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+        assert "Overwrite existing .env file" in normalize_console_output(result.output)
+        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\nMINDROOM_API_KEY=dashboard-existing\n"
 
     def test_init_keeps_existing_env_without_storage_root_and_resolves_to_default_root(
         self,
@@ -1215,6 +1218,60 @@ class TestConfigInit:
         env_content = env_path.read_text()
         assert "ANTHROPIC_API_KEY=sk-existing" in env_content
         assert "MATRIX_HOMESERVER" in env_content
+
+    @pytest.mark.parametrize("matrix_server", ["mindroom.chat", "self-hosted"])
+    @pytest.mark.parametrize(
+        ("args", "answers"),
+        [
+            (("--no-input",), None),
+            (("--provider", "openai"), "n\n"),
+        ],
+        ids=["no-input", "declined-overwrite"],
+    )
+    def test_init_keeping_existing_env_adds_dashboard_key(
+        self,
+        tmp_path: Path,
+        matrix_server: str,
+        args: tuple[str, ...],
+        answers: str | None,
+    ) -> None:
+        """A kept `.env`, such as one `connect` wrote, gains a generated dashboard key and keeps pairing credentials."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        connect_env = (
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
+            "MINDROOM_LOCAL_CLIENT_ID=client-123\n"
+            "MINDROOM_LOCAL_CLIENT_SECRET=secret-123\n"
+        )
+        env_path.write_text(connect_env, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", matrix_server, *args],
+            input=answers,
+        )
+
+        assert result.exit_code == 0, result.output
+        env_content = env_path.read_text(encoding="utf-8")
+        assert env_content.startswith(connect_env)
+        dashboard_keys = re.findall(r"^MINDROOM_API_KEY=(.*)$", env_content, flags=re.MULTILINE)
+        assert len(dashboard_keys) == 1
+        assert len(dashboard_keys[0]) >= 32
+        assert env_path.stat().st_mode & 0o777 == 0o600
+
+    def test_init_keeps_explicitly_empty_dashboard_key(self, tmp_path: Path) -> None:
+        """An empty MINDROOM_API_KEY is the operator's open-access choice, so setup leaves it empty."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
 
     def test_init_no_input_self_hosted_defaults_to_openai_without_prompting(self, tmp_path: Path) -> None:
         """Self-hosted config init --no-input skips the provider prompt and uses OpenAI."""
@@ -2125,10 +2182,15 @@ class TestRunFirstRunSetup:
         assert result.exit_code == 0, result.output
         env_content = env_path.read_text(encoding="utf-8")
         assert "MINDROOM_LOCAL_CLIENT_ID=client\n" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_SECRET=secret\n" in env_content
         assert "OPENROUTER_API_KEY=sk-or-key\n" in env_content
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert paired == []
         assert started[0].env_value("OPENROUTER_API_KEY") == "sk-or-key"
+        # The runtime this setup starts serves the dashboard on every interface by default.
+        dashboard_key = started[0].env_value("MINDROOM_API_KEY")
+        assert dashboard_key
+        assert f"MINDROOM_API_KEY={dashboard_key}\n" in env_content
 
     def test_existing_config_starts_without_prompts(self, tmp_path: Path) -> None:
         """An existing config goes straight to startup even in a terminal."""
@@ -2648,6 +2710,51 @@ class TestRunApiFlags:
         assert kwargs.kwargs["api"] is True
         assert kwargs.kwargs["api_port"] == 8765
         assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
+
+    @pytest.mark.parametrize(
+        ("args", "env", "warns"),
+        [
+            ((), {}, True),
+            (("--api-host", "192.0.2.10"), {}, True),
+            ((), {"MINDROOM_API_KEY": "dashboard-key"}, False),
+            ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, False),
+            (
+                (),
+                {
+                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-User",
+                },
+                False,
+            ),
+            (("--api-host", "127.0.0.1"), {}, False),
+            (("--api-host", "localhost"), {}, False),
+            (("--no-api",), {}, False),
+        ],
+    )
+    def test_run_warns_when_dashboard_api_listens_beyond_loopback_without_credential(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: tuple[str, ...],
+        env: dict[str, str],
+        warns: bool,
+    ) -> None:
+        """Without a dashboard credential, anyone who reaches a non-loopback bind address administers MindRoom."""
+        for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+            monkeypatch.delenv(name, raising=False)
+        cfg = tmp_path / "config.yaml"
+        self._write_minimal_config(cfg)
+
+        with patch("mindroom.orchestrator.main", AsyncMock()):
+            result = _invoke_with_runtime(["run", *args], cfg, env=env)
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert ("without MINDROOM_API_KEY" in output) is warns
+        if warns:
+            bind_host = args[1] if args else "0.0.0.0"  # noqa: S104
+            assert f"{bind_host}:8765" in output
+            assert str((tmp_path / ".env").resolve()) in output
 
     def test_run_no_api_flag(self, tmp_path: Path) -> None:
         """Run --no-api passes api=False to bot main."""

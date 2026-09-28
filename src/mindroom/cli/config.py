@@ -207,6 +207,15 @@ def _write_env_file(
             _PUBLIC_HOSTED_ENV_DEFAULTS,
             title="Hosted Matrix defaults for mindroom.chat",
         )
+        # `mindroom run` serves the dashboard on every interface by default, so a kept
+        # .env without a dashboard key gets one; an explicitly empty key stays empty.
+        changed |= _append_missing_env_defaults(
+            env_path,
+            (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
+            title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
+        )
+        if changed:
+            console.print(f"[green]Env file updated:[/green] {env_path}")
         if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
             upsert_env_values(env_path, {env_key: provider_api_key})
             console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
@@ -242,7 +251,6 @@ def _append_missing_env_defaults(
     appended_lines = [f"# {title}", *(f"{key}={value}" for key, value in missing_defaults)]
     appended_content = "\n".join(appended_lines)
     write_private_env_text(env_path, f"{current_content}{separator}{appended_content}\n")
-    console.print(f"[green]Env file updated:[/green] {env_path}")
     return True
 
 
@@ -1195,7 +1203,7 @@ def _env_template(
 
     Generates a random dashboard API key.
     """
-    api_key = secrets.token_urlsafe(32)
+    api_key = _new_dashboard_api_key()
     if matrix_server == "mindroom.chat":
         matrix_homeserver = "https://mindroom.chat"
         extra_matrix = (
@@ -1233,7 +1241,8 @@ MATRIX_HOMESERVER={matrix_homeserver}
 # When set, all dashboard requests require: Authorization: Bearer <key>
 # The auth header is injected at the proxy layer (nginx / Vite dev server),
 # so the key never appears in the browser JS bundle.
-# Remove or comment out to allow open access (fine for localhost).
+# Set it empty (MINDROOM_API_KEY=) to allow open access; `mindroom run` listens on
+# every interface by default, so do that only with `--api-host 127.0.0.1`.
 MINDROOM_API_KEY={api_key}
 
 # OpenAI-compatible API authentication (separate from dashboard auth)
@@ -1243,6 +1252,11 @@ MINDROOM_API_KEY={api_key}
 # MindRoom port (default 8765)
 # MINDROOM_PORT=8765
 """
+
+
+def _new_dashboard_api_key() -> str:
+    """Return a random MINDROOM_API_KEY for a new or kept `.env`."""
+    return secrets.token_urlsafe(32)
 
 
 def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:

@@ -165,6 +165,13 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
     )
 
 
+def dashboard_requires_credential(runtime_paths: RuntimePaths) -> bool:
+    """Return whether dashboard requests need a credential instead of being authorized by reachability alone."""
+    settings = _build_auth_settings(runtime_paths)
+    platform_auth = bool(settings.supabase_url and settings.supabase_anon_key)
+    return bool(settings.mindroom_api_key) or platform_auth or settings.trusted_upstream.enabled
+
+
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     value = runtime_paths.env_value(name)
     if value is None:

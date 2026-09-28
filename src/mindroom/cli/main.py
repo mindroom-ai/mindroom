@@ -14,6 +14,7 @@ from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
 
+from .api import is_loopback_host
 from .banner import make_banner
 from .config import (
     activate_cli_runtime,
@@ -254,6 +255,7 @@ async def _run(
         else:
             console.print(f"Dashboard: http://{display_host}:{api_port}")
         console.print(f"API: http://{display_host}:{api_port}/api")
+        _warn_if_dashboard_is_open_beyond_loopback(runtime_paths, api_host, api_port)
     console.print("Press Ctrl+C to stop\n")
 
     try:
@@ -279,6 +281,19 @@ async def _run(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_host: str, api_port: int) -> None:
+    """Warn when anyone who can reach a non-loopback bind address would administer MindRoom."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
+        return
+    console.print(
+        f"[yellow]Warning:[/yellow] The dashboard API listens on {api_host}:{api_port} without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom.",
+    )
+    console.print(f"  Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.")
 
 
 @app.command()
