@@ -68,6 +68,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import admit_context_events
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -4636,6 +4637,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         was written to catch.
         """
         turn_store = await _store(journal_store, agent_name="agent")
+        await admit_context_events(journal_store.principal("agent@alice"), _ROOM_ID, "$source")
         await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
         gateway = _gateway(
             tmp_path,

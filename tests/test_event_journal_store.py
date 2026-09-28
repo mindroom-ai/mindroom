@@ -76,6 +76,7 @@ from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import postgres_journal_schema_url
+from tests.journal_helpers import admit_context_events
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -5462,6 +5463,7 @@ class TestOutbox:
             source_event_revisions={source: (20, driving)},
         )
         principal = rival_stores.second.principal("agent@alice")
+        await admit_context_events(rival_stores.first.principal("agent@alice"), ROOM, later)
         await principal.enqueue_matrix_delivery(
             delivery_id=driving,
             stage=DeliveryStage.FINAL,

@@ -506,6 +506,7 @@ def _build_harness(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_principal.redacted_event_ids,
+            event_admitted_in_room=journal_principal.event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=resolver,

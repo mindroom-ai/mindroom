@@ -970,7 +970,11 @@ async def test_deleted_initial_cannot_demote_another_principals_eventless_turn(
     second = journal_store.principal("other@bob")
     first_store = await _store(journal_store)
     second_store = await _store(journal_store, agent_name="other")
-    second_store.deps = replace(second_store.deps, redacted_event_ids=second.redacted_event_ids)
+    second_store.deps = replace(
+        second_store.deps,
+        redacted_event_ids=second.redacted_event_ids,
+        event_admitted_in_room=second.event_admitted_in_room,
+    )
     target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE)
     room = nio.MatrixRoom(ROOM_ID, BOT_USER_ID)
     for principal in (first, second):

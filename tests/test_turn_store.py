@@ -64,6 +64,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.history_helpers import StoredGeneration, compaction_generations
+from tests.journal_helpers import admit_context_events
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,6 +83,7 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
@@ -430,6 +432,7 @@ async def _store_with_storage(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -539,6 +542,31 @@ async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversat
     assert store._ledger.pending_redaction_cleanup_event_ids() == ()
     assert await store.mark_source_redacted(redacted_event_id, room_id=target.room_id) is not None
     assert store.is_revision_redacted(redacted_event_id)
+
+
+@pytest.mark.asyncio
+async def test_redaction_before_its_turn_registers_needs_the_journal_to_place_the_event_in_its_room(
+    journal_store: EventJournalStore,
+) -> None:
+    """With no turn recording a room yet, only the journal can tie the target to the redaction's room."""
+    store = await _store(journal_store)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$user_msg")
+
+    assert await store.mark_source_redacted("$user_msg", room_id="!elsewhere:example.org") is None
+    assert await store.mark_source_redacted("$never-admitted", room_id="!elsewhere:example.org") is None
+    assert not store.is_handled("$user_msg")
+    pending = await store.record_pending_turn(
+        replace(
+            _owned_turn_record(MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")),
+            completed=False,
+        ),
+    )
+    assert pending is not None
+    assert pending.redacted_source_event_ids == ()
+    assert pending.pending_redaction_cleanup_event_ids == ()
+
+    assert await store.mark_source_redacted("$user_msg", room_id="!room:example.org") is not None
+    assert store.is_handled("$user_msg")
 
 
 @pytest.mark.asyncio
@@ -1223,6 +1251,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1294,6 +1323,7 @@ async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1350,6 +1380,7 @@ async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
     )
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$user_msg")
     marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     assert marked is not None
     assert marked.conversation_target is None
@@ -1437,6 +1468,7 @@ async def test_redaction_before_response_registration_tombstones_pending_coalesc
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
 
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$first")
     await store.mark_source_redacted("$first", room_id="!room:example.org")
     pending = await store.record_pending_turn(
         TurnRecord.create(
@@ -1653,6 +1685,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1787,6 +1820,7 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
         agent_name="unrelated",
     )
 
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$user_msg")
     owner_marked = await owner_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
@@ -2367,6 +2401,7 @@ async def test_routed_alias_redaction_marks_owning_relay_under_lock(journal_stor
         ),
     )
 
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$human")
     marked = await store.mark_source_redacted("$human", room_id="!room:example.org")
 
     assert marked is not None
@@ -3149,6 +3184,7 @@ async def test_absent_source_import_declines_occupied_discovery_alias(
 ) -> None:
     """Historical import cannot replace an alias owner or carry its saved facts."""
     store = await _store(journal_store)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$selection")
     recovery_record = _saved_turn_with_selection_alias()
 
     async def record_alias_owner() -> TurnRecord:
@@ -3266,6 +3302,7 @@ async def test_absent_row_import_returns_concurrent_redaction_tombstone_unchange
 ) -> None:
     """A redaction landing after the history read must remain the exact source authority."""
     store = await _store(journal_store)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$event")
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$stale-response",
@@ -3361,6 +3398,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
                 agent_name="router",
                 turn_records=journal_store.turn_records("router"),
                 redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+                event_admitted_in_room=journal_store.principal("agent@alice").event_admitted_in_room,
                 legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
                     ConversationStateWriterDeps(
@@ -3646,6 +3684,7 @@ async def test_edit_tombstone_registration_crash_reopens_cleanup_owner(
 ) -> None:
     """A committed exact tombstone must join its root before cold retention."""
     store = await _store(journal_store)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$physical-edit")
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     await store.record_turn(_owned_turn_record(target))
     if crash_before_join:
@@ -3989,6 +4028,7 @@ async def test_prepared_voice_survives_cold_load_and_keeps_first_content(
 async def test_prepared_voice_dropped_by_terminal_authority(journal_store: EventJournalStore, terminal: str) -> None:
     """Settlement and physical or discovery redaction erase checkpoints permanently."""
     store = await _store(journal_store)
+    await admit_context_events(journal_store.principal("agent@alice"), "!room:example.org", "$voice", "$alias")
     await store.record_pending_turn(
         TurnRecord.create(
             ["$voice"],

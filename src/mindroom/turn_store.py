@@ -75,6 +75,8 @@ class TurnStoreDeps:
     # lost it would answer every outstanding message a second time.
     turn_records: TurnRecordStore
     redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
+    # Proves which room an event belongs to when no turn has recorded one yet.
+    event_admitted_in_room: Callable[[str, str], Awaitable[bool]]
     # The JSON ledger this agent used before its records moved into the
     # database, imported once on first load. An installation that has been
     # answering messages keeps all of its terminal truth there, and a runtime
@@ -705,16 +707,22 @@ class TurnStore:
         A redaction names its target by event ID alone, and a homeserver can
         deliver one it did not apply, including one naming another room's
         event. Returns None, changing nothing, when a turn that owns or consumed
-        the event is recorded in a different room.
+        the event is recorded in a different room, or when no turn records a
+        room for it and the journal did not admit it from ``room_id``. The
+        journal projection keeps its own room-scoped tombstone, so a target
+        that arrives after its redaction is still retired there.
         """
         own_record = self._ledger.get_turn_record(source_event_id)
-        if not all(
-            _recorded_in_room(record, room_id)
+        recorded_room_ids = {
+            record.conversation_target.room_id
             for record in (own_record, *self._revision_owners(source_event_id))
-            if record is not None
+            if record is not None and record.conversation_target is not None
+        }
+        if recorded_room_ids - {room_id} or (
+            not recorded_room_ids and not await self.deps.event_admitted_in_room(room_id, source_event_id)
         ):
             logger.warning(
-                "Ignoring redaction of an event recorded in another room",
+                "Ignoring redaction of an event not recorded in the redaction's room",
                 room_id=room_id,
                 redacted_event_id=source_event_id,
             )

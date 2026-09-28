@@ -406,6 +406,11 @@ class PrincipalStore:
             ),
         )
 
+    async def event_admitted_in_room(self, room_id: str, event_id: str) -> bool:
+        """Return whether this principal admitted one event from exactly this room."""
+        admitted, _thread_id = await self.admitted_thread_id(room_id=room_id, event_id=event_id)
+        return admitted
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         return await self._backend.read(

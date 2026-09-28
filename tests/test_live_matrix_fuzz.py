@@ -69,6 +69,7 @@ from scripts.testing.fuzz_live_matrix import (
     short_stream_correctness_scenario,
     sustained_stream_capacity_scenario,
 )
+from tests.journal_helpers import admit_context_events
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -6042,6 +6043,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
             agent_name="general",
             turn_records=journal.turn_records("general"),
             redacted_event_ids=journal.principal("agent@alice").redacted_event_ids,
+            event_admitted_in_room=journal.principal("agent@alice").event_admitted_in_room,
             legacy_responses_file=None,
             state_writer=Mock(),
             resolver=Mock(),
@@ -6053,6 +6055,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         await store.record_responded_turn(
             TurnRecord.create(source_event_ids=("$root",), response_event_id="$root-reply"),
         )
+        await admit_context_events(journal.principal("agent@alice"), "!room:example", "$edit")
         await store.mark_source_redacted("$edit", room_id="!room:example")
         # Runtime exact-event invalidation establishes the expectation independently of the harness.
         assert store.is_revision_redacted("$edit")
