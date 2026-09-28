@@ -9,7 +9,7 @@ from trafilatura import spider as trafilatura_spider
 from trafilatura.downloads import USER_AGENT, Response
 from trafilatura.settings import DEFAULT_CONFIG
 
-from mindroom.bounded_http_body import CompressedHttpBodyError, read_identity_body_prefix
+from mindroom.bounded_http_body import CompressedHttpBodyError, http_exchange_deadline, read_identity_body_prefix
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     validate_server_fetch_redirect_url,
@@ -21,14 +21,10 @@ _MAX_REDIRECTS = DEFAULT_CONFIG.getint("DEFAULT", "MAX_REDIRECTS")
 _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 
 
-def _read_response(response: httpx.Response, url: str, *, decode: bool) -> Response | None:
+def _read_response(response: httpx.Response, url: str, *, decode: bool, deadline: float) -> Response | None:
     """Buffer one uncompressed response body within Trafilatura's download size limit."""
     try:
-        body = read_identity_body_prefix(
-            response,
-            max_bytes=_MAX_FILE_SIZE,
-            timeout_seconds=_DOWNLOAD_TIMEOUT_SECONDS,
-        )
+        body = read_identity_body_prefix(response, max_bytes=_MAX_FILE_SIZE, deadline=deadline)
     except CompressedHttpBodyError:
         log_warning("Trafilatura download used an unrequested content encoding")
         return None
@@ -49,15 +45,18 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
     """
     request_url = validate_server_fetch_url(url)
     try:
-        with httpx.Client(
-            transport=ServerFetchHTTPTransport(),
-            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
-            timeout=_DOWNLOAD_TIMEOUT_SECONDS,
-        ) as client:
+        with (
+            http_exchange_deadline(_DOWNLOAD_TIMEOUT_SECONDS) as exchange,
+            httpx.Client(
+                transport=ServerFetchHTTPTransport(),
+                headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
+                timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+            ) as client,
+        ):
             for _redirect_count in range(_MAX_REDIRECTS + 1):
-                with client.stream("GET", request_url) as response:
+                with client.stream("GET", request_url, extensions=exchange.extensions) as response:
                     if not response.is_redirect:
-                        return _read_response(response, request_url, decode=decode)
+                        return _read_response(response, request_url, decode=decode, deadline=exchange.deadline)
                     location = response.headers.get("location")
                 request_url = validate_server_fetch_redirect_url(request_url, location)
     except (httpx.HTTPError, httpx.InvalidURL) as error:

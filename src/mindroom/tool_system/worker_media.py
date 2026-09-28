@@ -14,14 +14,14 @@ from agno.media import Audio, File, Image, Video
 from agno.tools.function import ToolResult
 from httpx._utils import get_environment_proxies
 
-from mindroom.bounded_http_body import read_identity_body_prefix
+from mindroom.bounded_http_body import http_exchange_deadline, read_identity_body_prefix
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
 
-# httpx timeouts apply per read, so each hop's body must also arrive within this total.
+# httpx timeouts apply per read, so the whole exchange, redirects and headers included, must finish within this total.
 _READ_URL_SECONDS = 60
 _AUDIO_FORMAT_BY_MIME_TYPE = {
     "audio/mpeg": "mp3",
@@ -62,16 +62,19 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
         pattern: None if proxy is None else _WorkerMediaProxyTransport(proxy=proxy)
         for pattern, proxy in get_environment_proxies().items()
     }
-    with httpx.Client(
-        transport=ServerFetchHTTPTransport(),
-        mounts=mounts,
-        trust_env=False,
-        headers={"Accept-Encoding": "identity"},
-        follow_redirects=False,
-        max_redirects=5,
-        timeout=30,
-    ) as client:
-        request = client.build_request("GET", url)
+    with (
+        http_exchange_deadline(_READ_URL_SECONDS) as exchange,
+        httpx.Client(
+            transport=ServerFetchHTTPTransport(),
+            mounts=mounts,
+            trust_env=False,
+            headers={"Accept-Encoding": "identity"},
+            follow_redirects=False,
+            max_redirects=5,
+            timeout=30,
+        ) as client,
+    ):
+        request = client.build_request("GET", url, extensions=exchange.extensions)
         for _ in range(client.max_redirects + 1):
             response = client.send(request, stream=True)
             try:
@@ -80,7 +83,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                     request = response.next_request
                     continue
                 response.raise_for_status()
-                content = read_identity_body_prefix(response, max_bytes=limit, timeout_seconds=_READ_URL_SECONDS)
+                content = read_identity_body_prefix(response, max_bytes=limit, deadline=exchange.deadline)
                 if content.truncated:
                     msg = "Worker media exceeds the byte limit."
                     raise ValueError(msg)

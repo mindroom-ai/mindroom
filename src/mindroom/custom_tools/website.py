@@ -17,7 +17,7 @@ from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
 from mindroom.bounded_bytes import BytePrefix
-from mindroom.bounded_http_body import read_identity_body_prefix
+from mindroom.bounded_http_body import http_exchange_deadline, read_identity_body_prefix
 from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
@@ -63,7 +63,7 @@ _MAX_REDIRECTS = 10
 # BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so only a prefix is parsed.
 _MAX_PAGE_BYTES = 1024 * 1024
 _NO_BODY = BytePrefix(b"", truncated=False)
-# httpx timeouts apply per read, so each hop's body must also arrive within this total.
+# httpx timeouts apply per read, so each hop's whole exchange, headers included, must also finish within this total.
 _PAGE_READ_SECONDS = 30
 _TRUNCATED_PAGE_NOTE = f"[Page truncated: only its first {_MAX_PAGE_BYTES // (1024 * 1024)} MiB was read.]"
 
@@ -194,13 +194,14 @@ def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> _F
     # The proxy owns target DNS resolution and egress policy from here.
     route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
     with (
+        http_exchange_deadline(_PAGE_READ_SECONDS) as exchange,
         httpx.Client(headers={"Accept-Encoding": "identity"}, timeout=timeout, **route) as client,
-        client.stream("GET", url) as response,
+        client.stream("GET", url, extensions=exchange.extensions) as response,
     ):
         body = (
             _NO_BODY
             if response.is_redirect
-            else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES, timeout_seconds=_PAGE_READ_SECONDS)
+            else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES, deadline=exchange.deadline)
         )
         return _FetchedPage(
             httpx.Response(response.status_code, headers=response.headers, content=body.data, request=response.request),
