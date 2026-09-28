@@ -808,6 +808,12 @@ async def _store_callback_credentials(
     """Resolve and store one callback's exact credential target."""
     pending = consume_pending_oauth_request(request, provider.id, state)
     token_url = pending.token_url
+    # LEGACY_COMPAT: Pending OAuth connect state without a bound token endpoint.
+    # Legacy format: pending `dashboard_oauth_state` records whose data has no `token_url`.
+    # Last legacy release: v2026.9.358; the unreleased replacement records the endpoint when building the auth URL.
+    # Handling: reject the callback before any token request; the state lives 600 seconds, so only connects started
+    # before an upgrade and completed after it must restart.
+    # Coverage: tests/api/test_oauth_api.py::test_callback_exchanges_code_only_at_token_endpoint_bound_during_connect
     if token_url is None:
         msg = "OAuth state does not record the token endpoint bound at authorization"
         raise OAuthProviderError(msg)

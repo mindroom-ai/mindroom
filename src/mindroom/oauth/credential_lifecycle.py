@@ -693,20 +693,20 @@ async def _invalidate_rejected_credentials(
     credentials: dict[str, Any],
     exc: OAuthRefreshRejectedError,
     *,
+    provider_error: OAuthProviderError,
     transaction: OAuthCredentialTransaction,
 ) -> None:
     _attach_oauth_refresh_failure_context(exc, credentials)
     await transaction.reset(None)
     await transaction.commit()
-    endpoint_change = exc.__cause__
-    if isinstance(endpoint_change, OAuthTokenEndpointChangedError):
+    if isinstance(provider_error, OAuthTokenEndpointChangedError):
         _log_oauth_refresh_failed(
             context,
             credentials,
             exc,
             reason="token_endpoint_changed",
-            stored_token_endpoint_origin=endpoint_change.stored_token_endpoint_origin,
-            current_token_endpoint_origin=endpoint_change.current_token_endpoint_origin,
+            stored_token_endpoint_origin=provider_error.stored_token_endpoint_origin,
+            current_token_endpoint_origin=provider_error.current_token_endpoint_origin,
         )
     else:
         _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
@@ -726,6 +726,7 @@ async def _raise_normalized_refresh_error(
             context,
             credentials,
             normalized_error,
+            provider_error=exc,
             transaction=transaction,
         )
     else:
@@ -1004,6 +1005,7 @@ def _token_data_preserving_refresh_token(
         and existing_refresh_token
         and _same_external_identity(existing_credentials, token_data)
         and _same_oauth_client(existing_credentials, token_data)
+        and (existing_credentials or {}).get("token_uri") == token_data.get("token_uri")
     ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data

@@ -13,6 +13,7 @@ import pytest
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
 from mindroom.credentials import get_runtime_credentials_manager
@@ -362,6 +363,7 @@ async def test_resource_origin_metadata_registers_public_client(
         "client_id": "registered-public-client",
         "redirect_uri": "https://mindroom.example.test/api/oauth/example/callback",
         OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "https://mindroom.example.test/api/oauth/example/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "example",
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
@@ -398,7 +400,7 @@ def test_dynamic_registration_rejects_unconfirmed_redirect_uri(
         registration["redirect_uris"] = registered_redirect_uris
 
     with pytest.raises(OAuthProviderError, match="did not confirm redirect_uri"):
-        _stored_registration(provider, runtime_paths, registration)
+        _stored_registration(provider, runtime_paths, registration, "https://auth.example.test/token")
 
 
 @pytest.mark.asyncio

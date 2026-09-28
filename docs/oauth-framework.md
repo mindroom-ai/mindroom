@@ -52,9 +52,12 @@ OAuth token writes always resolve the provider's canonical credential target and
 Starting a connection resolves the provider's endpoints once, builds the authorization URL from them, and records the resolved token endpoint in the pending OAuth state.
 The callback fails without contacting any token endpoint when the provider now resolves a different one; otherwise the built-in exchange sends the authorization code, PKCE verifier, and client secret to that recorded endpoint.
 Stored credentials record the same endpoint as `token_uri`, including credentials produced by custom token exchangers and parsers.
-A refresh sends the refresh token only when the stored `token_uri` matches the currently resolved token endpoint.
+Refreshes through the provider contract, used by the dashboard, MCP servers, GitHub, and Atlassian, send the refresh token only when the stored `token_uri` matches the token endpoint the provider currently resolves.
 When it differs, or an older credential has no recorded endpoint, MindRoom deletes the credential without contacting the token endpoint and requires reconnection.
 That rejection is logged as `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and the stored and current endpoint origins, so an authorization-server change is distinguishable from a revoked grant.
+Google tool wrappers instead refresh through google-auth against the stored `token_uri` without re-resolving endpoints, and Google providers always store Google's fixed token endpoint there.
+A reconnect keeps an earlier refresh token that the provider did not replace only when the verified identity, OAuth client, and `token_uri` all match.
+Dynamic client registrations record the token endpoint they were issued for, and discovery registers a new client when the resolved token endpoint changes.
 The SQLite store is authoritative on every OAuth credential read.
 Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.

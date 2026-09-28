@@ -96,7 +96,7 @@ Later same-scope callers observe the committed rotation and do not consume the s
 3. Acquire the same SQLite transaction used by refresh.
 4. Compare the pending connection generation with the current generation.
 5. Exchange the authorization code at the token endpoint recorded in the pending state, then validate claims.
-6. Preserve an existing refresh token only for the same verified external identity and OAuth client.
+6. Preserve an existing refresh token only for the same verified external identity, OAuth client, and token endpoint.
 7. Publish the credential and advance both revisions.
 8. Commit before propagating cancellation.
 

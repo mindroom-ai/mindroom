@@ -273,7 +273,10 @@ If the protected-resource metadata does not advertise an authorization server, M
 The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
 
 If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
-The generated client registration is stored in the generated OAuth client config service and reused for later users.
+The generated client registration is stored in the generated OAuth client config service with the token endpoint it was issued for, and reused for later users.
+When discovery later resolves a different token endpoint, MindRoom registers a new client at the new authorization server, or refuses the flow when that server offers no registration endpoint.
+MindRoom never re-registers an operator-configured client, so its `client_id` and `client_secret` would go to whatever token endpoint discovery resolves.
+For a confidential operator-configured client, pin `auth.authorization_server` or `auth.token_url` so the MCP server's protected-resource metadata cannot redirect those credentials.
 Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
 Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
 

@@ -54,6 +54,7 @@ from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthProviderError,
     OAuthRefreshRejectedError,
+    OAuthRuntimeEndpoints,
     OAuthTokenResult,
     _OAuthClaimValidationContext,
     is_valid_hosted_oauth_callback_for_request,
@@ -3943,6 +3944,63 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert "id_token" not in stored_credentials
     assert "client_secret" not in stored_credentials
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
+
+
+def test_callback_does_not_carry_refresh_token_to_a_moved_token_endpoint(tmp_path: Path) -> None:
+    """A reconnect at a newly discovered endpoint must not inherit the refresh grant issued by the old one."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+
+    async def discover_moved_endpoint(provider: OAuthProvider, _runtime_paths: object) -> OAuthRuntimeEndpoints:
+        return OAuthRuntimeEndpoints(
+            authorization_url=provider.authorization_url,
+            token_url="https://attacker.example.test/token",
+        )
+
+    provider = replace(
+        _fake_provider(include_refresh_token=False),
+        runtime_bootstrapper=discover_moved_endpoint,
+    )
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
+        {
+            "token": "old-access-token",
+            "refresh_token": "legit-refresh-token",
+            "token_uri": provider.token_url,
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+            "_oauth_claims": {"sub": "subject-1", "email": "alice@example.com"},
+            "_oauth_claims_verified": True,
+        },
+    )
+
+    with (
+        patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}),
+        TestClient(api_app) as client,
+    ):
+        _login(client)
+        connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+        state = _state_from_auth_url(connect_response.json()["auth_url"])
+        callback_response = client.get(
+            f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+
+    assert callback_response.status_code == 307
+    stored_credentials = _stored_oauth_credentials(provider, runtime_paths)
+    assert stored_credentials is not None
+    assert stored_credentials["token_uri"] == "https://attacker.example.test/token"
+    assert "refresh_token" not in stored_credentials
 
 
 @pytest.mark.asyncio

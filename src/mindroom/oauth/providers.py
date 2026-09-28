@@ -23,6 +23,7 @@ from httpx import HTTPError, HTTPStatusError
 
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     is_oauth_client_config_service,
@@ -281,6 +282,7 @@ class OAuthClientConfigResolution:
     custom: bool = True
     dynamically_registered: bool = False
     registered_redirect_uri: str | None = None
+    registered_token_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,6 +652,7 @@ class OAuthProvider:
                 credentials = credentials or {}
                 runtime_bootstrapped = credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is True
                 registered_redirect_uri = credentials.get(OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY)
+                registered_token_url = credentials.get(OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY)
                 return OAuthClientConfigResolution(
                     config=config,
                     service=service,
@@ -660,6 +663,7 @@ class OAuthProvider:
                     registered_redirect_uri=(
                         registered_redirect_uri if isinstance(registered_redirect_uri, str) else None
                     ),
+                    registered_token_url=registered_token_url if isinstance(registered_token_url, str) else None,
                 )
         for service in self.shared_client_config_services:
             credentials = manager.load_credentials(service)
@@ -888,6 +892,14 @@ class OAuthProvider:
 
         endpoints = await self.runtime_endpoints(runtime_paths)
         stored_token_url = token_data.get("token_uri")
+        # LEGACY_COMPAT: OAuth credentials stored without a `token_uri` endpoint binding.
+        # Legacy format: stored credentials whose mapping has no `token_uri`, produced by plugin `token_exchanger` or
+        # `token_parser` results that core did not stamp; built-in parsers have written `token_uri` since v2026.5.3.
+        # Last legacy release: v2026.9.358 for unstamped plugin output (unversioned external input); the unreleased
+        # replacement stamps the authorization-bound endpoint on every exchange and refresh result.
+        # Handling: reject before building a client or sending the refresh token; the lifecycle deletes the
+        # credential, logs `token_endpoint_changed`, and the user reconnects.
+        # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authorization
         if stored_token_url != endpoints.token_url:
             raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
         client_config = await self.require_client_config_async(runtime_paths)

@@ -15,11 +15,17 @@ import httpx
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
+from mindroom.oauth.providers import (
+    OAuthClientConfigResolution,
+    OAuthProvider,
+    OAuthProviderError,
+    OAuthRuntimeEndpoints,
+)
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
     ServerFetchUrlError,
@@ -340,6 +346,7 @@ def _stored_registration(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     registration: dict[str, Any],
+    token_url: str,
 ) -> dict[str, Any]:
     client_id = registration.get("client_id")
     if not isinstance(client_id, str) or not client_id.strip():
@@ -360,6 +367,7 @@ def _stored_registration(
         "client_id": client_id.strip(),
         "redirect_uri": redirect_uri,
         OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: token_url,
         "_source": OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
         "_oauth_provider": provider.id,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
@@ -379,18 +387,29 @@ def _stored_registration(
     return stored
 
 
+def _registration_needed(
+    resolution: OAuthClientConfigResolution | None,
+    metadata: _DiscoveredOAuthMetadata,
+) -> bool:
+    """Return whether no client exists yet or the dynamic registration belongs to another token endpoint."""
+    if resolution is None:
+        return metadata.registration_url is not None
+    return resolution.dynamically_registered and resolution.registered_token_url != metadata.token_url
+
+
 async def _register_client(
     provider: OAuthProvider,
     config: OAuthDiscoveryConfig,
     metadata: _DiscoveredOAuthMetadata,
     runtime_paths: RuntimePaths,
 ) -> None:
-    if not config.dynamic_client_registration or metadata.registration_url is None:
+    if not config.dynamic_client_registration:
         return
     with _DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD:
         lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
     async with _cross_loop_lock(lock):
-        if await asyncio.to_thread(provider.client_config_resolution, runtime_paths) is not None:
+        resolution = await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
+        if not _registration_needed(resolution, metadata):
             return
         if not provider.client_config_services:
             msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
@@ -398,6 +417,25 @@ async def _register_client(
         credentials_manager = await asyncio.to_thread(get_runtime_credentials_manager, runtime_paths)
         if credentials_manager.current_worker_key is not None:
             msg = f"{config.error_label} dynamic client registration must run in the primary runtime"
+            raise OAuthProviderError(msg)
+        if resolution is not None and resolution.registered_token_url is None:
+            # LEGACY_COMPAT: Dynamic client registrations without a recorded token endpoint.
+            # Legacy format: a dynamically registered client config without `OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY`.
+            # Last legacy release: v2026.9.358, for records written since v2026.8.37 (earlier records lack the
+            # runtime-bootstrap flag and already resolve as operator-configured clients); the unreleased replacement
+            # records the token endpoint with every registration.
+            # Handling: bind the registration once to the token endpoint resolved at first use after upgrade, keeping
+            # its client ID and the tokens issued to it; later endpoint changes re-register.
+            # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endpoint
+            stored = await asyncio.to_thread(credentials_manager.load_credentials, resolution.service)
+            await run_blocking_until_complete(
+                credentials_manager.save_credentials,
+                resolution.service,
+                {**(stored or {}), OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: metadata.token_url},
+            )
+            return
+        if metadata.registration_url is None:
+            msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint"
             raise OAuthProviderError(msg)
         await _validate_url(metadata.registration_url, config, runtime_paths)
         try:
@@ -419,7 +457,7 @@ async def _register_client(
         await run_blocking_until_complete(
             credentials_manager.save_credentials,
             service,
-            _stored_registration(provider, runtime_paths, registration),
+            _stored_registration(provider, runtime_paths, registration, metadata.token_url),
         )
 
 
