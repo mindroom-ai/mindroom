@@ -616,14 +616,6 @@ def _new_pair_code_unlocked(state: ProvisioningState) -> str:
             return pair_code
 
 
-def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> PairSession | None:
-    pair_hash = _hash_token(_normalize_pair_code(pair_code))
-    session_id = state.pair_session_by_hash.get(pair_hash)
-    if not session_id:
-        return None
-    return state.pair_sessions.get(session_id)
-
-
 def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> bool:
     """Return whether username matches mindroom_<entity>_<namespace>."""
     suffix = f"_{namespace}"
@@ -823,8 +815,14 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
     raise HTTPException(status_code=502, detail=f"Matrix registration failed: {detail}")
 
 
-async def _limit_homeserver_token_lookup(request: Request) -> None:
-    """Bound homeserver lookups per client address so invalid tokens cannot amplify traffic."""
+async def _verify_openid_user(
+    request: Request,
+    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
+) -> str:
+    token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
+    # Bound homeserver lookups per client address so invalid tokens cannot amplify traffic.
     state = _runtime_state_from_request(request)
     remote = request.client.host if request.client else "unknown"
     async with state.lock:
@@ -834,16 +832,6 @@ async def _limit_homeserver_token_lookup(request: Request) -> None:
             limit=HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE,
             window_seconds=60,
         )
-
-
-async def _verify_openid_user(
-    request: Request,
-    x_matrix_openid_token: Annotated[str | None, Header(alias=OPENID_TOKEN_HEADER)] = None,
-) -> str:
-    token = x_matrix_openid_token.strip() if x_matrix_openid_token else ""
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing Matrix OpenID token")
-    await _limit_homeserver_token_lookup(request)
     return await _matrix_openid_userinfo(_service_config_from_request(request), token)
 
 
@@ -888,8 +876,9 @@ def _create_connection_unlocked(
     return connection, client_secret
 
 
-def _find_device_session_unlocked(state: ProvisioningState, pair_code: str, now: datetime) -> PairSession:
-    session = _find_pair_session_unlocked(state, pair_code)
+def _live_pair_session_by_code_unlocked(state: ProvisioningState, pair_code: str, now: datetime) -> PairSession:
+    session_id = state.pair_session_by_hash.get(_hash_token(_normalize_pair_code(pair_code)))
+    session = state.pair_sessions.get(session_id) if session_id else None
     if session is None:
         raise HTTPException(status_code=404, detail="Pair code not found")
     _expire_if_needed(session, now)
@@ -962,7 +951,7 @@ async def inspect_device_pair(
     """Describe the machine waiting behind a device code before the user approves it."""
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:device:inspect:{user_id}", limit=20, window_seconds=60)
-        return _device_session_out(_find_device_session_unlocked(state, payload.pair_code, _now_utc()))
+        return _device_session_out(_live_pair_session_by_code_unlocked(state, payload.pair_code, _now_utc()))
 
 
 @router.post("/v1/local-mindroom/pair/device/approve", response_model=DevicePairSessionOut)
@@ -976,7 +965,7 @@ async def approve_device_pair(
     now = _now_utc()
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:device:approve:{user_id}", limit=20, window_seconds=60)
-        session = _find_device_session_unlocked(state, payload.pair_code, now)
+        session = _live_pair_session_by_code_unlocked(state, payload.pair_code, now)
         if session.status == "approved" and session.user_id != user_id:
             raise HTTPException(status_code=409, detail="Pair code already approved")
         if session.status == "pending":
