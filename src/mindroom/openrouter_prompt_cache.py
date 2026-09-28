@@ -10,8 +10,8 @@ Breakpoint placement reuses :mod:`mindroom.claude_prompt_cache`: the shared
 system prefix, the newest cacheable part of the two newest cacheable messages,
 and the last tool definition, all with one TTL and at most four markers. This
 module only translates between the OpenAI message shape and those rules.
-The ladder runs on the complete request at the SDK client, so authored
-markers on messages and tools share one budget with the automatic markers.
+The ladder runs on the complete request at the SDK client and leaves any
+request that already carries authored markers untouched.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 from mindroom.claude_prompt_cache import (
     MAX_CACHE_MARKERS,
     MESSAGE_RUNG_COUNT,
-    count_cache_markers,
     mark_last_tool,
     mark_message_cache_rungs,
     prompt_cache_control,
@@ -91,39 +90,50 @@ def _with_text_part_content(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "content": [{"type": "text", "text": content}]}
 
 
+def _contains_cache_marker(value: object) -> bool:
+    if isinstance(value, dict):
+        return "cache_control" in value or any(_contains_cache_marker(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_cache_marker(item) for item in value)
+    return False
+
+
 def _request_kwargs_with_prompt_cache(
     request_kwargs: dict[str, Any],
     cache_control: dict[str, str],
 ) -> dict[str, Any]:
-    """Return Chat Completions kwargs with Claude ladder breakpoints within one request-wide budget.
+    """Return Chat Completions kwargs with Claude ladder breakpoints.
 
-    Existing markers on messages and tools count first; the system prompt,
-    conversation rungs, and last tool then take markers in that order until
-    the API limit is reached.
+    A request that already carries any authored ``cache_control`` (on messages,
+    tools, or the ``extra_body`` the SDK merges into the payload) is left
+    untouched, so automatic markers never exceed the limit or mix TTLs with
+    authored ones. Otherwise the system prompt, conversation rungs, and last
+    tool take markers in that order, at most four.
     """
     messages = request_kwargs.get("messages")
-    if not isinstance(messages, list):
+    if not isinstance(messages, list) or any(
+        _contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
+    ):
         return request_kwargs
     prepared = _move_transient_context_after_user_turn(messages)
-    budget = MAX_CACHE_MARKERS - count_cache_markers({"messages": prepared, "tools": request_kwargs.get("tools")})
+    budget = MAX_CACHE_MARKERS
     system_count = 0
     while system_count < len(prepared) and prepared[system_count].get("role") in _SYSTEM_ROLES:
         system_count += 1
-    if system_count and budget > 0:
+    if system_count:
         marked_system = _with_marked_system_prompt(prepared[0], cache_control)
         budget -= marked_system is not prepared[0]
         prepared[0] = marked_system
 
-    if budget > 0:
-        conversation = prepared[system_count:]
-        # Only messages that receive a marker keep the text-part form; others stay unchanged.
-        candidates = [_with_text_part_content(message) for message in conversation]
-        marked, markers_added = mark_message_cache_rungs(candidates, cache_control, min(MESSAGE_RUNG_COUNT, budget))
-        budget -= markers_added
-        prepared[system_count:] = [
-            original if marked_message is candidate else marked_message
-            for original, candidate, marked_message in zip(conversation, candidates, marked, strict=True)
-        ]
+    conversation = prepared[system_count:]
+    # Only messages that receive a marker keep the text-part form; others stay unchanged.
+    candidates = [_with_text_part_content(message) for message in conversation]
+    marked, markers_added = mark_message_cache_rungs(candidates, cache_control, min(MESSAGE_RUNG_COUNT, budget))
+    budget -= markers_added
+    prepared[system_count:] = [
+        original if marked_message is candidate else marked_message
+        for original, candidate, marked_message in zip(conversation, candidates, marked, strict=True)
+    ]
     prepared_kwargs = {**request_kwargs, "messages": prepared}
 
     if budget > 0:

@@ -31,11 +31,11 @@ from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
     MAX_CACHE_MARKERS,
+    _count_cache_markers,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
     _request_kwargs_with_replay_safe_tool_search_results,
     aclose_anthropic_async_client,
-    count_cache_markers,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
@@ -960,7 +960,7 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert tool_result_block["cache_control"] == expected_cache_control
     assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
     assert prepared["tools"][-1]["cache_control"] == expected_cache_control
-    assert count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
@@ -1026,7 +1026,7 @@ def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() ->
     assert prepared["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in prepared["messages"][0]["content"][0]
     assert prepared["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_client_proxy_delegates_context_manager() -> None:
@@ -1065,7 +1065,7 @@ def test_prompt_cache_ladder_respects_marker_budget() -> None:
     prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert prepared is request_kwargs
-    assert count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
@@ -1155,7 +1155,7 @@ def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
     model.response(messages=_tool_turn_messages("ok"), compression_manager=None)
 
     wire_messages = captured_kwargs[0]["messages"]
-    assert count_cache_markers({"messages": list(wire_messages)}) == 0
+    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
 def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
@@ -1285,7 +1285,7 @@ def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> No
     wire_tools = captured_kwargs[0]["tools"]
     assert wire_tools[0]["name"] == "tool_search_tool_regex"
     assert wire_tools[1]["defer_loading"] is True
-    assert count_cache_markers({"tools": list(wire_tools)}) == 0
+    assert _count_cache_markers({"tools": list(wire_tools)}) == 0
 
 
 def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
@@ -1301,7 +1301,7 @@ def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled()
     wire_tools = request["tools"]
     assert wire_tools[0]["name"] == "tool_search_tool_regex"
     assert wire_tools[1]["defer_loading"] is True
-    assert count_cache_markers({"tools": list(wire_tools), "messages": list(request["messages"])}) == 0
+    assert _count_cache_markers({"tools": list(wire_tools), "messages": list(request["messages"])}) == 0
 
 
 def test_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
@@ -1883,7 +1883,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
 
     wire_messages = captured_kwargs[0]["messages"]
     assert _wire_tool_search_results(wire_messages) == []
-    assert count_cache_markers({"messages": list(wire_messages)}) == 0
+    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

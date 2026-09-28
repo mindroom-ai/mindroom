@@ -247,7 +247,7 @@ def _move_transient_context_to_user_suffix(messages: list[Any]) -> list[Any]:
     return prepared_messages
 
 
-def count_cache_markers(request_kwargs: dict[str, Any]) -> int:
+def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
     """Count cache_control markers already present in a wire-format request."""
     count = 0
     system = request_kwargs.get("system")
@@ -572,7 +572,7 @@ def _request_kwargs_with_prompt_cache_ladder(
         if reordered_messages != messages:
             prepared_kwargs = {**request_kwargs, "messages": reordered_messages}
 
-    marker_budget = MAX_CACHE_MARKERS - count_cache_markers(prepared_kwargs)
+    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
     if marker_budget <= 0:
         return prepared_kwargs
     prepared_kwargs = dict(prepared_kwargs)

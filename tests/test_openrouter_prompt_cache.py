@@ -138,31 +138,107 @@ def test_tool_loop_request_extends_the_previous_boundary() -> None:
     assert "cache_control" not in json.dumps(payload["messages"][2])
 
 
-def test_authored_tool_markers_share_the_request_budget() -> None:
-    """An authored tool marker counts toward the limit before automatic markers are added."""
+def test_authored_request_params_tool_marker_disables_automatic_markers() -> None:
+    """An authored tool marker in request_params leaves the request untouched."""
     authored_tools = deepcopy(_TOOLS)
     authored_tools[0]["cache_control"] = _ONE_HOUR
+    model, requests = _model(request_params={"tools": authored_tools})
+    messages = _conversation()
+
+    payload = _send(model, requests, messages, tools=deepcopy(_TOOLS))
+
+    assert _markers(payload) == [_ONE_HOUR]
+    assert payload["messages"][0]["content"] == messages[0].content
+
+
+def test_authored_extra_body_tool_marker_disables_automatic_markers() -> None:
+    """Markers in extra_body, which the SDK merges into the payload, also disable the ladder."""
+    authored_tools = deepcopy(_TOOLS)
+    authored_tools[-1]["cache_control"] = _ONE_HOUR
+    model, requests = _model(extra_body={"tools": authored_tools})
+
+    payload = _send(model, requests, _conversation(), tools=deepcopy(_TOOLS))
+
+    assert _markers(payload) == [_ONE_HOUR]
+
+
+def test_authored_five_minute_marker_is_not_mixed_with_one_hour_markers() -> None:
+    """Automatic 1h markers after an authored 5m marker would violate the API's TTL ordering."""
+    authored_tools = deepcopy(_TOOLS)
+    authored_tools[0]["cache_control"] = {"type": "ephemeral"}
     model, requests = _model(request_params={"tools": authored_tools})
 
     payload = _send(model, requests, _conversation(), tools=deepcopy(_TOOLS))
 
-    assert _markers(payload) == [_ONE_HOUR] * 4
-    assert payload["tools"][0]["cache_control"] == _ONE_HOUR
-    assert "cache_control" not in payload["tools"][1]
-    assert payload["messages"][-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
+    assert _markers(payload) == [{"type": "ephemeral"}]
 
 
-def test_existing_message_markers_block_the_system_marker() -> None:
-    """Four authored message markers leave no budget for any automatic marker."""
-    model, requests = _model()
-    marked_content = [{"type": "text", "text": f"Part {index}.", "cache_control": _ONE_HOUR} for index in range(4)]
-    messages = [Message(role="system", content=_SHARED), Message(role="user", content=marked_content)]
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
-    payload = _send(model, requests, messages, tools=deepcopy(_TOOLS))
 
-    assert _markers(payload) == [_ONE_HOUR] * 4
-    assert payload["messages"][0]["content"] == _SHARED
-    assert all("cache_control" not in tool for tool in payload["tools"])
+def _wire_response(body: dict) -> httpx.Response:
+    if not body.get("stream"):
+        return httpx.Response(200, json=_COMPLETION)
+    chunk = {"id": "gen-test", "object": "chat.completion.chunk", "created": 1, "model": "anthropic/claude-haiku-4.5"}
+    events = (
+        _sse(
+            {
+                **chunk,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": None}],
+            },
+        )
+        + _sse(
+            {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": _COMPLETION["usage"]},
+        )
+        + "data: [DONE]\n\n"
+    )
+    return httpx.Response(200, text=events, headers={"content-type": "text/event-stream"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asynchronous", "stream"),
+    [(False, False), (False, True), (True, False), (True, True)],
+    ids=["sync", "sync-stream", "async", "async-stream"],
+)
+async def test_every_invocation_mode_sends_markers_and_honors_late_opt_out(*, asynchronous: bool, stream: bool) -> None:
+    """All four Agno request paths go through the wrapped client, which reads the opt-out per request."""
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _wire_response(requests[-1])
+
+    async def arespond(request: httpx.Request) -> httpx.Response:
+        return respond(request)
+
+    transport = httpx.MockTransport(arespond if asynchronous else respond)
+    http_client = httpx.AsyncClient(transport=transport) if asynchronous else httpx.Client(transport=transport)
+    model = MindRoomOpenRouter(id="anthropic/claude-haiku-4.5", api_key="test-key", http_client=http_client)
+
+    async def invoke() -> dict:
+        messages = _conversation()
+        tools = deepcopy(_TOOLS)
+        if asynchronous and stream:
+            async for _ in model.aresponse_stream(messages=messages, tools=tools):
+                pass
+        elif asynchronous:
+            await model.aresponse(messages=messages, tools=tools)
+        elif stream:
+            for _ in model.response_stream(messages=messages, tools=tools):
+                pass
+        else:
+            model.response(messages=messages, tools=tools)
+        return requests[-1]
+
+    first = await invoke()
+    model.cache_system_prompt = False
+    second = await invoke()
+
+    assert first.get("stream", False) is stream
+    assert _markers(first) == [_ONE_HOUR] * 4
+    assert _markers(second) == []
 
 
 def test_shared_prefix_is_independent_of_session_context() -> None:
