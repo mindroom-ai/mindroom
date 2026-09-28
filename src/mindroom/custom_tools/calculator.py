@@ -13,6 +13,16 @@ _MAX_FACTORIAL_ARGUMENT = 1558
 _MAX_PRIME_CHECK_ARGUMENT = 10**12
 
 
+# AGNO_COMPAT: CalculatorTools factorial and is_prime accept unbounded arguments.
+# Reason: Agno 3.0.9 runs math.factorial(n), which holds the GIL until it finishes and whose result
+# json.dumps refuses above 4300 digits, and trial-divides is_prime up to sqrt(n); either call from one
+# chat message stalls the primary process shared by every agent.
+# Upstream issue: Tracking gap; no matching issue has been verified.
+# Upstream PR: No matching fix has been verified.
+# Remove when: Agno refuses factorial arguments whose result cannot be serialized and bounds is_prime work;
+# the specific 1558 and 10**12 caps are MindRoom policy for the shared primary and stay if Agno picks others.
+# Coverage: tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned;
+# tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division.
 class CalculatorTools(AgnoCalculatorTools):
     """Agno calculator with argument bounds, because it runs in the process shared by every agent."""
 
