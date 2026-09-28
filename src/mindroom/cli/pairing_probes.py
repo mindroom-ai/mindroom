@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import socket
 import threading
@@ -43,7 +44,8 @@ class _ProbeHandler(BaseHTTPRequestHandler):
 class _ProbeServer(ThreadingHTTPServer):
     def __init__(self, family: socket.AddressFamily, address: tuple) -> None:
         self.address_family = family
-        super().__init__(address, _ProbeHandler)
+        # The caller binds, so an address this host has not configured can be skipped.
+        super().__init__(address, _ProbeHandler, bind_and_activate=False)
 
     def server_bind(self) -> None:
         # Like asyncio's create_server behind Uvicorn, an IPv6 listener leaves IPv4 to its own listener.
@@ -72,11 +74,27 @@ def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
                     flags=socket.AI_PASSIVE,
                 )
             )
+            listening = 0
             for family, address in addresses:
-                server = _ProbeServer(family, address)
+                # Like asyncio's create_server, skip a family this host cannot create sockets for
+                # and an address it has not configured, such as `::1` with IPv6 disabled.
+                try:
+                    server = _ProbeServer(family, address)
+                except OSError:
+                    continue
                 servers.callback(server.server_close)
+                try:
+                    server.server_bind()
+                except OSError as exc:
+                    if exc.errno == errno.EADDRNOTAVAIL:
+                        continue
+                    raise
+                server.server_activate()
                 threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True).start()
                 servers.callback(server.shutdown)
+                listening += 1
+            if not listening:
+                raise OSError(errno.EADDRNOTAVAIL, "could not bind on any resolved address")  # noqa: TRY301
         except OSError as exc:
             msg = (
                 f"Cannot listen on the API address {host}:{port} ({exc.strerror or exc}); "

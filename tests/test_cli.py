@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import re
 import socket
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 
 from mindroom import constants as constants_mod
 from mindroom.cli import main as main_module
+from mindroom.cli import pairing_probes
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
 from mindroom.cli.pairing_probes import serve_pairing_probes
@@ -626,6 +628,41 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         released.bind(first_address)
         released.listen()
+
+
+def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like the real API server, a `::1` that IPv6-disabled hosts cannot bind is skipped while IPv4 still answers."""
+    port = _unused_local_port()
+    resolved = {
+        "dual-stack.test": [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ],
+        "ipv6-only.test": [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))],
+    }
+    real_getaddrinfo = socket.getaddrinfo
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: resolved.get(host) or real_getaddrinfo(host, *args, **kwargs),
+    )
+    real_server_bind = pairing_probes._ProbeServer.server_bind
+
+    def server_bind(server: pairing_probes._ProbeServer) -> None:
+        if server.address_family == socket.AF_INET6:
+            raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+        real_server_bind(server)
+
+    monkeypatch.setattr(pairing_probes._ProbeServer, "server_bind", server_bind)
+
+    with serve_pairing_probes("dual-stack.test", port):
+        assert _probe_status("127.0.0.1", port) == 200
+
+    with (
+        pytest.raises(OSError, match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)")),
+        serve_pairing_probes("ipv6-only.test", port),
+    ):
+        pass
 
 
 def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
