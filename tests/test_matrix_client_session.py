@@ -1121,17 +1121,35 @@ def _session_restore(runtime_paths: RuntimePaths) -> Coroutine[Any, Any, nio.Asy
     )
 
 
+def _forbidden_response() -> SimpleNamespace:
+    return SimpleNamespace(
+        status=403,
+        content_type="application/json",
+        content_disposition=None,
+        json=AsyncMock(return_value={"errcode": "M_FORBIDDEN", "error": "rejected"}),
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "failed"])
+@pytest.mark.parametrize(
+    ("outcome", "expected_error"),
+    [
+        (None, asyncio.CancelledError),
+        (RuntimeError("transport broke"), RuntimeError),
+        (_forbidden_response(), PermanentMatrixStartupError),
+    ],
+    ids=["cancelled", "failed", "rejected"],
+)
 @pytest.mark.parametrize("authenticate", [_password_login, _session_restore], ids=["login", "restore_login"])
 async def test_authentication_closes_the_client_it_does_not_return(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     authenticate: Callable[[RuntimePaths], Coroutine[Any, Any, nio.AsyncClient]],
-    cancel: bool,
+    outcome: object,
+    expected_error: type[BaseException],
 ) -> None:
-    """Ctrl+C during a startup retry, or any transport error, must not leave an unclosed HTTP session behind."""
-    _, blocked = _install_scripted_transport(monkeypatch, *([] if cancel else [RuntimeError("transport broke")]))
+    """Ctrl+C during a startup retry, a transport error, or a rejection must not leave an unclosed HTTP session."""
+    _, blocked = _install_scripted_transport(monkeypatch, *([] if outcome is None else [outcome]))
     created: list[nio.AsyncClient] = []
     create_client = client_session._create_matrix_client
 
@@ -1144,10 +1162,10 @@ async def test_authentication_closes_the_client_it_does_not_return(
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
 
     attempt = asyncio.create_task(authenticate(runtime_paths))
-    if cancel:
+    if outcome is None:
         await asyncio.wait_for(blocked.wait(), timeout=1.0)
         attempt.cancel()
-    with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
+    with pytest.raises(expected_error):
         await attempt
 
     [client] = created
