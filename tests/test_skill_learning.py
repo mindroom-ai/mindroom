@@ -57,6 +57,7 @@ from mindroom.tool_system.workspace_skills import (
     open_skills_root,
     record_skill_use,
     update_skill_usage,
+    update_skill_usages,
 )
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
@@ -2840,6 +2841,86 @@ def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
     archived = library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
     assert len(archived) == count
     assert (root / f"s-{count:03d}").exists()
+
+
+@pytest.mark.parametrize("reader", ["catalog", "archival"])
+def test_ownership_reads_stay_within_the_frontmatter_budget(tmp_path: Path, reader: str) -> None:
+    """Files swapped in after loading measured them cannot make the ownership checks parse more than loading may."""
+    root = tmp_path / "skills"
+    names = [f"s-{index:03d}" for index in range(64)]
+    for index, name in enumerate(names):
+        metadata = f"{{mindroom: {{learned: true}}, salt: {index}}}"
+        _write_skill(
+            root,
+            name,
+            f"---\nname: {name}\ndescription: d\nnote: {'n' * 6000}\nmetadata: '{metadata}'\n---\nb\n",
+        )
+    workspace_skills_module._PARSE_CACHE.clear()
+    parsed: list[int] = []
+    real_yaml = workspace_skills_module.yaml_io.safe_load_untrusted
+    real_json5 = workspace_skills_module.json5.loads
+
+    def yaml_counted(text: str) -> object:
+        parsed.append(len(text.encode()))
+        return real_yaml(text)
+
+    def json5_counted(text: str) -> object:
+        parsed.append(3 * len(text.encode()))
+        return real_json5(text)
+
+    # As if loading had measured small files, which worker code then replaced.
+    measured = workspace_skills_module._WorkspaceSkillBudget(dict.fromkeys(names, 0), {})
+    with (
+        patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", yaml_counted),
+        patch.object(workspace_skills_module.json5, "loads", json5_counted),
+        patch.object(library, "workspace_skill_budget", return_value=measured),
+    ):
+        if reader == "catalog":
+            assert library.learned_skill_directories(root, names)
+        else:
+            old = datetime.now(UTC) - timedelta(days=90)
+            with open_skills_root(root) as root_fd:
+                update_skill_usages(
+                    root_fd,
+                    dict.fromkeys(names, lambda usage: usage.model_copy(update={"created_at": old})),
+                )
+            assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
+    assert sum(parsed) <= workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES
+
+
+def test_an_edit_repairs_a_skill_whose_name_loading_refuses(tmp_path: Path) -> None:
+    """Loading refuses a skill whose name is too long, so an edit keeps its directory's name and the skill loads again."""
+    root = tmp_path / "skills"
+    _write_skill(root, "deploy-checks", LEARNED.replace("name: deploy-checks", f"name: {'long-' * 14}"))
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    assert current.name == "deploy-checks"
+    kept = current.content.replace("smoke", "unit")
+    with pytest.raises(library.SkillEditError, match="Frontmatter name must be exactly 'deploy-checks'"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", kept, expected_digest=current.digest, learner=True)
+    library.write_skill_file(root, "deploy-checks", "SKILL.md", LEARNED, expected_digest=current.digest, learner=True)
+    assert [skill.name for skill in workspace_skills_module.load_workspace_skills(root)] == ["deploy-checks"]
+    long_directory = "d" * 70
+    _write_skill(root, long_directory, LEARNED.replace("deploy-checks", long_directory))
+    current = library.read_skill_file(root, long_directory)
+    assert current is not None
+    with pytest.raises(library.SkillEditError, match="rename the directory"):
+        library.write_skill_file(
+            root,
+            long_directory,
+            "SKILL.md",
+            current.content.replace("smoke", "unit"),
+            expected_digest=current.digest,
+            learner=True,
+        )
+
+
+def test_a_support_file_can_be_added_to_a_skill_loading_skips(tmp_path: Path) -> None:
+    """A skill whose frontmatter is not a mapping never loads, and its owner can still add a file to it."""
+    root = tmp_path / "skills"
+    _write_skill(root, "broken", "---\n- a\n- b\n---\nbody\n")
+    library.write_skill_file(root, "broken", "references/x.md", "Notes.", expected_digest=None, learner=False)
+    assert (root / "broken" / "references" / "x.md").read_text() == "Notes."
 
 
 @pytest.mark.parametrize("change", ["create", "edit"])

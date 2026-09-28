@@ -91,7 +91,8 @@ A workspace loads at most 256 skills within an 8 MiB budget for names, descripti
 `skill_manage` refuses a change that would cross one of these limits, so a skill it writes always loads.
 The primary parses workspace frontmatter, which worker code can write, with bounded work: at most 8 KiB of frontmatter per skill and 128 KiB per workspace, with JSON5 metadata counting three times its size because it parses that much slower, so a skill with larger frontmatter is refused and skills past the workspace budget are skipped, each with a warning.
 Frontmatter counts toward the workspace budget once it is parsed, including for a skill that loading then refuses, such as one whose name is too long, and `skill_manage` refuses a change that would push the workspace over it.
-A pass reads at most 16 MiB of `SKILL.md` files, refused ones included, and parses of unchanged frontmatter and metadata are reused across loads.
+Reading which skills the learner owns, for a skill catalog or for archival, parses frontmatter within its own budget of the same size, and a skill past it reads as user-owned, so a pin in it still holds.
+A pass reads at most 16 MiB of `SKILL.md` files, refused ones included, and parses of unchanged frontmatter and metadata are reused across loads from a cache that keeps at most 8 MiB.
 Workspace frontmatter may not use YAML aliases, merge keys, flow collections nested more than 32 levels deep, base-60 integers, or integer literals over 1000 characters, which can expand or take superlinear time to parse; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
@@ -241,6 +242,7 @@ It can create a skill, patch text, replace `SKILL.md`, and write or remove one s
 Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
 In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
 Like Hermes' `_find_skill`, chat finds a skill by its workspace directory name first, so it also reaches a workspace skill this host does not load, for example because its requirements are unmet or its frontmatter is broken, and configured skills are found by their names.
+An edit of `SKILL.md` keeps the name the skill loads under, or its directory's name when it has none or one too long to load, so an edit can repair a skill that loading refuses.
 Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
 The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
 Skill tools serve files with normalized line endings, so like Hermes' `skill_manage`, a patch matches that text and writes the file with LF line endings.

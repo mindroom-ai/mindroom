@@ -6,15 +6,17 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pickle
 import re
+import stat
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
@@ -51,8 +53,10 @@ MAX_WORKSPACE_FRONTMATTER_BYTES = 128 << 10
 _JSON5_PARSE_WEIGHT = 3
 # Refused files count too, so planted ones cannot make a pass read without bound.
 _MAX_WORKSPACE_SKILL_READ_BYTES = 16 << 20
-# Loads repeat for every agent build and skill edit, so parses of unchanged frontmatter and metadata are reused.
-_PARSE_CACHE_ENTRIES = 1024
+# Loads repeat for every agent build and skill edit, so parses of unchanged frontmatter and metadata are reused, and
+# the cache keeps a bounded number of bytes whatever worker code writes.
+_PARSE_CACHE_BYTES = 8 << 20
+_PARSE_CACHE_ENTRY_OVERHEAD = 256
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
@@ -183,38 +187,75 @@ def _strict_frontmatter(text: str, *, trusted: bool) -> Any:  # noqa: ANN401
     Workspace frontmatter, which worker code can write, gets PyYAML's pure-Python loader like Agno's LocalSkills, with
     the refusals of ``yaml_io.safe_load_untrusted``; operator-owned skill roots keep the fast safe loader.
     """
-    pickled, error = _cached_frontmatter(text, trusted=trusted)
-    if error is not None:
-        raise YAMLError(error)
-    return _unpickled(pickled)
+    kind = "trusted-yaml" if trusted else "untrusted-yaml"
+    parsed = _PARSE_CACHE.parse(kind, text, yaml_io.safe_load if trusted else yaml_io.safe_load_untrusted)
+    if isinstance(parsed, _ParseError):
+        raise YAMLError(parsed.message)
+    return parsed or {}
 
 
-@lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
-def _cached_frontmatter(text: str, *, trusted: bool) -> tuple[bytes, str | None]:
-    try:
-        return _pickled((yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}), None
-    except Exception as exc:
-        # PyYAML refuses values such as 2026-02-30, `!!int ""`, `!!bool maybe`, or deep nesting with ValueError,
-        # IndexError, KeyError, AttributeError, or RecursionError; like LocalSkills, any of them makes the YAML invalid.
-        return b"", str(exc)
+@dataclass(frozen=True)
+class _ParseError:
+    message: str
 
 
-@lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
-def _cached_json5(text: str) -> tuple[bytes, str | None]:
-    try:
-        return _pickled(json5.loads(text)), None
-    except Exception as exc:
-        return b"", str(exc)
+class _ParseCache:
+    """Pickled parses of skill text, keyed by digest and bounded by the bytes they keep, least recently used first."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._entries: OrderedDict[tuple[str, bytes], bytes | _ParseError] = OrderedDict()
+        self._retained = 0
+        self._lock = threading.Lock()
+
+    @property
+    def retained_bytes(self) -> int:
+        """Return what the cached entries keep, counting a fixed overhead for each."""
+        return self._retained
+
+    def parse(self, kind: str, text: str, parse: Callable[[str], object]) -> Any:  # noqa: ANN401
+        """Return a fresh copy of the parse of ``text``, or the error that refused it, parsing only on a miss."""
+        # YAML escapes can put lone surrogates in a metadata string, which the digest must still read.
+        key = (kind, hashlib.blake2b(text.encode(errors="surrogatepass"), digest_size=16).digest())
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)
+        if entry is None:
+            try:
+                entry = pickle.dumps(parse(text), protocol=pickle.HIGHEST_PROTOCOL)
+            except Exception as exc:
+                # PyYAML refuses values such as 2026-02-30, `!!int ""`, `!!bool maybe`, or deep nesting with ValueError,
+                # IndexError, KeyError, AttributeError, or RecursionError; like LocalSkills, any error makes it invalid.
+                entry = _ParseError(str(exc))
+            self._store(key, entry)
+        # Only this cache pickled the entry, from parser output of built-in types; unpickling returns a fresh copy.
+        return entry if isinstance(entry, _ParseError) else pickle.loads(entry)  # noqa: S301
+
+    def clear(self) -> None:
+        """Drop every cached parse."""
+        with self._lock:
+            self._entries.clear()
+            self._retained = 0
+
+    def _store(self, key: tuple[str, bytes], entry: bytes | _ParseError) -> None:
+        size = _cached_entry_bytes(entry)
+        with self._lock:
+            if key in self._entries or size > self._max_bytes:
+                return
+            self._entries[key] = entry
+            self._retained += size
+            while self._retained > self._max_bytes:
+                _key, evicted = self._entries.popitem(last=False)
+                self._retained -= _cached_entry_bytes(evicted)
 
 
-def _pickled(value: object) -> bytes:
-    """Keep a cached parse as bytes, which stay near the size of its text where live parsed objects take far more."""
-    return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+def _cached_entry_bytes(entry: bytes | _ParseError) -> int:
+    size = len(entry) if isinstance(entry, bytes) else len(entry.message.encode())
+    return size + _PARSE_CACHE_ENTRY_OVERHEAD
 
 
-def _unpickled(data: bytes) -> Any:  # noqa: ANN401
-    """Return a fresh copy of a cached parse, which only ``_pickled`` wrote from parser output of built-in types."""
-    return pickle.loads(data)  # noqa: S301 - this module pickled it
+_PARSE_CACHE = _ParseCache(_PARSE_CACHE_BYTES)
 
 
 def normalized_newlines(text: str) -> str:
@@ -259,11 +300,10 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return cast("dict[str, Any]", raw)
     if isinstance(raw, str):
-        pickled, error = _cached_json5(raw)
-        if error is not None:
-            logger.warning("Failed to parse skill metadata JSON5", path=path, error=error)
+        parsed = _PARSE_CACHE.parse("json5", raw, json5.loads)
+        if isinstance(parsed, _ParseError):
+            logger.warning("Failed to parse skill metadata JSON5", path=path, error=parsed.message)
             return None
-        parsed = _unpickled(pickled)
         if isinstance(parsed, dict):
             return cast("dict[str, Any]", parsed)
         logger.warning("Skill metadata JSON5 must be an object", path=path)
@@ -366,31 +406,29 @@ def _measured_skills(skills_root: Path, *, charges: dict[str, int]) -> Iterator[
     so planted skill files, refused or not, cannot make the primary parse more than that per load. ``charges`` receives
     what each parsed directory cost.
     """
-    parsed_bytes = 0
+    budget = FrontmatterBudget()
     read_bytes = 0
 
     def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | _BudgetSpent | None:
-        nonlocal parsed_bytes, read_bytes
+        nonlocal read_bytes
         content = _read_skill_markdown(skill_fd, skills_root, directory)
         if content is None:
             return None
-        read_bytes += len(content)
+        read_bytes += len(content.encode())
         if read_bytes > _MAX_WORKSPACE_SKILL_READ_BYTES:
             return _READ_BUDGET_SPENT
         size = _checked_frontmatter_bytes(content, skills_root / directory / SKILL_FILENAME)
         if size is None:
             return None
-        if parsed_bytes + size > MAX_WORKSPACE_FRONTMATTER_BYTES:
-            return _FRONTMATTER_BUDGET_SPENT
         # Spent even when the parse raises or skill loading refuses the skill it parsed.
-        parsed_bytes += size
+        if not budget.spend(size):
+            return _FRONTMATTER_BUDGET_SPENT
         charges[directory] = size
         skill = _read_skill(skill_fd, content, skills_root, directory)
         # Only a loaded skill's JSON5 metadata is parsed later, so only it adds that weight.
-        surcharge = skill_parse_cost(size, skill) - size if skill is not None else 0
-        if parsed_bytes + surcharge > MAX_WORKSPACE_FRONTMATTER_BYTES:
+        surcharge = metadata_surcharge(skill.metadata) if skill is not None else 0
+        if not budget.spend(surcharge):
             return _FRONTMATTER_BUDGET_SPENT
-        parsed_bytes += surcharge
         charges[directory] += surcharge
         return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
 
@@ -411,21 +449,44 @@ def _read_skill(skill_fd: int, content: str, skills_root: Path, directory: str) 
     )
 
 
-def skill_parse_cost(frontmatter_size: int, skill: Skill) -> int:
-    """Return what one skill's frontmatter costs to parse, in YAML bytes, counting JSON5 metadata at its weight."""
-    metadata = skill.metadata
-    json5_bytes = len(metadata.encode()) if isinstance(metadata, str) else 0
-    return frontmatter_size + (_JSON5_PARSE_WEIGHT - 1) * json5_bytes
+@dataclass
+class FrontmatterBudget:
+    """The worker-writable frontmatter one pass over a workspace may parse, charged before each parse."""
+
+    remaining: int = MAX_WORKSPACE_FRONTMATTER_BYTES
+
+    def spend(self, cost: int) -> bool:
+        """Charge ``cost`` when it fits, and return whether it did."""
+        if cost > self.remaining:
+            return False
+        self.remaining -= cost
+        return True
 
 
-def frontmatter_bytes(content: str) -> int:
+def metadata_surcharge(metadata: object) -> int:
+    """Return what parsing JSON5 metadata costs beyond its share of the frontmatter, in YAML bytes at its weight."""
+    return (_JSON5_PARSE_WEIGHT - 1) * len(metadata.encode(errors="surrogatepass")) if isinstance(metadata, str) else 0
+
+
+def frontmatter_charge(content: str) -> int:
+    """Return what parsing a SKILL.md charges its pass: its frontmatter, or nothing over the cap that refuses it unparsed."""
+    size = _frontmatter_bytes(content)
+    return 0 if size > _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES else size
+
+
+def skill_parse_charge(content: str, skill: Skill | None) -> int:
+    """Return what skill loading charges one SKILL.md, whose skill it loads, or refuses when ``skill`` is None."""
+    return frontmatter_charge(content) + (metadata_surcharge(skill.metadata) if skill is not None else 0)
+
+
+def _frontmatter_bytes(content: str) -> int:
     """Return the size of a SKILL.md's frontmatter, the part the primary parses; a body is never parsed."""
     match = match_frontmatter(normalized_newlines(content))
     return len(match.group(1).encode()) if match is not None else 0
 
 
 def _checked_frontmatter_bytes(content: str, path: Path) -> int | None:
-    size = frontmatter_bytes(content)
+    size = _frontmatter_bytes(content)
     if size > _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES:
         logger.warning("Refused a workspace skill whose frontmatter is too large", path=str(path), size=size)
         return None
@@ -463,15 +524,21 @@ def support_entry_count(skill_fd: int, directory: str) -> int:
 
 
 def workspace_skill_directories(skills_root: Path) -> list[str]:
-    """Return the visible workspace directories that hold a SKILL.md, without reading it."""
+    """Return the visible workspace directories skill loading reads that hold a SKILL.md, without reading it."""
     return list(
         _each_skill_directory(
             skills_root,
-            lambda skill_fd, directory: (
-                directory if SKILL_FILENAME in list_entries(skill_fd, directories=False) else None
-            ),
+            lambda skill_fd, directory: directory if _holds_skill_file(skill_fd) else None,
+            limit=MAX_WORKSPACE_SKILLS,
         ),
     )
+
+
+def _holds_skill_file(skill_fd: int) -> bool:
+    try:
+        return stat.S_ISREG(os.stat(SKILL_FILENAME, dir_fd=skill_fd, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def frontmatter_name(frontmatter: dict[str, Any], directory: str) -> str | None:

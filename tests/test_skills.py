@@ -7,6 +7,7 @@ import os
 import platform
 import threading
 import time
+import tracemalloc
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -720,7 +721,7 @@ def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> No
 def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path) -> None:
     """Frontmatter that skill loading parses and then refuses still counts, so refused skills cannot parse for free."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    workspace_skills_module._cached_frontmatter.cache_clear()
+    workspace_skills_module._PARSE_CACHE.clear()
     padding = "n" * (workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 200)
     refusals = (
         lambda index: f"name: {'long-' * 20}{index}\ndescription: d\nnote: {padding}",
@@ -747,14 +748,26 @@ def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path) -> None:
     assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
 
 
-def test_cached_parses_are_kept_compact_and_returned_as_copies() -> None:
-    """A cached parse keeps about the size of its text, where the live objects of many empty mappings take far more."""
+def test_the_parse_cache_keeps_a_bounded_number_of_bytes() -> None:
+    """Cached parses are keyed by digest and evicted past a byte bound, however much distinct text worker code writes."""
+    cache = workspace_skills_module._ParseCache(1 << 20)
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        for index in range(200):
+            # One character outside the Basic Multilingual Plane makes Python keep the text at four bytes a character.
+            cache.parse("text", f"\U0001f600{index} {'n' * 8000}", str)
+        retained = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+    assert cache.retained_bytes <= 1 << 20
+    assert retained < 2 << 20
+
+
+def test_cached_parses_are_returned_as_copies() -> None:
+    """Callers may change what a parse returns without changing what the next caller of the same text gets."""
     text = "metadata: [" + "{}, " * 2000 + "]\n"
     first = workspace_skills_module._strict_frontmatter(text, trusted=False)
-    pickled, error = workspace_skills_module._cached_frontmatter(text, trusted=False)
-    assert error is None
-    assert isinstance(pickled, bytes)
-    assert len(pickled) <= len(text)
     first["metadata"].append("changed")
     assert len(workspace_skills_module._strict_frontmatter(text, trusted=False)["metadata"]) == 2000
     metadata = workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s")
@@ -814,13 +827,43 @@ def test_planted_skill_files_stay_within_the_read_budget(tmp_path: Path) -> None
     assert len(refused) < 20
 
 
+def test_the_read_budget_counts_bytes(tmp_path: Path) -> None:
+    """Characters that take four bytes count four times, so a pass reads no more bytes than its budget."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    frontmatter = "---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n"
+    body = "\U0001f600" * ((MAX_SKILL_FILE_BYTES - len(frontmatter)) // 4 - 1)
+    for index in range(20):
+        (workspace_skills / f"a-{index:02d}").mkdir()
+        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_text(frontmatter + body, encoding="utf-8")
+    with capture_logs() as logs:
+        _load_agent_skills(tmp_path, storage)
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert "Workspace skill files exceed their read budget; skipping the rest" in events
+
+
+def test_chat_finds_only_skill_directories_loading_reads(tmp_path: Path) -> None:
+    """Directories past the skill count never load, and a SKILL.md that is not a regular file never names a skill."""
+    root = tmp_path / "skills"
+    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
+    (root / "a-dir-skill" / "SKILL.md").mkdir(parents=True)
+    for index in range(count + 3):
+        (root / f"s-{index:03d}").mkdir()
+        (root / f"s-{index:03d}" / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\nbody\n")
+    directories = workspace_skills_module.workspace_skill_directories(root)
+    assert "a-dir-skill" not in directories
+    assert directories == [f"s-{index:03d}" for index in range(count - 1)]
+
+
 def test_json5_metadata_counts_at_its_parse_weight() -> None:
     """JSON5 parses slower per byte than YAML, so a skill's JSON5 metadata counts more toward the parse budget."""
     metadata = "{openclaw: {requires: {bins: [git]}}}"
     skill = Skill(name="s", description="d", instructions="", source_path="s", metadata=metadata)
     plain = Skill(name="s", description="d", instructions="", source_path="s", metadata={"a": 1})
-    assert workspace_skills_module.skill_parse_cost(100, plain) == 100
-    assert workspace_skills_module.skill_parse_cost(100, skill) == 100 + 2 * len(metadata)
+    content = f"---\nname: s\ndescription: d\nmetadata: {metadata!r}\n---\nbody\n"
+    size = len(content.split("---\n")[1].rstrip("\n").encode())
+    assert workspace_skills_module.skill_parse_charge(content, plain) == size
+    assert workspace_skills_module.skill_parse_charge(content, skill) == size + 2 * len(metadata)
+    assert workspace_skills_module.skill_parse_charge(content, None) == size
 
 
 def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:

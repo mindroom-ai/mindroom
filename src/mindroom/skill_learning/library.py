@@ -32,20 +32,22 @@ from mindroom.tool_system.workspace_skills import (
     MAX_WORKSPACE_SKILLS,
     MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
+    FrontmatterBudget,
     SkillFrontmatterTooLargeError,
     SkillUsage,
     forget_missing_skill_usage,
-    frontmatter_bytes,
+    frontmatter_charge,
     frontmatter_name,
     list_entries,
     list_support_files,
     load_skill_usage,
+    metadata_surcharge,
     normalized_newlines,
     open_skills_root,
     parse_skill_markdown,
     parse_skill_metadata,
     read_text_at,
-    skill_parse_cost,
+    skill_parse_charge,
     skill_prompt_bytes,
     support_entry_count,
     update_skill_usage,
@@ -136,6 +138,12 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
     frontmatter, body = _parsed_markdown(content)
     description = frontmatter.get("description")
     frontmatter_name = frontmatter.get("name")
+    if len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
+        msg = (
+            f"Skill loading refuses names over {MAX_WORKSPACE_SKILL_NAME_CHARS} characters, and so does this skill's "
+            "directory name; rename the directory to repair the skill."
+        )
+        raise SkillEditError(msg)
     # Like skill loading, surrounding whitespace is not part of the name.
     if not isinstance(frontmatter_name, str) or frontmatter_name.strip() != name:
         msg = f"Frontmatter name must be exactly {name!r}."
@@ -200,30 +208,57 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     _split_relative_path(relative_path)
     try:
         with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-            return _read_skill_file(skill_fd, name, relative_path, load_skill_usage(root_fd).get(name, SkillUsage()))
+            usage = load_skill_usage(root_fd).get(name, SkillUsage())
+            return _read_skill_file(skill_fd, name, relative_path, usage, budget=FrontmatterBudget())
     except FileNotFoundError:
         return None
 
 
-def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillUsage) -> SkillFile | None:
+def _read_skill_file(
+    skill_fd: int,
+    name: str,
+    relative_path: str,
+    usage: SkillUsage,
+    *,
+    budget: FrontmatterBudget,
+) -> SkillFile | None:
+    """Read one skill file with its skill's ownership, parsing SKILL.md frontmatter only while ``budget`` lasts."""
     markdown = read_text_at(skill_fd, SKILL_FILENAME)
     content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
     if content is None:
         return None
+    digest = content_digest(content)
+    if markdown is None:
+        return SkillFile(content=content, digest=digest, learned=_learner_owns({}, usage, path=name), name=name)
+    if not budget.spend(frontmatter_charge(markdown)):
+        # A pass over many skills leaves frontmatter past its budget unparsed, and pins it cannot read must still hold.
+        return SkillFile(content=content, digest=digest, learned=False, name=name)
     try:
-        frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
+        frontmatter = parse_skill_markdown(markdown)[0]
     except (TypeError, ValueError, YAMLError):
         # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's; an edit
-        # keeps the name skill loading reads loosely, or the directory's, so an edit can repair it.
-        skill_name = (workspace_skill_name(markdown, name) if markdown is not None else None) or name
-        return SkillFile(content=content, digest=content_digest(content), learned=False, name=skill_name)
+        # keeps the name skill loading reads loosely.
+        return SkillFile(
+            content=content,
+            digest=digest,
+            learned=False,
+            name=_edit_name(workspace_skill_name(markdown, name), name),
+        )
+    metadata_parsed = budget.spend(metadata_surcharge(frontmatter.get("metadata")))
     return SkillFile(
         content=content,
-        digest=content_digest(content),
-        learned=_learner_owns(frontmatter, usage, path=name),
-        # An edit keeps the name the skill loads under, or its directory's when it has none, so an edit can repair it.
-        name=frontmatter_name(frontmatter, name) or name,
+        digest=digest,
+        learned=metadata_parsed and _learner_owns(frontmatter, usage, path=name),
+        name=_edit_name(frontmatter_name(frontmatter, name), name),
     )
+
+
+def _edit_name(loaded_name: str | None, directory: str) -> str:
+    """Return the name an edit keeps: the one the skill loads under, or its directory's when loading reads none."""
+    # Loading refuses a skill whose name is too long, so an edit falls back to the directory's and can repair it.
+    if loaded_name is not None and len(loaded_name) <= MAX_WORKSPACE_SKILL_NAME_CHARS:
+        return loaded_name
+    return directory
 
 
 def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> frozenset[str]:
@@ -232,6 +267,8 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
     if not directories:
         return frozenset()
     learned: set[str] = set()
+    # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
+    budget = FrontmatterBudget()
     try:
         with open_skills_root(skills_root) as root_fd:
             usage = load_skill_usage(root_fd)
@@ -243,6 +280,7 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
                             directory,
                             SKILL_FILENAME,
                             usage.get(directory, SkillUsage()),
+                            budget=budget,
                         )
                 except (OSError, ValueError):
                     continue
@@ -314,18 +352,20 @@ def _require_prompt_budget(
     if added is not None:
         kind, filename = added
         listings[kind] = [*listings[kind], filename]
-    changed = workspace_skill(
-        markdown,
-        skills_root,
-        name,
-        scripts=listings["scripts"],
-        references=listings["references"],
-    )
-    if changed is None:
-        return
+    try:
+        changed = workspace_skill(
+            markdown,
+            skills_root,
+            name,
+            scripts=listings["scripts"],
+            references=listings["references"],
+        )
+    except (TypeError, ValueError):
+        # A support file can be added to a skill whose SKILL.md loading skips, and loading still charges its parse.
+        changed = None
     budget = workspace_skill_budget(skills_root)
     other_bytes = sum(size for directory, size in budget.prompt_bytes.items() if directory != name)
-    if other_bytes + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
+    if changed is not None and other_bytes + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
         msg = (
             f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
             "budget, and skill loading would skip some; shorten or merge skills instead."
@@ -333,7 +373,7 @@ def _require_prompt_budget(
         raise SkillEditError(msg)
     # Loading charges every directory it parses, refused ones too, so the check counts what loading counts.
     other_charges = sum(charge for directory, charge in budget.parse_charges.items() if directory != name)
-    if other_charges + skill_parse_cost(frontmatter_bytes(markdown), changed) > MAX_WORKSPACE_FRONTMATTER_BYTES:
+    if other_charges + skill_parse_charge(markdown, changed) > MAX_WORKSPACE_FRONTMATTER_BYTES:
         msg = (
             f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
             "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
@@ -419,7 +459,7 @@ def _require_writable(
 ) -> tuple[SkillFile, SkillFile | None]:
     """Return the skill's SKILL.md and the current target, which must be the version the write is based on."""
     usage = load_skill_usage(root_fd).get(name, SkillUsage())
-    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage)
+    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage, budget=FrontmatterBudget())
     if markdown is None:
         msg = f"Skill {name!r} has no SKILL.md."
         raise SkillEditError(msg)
@@ -429,7 +469,7 @@ def _require_writable(
             "your reply instead of editing it."
         )
         raise SkillEditError(msg)
-    current = _read_skill_file(skill_fd, name, relative_path, usage)
+    current = _read_skill_file(skill_fd, name, relative_path, usage, budget=FrontmatterBudget())
     if current is not None and current.digest != expected_digest:
         loader = (
             "get_skill_instructions" if relative_path == SKILL_FILENAME else "get_skill_reference or get_skill_script"
@@ -496,10 +536,18 @@ def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: in
     archived: list[str] = []
     first_seen: list[str] = []
     usage = load_skill_usage(root_fd)
+    # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
+    budget = FrontmatterBudget()
     for name in loaded:
         try:
             with open_directory_within_root(root_fd, name) as skill_fd:
-                markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))
+                markdown = _read_skill_file(
+                    skill_fd,
+                    name,
+                    SKILL_FILENAME,
+                    usage.get(name, SkillUsage()),
+                    budget=budget,
+                )
         except (OSError, ValueError) as exc:
             # One unreadable user skill must not block archival, and with it every review of the workspace.
             logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))
