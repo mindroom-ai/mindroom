@@ -61,6 +61,7 @@ def _subscription(status: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
         "tier": "hobby",
         "status": status,
         "trial_ends_at": None,
+        "updated_at": "2026-09-01T00:00:00+00:00",
         **fields,
     }
 
@@ -490,6 +491,36 @@ async def test_resubscription_during_stripe_refresh_is_not_overwritten(platform:
 
 
 @pytest.mark.asyncio
+async def test_payment_recovery_during_stripe_refresh_is_not_overwritten(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=31)).isoformat(),
+            teardown_after=(now - timedelta(days=1)).isoformat(),
+        )
+    )
+    platform.stripe.api_key = "sk_test"
+    responses = iter([{"status": "unpaid", "trial_end": None}, {"status": "active", "trial_end": None}])
+
+    def retrieve(_stripe_subscription_id: str) -> dict[str, Any]:
+        response = next(responses)
+        if response["status"] == "unpaid":
+            # A newer webhook for the same Stripe subscription lands while the older state is fetched.
+            platform.subscription().update({"status": "active", "updated_at": "2026-09-02T00:00:00+00:00"})
+        return response
+
+    platform.stripe.Subscription.retrieve.side_effect = retrieve
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    assert platform.subscription()["status"] == "active"
+    platform.uninstall.assert_not_awaited()
+    platform.start.assert_awaited_once_with(7)
+
+
+@pytest.mark.asyncio
 async def test_nightly_run_stops_instance_restarted_by_a_stale_active_event(platform: Platform) -> None:
     # A delayed "active" update after the cancellation resumed the instance and left the row active.
     platform.db.tables["subscriptions"].append(_subscription("active"))
@@ -546,6 +577,34 @@ async def test_held_instance_is_not_resumed_on_a_stale_active_status(platform: P
     platform.start.assert_not_awaited()
     assert platform.subscription()["status"] == "cancelled"
     assert platform.instance()["status"] == "stopped"
+
+
+def test_failed_binding_lookup_asks_stripe_to_redeliver(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("cancelled", stripe_subscription_id="sub_stripe_old"))
+    newer = {**_stripe_subscription("active"), "created": 1_750_000_000}
+    event = Mock(id="evt_created", type="customer.subscription.created")
+    event.data.object = newer
+    client = TestClient(app)
+
+    with (
+        patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event),
+        patch("backend.routes.webhooks.stripe.Subscription.retrieve", side_effect=RuntimeError("stripe 503")),
+    ):
+        failed = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
+
+    assert failed.status_code == 503
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_old"
+    assert platform.db.tables["webhook_events"] == []
+
+    with (
+        patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event),
+        patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value={"created": 1_700_000_000}),
+    ):
+        retried = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
+
+    assert retried.status_code == 200
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_1"
+    assert platform.subscription()["status"] == "active"
 
 
 def test_delayed_creation_of_an_older_subscription_keeps_the_newer_binding(platform: Platform) -> None:
@@ -741,6 +800,34 @@ async def test_operator_reprovision_keeps_held_instance_stopped() -> None:
     )
     wait_ready.assert_not_awaited()
     assert db.row("instances", instance_id=7)["status"] == "stopped"
+
+
+def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_status(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.start_instance", platform.start),
+        ):
+            response = TestClient(app).post("/my/instances/7/start")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 402
+    platform.start.assert_not_awaited()
+    assert platform.subscription()["status"] == "cancelled"
+    assert platform.instance()["status"] == "stopped"
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:

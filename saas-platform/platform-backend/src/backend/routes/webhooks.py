@@ -25,6 +25,10 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
 )
 
 
+class _RetryableWebhookError(Exception):
+    """The event cannot be applied yet; answer non-2xx so Stripe redelivers it."""
+
+
 def _timestamp_to_iso(timestamp: float) -> str:
     """Convert Unix timestamp to ISO format string."""
     return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
@@ -133,7 +137,11 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     current_stripe_id = existing.data[0].get("stripe_subscription_id") if existing.data else None
     if current_stripe_id and current_stripe_id != subscription["id"]:
         # A delayed creation event for an older Stripe subscription must not replace a newer binding.
-        current_created = stripe.Subscription.retrieve(current_stripe_id)["created"]
+        try:
+            current_created = stripe.Subscription.retrieve(current_stripe_id)["created"]
+        except Exception as exc:
+            msg = f"Could not look up current Stripe subscription {current_stripe_id}"
+            raise _RetryableWebhookError(msg) from exc
         if subscription["created"] < current_created:
             logger.info(
                 "Ignoring creation of Stripe subscription %s older than %s", subscription["id"], current_stripe_id
@@ -424,6 +432,10 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
                 acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
                 if acc_result.data:
                     account_id = acc_result.data["id"]
+    except _RetryableWebhookError as e:
+        # Not recorded as processed, so Stripe's redelivery is applied normally.
+        logger.exception("Webhook %s deferred for Stripe redelivery", event.id)
+        raise HTTPException(status_code=503, detail="Temporarily unable to process event") from e
     except Exception as e:
         logger.exception("Error processing webhook")
         error_msg = str(e)

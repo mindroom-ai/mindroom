@@ -161,8 +161,8 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
 
     Subscriptions without a Stripe id (platform trials, free tier) and deployments without Stripe keep the
     stored status. Any Stripe API error propagates so no instance is stopped on an unverified status.
-    A webhook can rebind the row to a new Stripe subscription while Stripe is queried, so the correction is
-    only written while the row is still bound to the queried subscription; otherwise the refresh restarts.
+    A webhook can change the row while Stripe is queried, so the correction is only written while the row is
+    unchanged since it was read (same Stripe binding, status, and updated_at); otherwise the refresh restarts.
     """
     for _ in range(_STRIPE_REFRESH_ATTEMPTS):
         rows = sb.table("subscriptions").select("*").eq("id", subscription_id).limit(1).execute().data
@@ -182,16 +182,18 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
             subscription.get("trial_ends_at")
         ) == parse_timestamp(fields["trial_ends_at"])
         query = sb.table("subscriptions")
-        if unchanged:
-            written = query.select("*").eq("id", subscription_id).eq("stripe_subscription_id", stripe_subscription_id)
-        else:
-            written = (
-                query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
-                .eq("id", subscription_id)
-                .eq("stripe_subscription_id", stripe_subscription_id)
-            )
-        current = written.execute().data
-        if current and current[0].get("status") == fields["status"]:
+        query = (
+            query.select("*") if unchanged else query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
+        )
+        current = (
+            query.eq("id", subscription_id)
+            .eq("stripe_subscription_id", stripe_subscription_id)
+            .eq("status", subscription.get("status"))
+            .eq("updated_at", subscription.get("updated_at"))
+            .execute()
+            .data
+        )
+        if current:
             if not unchanged:
                 logger.warning(
                     "Subscription %s was stored as %s but Stripe reports %s; corrected it",

@@ -277,6 +277,12 @@ async def _verify_instance_ownership_and_run(
             summary = await instance_lifecycle.reconcile_subscription_instances(instance["subscription_id"])
             if summary.errors:
                 raise HTTPException(status_code=500, detail=f"Failed to resume instance: {summary.errors[0]}")
+            # Reconciliation may have found the stored active status stale and kept the hold.
+            sub_result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
+            assert_instance_entitlement(sub_result.data[0], "run")
+            refreshed = instances_data.get_owned_instance(sb, instance_id, user["account_id"])
+            if refreshed is None or refreshed.get("lifecycle_stopped_at"):
+                raise HTTPException(status_code=409, detail="Instance is stopped for an inactive subscription")
 
     return await instance_action(instance_id)
 
