@@ -917,7 +917,8 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(
+            target_url = await asyncio.to_thread(
+                validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
                 allow_loopback=self._worker_display is not None,
@@ -970,7 +971,8 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(
+            target_url = await asyncio.to_thread(
+                validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
                 allow_loopback=self._worker_display is not None,
@@ -1108,7 +1110,9 @@ class BrowserTools(Toolkit):
         if context is None:
             msg = "Browser target=desktop requires a live Matrix runtime context."
             raise ValueError(msg)
-        parameters = _desktop_browser_parameters(
+        # URL validation resolves requester-chosen hostnames, which must not block the event loop.
+        parameters = await asyncio.to_thread(
+            _desktop_browser_parameters,
             action,
             target_url=target_url,
             target_id=target_id,

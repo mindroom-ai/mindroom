@@ -1320,6 +1320,71 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
         await tool.aclose()
 
 
+def _validation_ran_on_event_loop(calls: list[bool]) -> Callable[..., str]:
+    def validate(url: str, **_kwargs: object) -> str:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            calls.append(False)
+        else:
+            calls.append(True)
+        return url
+
+    return validate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["open", "navigate"])
+async def test_host_url_validation_resolves_hostnames_off_event_loop(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requester-chosen hostnames resolve in a worker thread, never on the shared event loop."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.validate_server_fetch_url",
+        _validation_ran_on_event_loop(calls),
+    )
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    monkeypatch.setattr(tool, "_open_tab", AsyncMock(return_value={"status": "ok"}))
+    monkeypatch.setattr(tool, "_navigate", AsyncMock(return_value={"status": "ok"}))
+
+    await tool.browser(action=action, targetUrl="https://slow-dns.example")
+
+    assert calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Desktop open validation also resolves requester-chosen hostnames off the event loop."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.validate_server_fetch_url",
+        _validation_ran_on_event_loop(calls),
+    )
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    request = AsyncMock(
+        return_value=DesktopResponse(request_id="open", session_id="session", ok=True, result={"action": "open"}),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    await tool.browser(action="open", targetUrl="https://slow-dns.example")
+
+    assert calls == [False]
+    assert request.await_args.args[1].parameters["browser_parameters"] == {"targetUrl": "https://slow-dns.example"}
+
+
 @pytest.mark.asyncio
 async def test_ensure_profile_clears_dead_lock_before_launch(
     monkeypatch: pytest.MonkeyPatch,
