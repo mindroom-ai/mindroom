@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import hashlib
 import importlib
@@ -31,9 +32,16 @@ def _records_module() -> ModuleType:
     return importlib.import_module("mindroom.delegation.records")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_record_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test its own kept record states; teardown restores the module's."""
+    module = _records_module()
+    monkeypatch.setattr(module, "_RECORD_STATES", module._RecordStates())
+
+
 def _restart_process(module: ModuleType) -> None:
-    """Drop the record views this process holds, as a primary restart would, so the next use reads the record."""
-    module._RECORD_STATES.clear()
+    """Drop the record states this process keeps, as a primary restart would, so the next use reads the record."""
+    module._RECORD_STATES = module._RecordStates()
 
 
 @pytest.mark.asyncio
@@ -800,6 +808,95 @@ async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) ->
     run = _read_json(_record_dir(handle) / "run.json")
     assert run["status"] == "failed"
     assert run["output"] == large_inline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["tampered_log", "failed_start", "failed_finish"])
+async def test_delegations_that_can_never_settle_keep_no_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Only a record its owner can still settle keeps state, so refused or failed records never pile up."""
+    module = _records_module()
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    if failure == "failed_start":
+        # The caller's worker left a file where its receipts go.
+        receipts = runtime_paths.storage_root / "agents" / "caller" / "workspace" / ".mindroom" / "delegation_receipts"
+        receipts.parent.mkdir(parents=True)
+        receipts.write_text("blocked", encoding="utf-8")
+
+    for index in range(20):
+        if failure == "failed_start":
+            with pytest.raises(OSError, match="Not a directory"):
+                await owner.start(
+                    _metadata(module),
+                    caller_execution_identity=_identity("caller"),
+                    child_execution_identity=_identity("child"),
+                    delegation_id=f"never-settles-{index}",
+                )
+            continue
+        handle = await owner.start(
+            _metadata(module),
+            caller_execution_identity=_identity("caller"),
+            child_execution_identity=_identity("child"),
+            delegation_id=f"never-settles-{index}",
+        )
+        if failure == "tampered_log":
+            with (_record_dir(handle) / "events.jsonl").open("a", encoding="utf-8") as events:
+                events.write('{"sequence": 2}\n')
+            with pytest.raises(ValueError, match="changed outside the primary"):
+                await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        else:
+            with monkeypatch.context() as full:
+                full.setattr(module, "_MAX_EVENTS", 1)
+                with pytest.raises(module.DelegationRecordLimitError):
+                    await owner.finish(handle, status="completed", output="Done")
+
+    assert module._RECORD_STATES.states == {}
+    assert module._RECORD_STATES.retained_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_name", ["run.json", "events.jsonl"])
+async def test_a_record_that_could_not_be_opened_is_read_again_on_its_next_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_name: str,
+) -> None:
+    """Running out of descriptors or an I/O error is not a verdict on the record, so it is never remembered."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    _restart_process(module)
+    failures = [OSError(errno.EMFILE, "Too many open files")]
+    read_file = module.read_regular_file_within_root
+    open_file = module.open_regular_file_at
+
+    def read_or_fail(root: object, relative_path: object, **kwargs: object) -> bytes:
+        if str(relative_path) == file_name and failures:
+            raise failures.pop()
+        return read_file(root, relative_path, **kwargs)
+
+    def open_or_fail(directory_fd: int, name: str, *args: object) -> int:
+        if name == file_name and not args and failures:
+            raise failures.pop()
+        return open_file(directory_fd, name, *args)
+
+    monkeypatch.setattr(module, "read_regular_file_within_root", read_or_fail)
+    monkeypatch.setattr(module, "open_regular_file_at", open_or_fail)
+
+    with pytest.raises(module._RecordAccessError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Lost"}))
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Kept"}))
+
+    assert failures == []
+    assert [event["data"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [{}, {"content": "Kept"}]
 
 
 @pytest.mark.asyncio
