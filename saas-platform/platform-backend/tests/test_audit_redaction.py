@@ -13,9 +13,12 @@ from backend.utils.audit import (
     MAX_AUDIT_TEXT_LENGTH,
     REDACTED,
     TRUNCATED,
+    _redact_secret_assignments,
     redact_audit_details,
     redact_audit_text,
 )
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 
 def test_redact_audit_details_recurses_and_matches_case_insensitive_headers() -> None:
@@ -186,6 +189,91 @@ def test_redact_audit_text_redacts_secret_assignments_after_non_secret_keys() ->
 def test_redact_audit_text_does_not_close_quoted_values_at_inner_quotes(text: str) -> None:
     """A quote inside a quoted secret does not end it unless a delimiter or the next assignment follows."""
     assert "hunter2" not in redact_audit_text(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("retry with password=)Qw9!zz user=bob", "Qw9!zz"),
+        ("token=}abc123def", "abc123def"),
+        ("api_key: ,sk_abc", "sk_abc"),
+        ("password=]P4ss", "P4ss"),
+        ("password='}pw-secret\\'", "pw-secret"),
+        ('Authorization: ]a\\cookie=",ck-secret\'"&', "ck-secret"),
+    ],
+)
+def test_redact_audit_text_redacts_values_that_start_with_a_delimiter(text: str, secret: str) -> None:
+    """An unquoted value always includes its first character, and a secret assignment inside a value is still found."""
+    assert secret not in redact_audit_text(text)
+
+
+_SECRET_ASSIGNMENT_KEYS = ["password", "token", "api_key", "clientSecret", "Authorization", "id_token", "cookie"]
+_PLAIN_ASSIGNMENT_KEYS = ["note", "user", "x", "config"]
+_VALUE_CHARACTERS = st.characters(
+    codec="ascii", categories=("L", "N"), include_characters="!#$%^+-.=@_~", exclude_characters="\r\n"
+)
+
+
+@st.composite
+def _assignment_text(draw: st.DrawFn) -> tuple[str, list[str]]:
+    """Build separated assignments whose secret values carry unique markers, as audit text commonly holds them."""
+    parts: list[str] = []
+    markers: list[str] = []
+    for index in range(draw(st.integers(min_value=1, max_value=6))):
+        is_secret = draw(st.booleans())
+        key = draw(st.sampled_from(_SECRET_ASSIGNMENT_KEYS if is_secret else _PLAIN_ASSIGNMENT_KEYS))
+        marker = f"zq{index}q"
+        rest = draw(st.text(_VALUE_CHARACTERS, max_size=12))
+        quote = draw(st.sampled_from(["", "'", '"']))
+        if quote:
+            inner = draw(st.text(st.sampled_from(" ,&)]}(" + ("'" if quote == '"' else '"')), max_size=3))
+            value = f"{quote}{inner}{marker}{rest}{inner}{quote}"
+        else:
+            first = draw(st.sampled_from(",&)]}(=!#'\""))
+            value = f"{first}{marker}{rest}"
+        if is_secret:
+            markers.append(marker)
+        separator = draw(st.sampled_from(["=", ": ", " = ", ":"]))
+        parts.append(f"{key}{separator}{value if is_secret else rest}")
+    delimiters = draw(
+        st.lists(st.sampled_from([" ", ", ", "&", "\n", " and "]), min_size=len(parts), max_size=len(parts))
+    )
+    text = "".join(part + delimiter for part, delimiter in zip(parts, delimiters[:-1], strict=False)) + parts[-1]
+    return text + draw(st.sampled_from(["", " ", "\n"])), markers
+
+
+@settings(max_examples=500, deadline=None)
+@given(_assignment_text())
+def test_redact_audit_text_redacts_every_secret_assignment_value(case: tuple[str, list[str]]) -> None:
+    """No secret value in separated assignments survives, whatever character, quote, or delimiter starts it."""
+    text, markers = case
+
+    redacted = redact_audit_text(text)
+
+    assert [marker for marker in markers if marker in redacted] == []
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "authorization=bearer ***redacted***",
+        "authorization: bearer ***redacted*** ",
+        "Authorization: basic ",
+        "token=",
+        "token=token=x",
+        "token='a'b ",
+        "token=)'",
+        "a=",
+    ],
+)
+def test_secret_assignment_scan_is_linear_without_the_length_cap(unit: str) -> None:
+    """The scanner itself stays linear, so its safety does not rest on the audit text length cap."""
+    text = unit * (200_000 // len(unit))
+
+    started = time.perf_counter()
+    _redact_secret_assignments(text)
+
+    assert time.perf_counter() - started < 1
 
 
 def test_redact_audit_details_redacts_unparseable_urls_instead_of_failing() -> None:

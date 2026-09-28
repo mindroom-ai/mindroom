@@ -16,6 +16,8 @@ from fastapi import Request
 
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
+_REDACTED_BEARER = f"bearer {REDACTED}"
+_AUTHORIZATION_SCHEMES = frozenset({"basic", "bearer"})
 TRUNCATED = "... [truncated]"
 # Audit text is cut to this length; redaction scans a little further so a secret straddling the cut is still masked.
 MAX_AUDIT_TEXT_LENGTH = 4 * 1024
@@ -39,6 +41,7 @@ _ASSIGNMENT_VALUE_END_PATTERN = re.compile(
     r"[\r\n,&)\]}]|(?<!\s)\s++(?:and\s++)?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]", re.IGNORECASE
 )
 _QUOTE_PATTERN = re.compile(r"[\"']")
+_TRAILING_SPACE_PATTERN = re.compile(r"\s*+\Z")
 _LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
 _ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
@@ -130,22 +133,16 @@ class _QuoteIndex:
 
 
 def _index_quotes(value: str) -> _QuoteIndex:
-    """Find every quote that can close a value: unescaped, and followed by the end, a delimiter, or an assignment.
+    """Find every quote that can close a value: one followed by a delimiter, the next assignment, or only whitespace.
 
     Requiring what follows the quote keeps a quote inside the value (as in `'it's'`) from ending it early,
     and indexing once keeps later lookups from rescanning the text.
     """
     closing_quotes: dict[str, list[int]] = {"'": [], '"': []}
     for match in _QUOTE_PATTERN.finditer(value):
-        position = match.start()
-        escape_start = position
-        while escape_start > 0 and value[escape_start - 1] == "\\":
-            escape_start -= 1
-        after = position + 1
-        if (position - escape_start) % 2 == 0 and (
-            after == len(value) or _ASSIGNMENT_VALUE_END_PATTERN.match(value, after)
-        ):
-            closing_quotes[match.group()].append(position)
+        after = match.end()
+        if _ASSIGNMENT_VALUE_END_PATTERN.match(value, after) or _TRAILING_SPACE_PATTERN.match(value, after):
+            closing_quotes[match.group()].append(match.start())
     return _QuoteIndex(
         closing_quotes=closing_quotes, line_breaks=[match.start() for match in _LINE_BREAK_PATTERN.finditer(value)]
     )
@@ -164,45 +161,85 @@ def _closing_quote(quotes: _QuoteIndex, quote: str, start: int) -> int | None:
     return candidate
 
 
-def _assignment_value_span(value: str, value_start: int, quotes: _QuoteIndex) -> tuple[int, int] | None:
-    """Return the span of one assigned value, or None when it is empty.
+@dataclass
+class _ValueEndFinder:
+    """Find where unquoted values end in one text, reusing the last result because lookups only move forward.
 
-    A quoted value ends at its closing quote; an unquoted or unclosed one ends at a delimiter or the next assignment.
+    A search from any position between the last search start and its match finds that same match,
+    so every character is searched at most once.
     """
-    if value_start < len(value) and value[value_start] in {"'", '"'}:
+
+    text: str
+    searched_from: int = -1
+    found: int = -1
+
+    def after(self, position: int) -> int:
+        """Return where an unquoted value whose first character precedes `position` ends."""
+        if not self.searched_from <= position <= self.found:
+            match = _ASSIGNMENT_VALUE_END_PATTERN.search(self.text, position)
+            self.searched_from = position
+            self.found = match.start() if match else len(self.text)
+        return self.found
+
+
+def _assignment_value_span(
+    value: str, value_start: int, quotes: _QuoteIndex, value_ends: _ValueEndFinder
+) -> tuple[int, int] | None:
+    """Return the span of one assigned value, or None at the end of the text.
+
+    A quoted value ends at its closing quote.
+    An unquoted or unclosed one always includes its first character, even a delimiter, and then ends at a delimiter
+    or the next assignment.
+    """
+    if value_start >= len(value):
+        return None
+    if value[value_start] in {"'", '"'}:
         closing = _closing_quote(quotes, value[value_start], value_start + 1)
         if closing is not None:
             return value_start + 1, closing
-    value_end_match = _ASSIGNMENT_VALUE_END_PATTERN.search(value, value_start)
-    value_end = value_end_match.start() if value_end_match else len(value)
-    return (value_start, value_end) if value_end > value_start else None
+    return value_start, value_ends.after(value_start + 1)
 
 
 def _redact_secret_assignments(value: str) -> str:
     """Redact the values of secret key assignments in one forward scan.
 
-    Scanning resumes inside every value it keeps, so assignments nested there are still found without recursion.
+    Scanning continues inside every value, kept or redacted, so assignments nested there are still found
+    without recursion; overlapping redacted values merge into one.
     """
     quotes = _index_quotes(value)
-    parts: list[str] = []
-    copied_until = 0
+    value_ends = _ValueEndFinder(value)
+    spans: list[tuple[int, int]] = []
     search_start = 0
     while prefix := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix.end()
         key = prefix.group("key")
         if not _is_secret_key(key):
             continue
-        span = _assignment_value_span(value, prefix.end(), quotes)
+        is_authorization = _normalize_key(key) == "authorization"
+        # An already redacted bearer token is kept, and scanning resumes right after it.
+        if is_authorization and value[search_start : search_start + len(_REDACTED_BEARER)].lower() == _REDACTED_BEARER:
+            search_start += len(_REDACTED_BEARER)
+            continue
+        span = _assignment_value_span(value, search_start, quotes, value_ends)
         if span is None:
             continue
         value_start, value_end = span
-        assigned = value[value_start:value_end].lower()
-        if _normalize_key(key) == "authorization" and (
-            assigned in {"basic", "bearer"} or assigned.startswith(f"bearer {REDACTED}")
+        # A bare, unquoted authorization scheme carries no credential.
+        if (
+            is_authorization
+            and value_start == search_start
+            and value[value_start:value_end].lower() in _AUTHORIZATION_SCHEMES
         ):
             continue
+        if spans and value_start <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], value_end))
+        else:
+            spans.append((value_start, value_end))
+    parts: list[str] = []
+    copied_until = 0
+    for value_start, value_end in spans:
         parts.extend((value[copied_until:value_start], REDACTED))
-        copied_until = search_start = value_end
+        copied_until = value_end
     parts.append(value[copied_until:])
     return "".join(parts)
 
