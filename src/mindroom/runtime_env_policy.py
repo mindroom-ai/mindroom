@@ -7,8 +7,6 @@ from collections.abc import Mapping  # noqa: TC003 - public annotations support 
 from types import MappingProxyType
 from typing import cast
 
-from mindroom.sensitivity import secret_name_suffixes
-
 __all__ = [
     "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
@@ -329,8 +327,7 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
-# Shared secret stems (api_key/password/secret/token) plus the env-only `_API_KEYS`.
-_RUNTIME_STARTUP_SECRET_SUFFIXES = (*secret_name_suffixes(upper=True), "_API_KEYS")
+_RUNTIME_STARTUP_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET", "_TOKEN")
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
