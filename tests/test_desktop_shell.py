@@ -567,6 +567,8 @@ async def test_cancelling_execute_stops_process_before_delayed_write(tmp_path: P
         "echo ok" + "\t" * 65 + "touch marker",
         "echo ok" + "\u00a0" * 65 + "touch marker",
         "echo ok" + "\u3000" * 65 + "touch marker",
+        "echo ok #" + "\u2800" * 65 + "\ntouch marker",
+        "echo ok #" + "\u3164 " * 33 + "\ntouch marker",
     ],
     ids=[
         "newlines",
@@ -576,6 +578,8 @@ async def test_cancelling_execute_stops_process_before_delayed_write(tmp_path: P
         "tabs",
         "no-break-spaces",
         "wide-spaces",
+        "braille-blanks",
+        "hangul-fillers",
     ],
 )
 @pytest.mark.asyncio
@@ -585,7 +589,7 @@ async def test_whitespace_padding_that_could_hide_part_of_a_command_is_refused_b
 ) -> None:
     """Blank-line and space padding could push the rest of a command out of an approver's view."""
     shell = local_shell()
-    with pytest.raises(DesktopShellError, match="hide part of it"):
+    with pytest.raises(DesktopShellError, match="hide part of the request"):
         await asyncio.wait_for(shell.execute(request(command, tmp_path)), 5)
     assert shell.status()["pending"] is None
     assert not (tmp_path / "marker").exists()
@@ -625,9 +629,13 @@ async def test_working_directory_existence_is_checked_only_after_approval(tmp_pa
     shell.decide("r1", approved=True)
     with pytest.raises(DesktopShellError, match="existing"):
         await task
-    for cwd, request_id in (("relative/dir", "r2"), (f"{tmp_path}\x00/x", "r3")):
+    for cwd, request_id, error in (
+        ("relative/dir", "r2", "absolute"),
+        (f"{tmp_path}\x00/x", "r3", "absolute"),
+        (f"{tmp_path}/" + "\n" * 4 + "x", "r4", "hide part of the request"),
+    ):
         invalid = DesktopShellRequest(request_id, REQUESTER, AGENT, "pwd", cwd, int(time.time() * 1000) + 60_000)
-        with pytest.raises(DesktopShellError, match="absolute"):
+        with pytest.raises(DesktopShellError, match=error):
             await asyncio.wait_for(shell.execute(invalid), 5)
         assert shell.status()["pending"] is None
     await shell.close()
@@ -665,8 +673,12 @@ async def test_agent_input_is_refused_while_a_command_awaits_approval(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_approval_is_shown_only_after_agent_input_in_progress_finishes(tmp_path: Path) -> None:
+async def test_approval_is_shown_only_after_agent_input_in_progress_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A request reaches the approver only once no agent input is in flight that could answer it."""
+    monkeypatch.setattr("mindroom.desktop.shell._AGENT_INPUT_SETTLE_SECONDS", 0.01)
     shell = local_shell()
     with shell.agent_input():
         task = asyncio.create_task(shell.execute(request("printf done", tmp_path)))
@@ -676,6 +688,48 @@ async def test_approval_is_shown_only_after_agent_input_in_progress_finishes(tmp
     await wait_pending(shell)
     shell.decide("r1", approved=True)
     assert completed_output(await task) == "done"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_waits_until_events_of_the_last_agent_input_have_arrived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keys posted just before a request arrives may still be in flight, so the prompt appears only later."""
+    monkeypatch.setattr("mindroom.desktop.shell._AGENT_INPUT_SETTLE_SECONDS", 0.3)
+    shell = local_shell()
+    with shell.agent_input():
+        pass
+    task = asyncio.create_task(shell.execute(request("printf done", tmp_path)))
+    for _ in range(10):
+        await asyncio.sleep(0.01)
+        assert shell.status()["pending"] is None
+    await wait_pending(shell)
+    shell.decide("r1", approved=True)
+    assert completed_output(await task) == "done"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_request_expiring_behind_agent_input_is_never_presented(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request whose approval window closed while it was held back expires without reaching the approver."""
+    monkeypatch.setattr("mindroom.desktop.shell._AGENT_INPUT_SETTLE_SECONDS", 0.01)
+    monotonic = [100.0]
+    shell = local_shell(clock=lambda: 100.0, monotonic_clock=lambda: monotonic[0])
+    with shell.agent_input():
+        task = asyncio.create_task(
+            shell.execute(DesktopShellRequest("r1", REQUESTER, AGENT, "touch marker", str(tmp_path), 101_000)),
+        )
+        await asyncio.sleep(0.05)
+        monotonic[0] = 102.0
+    with pytest.raises(DesktopShellError, match="expired"):
+        await task
+    assert shell.status()["pending"] is None
+    assert not (tmp_path / "marker").exists()
     await shell.close()
 
 

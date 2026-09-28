@@ -151,6 +151,7 @@ def test_request_text_escapes_control_and_directional_characters() -> None:
 def test_request_text_escapes_every_space_except_the_ascii_space() -> None:
     """Look-alike and wide spaces are shown as escapes, so they can neither disguise nor pad a command."""
     assert _escape_terminal_text("rm\u00a0-rf a b\u2003c\u3000d\u202fe") == "rm\\xa0-rf a b\\u2003c\\u3000d\\u202fe"
+    assert _escape_terminal_text("ls #\u2800\u3164\uffa0\u115f\u1160") == "ls #\\u2800\\u3164\\uffa0\\u115f\\u1160"
 
 
 @pytest.mark.asyncio

@@ -32,10 +32,13 @@ if TYPE_CHECKING:
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
 _MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
-# Longer whitespace runs could push the rest of a command out of an approver's view.
-_WHITESPACE_RUN = re.compile(r"\s+")
-_MAX_WHITESPACE_RUN = 64
+# Longer runs of whitespace or blank-looking characters could push part of a request out of an approver's view.
+BLANK_GLYPHS = frozenset("\u115f\u1160\u2800\u3164\uffa0")
+_BLANK_RUN = re.compile(rf"[\s{''.join(sorted(BLANK_GLYPHS))}]+")
+_MAX_BLANK_RUN = 64
 _MAX_BLANK_LINES = 2
+# Synthetic events posted just before a request appears must reach their target before anyone can answer it.
+_AGENT_INPUT_SETTLE_SECONDS = 1.0
 _COMMAND_PREVIEW_CHARS = 200
 # Equal to the engine's background limit, so a start is refused before approval rather than killed later.
 _MAX_HANDLES = MAX_BACKGROUNDED
@@ -141,13 +144,14 @@ def _validate_command(command: object) -> None:
     if len(command) > _MAX_COMMAND:
         message = "Shell command is too long."
         raise DesktopShellError(message)
-    if any(
-        len(run) > _MAX_WHITESPACE_RUN or run.count("\n") > _MAX_BLANK_LINES + 1
-        for run in _WHITESPACE_RUN.findall(command)
-    ):
+    _reject_padding(command, "Shell command")
+
+
+def _reject_padding(text: str, field: str) -> None:
+    if any(len(run) > _MAX_BLANK_RUN or run.count("\n") > _MAX_BLANK_LINES + 1 for run in _BLANK_RUN.findall(text)):
         message = (
-            f"Shell command must not contain more than {_MAX_WHITESPACE_RUN} whitespace characters or "
-            f"{_MAX_BLANK_LINES} blank lines in a row, which could hide part of it from the approver."
+            f"{field} must not contain more than {_MAX_BLANK_RUN} whitespace or blank characters or "
+            f"{_MAX_BLANK_LINES} blank lines in a row, which could hide part of the request from the approver."
         )
         raise DesktopShellError(message)
 
@@ -179,6 +183,7 @@ class DesktopShell:
         self._agent_inputs = 0
         self._agent_input_idle = asyncio.Event()
         self._agent_input_idle.set()
+        self._agent_input_ended_at = -math.inf
         self._used_ids: set[str] = set()
         self._records: dict[str, ProcessRecord] = {}
         self._handles: dict[str, _ShellHandle] = {}
@@ -199,6 +204,7 @@ class DesktopShell:
         if not isinstance(request.cwd, str) or "\x00" in request.cwd or not Path(request.cwd).is_absolute():
             message = "Shell working directory must be an absolute path."
             raise DesktopShellError(message)
+        _reject_padding(request.cwd, "Shell working directory")
         if (
             not isinstance(request.timeout_seconds, int)
             or isinstance(request.timeout_seconds, bool)
@@ -336,14 +342,28 @@ class DesktopShell:
         finally:
             self._agent_inputs -= 1
             if not self._agent_inputs:
+                self._agent_input_ended_at = time.monotonic()
                 self._agent_input_idle.set()
 
+    async def _agent_input_settled(self) -> None:
+        """Return once no agent input runs and the events of the last one have had time to arrive."""
+        # Another input can start between a wake-up and this task running, so recheck after every wait.
+        while True:
+            if not self._agent_input_idle.is_set():
+                await self._agent_input_idle.wait()
+                continue
+            remaining = self._agent_input_ended_at + _AGENT_INPUT_SETTLE_SECONDS - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
     async def _await_approval(self, request: DesktopShellRequest, deadline: float) -> str:
-        # Another input can start between the wake-up and this task running, so recheck before presenting.
-        while not self._agent_input_idle.is_set():
-            await self._agent_input_idle.wait()
+        await self._agent_input_settled()
         if self._cancel_event.is_set():
             return "cancelled"
+        if self._monotonic_clock() >= deadline:
+            message = "Shell approval expired."
+            raise DesktopShellError(message)
         self._pending = request
         self._pending_deadline = deadline
         self._decision = asyncio.get_running_loop().create_future()

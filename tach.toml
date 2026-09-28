@@ -3422,7 +3422,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.shell"]
 
 [[modules]]
 path = "mindroom.desktop.shell_prompt"
-depends_on = []
+depends_on = ["mindroom.desktop.shell"]
 visibility = ["mindroom.cli.desktop"]
 
 [[modules]]

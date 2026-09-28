@@ -1014,11 +1014,32 @@ class _BlockingClickProvider(FakeProvider):
 
 
 @pytest.mark.asyncio
-async def test_shell_approval_is_shown_only_after_app_input_in_progress_finishes(
+async def test_launch_app_still_works_while_a_shell_command_awaits_approval(
     transport: AsyncMock,
     tmp_path: Path,
 ) -> None:
+    """Launching or foregrounding an allowed app sends it no input, so it is not paused."""
+    provider = FakeProvider()
+    bridge = _control_shell_bridge(provider, _local_shell())
+    await bridge.on_to_device_event(_event(_run_shell(PRIVATE_COMMAND, tmp_path, expires_at_ms=120_000)))
+    shell_lane = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+    await _wait_for_pending_shell(bridge)
+    await _handle(bridge, _event(_command("launch_app", request_id="launch", sequence=2)))
+    assert _response(transport).ok
+    assert provider.calls[0] == ("launch_app", APP_ID)
+    bridge.decide_local_shell("run", approved=False, auto_approve_seconds=0)
+    await shell_lane
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_approval_is_shown_only_after_app_input_in_progress_finishes(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A request arriving mid-click waits, so the click cannot land on a card that appeared under it."""
+    monkeypatch.setattr("mindroom.desktop.shell._AGENT_INPUT_SETTLE_SECONDS", 0.01)
     provider = _BlockingClickProvider()
     bridge = _control_shell_bridge(provider, _local_shell())
     click = _app_input("click", {"x": 100, "y": 200, "button": "left"}, sequence=1)
