@@ -18,6 +18,7 @@ from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.worker_computer import browser_proxy, mcp_provider
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy_url
 from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.browser_socks_helpers import socks5_connect
 
 
 @pytest.mark.parametrize(
@@ -69,30 +70,6 @@ def test_browser_proxy_settings_never_silently_bypass_unsupported_routes(worker_
         browser_upstream_proxy_url({}, worker_env)
 
 
-async def _connect(
-    proxy: BrowserDestinationProxy,
-    host: str,
-    port: int,
-    *,
-    literal: bool = False,
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
-    endpoint = urlsplit(proxy.endpoint)
-    reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
-    writer.write(b"\x05\x01\x00")
-    await writer.drain()
-    assert await reader.readexactly(2) == b"\x05\x00"
-    if literal:
-        address = ipaddress.ip_address(host)
-        encoded = bytes([1 if address.version == 4 else 4]) + address.packed
-    else:
-        hostname = host.encode("ascii")
-        encoded = b"\x03" + bytes([len(hostname)]) + hostname
-    writer.write(b"\x05\x01\x00" + encoded + port.to_bytes(2, "big"))
-    await writer.drain()
-    reply = await reader.readexactly(10)
-    return reader, writer, reply[1]
-
-
 @pytest.mark.asyncio
 async def test_computer_mcp_binding_allows_own_preview_and_blocks_proxy_recursion(tmp_path: Path) -> None:
     """Display binding supplies the same loopback policy to the verifier and TCP relay."""
@@ -115,7 +92,7 @@ async def test_computer_mcp_binding_allows_own_preview_and_blocks_proxy_recursio
             result = await client.post(verifier.endpoint, json={"url": "http://localhost:5173"}, headers=headers)
             assert result.json() == {"allowed": True}
         verifier_url = urlsplit(verifier.endpoint)
-        reader, writer, status = await _connect(proxy, "127.0.0.1", verifier_url.port)
+        reader, writer, status = await socks5_connect(proxy.endpoint, "127.0.0.1", verifier_url.port)
         try:
             assert status == 0
             writer.write(b"POST /verify HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
@@ -125,7 +102,7 @@ async def test_computer_mcp_binding_allows_own_preview_and_blocks_proxy_recursio
             writer.close()
             await writer.wait_closed()
         for host in ["127.0.0.1", "::1", "::ffff:127.0.0.1"]:
-            reader, writer, status = await _connect(proxy, host, urlsplit(proxy.endpoint).port, literal=True)
+            reader, writer, status = await socks5_connect(proxy.endpoint, host, urlsplit(proxy.endpoint).port, literal=True)
             assert status != 0
             assert await reader.read() == b""
             writer.close()
@@ -212,12 +189,12 @@ async def test_destination_policy_and_owned_tunnel_cleanup(private: bool, loopba
             ("metadata.google.internal", 80),
             ("127.0.0.1", urlsplit(proxy.endpoint).port),
         ]:
-            reader, writer, status = await _connect(proxy, host, destination_port)
+            reader, writer, status = await socks5_connect(proxy.endpoint, host, destination_port)
             assert status != 0
             assert await reader.read() == b""
             writer.close()
             await writer.wait_closed()
-        reader, writer, status = await _connect(proxy, "127.0.0.1", port)
+        reader, writer, status = await socks5_connect(proxy.endpoint, "127.0.0.1", port)
         assert (status == 0) is (private or loopback)
         if private or loopback:
             writer.write(b"opaque TLS or HTTP bytes")
@@ -267,7 +244,7 @@ async def test_validated_numeric_address_is_dialed_once(monkeypatch: pytest.Monk
     proxy = BrowserDestinationProxy()
     await proxy.start()
     try:
-        _, writer, status = await _connect(proxy, "fixture.example", 443)
+        _, writer, status = await socks5_connect(proxy.endpoint, "fixture.example", 443)
         assert status != 0
         assert resolved == [("fixture.example", 443, False)]
         assert dialed == [("8.8.8.8", 443, {"family": socket.AF_INET})]
@@ -368,7 +345,7 @@ async def test_literal_proxy_recursion_never_dials(host: str, monkeypatch: pytes
 
     monkeypatch.setattr(asyncio, "open_connection", dial)
     try:
-        _, writer, status = await _connect(proxy, host, port, literal=True)
+        _, writer, status = await socks5_connect(proxy.endpoint, host, port, literal=True)
         assert status != 0
         assert calls == []
         writer.close()

@@ -48,8 +48,8 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.browser_socks_helpers import socks5_connect
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
-from tests.test_worker_browser_proxy import _connect as _socks_connect
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
@@ -1510,7 +1510,7 @@ async def test_page_websockets_follow_browser_destination_policy(
 
 async def _socks_connect_status(proxy: BrowserDestinationProxy, host: str, port: int) -> int:
     """Return the SOCKS5 reply code for one CONNECT through a browser destination relay."""
-    _reader, writer, status = await _socks_connect(proxy, host, port, literal=True)
+    _reader, writer, status = await socks5_connect(proxy.endpoint, host, port, literal=True)
     writer.close()
     await writer.wait_closed()
     return status

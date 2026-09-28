@@ -72,7 +72,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
-from tests.test_worker_browser_proxy import _connect as _socks_connect
+from tests.browser_socks_helpers import socks5_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
@@ -481,9 +481,8 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
             proxy_config = self.config.proxy_config
             assert proxy_config is not None
             endpoints.append(proxy_config.server)
-            relay = SimpleNamespace(endpoint=proxy_config.server)
             for host, port in (("127.0.0.1", service_port), ("169.254.169.254", 80)):
-                _reader, writer, status = await _socks_connect(relay, host, port, literal=True)
+                _reader, writer, status = await socks5_connect(proxy_config.server, host, port, literal=True)
                 writer.close()
                 await writer.wait_closed()
                 assert status != 0
