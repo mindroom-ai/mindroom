@@ -294,6 +294,87 @@ class TestAgentBot(AgentBotTestBase):
         assert call_kwargs["requester_user_id"] == "@user:localhost"
         assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
 
+    @pytest.mark.parametrize("caption_in_upload_thread", [True, False])
+    @pytest.mark.asyncio
+    async def test_router_leaves_an_upload_to_the_agent_its_caption_names(
+        self,
+        tmp_path: Path,
+        caption_in_upload_thread: bool,
+    ) -> None:
+        """An upload whose threaded caption names an agent must not also be routed elsewhere."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
+        bot._turn_controller._execute_router_relay = AsyncMock()
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        for user_id in (
+            "@mindroom_router:localhost",
+            "@mindroom_general:localhost",
+            "@mindroom_calculator:localhost",
+            "@user:localhost",
+        ):
+            room.add_member(user_id, None, None)
+        room.members_synced = True
+
+        upload = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$upload",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        caption_content: dict[str, object] = {
+            "msgtype": "m.text",
+            "body": "@mindroom_general:localhost review this",
+            "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+        }
+        if caption_in_upload_thread:
+            caption_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$upload"}
+        caption = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$caption",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "content": caption_content,
+            },
+        )
+
+        with (
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+        ):
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
+            await bot._on_media_message(room, upload)
+            await bot._on_message(room, caption)
+            await drain_coalescing(bot)
+
+        bot._turn_controller._execute_router_relay.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_router_routing_registers_file_with_effective_thread_scope(
         self,

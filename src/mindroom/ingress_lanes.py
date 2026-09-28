@@ -222,6 +222,16 @@ class IngressLanes:
             )
         )
 
+    def has_pending_delivery(self, key: CoalescingKey) -> bool:
+        """Return whether any live lane owner still holds loaded work for one conversation key."""
+        return any(
+            slot.delivery is not None and slot.delivery.key == key
+            for slot in chain(
+                chain.from_iterable(self._lanes.values()),
+                self._settling_slots.values(),
+            )
+        )
+
     def all_settled(self) -> bool:
         """Return whether no lane holds undelivered ingress."""
         return not self.unsettled_slots()
