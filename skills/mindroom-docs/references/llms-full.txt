@@ -24801,7 +24801,7 @@ The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an 
 | `active`, unexpired `trialing`, or `past_due` (Stripe is retrying payment) | Keeps running | Enabled | Kept |
 | `cancelled`, `unpaid`, `incomplete`, `incomplete_expired`, `paused`, expired trial, free tier, or account pending deletion | Stopped | Disabled | Kept until the teardown date |
 | Still inactive after the grace period | Uninstalled and marked `deprovisioned` | Deleted | PVCs and instance Secrets deleted |
-| Entitled again while stopped | Started, or re-provisioned when its key does not match the tier | Re-enabled, or replaced by the tier's key | Kept |
+| Entitled again while stopped | Started, or re-provisioned when its key or recorded tier does not match the tier | Re-enabled, or replaced by the tier's key | Kept |
 | Entitled again after teardown | Re-provisioned as a fresh instance | New key | Starts empty |
 | Entitled on a different tier while running | Re-provisioned with the tier's resources | Replaced by the tier's key, or deleted when the tier has no included budget | Kept |
 | Entitled on a cheaper tier while stopped by the customer | Stays stopped | Deleted when larger than the tier includes | Kept |
@@ -24813,8 +24813,8 @@ Before stopping, resuming, or redeploying a Stripe-billed instance, and for ever
 A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
 A delayed creation event for a Stripe subscription older than the account's current one is ignored.
 Right before teardown the job re-reads the subscription and skips the teardown when it is entitled again.
-An instance's platform OpenRouter key must match its subscription tier's included budget (`included_ai_budget_usd` in `pricing-config.yaml`), and its recorded `instances.tier` must match the subscription's tier, so a plan change or a resubscription on another tier never hands back a key or resources from a pricier tier.
-A replaced key is deleted on OpenRouter before its replacement is created, so a failed deletion leaves the old key recorded for the next run to retry instead of live and forgotten.
+An instance's platform OpenRouter key must match its subscription tier's included budget (`included_ai_budget_usd` in `pricing-config.yaml`), and its `instances.tier`, which provisioning records only after a successful deploy, must match the subscription's tier, so a plan change or a resubscription on another tier never hands back a key or resources from a pricier tier.
+A key larger than the tier includes is deleted on OpenRouter before its replacement is created, so a failed deletion leaves it recorded for the next run to retry instead of live and forgotten; a smaller key keeps serving until its replacement is published and is then revoked.
 A customer-stopped instance is not redeployed, because that would start it; after the customer starts it, the lifecycle redeploys it for its tier in the background.
 Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
 Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses to shrink a PVC; a downgrade from `pro` keeps its larger volumes.
