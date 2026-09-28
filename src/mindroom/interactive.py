@@ -158,9 +158,9 @@ _INTERACTIVE_PATTERN = (
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
-# An interactive block whose closing fence has not streamed in yet, and a trailing fence whose marker is still arriving.
-_UNFINISHED_INTERACTIVE_PATTERN = r"```[ \t]*(?:\r?\n[ \t]*)?interactive(?:[ \t]+json)?[ \t]*(?:\r?\n|$)"
-_TRAILING_FENCE_PATTERN = r"(?:^|\n)[ \t]*```[ \t]*([a-z]*)[ \t]*$"
+# One fence line: its backticks and info string. Info strings cannot contain backticks.
+_FENCE_LINE_PATTERN = r"[ \t]*(`{3,})[ \t]*([^`]*?)[ \t]*\r?"
+_FULL_INTERACTIVE_MARKER = "interactive json"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -342,19 +342,32 @@ def _first_valid_interactive_payload(
 
 
 def hide_unfinished_interactive(formatted_text: str) -> str:
-    """Cut a still-streaming interactive block from formatted text, so its raw JSON never shows.
+    """Cut an interactive block that is still streaming, so its partial JSON stays out of the message.
 
-    Complete blocks are already rendered as questions, so any interactive fence left in the text has not
-    closed yet; a trailing fence whose marker could still become ``interactive`` is cut too. The text before
-    the block stays visible, and the question appears once its closing fence arrives.
+    Complete blocks are already rendered as questions. When the text ends inside a fenced block whose marker is,
+    or could still become, ``interactive``, the text is cut where that block opens; the text before it stays and
+    the question appears once the block closes. Closed blocks, even ones the parser could not use, and other
+    code blocks are left as written.
     """
-    unfinished = re.search(_UNFINISHED_INTERACTIVE_PATTERN, formatted_text, re.IGNORECASE)
-    if unfinished is not None:
-        return formatted_text[: unfinished.start()].rstrip()
-    trailing = re.search(_TRAILING_FENCE_PATTERN, formatted_text, re.IGNORECASE)
-    if trailing is not None and "interactive".startswith(trailing.group(1).lower()):
-        return formatted_text[: trailing.start()].rstrip()
-    return formatted_text
+    lines = formatted_text.split("\n")
+    open_fence: tuple[int, int, str] | None = None  # line, backtick count, and marker of the block the text ends in
+    for index, line in enumerate(lines):
+        fence = re.fullmatch(_FENCE_LINE_PATTERN, line)
+        if fence is None:
+            continue
+        ticks, info = len(fence.group(1)), fence.group(2)
+        if open_fence is None:
+            open_fence = (index, ticks, info)
+        elif not info and ticks >= open_fence[1]:
+            open_fence = None
+    if open_fence is None:
+        return formatted_text
+    index, _, marker = open_fence
+    if not marker and index + 1 < len(lines):
+        marker = lines[index + 1]  # a bare fence may carry its marker on the next line
+    if not _FULL_INTERACTIVE_MARKER.startswith(" ".join(marker.lower().split())):
+        return formatted_text
+    return "\n".join(lines[:index]).rstrip()
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:

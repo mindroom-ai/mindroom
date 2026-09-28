@@ -33,6 +33,14 @@ class TestInteractiveFunctions:
             ("Two things.\n\n```python\nprint(", "Two things.\n\n```python\nprint("),
             ('Two things.\n\n```json\n{"a": 1', 'Two things.\n\n```json\n{"a": 1'),
             ("Two things.\n\nWhat next?\n1. 📊 Numbers", "Two things.\n\nWhat next?\n1. 📊 Numbers"),
+            ("Two things.\n\n```interactive js", "Two things."),
+            ("Two things.\r\n\r\n```interactive\r\n{", "Two things."),
+            ("Before.\n\n```python\nprint(1)\n```", "Before.\n\n```python\nprint(1)\n```"),
+            (
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+            ),
+            ("Code:\n\n````md\n```interactive\n{\n", "Code:\n\n````md\n```interactive\n{\n"),
         ],
     )
     def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:

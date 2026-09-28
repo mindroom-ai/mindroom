@@ -727,6 +727,29 @@ def test_streaming_edits_hide_an_interactive_block_until_it_closes(config: Confi
     assert "```" not in shown
 
 
+def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Config) -> None:
+    """A reply that is only an unfinished block shows the placeholder; a final edit shows the text as written."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = '```interactive\n{"question": "What next?"'
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    final = streaming._delivery_snapshot(
+        is_final=True,
+        allow_empty_progress=False,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    assert progress is not None
+    assert final is not None
+
+    in_progress = streaming_mod._prepare_delivery_from_snapshot(progress)
+    assert in_progress.display_text == "Thinking..."
+    assert in_progress.committed_state.visible_body_state == "placeholder_only"
+    assert "```interactive" in streaming_mod._prepare_delivery_from_snapshot(final).display_text
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])

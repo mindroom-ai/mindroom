@@ -16,7 +16,6 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
-    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -101,9 +100,7 @@ __all__ = [
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
-_IN_PROGRESS_STREAM_STATUSES = frozenset(
-    {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
-)
+_IN_PROGRESS_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,7 +476,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         extra_content=extra_content,
         markdown_renderer=snapshot.markdown_renderer,
     )
-    if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
         # updates may already contain mentions, so using m.text here would make
         # every progressive edit eligible for a push notification.
