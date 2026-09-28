@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["canonical_provider", "get_model_instance"]
+__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
@@ -364,6 +364,32 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     raise ValueError(msg)
 
 
+def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the dashboard key saved for one model config (``model:<name>``), if any."""
+    model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
+    return model_creds.get("api_key") if model_creds else None
+
+
+def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
+    """Return the provider service a configured model needs a key for when none resolves, else None.
+
+    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``,
+    then the per-model dashboard key, then the shared provider key (including its
+    env-var-named twin). Only providers that authenticate with one API key are checked.
+    """
+    model_config = config.models[model_name]
+    provider = canonical_provider(model_config.provider)
+    if provider == "gemini":
+        provider = "google"
+    if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
+        return None
+    if (model_config.extra_kwargs or {}).get("api_key") or _model_credential_api_key(model_name, runtime_paths):
+        return None
+    if get_api_key_for_provider(provider, runtime_paths=runtime_paths):
+        return None
+    return provider
+
+
 def get_model_instance(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -382,10 +408,7 @@ def get_model_instance(
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
+    model_api_key = _model_credential_api_key(model_name, runtime_paths)
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
 

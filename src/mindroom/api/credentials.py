@@ -321,22 +321,39 @@ async def set_api_key(
     request_service = _validated_save_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
+    save_dashboard_api_key(
+        http_request,
+        service,
+        payload.api_key,
+        key_name=payload.key_name,
+        agent_name=agent_name,
+    )
+    return {"status": "success", "service": service, "message": f"API key set for {service}"}
+
+
+def save_dashboard_api_key(
+    http_request: Request,
+    service: str,
+    api_key: str,
+    *,
+    key_name: str = "api_key",
+    agent_name: str | None = None,
+) -> None:
+    """Save one UI-sourced API key through the dashboard credential access rules."""
     access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
     )
-    reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
+    reject_oauth_api_key_write_field(service, access.match(service), key_name=key_name)
 
     credentials = access.load(service) or {}
     access.reject_stored_oauth_credentials(credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
-    credentials[payload.key_name] = payload.api_key
+    credentials[key_name] = api_key
     credentials["_source"] = "ui"
     access.save(service, credentials)
     _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
-
-    return {"status": "success", "service": service, "message": f"API key set for {service}"}
 
 
 def _load_api_key_credentials(

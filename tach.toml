@@ -1073,6 +1073,7 @@ depends_on = [
 ]
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
+    "mindroom.api.provider_setup",
     "mindroom.agents",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -1663,6 +1664,7 @@ depends_on = [
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
+    "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
@@ -1698,6 +1700,15 @@ depends_on = [
     "mindroom.embedder_health",
     "mindroom.embedding_factory",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.provider_setup"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials",
+    "mindroom.logging_config",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -5395,7 +5406,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance"]
+expose = ["get_model_instance", "missing_model_api_key_provider"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]

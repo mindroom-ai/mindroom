@@ -1,13 +1,17 @@
 """Tests for error handling module."""
 
+from pathlib import Path
+
 import httpx
 import pytest
-from agno.exceptions import ModelProviderError
+from agno.exceptions import ModelAuthenticationError, ModelProviderError
 from agno.run.agent import RunErrorEvent
 from agno.utils.events import error_type_of
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
+from openai import OpenAIError
 
+from mindroom import constants
 from mindroom.error_handling import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     MinimalModeUnavailableError,
@@ -223,3 +227,61 @@ def test_minimal_mode_failure_keeps_standard_mode_hint(reason: str) -> None:
     message = get_user_friendly_error_message(run_error_event_exception(event), "helper")
 
     assert message == (f"[helper] ⚠️ Error: {reason.rstrip('.')}. Return to standard mode with `!mode helper standard`.")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelAuthenticationError(
+            message="OPENROUTER_API_KEY not set. Please set the OPENROUTER_API_KEY environment variable.",
+        ),
+        OpenAIError(
+            "The api_key client option must be set either by passing api_key to the client "
+            "or by setting the OPENAI_API_KEY environment variable",
+        ),
+        OpenAIError(
+            "Missing credentials. Please pass an `api_key`, `workload_identity`, `admin_api_key`, "
+            "or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable.",
+        ),
+        TypeError(
+            '"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set."',
+        ),
+        # Streaming errors reach the user after Agno flattens them into plain text.
+        Exception("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set. Please set the ANTHROPIC_API_KEY."),
+    ],
+)
+def test_missing_provider_key_points_to_dashboard_setup(error: Exception, tmp_path: Path) -> None:
+    """A missing provider key tells the user where to connect one instead of showing the raw exception."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_PUBLIC_URL": "https://42.mindroom.chat/"},
+    )
+
+    message = get_user_friendly_error_message(error, "mind", runtime_paths=runtime_paths)
+
+    assert message == (
+        "[mind] 🔑 No AI provider key is set up yet, so I can't reply. "
+        "Open the MindRoom dashboard (https://42.mindroom.chat), choose **Connect your AI provider**, "
+        "paste your key, then send your message again."
+    )
+
+
+def test_missing_provider_key_without_public_url_names_dashboard() -> None:
+    """Without a known dashboard URL the message still points at the dashboard setup step."""
+    error = ModelAuthenticationError(message="OPENROUTER_API_KEY not set.")
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Open the MindRoom dashboard, choose **Connect your AI provider**" in message
+    assert "OPENROUTER_API_KEY" not in message
+
+
+def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
+    """A configured but invalid key is not reported as a missing key."""
+    error = OpenAIAuthError(message="Incorrect API key provided", response=_MOCK_RESPONSE, body=None)
+
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert "Authentication failed" in message
+    assert "Connect your AI provider" not in message
