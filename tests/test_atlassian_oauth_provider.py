@@ -13,6 +13,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.atlassian import AtlassianProduct, atlassian_oauth_provider
 from mindroom.oauth.registry import load_oauth_providers
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -101,7 +102,7 @@ def test_authorization_url_carries_audience_consent_and_callback(tmp_path: Path)
     )
     provider = atlassian_oauth_provider()
 
-    url = asyncio.run(provider.authorization_uri_async(paths, state="opaque-state"))
+    url = asyncio.run(oauth_authorization_url(provider, paths, state="opaque-state"))
 
     parsed = urlparse(url)
     query = parse_qs(parsed.query)

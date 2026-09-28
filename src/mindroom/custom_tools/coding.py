@@ -33,6 +33,7 @@ from mindroom.tools.path_safety import (
     is_within_base_dir,
     read_resolved_file,
     resolve_base_dir_path,
+    resolve_tool_base_dir,
     split_search_pattern,
     write_resolved_file,
 )
@@ -552,7 +553,7 @@ class CodingTools(Toolkit):
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
+        self.base_dir = resolve_tool_base_dir(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
@@ -686,9 +687,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         effective_glob = glob
@@ -747,9 +746,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         search_pattern = pattern
@@ -785,7 +782,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            target = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            target = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
 

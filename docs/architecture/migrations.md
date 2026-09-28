@@ -97,6 +97,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
+| [`oauth/providers.py`][oauth-providers], [`api/oauth.py`][api-oauth], and [`oauth/discovery.py`][oauth-discovery] | [MCP OAuth tests][mcp-oauth-tests] cover unbound credential rejection and legacy registration binding; [OAuth API tests][oauth-api-tests] cover rejection of pending state without a bound endpoint. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`history/legacy_compaction_state.py`][legacy-compaction-state] | [Legacy compaction tests][legacy-compaction-state-tests] cover recognition, one-time migration, summary attribution, tombstone pruning, and malformed metadata; [compaction redaction tests][compaction-redaction-tests] cover legacy invalidation. |
@@ -106,6 +107,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load pair sessions persisted before device pairing as browser-initiated sessions without device fields. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load device pair sessions persisted without a requester address and inspect them with no address. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
@@ -189,6 +191,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
 | C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads pair sessions persisted before device pairing, which lack device fields, as browser-initiated sessions. |
 | C15 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still resolves Matrix access tokens through whoami on browser-initiated pairing and connection endpoints when the deployed chat client sends no OpenID token. |
+| C16 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads device pair sessions persisted before requester addresses were recorded with no address, which the approval page shows as unknown. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -205,6 +208,9 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | O4 | Current behavior | [`oauth/credential_store.py`][oauth-store] owns schema, private-file, and scope-binding validation. |
 | O5 | Current behavior | [`oauth/credential_lifecycle.py`][oauth-lifecycle] owns target resolution, generation checks, and reset receipts. |
 | O6 | Current behavior | [`oauth/client.py`][oauth-client] and [`credential_lifecycle.py`][oauth-lifecycle] support active provider dialects and configured original authentication. |
+| O7 | Removed/superseded | [`oauth/providers.py`][oauth-providers] rejects refreshes of credentials without a `token_uri` endpoint binding, which only unstamped plugin exchanger or parser output produced; the lifecycle deletes them and the user reconnects. |
+| O8 | Removed/superseded | [`api/oauth.py`][api-oauth] rejects pending connect state without a bound `token_url`; the state lives 600 seconds, so only connects that straddle an upgrade must restart. |
+| O9 | Tiny retained default | [`oauth/discovery.py`][oauth-discovery] binds a dynamic client registration without a recorded token endpoint to the endpoint resolved at first use, keeping its client and tokens; later endpoint changes re-register. |
 | M1 | Isolated | [`matrix/legacy_state.py`][matrix-legacy-state] backfills domains and asks the current state owner to rewrite noncanonical data. |
 | M2 | Tiny retained default | [`matrix/users.py`][matrix-users] falls back from missing `requested_username` to persisted actual username. |
 | M3 | Removed/superseded | [`thread_tags.py`][thread-tags] reads only one state event per thread-tag pair; the old thread-wide overlay is gone. |
@@ -279,6 +285,7 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
+[api-oauth]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/oauth.py
 [approval-execution]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_execution.py
 [approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
 [attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
@@ -341,9 +348,11 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [memory-config]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/config.py
 [memory-functions]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/functions.py
 [oauth-client]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/client.py
+[oauth-discovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/discovery.py
 [oauth-legacy-credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/legacy_credentials.py
 [oauth-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_lifecycle.py
 [oauth-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_store.py
+[oauth-providers]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/providers.py
 [plugin-imports]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/plugin_imports.py
 [pre-journal-test]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_upgrade_from_pre_journal_storage.py
 [private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
@@ -402,7 +411,9 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
+[mcp-oauth-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_oauth.py
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
+[oauth-api-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/api/test_oauth_api.py
 [oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py
 [openai-model-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_models.py
 [openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py

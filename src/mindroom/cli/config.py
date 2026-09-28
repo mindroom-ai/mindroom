@@ -860,6 +860,22 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
+def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the providers with a model that has no credential of its own, so it needs the shared key."""
+    # model_loading pulls in the Agno runtime, which CLI startup must not import.
+    from mindroom.model_loading import model_uses_own_credential  # noqa: PLC0415
+
+    try:
+        return {
+            model.provider
+            for name, model in config.models.items()
+            if not model_uses_own_credential(name, model, runtime_paths)
+        }
+    except (OSError, ValueError):
+        # Without the credential store, dashboard keys are unknown, so every provider needs its shared key.
+        return {model.provider for model in config.models.values()}
+
+
 def _find_missing_env_keys(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -868,6 +884,7 @@ def _find_missing_env_keys(
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
+    shared_key_providers = _shared_key_providers(config, runtime_paths)
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "bedrock_claude":
@@ -887,9 +904,12 @@ def _find_missing_env_keys(
                 missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
             continue
         if provider == "azure":
+            azure_env_keys = [AZURE_OPENAI_ENV_BY_KEY["endpoint"]]
+            if provider in shared_key_providers:
+                azure_env_keys.insert(0, AZURE_OPENAI_ENV_BY_KEY["api_key"])
             missing.extend(
                 (provider, env_key)
-                for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
+                for env_key in azure_env_keys
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
@@ -901,7 +921,9 @@ def _find_missing_env_keys(
             )
             continue
         env_key = constants.env_key_for_provider(provider)
-        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
+        # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
+        needs_env_key = provider == "ollama" or provider in shared_key_providers
+        if env_key and needs_env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
 

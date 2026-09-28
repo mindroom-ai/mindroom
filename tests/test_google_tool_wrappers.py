@@ -1935,6 +1935,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
             callback_context,
             "account-b-code",
             "pkce-verifier",
+            token_url=callback_context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         )
 
@@ -2014,6 +2015,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
         callback_context,
         "account-b-code",
         "pkce-verifier",
+        token_url=callback_context.provider.token_url,
         expected_connection_generation=issued_connection_generation,
     )
 

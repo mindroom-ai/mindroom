@@ -10,6 +10,7 @@ _WorkerScope = Literal["shared", "user", "user_agent"]
 RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
 OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE = "oauth_dynamic_client_registration"
 OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY = "_oauth_dynamic_client_registered_redirect_uri"
+OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY = "_oauth_dynamic_client_registered_token_url"  # noqa: S105
 
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {

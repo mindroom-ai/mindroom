@@ -81,6 +81,7 @@ The following provider restrictions apply to this same-model check; a valid deci
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
+Gemini checks also request JSON output, except on Vertex AI when the agent has function declarations, because Gemini can emit function calls even with function calling disabled.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
@@ -632,6 +633,7 @@ models:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
     id: claude-sonnet-5            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
+    api_key: null                  # Optional: Model-specific API key used instead of the provider's shared key
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 

@@ -291,6 +291,7 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
                 {
                     "token": f"{client_id}-access",
                     "refresh_token": f"{client_id}-refresh",
+                    "token_uri": provider.token_url,
                     "client_id": client_id,
                     "scopes": list(provider.scopes),
                     "expires_at": 1,

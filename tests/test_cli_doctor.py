@@ -21,7 +21,7 @@ from mindroom.cli.doctor import (
 )
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
-from mindroom.config.models import RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials_sync import get_embedder_api_key
 
@@ -107,7 +107,12 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         lambda *args: validated.append(args) or (False, "HTTP 401"),
     )
 
-    result = _check_single_provider("openai", Config(router=RouterConfig(model="default")), set(), runtime_paths)
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        router=RouterConfig(model="default"),
+    )
+
+    result = _check_single_provider("openai", config, set(), runtime_paths)
 
     assert result == (0, 0, 1)
     assert validated == []

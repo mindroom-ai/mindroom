@@ -36,7 +36,7 @@ MindRoom currently ships three worker backend shapes:
 ## Live config snapshots
 
 A runner's own config file holds only what it loaded at startup, and hosted deployments mount a seed config that never follows the live config the primary hot-reloads and the dashboard edits.
-With the `static_runner` and `kubernetes` backends, the primary therefore sends its live config with every execute, attachment-save, and file-view request.
+With the `static_runner` and `kubernetes` backends, the primary therefore sends its live config with every execute, attachment-save, file-view, and background-script launch request.
 Before sending, it removes sensitive keys such as `api_key`, `password`, and names ending in `_token` or `_secret`, plus credential headers, with the same redaction the Docker worker projection applies.
 The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately and a stale startup config cannot widen an agent's settings.
 The runner rejects an invalid snapshot with HTTP 400 instead of falling back to its startup config.
@@ -228,7 +228,7 @@ Upgrading from a release whose workers mounted whole agent state roots stops tho
 If any cannot be stopped, startup fails and the primary restarts until none remain.
 Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](https://docs.mindroom.chat/architecture/migrations/#workspace-only-worker-mounts) describes.
 
-Dedicated Kubernetes workers also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
+Dedicated Kubernetes workers, including background-script workers, also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the hosted instance chart mounts only the seed ConfigMap into them.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 

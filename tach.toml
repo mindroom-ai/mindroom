@@ -1074,6 +1074,8 @@ depends_on = [
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
     "mindroom.api.provider_setup",
+    "mindroom.cli.config",
+    "mindroom.cli.doctor",
     "mindroom.agents",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -4080,6 +4082,8 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.credentials_sync",
+    # Deferred import in the missing-env check.
+    "mindroom.model_loading",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -4127,6 +4131,8 @@ depends_on = [
     "mindroom.matrix.health",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
+    # Deferred import in the provider key checks.
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -4167,6 +4173,11 @@ depends_on = [
     "mindroom.cli.config",
     "mindroom.constants",
 ]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
+path = "mindroom.cli.pairing_probes"
+depends_on = []
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
@@ -4213,6 +4224,7 @@ depends_on = [
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
+    "mindroom.cli.pairing_probes",
     "mindroom.cli.plugins",
     "mindroom.cli.service",
     "mindroom.cli.trigger",
@@ -5438,7 +5450,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance", "missing_model_api_key_provider"]
+expose = ["get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]
@@ -6376,6 +6388,7 @@ expose = [
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
+    "runner_config_snapshot",
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",

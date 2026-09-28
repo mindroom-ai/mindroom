@@ -712,12 +712,14 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 #   --namespace mindroom-instances \
 #   -f values-with-secrets.yaml  # Never commit this file!
 
-# Quick redeploy of MindRoom backend (updates all instances)
-./saas-platform/redeploy-mindroom.sh
+# Deploy a release tag: platform Helm upgrade, then re-provision instances
+# (see docs/deployment/kubernetes.md#release-deployment)
+./cluster/scripts/deploy-release.sh v2026.9.351 --dry-run
+./cluster/scripts/deploy-release.sh v2026.9.351 --instances running  # or all, none, 1,7
 
-# Deploy platform frontend or backend
-./saas-platform/deploy.sh platform-frontend  # Build, push, and deploy frontend
-./saas-platform/deploy.sh platform-backend   # Build, push, and deploy backend
+# Apply a Supabase migration through the Management API (no DB password needed)
+SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<ref> \
+  ./cluster/scripts/db/apply-migration.sh saas-platform/supabase/migrations/<file>.sql
 
 # Use the CLI helper for common operations
 ./cluster/scripts/mindroom-cli.sh status

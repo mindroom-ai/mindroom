@@ -124,6 +124,8 @@ memory:
 ```
 
 Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).
+An explicit `memory.llm.config.api_key` is used instead of the provider key, and a blank one counts as unset.
+When `OPENROUTER_API_KEY` is set in the process environment, Mem0's OpenAI LLM, which serves both the `openai` and `openrouter` providers, sends that key to OpenRouter instead, overriding an explicit `memory.llm.config.api_key`.
 
 ## Backend: `none`
 
