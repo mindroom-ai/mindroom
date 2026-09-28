@@ -622,10 +622,10 @@ agents:
 models:
   default:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5            # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
@@ -706,7 +706,7 @@ defaults:
 
 # defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
 # Set it to null to use provider defaults.
-# GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# GPT-6 Astra, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
 # room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
 #
 # A thread's first trusted automatic summary call is summary-only.

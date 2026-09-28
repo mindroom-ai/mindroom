@@ -45,7 +45,7 @@ __all__ = (
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
     "OPENAI_GPT_LUNA",
-    "OPENAI_GPT_TERRA",
+    "OPENAI_GPT_SOL",
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
@@ -54,6 +54,7 @@ __all__ = (
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
+    "OPENAI_UNSUPPORTED_SAMPLING_CONTROLS",
     "OPENROUTER_BASE_URL_DEFAULT",
     "OPENROUTER_OPENAI_EMBEDDING_SMALL",
     "OPENROUTER_OPENAI_LUNA",
@@ -85,16 +86,17 @@ class ModelPreset:
 
 
 _ANTHROPIC_FABLE = "claude-fable-5-1"
-_ANTHROPIC_OPUS = "claude-opus-5"
-_ANTHROPIC_SONNET = "claude-sonnet-5"
+_ANTHROPIC_OPUS = "claude-opus-5-5"
+_ANTHROPIC_SONNET = "claude-sonnet-5-5"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
+# Prefixes also cover newer point releases (claude-sonnet-5 matches claude-sonnet-5-5).
 CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-sonnet-4-6",
-    _ANTHROPIC_SONNET,
+    "claude-sonnet-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
-    _ANTHROPIC_OPUS,
+    "claude-opus-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
@@ -115,15 +117,17 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
     "claude-sonnet-4@",
 )
 _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
-AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5"
-_AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5"
+AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
+_AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-4-5"
 CODEX_GPT = "gpt-6-astra"
 CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT,)
+OPENAI_GPT_SOL = "gpt-6-sol"
+OPENAI_GPT_LUNA = "gpt-6-luna"
+OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT, OPENAI_GPT_SOL, OPENAI_GPT_LUNA)
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
@@ -132,8 +136,16 @@ OPENAI_IMAGE_PATCH_MODEL_PREFIXES = (*OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREF
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.
 OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
-OPENAI_GPT_TERRA = "gpt-5.6-terra"
-OPENAI_GPT_LUNA = "gpt-5.6-luna"
+# Chat Completions sampling controls each model rejects: GPT-6 Sol and Luna reject
+# both at their default (non-`none`) reasoning effort; GPT-5.6 Terra and Luna reject top_p.
+OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        OPENAI_GPT_SOL: frozenset({"temperature", "top_p"}),
+        OPENAI_GPT_LUNA: frozenset({"temperature", "top_p"}),
+        "gpt-5.6-terra": frozenset({"top_p"}),
+        "gpt-5.6-luna": frozenset({"top_p"}),
+    },
+)
 OPENAI_AVATAR_PROMPT = _OPENAI_GPT
 AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
@@ -151,17 +163,21 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "claude-fable-5.1",
     "claude-fable-5",
     _ANTHROPIC_OPUS,
+    "claude-opus-5.5",
+    "claude-opus-5",
     _ANTHROPIC_SONNET,
+    "claude-sonnet-5.5",
+    "claude-sonnet-5",
 )
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
-_OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5"
-_OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5"
+_OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"
+_OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
 _OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
-_OPENROUTER_OPENAI_TERRA = "openai/gpt-5.6-terra"
+_OPENROUTER_OPENAI_SOL = f"openai/{OPENAI_GPT_SOL}"
 OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
 # Not the ":free" variant: guardrail/data-policy restricted keys (such as
 # platform-provisioned hosted keys) have no endpoints for free models.
@@ -202,7 +218,7 @@ GROQ_TRANSCRIPTION = "whisper-large-v3"
 GROQ_TTS = "canopylabs/orpheus-v1-english"
 
 CARTESIA_TTS = "sonic-3.6"
-ELEVENLABS_TTS = "eleven_v3"
+ELEVENLABS_TTS = "eleven_v4"
 FAL_VIDEO = "fal-ai/hunyuan-video-v1.5/text-to-video"
 REPLICATE_VIDEO = "minimax/h3"
 
@@ -236,13 +252,13 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("haiku", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_HAIKU, 200_000)),
         ),
         "openai": (
-            ("openai_terra", ModelPreset("openai", OPENAI_GPT_TERRA, 1_050_000)),
+            ("openai_sol", ModelPreset("openai", OPENAI_GPT_SOL, 1_050_000)),
             ("openai_luna", ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000)),
         ),
         "openrouter": (
             ("astra", ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000)),
-            ("gpt5terra", ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000)),
-            ("gpt5luna", ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000)),
+            ("sol", ModelPreset("openrouter", _OPENROUTER_OPENAI_SOL, 1_050_000)),
+            ("luna", ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000)),
             ("fable", ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
@@ -266,8 +282,8 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
         "astra": ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000),
-        "gpt5terra": ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000),
-        "gpt5luna": ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000),
+        "sol": ModelPreset("openrouter", _OPENROUTER_OPENAI_SOL, 1_050_000),
+        "luna": ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000),
         "fable": ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000),
         "opus": ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000),
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),

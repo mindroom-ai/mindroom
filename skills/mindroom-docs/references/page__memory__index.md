@@ -120,7 +120,7 @@ memory:
   llm:
     provider: openrouter
     config:
-      model: openai/gpt-5.6-luna
+      model: openai/gpt-6-luna
 ```
 
 Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).

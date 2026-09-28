@@ -92,7 +92,7 @@ Changing those later sections does not invalidate the shared instruction prefix;
 The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
 Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
-The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5` and `~anthropic/claude-sonnet-latest`.
+The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`.
 MindRoom sends them as OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching) on message text parts and the last tool definition.
 Other OpenRouter model families, such as OpenAI, DeepSeek, Z.ai, and Gemini, cache implicitly and keep their unmarked request format.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
@@ -117,7 +117,7 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     context_window: 1000000
 
   fable:
@@ -127,7 +127,7 @@ models:
 
   opus:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
     context_window: 1000000
 
   haiku:
@@ -138,7 +138,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-5
+    id: anthropic.claude-opus-5-5
     context_window: 1000000
 
   # OpenAI
@@ -173,7 +173,7 @@ models:
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     extra_kwargs:
       project_id: your-gcp-project
       region: global
@@ -188,7 +188,7 @@ models:
   # OpenRouter (access to many model providers)
   openrouter:
     provider: openrouter
-    id: anthropic/claude-sonnet-5
+    id: anthropic/claude-sonnet-5.5
 
   # Groq (fast inference; Qwen3.8 is a preview model)
   groq:
@@ -225,7 +225,8 @@ models:
 ```
 
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
-Its [tool-choice rules](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) allow `auto` and `none`; forcing `any` or a named tool returns an error.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Their [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide) match Fable 5.1's: `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro.
@@ -326,9 +327,8 @@ MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
-| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Complex, open-ended work |
-| GPT-5.6 Terra | `gpt-5.6-terra` | Balanced everyday work |
-| GPT-5.6 Luna | `gpt-5.6-luna` | Fast, repeatable, cost-sensitive work |
+| GPT-6 Sol | `gpt-6-sol` | Strong reasoning on demanding tasks |
+| GPT-6 Luna | `gpt-6-luna` | Efficient, repeatable work at scale |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
 The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
@@ -451,14 +451,14 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Bedrock lists Fable 5.1 as open access, while Opus 5 access can depend on the AWS account and region.
-The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5.1 or Sonnet 5 instead.
+Bedrock lists Fable 5.1 as open access, while Opus 5.5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5.5, so confirm access or choose Fable 5.1 or Sonnet 5.5 instead.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-5
+    id: anthropic.claude-opus-5-5
     context_window: 1000000
 ```
 
@@ -514,7 +514,7 @@ If needed, that replay plan can reduce raw replay, fall back to summary-only rep
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     context_window: 1000000  # 1M tokens
 
 defaults:
@@ -560,11 +560,12 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
-Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
 MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters); omit these from authored model options.
-Automatic thread summaries omit their temperature override for GPT-6 Astra, including its OpenRouter route.
-For Mem0 memory extraction with `provider: openai`, use GPT-5.6 Luna; the current Mem0 request builder does not support Astra's parameter requirements.
+GPT-6 Sol and Luna reject the same controls unless reasoning effort is `none`.
+Automatic thread summaries omit their temperature override for GPT-6 Astra, Sol, and Luna, including their OpenRouter routes.
+For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 Sol and Luna reject.
 
 ## Environment Variables
 
@@ -610,7 +611,7 @@ ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
 CLOUD_ML_REGION=global
 ```
 
-For `claude-sonnet-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
+For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 ### File-based Secrets

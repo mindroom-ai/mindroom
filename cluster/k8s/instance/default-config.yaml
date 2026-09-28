@@ -9,13 +9,13 @@ models:
     provider: openrouter
     id: openai/gpt-6-astra
     context_window: 1050000
-  gpt5terra:
+  sol:
     provider: openrouter
-    id: openai/gpt-5.6-terra
+    id: openai/gpt-6-sol
     context_window: 1050000
-  gpt5luna:
+  luna:
     provider: openrouter
-    id: openai/gpt-5.6-luna
+    id: openai/gpt-6-luna
     context_window: 1050000
   fable:
     provider: openrouter
@@ -23,11 +23,11 @@ models:
     context_window: 1000000
   opus:
     provider: openrouter
-    id: anthropic/claude-opus-5
+    id: anthropic/claude-opus-5.5
     context_window: 1000000
   sonnet:
     provider: openrouter
-    id: anthropic/claude-sonnet-5
+    id: anthropic/claude-sonnet-5.5
     context_window: 1000000
   haiku:
     provider: openrouter
@@ -114,7 +114,7 @@ agents:
     - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless
       they ask.
 router:
-  model: gpt5luna
+  model: luna
   accept_invites: true
 mindroom_user:
   username: mindroom_user
