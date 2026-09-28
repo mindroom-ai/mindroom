@@ -94,7 +94,11 @@ def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
     def build(workspace_root: Path | None) -> MindRoomE2BTools:
-        return MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
+        return MindRoomE2BTools(
+            api_key="test",
+            tool_output_workspace_root=workspace_root,
+            tool_output_trusted_root=workspace_root,
+        )
 
     return build
 

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.TOOL_OUTPUT_TRUSTED_ROOT,
         ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
         ToolManagedInitArg.FILE_ACCESS,
     ),

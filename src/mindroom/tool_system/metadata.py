@@ -628,6 +628,7 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
+    tool_output_trusted_root: Path | None,
     worker_tools_override: list[str] | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
@@ -638,6 +639,7 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.WORKER_TARGET: lambda: worker_target,
         ToolManagedInitArg.RUNTIME_CONFIG: lambda: runtime_config,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT: lambda: tool_output_workspace_root,
+        ToolManagedInitArg.TOOL_OUTPUT_TRUSTED_ROOT: lambda: tool_output_trusted_root,
         ToolManagedInitArg.WORKER_TOOLS_OVERRIDE: lambda: worker_tools_override,
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
@@ -707,6 +709,11 @@ def _build_tool_instance(
 
     metadata = TOOL_METADATA[tool_name]
     tool_class = TOOL_REGISTRY[tool_name]()
+    resolved_output_trusted_root = None
+    if tool_output_workspace_root is not None:
+        resolved_output_trusted_root = (
+            tool_output_trusted_root if tool_output_trusted_root is not None else runtime_paths.storage_root
+        )
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -747,6 +754,7 @@ def _build_tool_instance(
             worker_target=worker_target,
             runtime_config=runtime_config,
             tool_output_workspace_root=tool_output_workspace_root,
+            tool_output_trusted_root=resolved_output_trusted_root,
             worker_tools_override=worker_tools_override,
         ),
     )
@@ -758,16 +766,15 @@ def _build_tool_instance(
         include_tools=include_tools,
         exclude_tools=exclude_tools,
     )
-    output_file_policy = (
-        ToolOutputFilePolicy.from_runtime(
+    output_file_policy = None
+    if tool_output_workspace_root is not None:
+        assert resolved_output_trusted_root is not None
+        output_file_policy = ToolOutputFilePolicy.from_runtime(
             tool_output_workspace_root,
             runtime_paths,
             auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-            trusted_root=tool_output_trusted_root,
+            trusted_root=resolved_output_trusted_root,
         )
-        if tool_output_workspace_root is not None
-        else None
-    )
     wrap_toolkit_for_output_files(toolkit, output_file_policy)
     if disable_sandbox_proxy:
         return toolkit

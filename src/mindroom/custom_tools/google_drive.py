@@ -125,6 +125,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
+        tool_output_trusted_root: Path | None = None,
         file_access: FileAccess = "workspace",
         write: bool = True,
         **kwargs: Any,  # noqa: ANN401
@@ -163,13 +164,10 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._creds_manager = credentials_manager
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
-        storage_root = runtime_paths.storage_root.expanduser().absolute()
-        self._output_root = (
-            storage_root
-            if tool_output_workspace_root is not None
-            and tool_output_workspace_root.expanduser().absolute().is_relative_to(storage_root)
-            else tool_output_workspace_root
-        )
+        if tool_output_workspace_root is not None and tool_output_trusted_root is None:
+            msg = "Google Drive downloads require a trusted workspace root"
+            raise ValueError(msg)
+        self._output_root = tool_output_trusted_root
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,

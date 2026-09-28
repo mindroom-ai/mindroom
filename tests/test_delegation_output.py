@@ -17,17 +17,54 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.execution import _prepare_delegation_output, drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.output_files import ToolOutputFileRequest
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+)
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_delegation_output_policy_preserves_private_lexical_workspace(tmp_path: Path) -> None:
+    """Delegation writes use the private runtime's lexical workspace and trusted root."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", private=AgentPrivateConfig(per="user"))},
+        defaults=DefaultsConfig(tools=[], learning=False),
+        memory={"backend": "none"},
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        None,
+        None,
+        "parent",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="leader")
+    assert worker_key is not None
+    runtime = resolve_agent_runtime("leader", config, paths, identity, create=True)
+    assert runtime.workspace is not None
+
+    request = _prepare_delegation_output("leader", config, paths, identity, "report.txt")
+
+    assert isinstance(request, ToolOutputFileRequest)
+    lexical_state_root = private_instance_scope_root_path(paths.storage_root, worker_key) / "leader"
+    assert runtime.workspace.lexical_root.parent == lexical_state_root
+    assert request.policy.workspace_root == runtime.workspace.lexical_root
+    assert request.policy.trusted_root == paths.storage_root
 
 
 @pytest.mark.asyncio

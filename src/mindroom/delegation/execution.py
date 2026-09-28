@@ -582,6 +582,7 @@ def _prepare_delegation_output(
     policy = ToolOutputFilePolicy.from_runtime(
         workspace.lexical_root,
         runtime_paths,
+        trusted_root=runtime_paths.storage_root,
         auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
     return prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)

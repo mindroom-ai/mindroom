@@ -4638,6 +4638,7 @@ models:
         projected_runtime_config,
         runtime_paths=projected_runtime_paths,
         state_storage_path=tmp_path / "private-root",
+        lexical_state_storage_path=tmp_path / "private-root",
         use_state_storage_path=True,
         create=True,
     )

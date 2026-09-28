@@ -55,8 +55,8 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.TOOL_OUTPUT_TRUSTED_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
-        ToolManagedInitArg.RUNTIME_PATHS,
     ),
     dependencies=["e2b_code_interpreter"],
     docs_url="https://docs.agno.com/tools/toolkits/others/e2b",

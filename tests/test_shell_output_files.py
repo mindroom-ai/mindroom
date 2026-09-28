@@ -215,7 +215,10 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
             process_env={},
         ),
     )
-    wrap_toolkit_for_output_files(tool, ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
+    wrap_toolkit_for_output_files(
+        tool,
+        ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path, max_bytes=60000),
+    )
     destination = tmp_path / "existing.txt"
     destination.write_text("keep existing")
     result = await FunctionCall(
@@ -344,7 +347,7 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         cwd=str(tmp_path),
         tail=100,
         timeout=0,
-        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 10000),
     )
     assert result.handle is not None
     record = registry[result.handle]
@@ -388,7 +391,7 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
             cwd=str(tmp_path),
             tail=100,
             timeout=30,
-            output_destination=ShellOutputDestination(str(tmp_path), "never.txt", 10000),
+            output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "never.txt", 10000),
         ),
     )
     await spawning.wait()
@@ -491,7 +494,7 @@ async def test_reader_failure_never_publishes_partial_output(
         cwd=str(tmp_path),
         tail=100,
         timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "partial.txt", 10000),
     )
     if result.handle is not None:
         record = registry[result.handle]
@@ -522,7 +525,7 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
         cwd=str(tmp_path),
         tail=100,
         timeout=30,
-        output_destination=ShellOutputDestination(str(tmp_path), "output.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "output.txt", 10000),
     )
     assert result.message.startswith("Error:")
     assert "Cannot create capture spool" in result.message
@@ -566,7 +569,7 @@ async def test_publication_io_failure_settles_capture(
         cwd=str(tmp_path),
         tail=100,
         timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 10000),
     )
     if result.handle is not None:
         record = registry[result.handle]
@@ -674,7 +677,7 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         cwd=str(tmp_path),
         tail=100,
         timeout=0,
-        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 3000000),
+        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 3000000),
     )
     assert result.handle is not None
     record = registry[result.handle]

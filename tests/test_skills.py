@@ -792,7 +792,7 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
         skill_roots=[tmp_path / "skills"],
         env_vars={},
         credential_keys=set(),
-        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root),
+        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root, trusted_root=workspace_root),
     )
     assert skills is not None
     tools = {tool.name: tool for tool in skills.get_tools()}

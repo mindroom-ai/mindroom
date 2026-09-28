@@ -185,6 +185,7 @@ def _google_drive_download_tool(
         creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=download_dir or tmp_path,
+        tool_output_trusted_root=download_dir or tmp_path,
     )
     service = _FakeDriveService()
     tool.service = service
@@ -204,6 +205,7 @@ def _google_drive_write_tool(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
+        tool_output_trusted_root=workspace_root,
         file_access=file_access,
     )
     service = _FakeDriveService()
@@ -314,6 +316,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         credentials_manager=credentials_manager,
         disable_sandbox_proxy=True,
         tool_output_workspace_root=tmp_path,
+        tool_output_trusted_root=tmp_path,
         worker_target=None,
     )
     disabled_tool = get_tool_by_name(
@@ -323,6 +326,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         tool_config_overrides={"write": False},
         disable_sandbox_proxy=True,
         tool_output_workspace_root=tmp_path,
+        tool_output_trusted_root=tmp_path,
         worker_target=None,
     )
     write_functions = {
@@ -368,6 +372,7 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
         tool_config_overrides={"download_file": True},
         disable_sandbox_proxy=True,
         tool_output_workspace_root=tmp_path,
+        tool_output_trusted_root=tmp_path,
         worker_target=None,
     )
 
@@ -403,6 +408,7 @@ def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> 
         creds=_valid_credentials(),
         download_file="true",
         tool_output_workspace_root=tmp_path,
+        tool_output_trusted_root=tmp_path,
     )
 
     assert "google_drive_download_file" in tool.functions
@@ -1337,6 +1343,7 @@ def test_google_drive_download_rejects_replaced_workspace_ancestor(
         creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=workspace,
+        tool_output_trusted_root=runtime_paths.storage_root,
     )
     service = _FakeDriveService()
     service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain"}

@@ -19,7 +19,6 @@ from mindroom.path_confinement import open_creatable_directory_within_existing_r
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
-    from mindroom.constants import RuntimePaths
 
 
 def _write_within_root(root: Path, workspace: Path, relative: Path, payload: bytes | bytearray) -> None:
@@ -49,12 +48,15 @@ class MindRoomE2BTools(E2BTools):
         sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
-        runtime_paths: RuntimePaths | None = None,
+        tool_output_trusted_root: Path | None = None,
         file_access: FileAccess = "workspace",
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
-        self._output_root = runtime_paths.storage_root if runtime_paths is not None else tool_output_workspace_root
+        if tool_output_workspace_root is not None and tool_output_trusted_root is None:
+            msg = "E2B local output requires a trusted workspace root"
+            raise ValueError(msg)
+        self._output_root = tool_output_trusted_root
         self._file_access = file_access
         super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
 
@@ -70,7 +72,8 @@ class MindRoomE2BTools(E2BTools):
                 resolved = resolve_path_within_root(root, requested, symlinks="internal")
                 canonical_root = root.resolve()
                 if resolved != canonical_root:
-                    trusted_root = (self._output_root or root).expanduser().absolute()
+                    assert self._output_root is not None
+                    trusted_root = self._output_root.expanduser().absolute()
                     return trusted_root, root, resolved.relative_to(canonical_root)
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)

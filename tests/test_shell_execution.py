@@ -26,7 +26,15 @@ class _RecordingCapture(ShellOutputCapture):
     """Keep the spool readable after the engine reports completion."""
 
     def __init__(self, directory: Path) -> None:
-        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024), None)
+        super().__init__(
+            ShellOutputDestination(
+                workspace_root=str(directory),
+                trusted_root=str(directory),
+                path="",
+                max_bytes=1024,
+            ),
+            None,
+        )
         self.return_codes: list[int | None] = []
 
     def publish(self, return_code: int | None) -> str:

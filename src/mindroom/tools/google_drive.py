@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.TOOL_OUTPUT_TRUSTED_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
     ),
     dependencies=[

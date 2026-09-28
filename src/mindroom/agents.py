@@ -659,6 +659,7 @@ def _agent_tool_output_file_policy(
     return ToolOutputFilePolicy.from_runtime(
         agent_runtime.workspace.lexical_root,
         runtime_paths,
+        trusted_root=runtime_paths.storage_root,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
     )
 

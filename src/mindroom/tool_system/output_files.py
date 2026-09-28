@@ -54,9 +54,9 @@ class ToolOutputFilePolicy:
     """Resolved policy for one toolkit's model-requested output files."""
 
     workspace_root: Path
+    trusted_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-    trusted_root: Path | None = None
 
     @classmethod
     def from_runtime(
@@ -64,15 +64,15 @@ class ToolOutputFilePolicy:
         workspace_root: Path,
         runtime_paths: RuntimePaths,
         *,
+        trusted_root: Path,
         auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
-        trusted_root: Path | None = None,
     ) -> ToolOutputFilePolicy:
         """Anchor primary output in runtime storage; workers explicitly supply their mounted workspace."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
             auto_save_threshold_bytes=auto_save_threshold_bytes,
-            trusted_root=runtime_paths.storage_root if trusted_root is None else trusted_root,
+            trusted_root=trusted_root,
         )
 
 
@@ -450,7 +450,7 @@ def _write_atomic(
     file_mode: int | None = None,
 ) -> str | None:
     try:
-        root = (policy.trusted_root or policy.workspace_root).expanduser().absolute()
+        root = policy.trusted_root.expanduser().absolute()
         with open_creatable_directory_within_existing_root(
             root,
             policy.workspace_root,
