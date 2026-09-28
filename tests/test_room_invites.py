@@ -18,10 +18,11 @@ from uuid import UUID
 import nio
 import pytest
 
+from mindroom import bot_room_lifecycle
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
-from mindroom.bot_room_lifecycle import _MAX_PENDING_INVITE_ATTEMPTS
+from mindroom.bot_room_lifecycle import _MAX_PENDING_INVITE_ATTEMPTS, _MAX_PENDING_INVITE_ROOMS_PER_PASS
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -445,7 +446,8 @@ async def test_one_failing_pending_invite_does_not_stop_reconciliation(
     await bot._room_lifecycle.reconcile_pending_invites()
 
     assert bot._room_lifecycle.invited_rooms == {joinable}
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {failing: "@owner:localhost"}
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert set(bot._room_lifecycle._pending_invite_retries) == {failing}
 
 
 @pytest.mark.asyncio
@@ -544,15 +546,16 @@ async def test_pending_invite_whose_join_keeps_failing_backs_off_then_gives_up_u
     now[0] += 7200
     await bot._room_lifecycle.reconcile_pending_invites()
     assert join_room.await_count == 5
-    # Giving up changes no durable state, so a restart would retry the accepted join.
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room_id: "@owner:localhost"}
+    # A failed join leaves no ledger entry, and giving up changes nothing durable.
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
 
-    # A freshly delivered invite starts over: its own attempt, then a new round of retries.
+    # A freshly delivered invite starts over: its own attempt, then timed retries.
     with pytest.raises(RuntimeError, match="Failed to join invited room"):
         await bot._room_lifecycle.handle_invite(room, "@owner:localhost")
     assert join_room.await_count == 6
     await bot._room_lifecycle.reconcile_pending_invites()
-    assert join_room.await_count == 7
+    assert join_room.await_count == 6
+    now[0] += 30
     await bot._room_lifecycle.reconcile_pending_invites()
     assert join_room.await_count == 7
 
@@ -621,14 +624,17 @@ async def test_revoked_invites_leave_no_accepted_entries_or_retry_state(
         AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE),
     )
     await bot._room_lifecycle.reconcile_pending_invites()
-    assert set(_pending_room_invites(config, ROUTER_AGENT_NAME)) == set(room_ids)
+    # Failed joins stay out of the ledger; only their retry state and inviters are kept, in memory.
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
     assert set(bot._room_lifecycle._pending_invite_retries) == set(room_ids)
+    assert set(bot._room_lifecycle._unconfirmed_join_inviters) == set(room_ids)
 
     bot.client.invited_rooms.clear()
     await bot._room_lifecycle.reconcile_pending_invites()
 
     assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
     assert bot._room_lifecycle._pending_invite_retries == {}
+    assert bot._room_lifecycle._unconfirmed_join_inviters == {}
     assert bot._room_lifecycle._invite_join_locks == {}
 
 
@@ -672,6 +678,203 @@ async def test_joined_room_whose_welcome_keeps_failing_is_retried_after_restart(
     welcome.assert_awaited_once_with(room.room_id, event.sender)
     assert restarted._room_lifecycle.invited_rooms == {room.room_id}
     assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_ledger_changes_uses_one_worker_thread_and_few_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changes that queue behind an in-flight ledger write are applied together, on one worker thread at a time."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    update = bot_room_lifecycle._update_pending_room_invites
+    save = invited_rooms_store.save_pending_room_invites
+    guard = threading.Lock()
+    threads_in_use = 0
+    most_threads_in_use = 0
+    saves = 0
+
+    def observed_update(*args: object) -> dict[str, str]:
+        nonlocal threads_in_use, most_threads_in_use
+        with guard:
+            threads_in_use += 1
+            most_threads_in_use = max(most_threads_in_use, threads_in_use)
+        try:
+            return update(*args)
+        finally:
+            with guard:
+                threads_in_use -= 1
+
+    def slow_save(path: Path, pending_invites: dict[str, str]) -> bool:
+        nonlocal saves
+        saves += 1
+        threading.Event().wait(0.02)
+        return save(path, pending_invites)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle._update_pending_room_invites", observed_update)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_pending_room_invites", slow_save)
+    room_ids = [f"!burst-{index}:localhost" for index in range(200)]
+
+    await asyncio.gather(
+        *(bot._room_lifecycle._record_accepted_invite(room_id, "@owner:localhost") for room_id in room_ids),
+    )
+
+    assert most_threads_in_use == 1
+    assert saves <= 3
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == dict.fromkeys(room_ids, "@owner:localhost")
+    assert bot._room_lifecycle._pending_room_invites == dict.fromkeys(room_ids, "@owner:localhost")
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_ledger_writer_leaves_queued_changes_for_the_next_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A writer cancelled mid-write cannot strand a change that was batched into its write."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    save = invited_rooms_store.save_pending_room_invites
+    started = [threading.Event(), threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event(), threading.Event()]
+    calls = 0
+
+    def blocking_save(path: Path, pending_invites: dict[str, str]) -> bool:
+        nonlocal calls
+        call = min(calls, 2)
+        calls += 1
+        started[call].set()
+        assert release[call].wait(2)
+        return save(path, pending_invites)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_pending_room_invites", blocking_save)
+    lifecycle = bot._room_lifecycle
+    first = asyncio.create_task(lifecycle._record_accepted_invite("!first:localhost", "@owner:localhost"))
+    assert await asyncio.to_thread(started[0].wait, 2)
+    second = asyncio.create_task(lifecycle._record_accepted_invite("!second:localhost", "@owner:localhost"))
+    third = asyncio.create_task(lifecycle._record_accepted_invite("!third:localhost", "@owner:localhost"))
+    await asyncio.sleep(0)
+    release[0].set()
+    await asyncio.wait_for(first, timeout=2)
+    # The second writer took both queued changes into one write; cancel it mid-write.
+    assert await asyncio.to_thread(started[1].wait, 2)
+    second.cancel()
+    release[1].set()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    release[2].set()
+    await asyncio.wait_for(third, timeout=2)
+
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+        "!first:localhost": "@owner:localhost",
+        "!second:localhost": "@owner:localhost",
+        "!third:localhost": "@owner:localhost",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failed_live_join_is_retried_by_its_own_timer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transient join failure is retried without waiting for an unrelated reconciliation trigger."""
+    _config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle._PENDING_INVITE_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    joined = asyncio.Event()
+    outcomes = [RoomJoinOutcome.RETRYABLE_FAILURE, RoomJoinOutcome.JOINED]
+
+    async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
+        outcome = outcomes.pop(0)
+        if outcome is RoomJoinOutcome.JOINED:
+            bot.client.invited_rooms.pop(room_id, None)
+            bot.client.rooms[room_id] = nio.MatrixRoom(room_id, bot.agent_user.user_id)
+            joined.set()
+        return outcome
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=join_room))
+
+    with pytest.raises(RuntimeError, match="Failed to join invited room"):
+        await _handle_invite(bot, room, event)
+    await asyncio.wait_for(joined.wait(), timeout=2)
+    assert await wait_for_background_tasks(timeout=2, owner=bot._runtime_view)
+
+    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    assert bot._room_lifecycle._pending_invite_retries == {}
+    assert bot._room_lifecycle._pending_invite_retry_timer is None
+
+
+@pytest.mark.asyncio
+async def test_one_pass_handles_a_bounded_number_of_rooms_and_schedules_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A large backlog is worked through in bounded passes, so one pass cannot hold membership work for long."""
+    _config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    bot.client.invited_rooms = {}
+    for index in range(_MAX_PENDING_INVITE_ROOMS_PER_PASS + 8):
+        _cache_current_invite(bot, f"!backlog-{index:03d}:localhost", "@owner:localhost")
+    join_room = AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+
+    await bot._room_lifecycle.reconcile_pending_invites()
+    assert join_room.await_count == _MAX_PENDING_INVITE_ROOMS_PER_PASS
+    assert bot._room_lifecycle._pending_invite_retry_timer is not None
+    await bot._room_lifecycle.reconcile_pending_invites()
+    assert join_room.await_count == _MAX_PENDING_INVITE_ROOMS_PER_PASS + 8
+    bot._room_lifecycle.cancel_pending_invite_retry()
+
+
+@pytest.mark.asyncio
+async def test_a_join_that_reported_failure_but_landed_is_still_finished(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The inviter of a failed join stays in memory, so a join that went through anyway is remembered and welcomed."""
+    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    monkeypatch.setattr(
+        "mindroom.matrix.client_room_admin.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE),
+    )
+    welcome = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
+    with pytest.raises(RuntimeError, match="Failed to join invited room"):
+        await _handle_invite(bot, room, event)
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+
+    # Nio later reports that the join went through after all.
+    bot.client.invited_rooms.pop(room.room_id)
+    bot.client.rooms[room.room_id] = nio.MatrixRoom(room.room_id, bot.agent_user.user_id)
+    bot._room_lifecycle._pending_invite_retries.clear()
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    welcome.assert_awaited_once_with(room.room_id, event.sender)
+    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    assert bot._room_lifecycle._unconfirmed_join_inviters == {}
+
+
+@pytest.mark.asyncio
+async def test_invite_join_lock_is_kept_while_a_waiter_has_not_resumed(tmp_path: Path) -> None:
+    """A room's lock survives the gap between its release and the next waiter resuming, then is dropped."""
+    _config, bot, room, _event = _live_router_invite_scenario(tmp_path)
+    lifecycle = bot._room_lifecycle
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def second() -> None:
+        async with lifecycle._invite_join_lock(room.room_id):
+            entered.set()
+            await release.wait()
+
+    async with lifecycle._invite_join_lock(room.room_id):
+        waiter = asyncio.create_task(second())
+        await asyncio.sleep(0)
+    held = lifecycle._invite_join_locks[room.room_id]
+    assert held.users == 1
+    assert not entered.is_set()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert lifecycle._invite_join_locks[room.room_id] is held
+    release.set()
+    await waiter
+    assert lifecycle._invite_join_locks == {}
 
 
 @pytest.fixture
@@ -1134,9 +1337,10 @@ async def test_live_invite_forbidden_join_remains_retryable(
             MagicMock(room_id="!failed:localhost", canonical_alias=None),
             MagicMock(sender="@owner:localhost"),
         )
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
-        "!failed:localhost": "@owner:localhost",
-    }
+    # Nio still holds the invite; the ledger keeps only joins in flight or joined.
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert bot._room_lifecycle._unconfirmed_join_inviters == {"!failed:localhost": "@owner:localhost"}
+    assert bot._room_lifecycle._pending_invite_retries["!failed:localhost"].failures == 1
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!failed:localhost")
 
 
@@ -1181,7 +1385,8 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
     assert await bot._journal_dispatcher.store.pending() == ()
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!invalid-state:localhost")
-    assert "!invalid-state:localhost" in _pending_room_invites(config, ROUTER_AGENT_NAME)
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert "!invalid-state:localhost" in bot._room_lifecycle._pending_invite_retries
 
 
 @pytest.mark.asyncio

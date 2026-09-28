@@ -2378,6 +2378,7 @@ class AgentBot:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
+        self._room_lifecycle.cancel_pending_invite_retry()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(

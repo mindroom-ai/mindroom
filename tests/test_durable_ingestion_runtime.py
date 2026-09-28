@@ -307,7 +307,10 @@ async def test_failed_durable_join_retains_pending_invitation(
         session._transport.request = AsyncMock(side_effect=HttpError(status))
         with pytest.raises(RuntimeError, match="Failed to join invited room"):
             await _handle_invite(bot, room, event)
-        assert room.room_id in _pending_room_invites(config, ROUTER_AGENT_NAME)
+        assert room.room_id in bot.client.invited_rooms
+        assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+        assert bot._room_lifecycle._unconfirmed_join_inviters == {room.room_id: event.sender}
+        assert room.room_id in bot._room_lifecycle._pending_invite_retries
         assert bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
 
 

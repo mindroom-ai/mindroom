@@ -165,12 +165,15 @@ The store automatically converts v2/v3 files to v4, preserving pending fences an
 Malformed fence records fail closed, and reads and writes run off the event loop.
 Live `room-member-joined` hooks remain at-least-once because hook emission happens before durable settlement.
 Invite callbacks have no stable event ID for a semantic journal row, and need none: nio's durable store restores every current invite and its inviter when the session opens, so a process that stops before the background join leaves the invite for reconciliation.
-Nio forgets the inviter once a join succeeds, so the entity keeps an accepted-invite record of the room and inviter, written off the event loop before it requests the join and removed once the joined room is remembered and, for the router, welcomed.
+Nio forgets the inviter once a join succeeds, so the entity keeps an accepted-invite record of the room and inviter, written before it requests the join and removed once the joined room is remembered and, for the router, welcomed.
+The record therefore holds only joins in flight or joined and awaiting completion: a join that reports failure is removed from it, and its inviter is kept in memory while nio still holds the invite, in case the join landed after all.
+Record changes run one at a time on one worker thread, and changes that queue behind a write are applied together in the next one.
 Neither record grants inviter authority: routers and agents re-read nio's current inviter after the join fence is durable and immediately before requesting the join, and recheck the invitation policy before finishing a joined room.
-A failed join keeps the decrypt fence and the accepted-invite record for retry while nio still holds the invite.
+A failed join keeps the decrypt fence for retry while nio still holds the invite.
 Reconciliation runs one pass at a time, and triggers that arrive during a pass share the next one.
-Each pass drops accepted-invite records whose room is neither invited nor joined, or whose current invite the policy refuses, in one write, then handles nio's current invites from allowed inviters and the joined rooms still owed completion, each on its own.
-A room whose handling fails is retried after 30, 60, 120, and 240 seconds, and after five failed passes reconciliation stops retrying it until the invite is delivered again or the process restarts; giving up changes no durable state, so a joined room whose welcome keeps failing is retried after a restart.
+Each pass drops accepted-invite records whose room is neither invited nor joined, or whose current invite the policy refuses, in one write, then handles nio's current invites from allowed inviters and the joined rooms still owed completion, each on its own and at most 32 per pass; a pass that stops at that bound schedules the next one a second later.
+A room whose handling fails, whether from a delivered invite or during a pass, is retried by a timed pass 30, 60, 120, and 240 seconds after successive failures, with one timer armed for the earliest retry due.
+After five failures it is not retried until the invite is delivered again or the process restarts; giving up changes no durable state, so a joined room whose welcome keeps failing is retried after a restart.
 Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
 Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
