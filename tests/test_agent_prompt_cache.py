@@ -19,7 +19,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.models.claude import format_messages
 
 from mindroom.agents import create_agent
-from mindroom.claude_prompt_cache import _count_cache_markers, prepare_claude_request_kwargs
+from mindroom.claude_prompt_cache import count_cache_markers, prepare_claude_request_kwargs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -127,7 +127,7 @@ async def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path:
     assert "cache_control" not in compacted["system"][1]
     assert "".join(block["text"] for block in original["system"]) == original_text
     assert "".join(block["text"] for block in compacted["system"]) == compacted_text
-    assert _count_cache_markers(compacted) <= 4
+    assert count_cache_markers(compacted) <= 4
 
 
 @pytest.mark.asyncio
@@ -183,7 +183,7 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
 
     assert request == original
     assert prepared["system"][-1] == custom_block
-    assert _count_cache_markers(prepared) <= 4
+    assert count_cache_markers(prepared) <= 4
     assert prepare_claude_request_kwargs(model, prepared) == prepared
     if cache_enabled:
         assert len(prepared["system"]) == 3

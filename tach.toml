@@ -2265,6 +2265,11 @@ depends_on = ["mindroom.agno_compat_openai_responses_items", "mindroom.legacy_op
 visibility = ["mindroom.openai_models"]
 
 [[modules]]
+path = "mindroom.openrouter_prompt_cache"
+depends_on = ["mindroom.claude_prompt_cache", "mindroom.hooks.enrichment"]
+visibility = ["mindroom.openai_models"]
+
+[[modules]]
 path = "mindroom.claude_native_compaction"
 depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
 visibility = ["mindroom.claude_compat"]
@@ -6710,7 +6715,7 @@ visibility = ["mindroom.history.compaction"]
 
 [[modules]]
 path = "mindroom.history.summary_provider_compat"
-depends_on = ["mindroom.claude_prompt_cache"]
+depends_on = ["mindroom.claude_prompt_cache", "mindroom.openai_models"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]

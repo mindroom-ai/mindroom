@@ -37,6 +37,11 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
+from mindroom.openrouter_prompt_cache import (
+    formatted_messages_with_prompt_cache,
+    openrouter_prompt_cache_control,
+    request_params_with_tools_cache_breakpoint,
+)
 from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
@@ -123,7 +128,52 @@ class MindRoomOpenAILike(OpenAIChatProviderCompat, OpenAILike):
 
 @dataclass
 class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
-    """OpenRouter model that can replay tool calls from other providers."""
+    """OpenRouter model with cross-provider tool replay and Claude prompt caching.
+
+    ``cache_system_prompt`` and ``extended_cache_time`` mirror the direct Claude
+    providers' settings and only affect model IDs that route to Anthropic.
+    """
+
+    cache_system_prompt: bool = True
+    extended_cache_time: bool = True
+
+    def _prompt_cache_control(self) -> dict[str, str] | None:
+        return openrouter_prompt_cache_control(
+            self.id,
+            cache_system_prompt=self.cache_system_prompt,
+            extended_cache_time=self.extended_cache_time,
+        )
+
+    def get_request_params(
+        self,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+    ) -> dict[str, Any]:
+        """Mark the last tool definition for Anthropic-routed prompt caching."""
+        request_params = super().get_request_params(
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+        )
+        cache_control = self._prompt_cache_control()
+        if cache_control is None:
+            return request_params
+        return request_params_with_tools_cache_breakpoint(request_params, cache_control)
+
+    def _format_all_messages(
+        self,
+        messages: list[Message],
+        compress_tool_results: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Add system and conversation breakpoints for Anthropic-routed prompt caching."""
+        formatted = super()._format_all_messages(messages, compress_tool_results)
+        cache_control = self._prompt_cache_control()
+        if cache_control is None:
+            return formatted
+        return formatted_messages_with_prompt_cache(formatted, cache_control)
 
 
 @dataclass
