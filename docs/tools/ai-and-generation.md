@@ -387,7 +387,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
 | `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
-| `model_id` | `text` | `no` | `eleven_v3` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `eleven_v4` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
 | `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
 | `enable_generate_sound_effect` | `boolean` | `no` | `true` | Enable `generate_sound_effect()`. |
@@ -401,7 +401,7 @@ agents:
   audio_fx:
     tools:
       - eleven_labs:
-          model_id: eleven_v3
+          model_id: eleven_v4
           output_format: mp3_44100_64
           target_directory: generated-audio
 ```
@@ -414,7 +414,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
-- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
+- The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.

@@ -49,7 +49,7 @@ from mindroom.model_defaults import (
     OLLAMA_GEMMA,
     OLLAMA_QWEN,
     OPENAI_GPT_LUNA,
-    OPENAI_GPT_TERRA,
+    OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
 from mindroom.model_loading import missing_model_api_key_provider
@@ -630,7 +630,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -924,7 +924,7 @@ class TestConfigInit:
         assert "Default model provider" in output
         assert "llama.cpp" in output
         assert "llama_cpp" not in output
-        assert "openai_terra" not in output
+        assert "openai_sol" not in output
         assert "openai_luna" not in output
         assert "Use with --matrix-server" not in output
         assert "--profile" not in output
@@ -1237,12 +1237,12 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
         assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["openai"].context_window
-        assert "openai_terra" not in config["models"]
+        assert "openai_sol" not in config["models"]
         assert "openai_luna" not in config["models"]
 
         config_text = target.read_text(encoding="utf-8")
-        assert "# openai_terra:" in config_text
-        assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
+        assert "# openai_sol:" in config_text
+        assert f"#   id: {OPENAI_GPT_SOL}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
         assert "access_model" not in config
@@ -1261,7 +1261,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
@@ -1275,7 +1275,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openrouter"
-        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-5.5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
     def test_init_azure_preset_uses_azure_openai_models(self, tmp_path: Path) -> None:
@@ -1309,14 +1309,14 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "bedrock_claude"
-        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         config_text = target.read_text(encoding="utf-8")
         assert "# fable:" in config_text
         assert "#   id: anthropic.claude-fable-5-1" in config_text
         assert "# sonnet:" in config_text
-        assert "#   id: anthropic.claude-sonnet-5" in config_text
+        assert "#   id: anthropic.claude-sonnet-5-5" in config_text
         assert "# haiku:" in config_text
         assert "#   id: anthropic.claude-haiku-4-5" in config_text
 
@@ -1410,7 +1410,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
@@ -1427,7 +1427,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()

@@ -2553,9 +2553,10 @@ class TestGenerateSummary:
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
 
-    async def test_generate_summary_omits_unsupported_direct_astra_temperature_from_request(self) -> None:
-        """Direct Astra summary requests must omit unsupported sampling controls."""
-        model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="dummy-key", temperature=0.9)
+    @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])
+    async def test_generate_summary_omits_unsupported_direct_gpt6_temperature_from_request(self, model_id: str) -> None:
+        """Direct GPT-6 summary requests must omit unsupported sampling controls."""
+        model = MindRoomOpenAIResponses(id=model_id, api_key="dummy-key", temperature=0.9)
 
         _configure_summary_model_temperature(
             model,
@@ -2565,10 +2566,14 @@ class TestGenerateSummary:
 
         assert "temperature" not in model.get_request_params()
 
-    async def test_generate_summary_omits_unsupported_openrouter_astra_temperature_from_request(self) -> None:
-        """OpenRouter Astra summary requests must omit unsupported sampling controls."""
+    @pytest.mark.parametrize("model_id", ["openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna"])
+    async def test_generate_summary_omits_unsupported_openrouter_gpt6_temperature_from_request(
+        self,
+        model_id: str,
+    ) -> None:
+        """OpenRouter GPT-6 summary requests must omit unsupported sampling controls."""
         model = MindRoomOpenRouter(
-            id="openai/gpt-6-astra",
+            id=model_id,
             api_key="dummy-key",
             max_tokens=None,
             temperature=0.9,
@@ -2608,10 +2613,14 @@ class TestGenerateSummary:
             "claude-fable-5",
             "anthropic.claude-fable-5",
             "anthropic/claude-fable-5",
+            "anthropic.claude-opus-5-5",
+            "anthropic/claude-opus-5.5",
+            "anthropic.claude-sonnet-5-5",
+            "anthropic/claude-sonnet-5.5",
         ],
     )
-    async def test_generate_summary_omits_invalid_fable_temperature(self, model_id: str) -> None:
-        """Fable requests through each supported provider must omit invalid temperature."""
+    async def test_generate_summary_omits_invalid_current_claude_temperature(self, model_id: str) -> None:
+        """Current Claude requests through each supported provider must omit invalid temperature."""
         model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
 
         _configure_summary_model_temperature(
@@ -2622,7 +2631,7 @@ class TestGenerateSummary:
 
         assert model.temperature is None
 
-    @pytest.mark.parametrize("model_id", ["claude-opus-5", "claude-sonnet-5"])
+    @pytest.mark.parametrize("model_id", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-sonnet-5"])
     async def test_generate_summary_omits_invalid_current_direct_claude_temperature(self, model_id: str) -> None:
         """Current direct Claude requests must omit deprecated sampling controls."""
         model = MindRoomAnthropicClaude(id=model_id, api_key="dummy-key", temperature=0.9)

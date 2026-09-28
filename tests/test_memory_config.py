@@ -32,7 +32,7 @@ from mindroom.model_defaults import (
     MEMORY_OLLAMA_LLM,
     OLLAMA_HOST_DEFAULT,
     OPENAI_GPT_LUNA,
-    OPENAI_GPT_TERRA,
+    OPENAI_GPT_SOL,
     OPENROUTER_BASE_URL_DEFAULT,
     OPENROUTER_OPENAI_EMBEDDING_SMALL,
     OPENROUTER_OPENAI_LUNA,
@@ -154,20 +154,24 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_top_p", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
         [
-            (OPENAI_GPT_LUNA, None, False),
-            (OPENAI_GPT_TERRA, None, False),
+            ("gpt-6-astra", None, None, False),
+            (OPENAI_GPT_LUNA, None, None, False),
+            (OPENAI_GPT_SOL, None, None, False),
+            ("gpt-5.6-luna", 0.1, None, False),
+            ("gpt-5.6-terra", 0.1, None, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.8, False),
-            (OPENAI_GPT_TERRA, None, True),
+            ("gpt-4", 0.1, 0.8, False),
+            (OPENAI_GPT_SOL, None, None, True),
         ],
-        ids=["luna", "terra", "gpt-4", "terra-legacy-mem0"],
+        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
     )
-    async def test_mem0_openai_top_p_support_is_model_specific(
+    async def test_mem0_openai_sampling_support_is_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
+        expected_temperature: float | None,
         expected_top_p: float | None,
         legacy_request_builder: bool,
     ) -> None:
@@ -221,11 +225,10 @@ class TestMemoryConfig:
             instance.llm.generate_response(messages)
 
         request_params = create_completion.call_args.kwargs
-        assert request_params["temperature"] == 0.1
-        if expected_top_p is None:
-            assert "top_p" not in request_params
-        else:
-            assert request_params["top_p"] == expected_top_p
+        expected_sampling = {"temperature": expected_temperature, "top_p": expected_top_p}
+        assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
+            name: value for name, value in expected_sampling.items() if value is not None
+        }
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,

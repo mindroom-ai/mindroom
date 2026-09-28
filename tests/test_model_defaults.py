@@ -120,10 +120,10 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     vertex_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["vertexai_claude"])
 
     assert anthropic_alternatives["fable"] == model_defaults.ModelPreset("anthropic", "claude-fable-5-1", 1_000_000)
-    assert anthropic_alternatives["opus"] == model_defaults.ModelPreset("anthropic", "claude-opus-5", 1_000_000)
+    assert anthropic_alternatives["opus"] == model_defaults.ModelPreset("anthropic", "claude-opus-5-5", 1_000_000)
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["bedrock_claude"] == model_defaults.ModelPreset(
         "bedrock_claude",
-        "anthropic.claude-opus-5",
+        "anthropic.claude-opus-5-5",
         1_000_000,
     )
     assert bedrock_alternatives["fable"] == model_defaults.ModelPreset(
@@ -138,7 +138,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert openrouter_alternatives["opus"] == model_defaults.ModelPreset(
         "openrouter",
-        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-5.5",
         1_000_000,
     )
     assert vertex_alternatives["fable"] == model_defaults.ModelPreset(
@@ -148,7 +148,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert vertex_alternatives["opus"] == model_defaults.ModelPreset(
         "vertexai_claude",
-        "claude-opus-5",
+        "claude-opus-5-5",
         1_000_000,
     )
     assert model_defaults.SAAS_MODEL_PRESETS["fable"] == model_defaults.ModelPreset(
@@ -158,9 +158,15 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert model_defaults.SAAS_MODEL_PRESETS["opus"] == model_defaults.ModelPreset(
         "openrouter",
-        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-5.5",
         1_000_000,
     )
+
+
+def test_native_compaction_covers_current_claude_models() -> None:
+    """Every current Claude default must take the native compaction path."""
+    for model_id in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"):
+        assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
 def test_current_google_and_openrouter_specialist_models() -> None:
@@ -178,7 +184,11 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "claude-fable-5-1",
         "claude-fable-5.1",
         "claude-fable-5",
+        "claude-opus-5-5",
+        "claude-opus-5.5",
         "claude-opus-5",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5.5",
         "claude-sonnet-5",
     )
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
@@ -206,19 +216,20 @@ def test_current_generation_media_models() -> None:
     assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-6-astra"
     assert model_defaults.OPENAI_IMAGE == "gpt-image-2.5-sunburst"
     assert model_defaults.GROQ_TTS == "canopylabs/orpheus-v1-english"
+    assert model_defaults.ELEVENLABS_TTS == "eleven_v4"
 
 
 def test_sonnet_presets_use_current_generation() -> None:
     """Sonnet presets should track the current provider-specific Sonnet generation."""
     bedrock_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["bedrock_claude"])
 
-    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id == "claude-sonnet-5"
-    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id == "claude-sonnet-5"
-    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5"
-    assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5"
-    assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id == "claude-sonnet-5-5"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id == "claude-sonnet-5-5"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5.5"
+    assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5.5"
+    assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5-5"
     assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-4-5"
-    assert "claude-sonnet-4-6" not in {
+    assert "claude-sonnet-5" not in {
         model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id,
@@ -243,19 +254,20 @@ def test_openai_presets_use_current_models() -> None:
         258_000,
     )
     assert openai_alternatives == {
-        "openai_terra": model_defaults.ModelPreset("openai", "gpt-5.6-terra", 1_050_000),
-        "openai_luna": model_defaults.ModelPreset("openai", "gpt-5.6-luna", 1_050_000),
+        "openai_sol": model_defaults.ModelPreset("openai", "gpt-6-sol", 1_050_000),
+        "openai_luna": model_defaults.ModelPreset("openai", "gpt-6-luna", 1_050_000),
     }
-    assert model_defaults.SAAS_MODEL_PRESETS["gpt5terra"] == model_defaults.ModelPreset(
+    assert model_defaults.SAAS_MODEL_PRESETS["sol"] == model_defaults.ModelPreset(
         "openrouter",
-        "openai/gpt-5.6-terra",
+        "openai/gpt-6-sol",
         1_050_000,
     )
-    assert model_defaults.SAAS_MODEL_PRESETS["gpt5luna"] == model_defaults.ModelPreset(
+    assert model_defaults.SAAS_MODEL_PRESETS["luna"] == model_defaults.ModelPreset(
         "openrouter",
-        "openai/gpt-5.6-luna",
+        "openai/gpt-6-luna",
         1_050_000,
     )
+    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
 
 
 def test_glm_presets_use_current_generation() -> None:
