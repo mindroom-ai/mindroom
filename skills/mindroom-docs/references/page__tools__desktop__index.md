@@ -100,7 +100,7 @@ The control actions are:
 - `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
   Global switching, quit, launch, and address-bar shortcuts are rejected, and the chord is not sent once the app is no longer frontmost.
 
-While a shell command waits for local approval, every control action above except `launch_app` is refused, and a new shell request is not shown for approval until a control action already in progress finishes.
+While a shell command waits for local approval, every control action above except `launch_app` is refused, and a new shell request is shown for approval only one second after the last control action finishes, once its events have reached their target.
 Agent input therefore never reaches an approval card or the terminal prompt that could answer it.
 
 Folder reads and shell commands are separate opt-in capabilities with their own limits, described in [Read-Only Folders](#read-only-folders) and [Shell Commands](#shell-commands).
@@ -158,7 +158,7 @@ Shell requests are off by default.
 Enable them locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`; cloud configuration and model output cannot enable them.
 
 - `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the local home directory.
-  A command with more than 64 whitespace characters or more than two blank lines in a row is refused before approval, because such padding could push part of it out of the approver's view.
+  A `command` or `cwd` with more than 64 whitespace or blank-looking characters in a row, or more than two blank lines in a row, is refused before approval, because such padding could push part of the request out of the approver's view.
   Before approval only the form of `cwd` is checked; whether it exists is checked after approval, so an unapproved request reveals nothing about local directories.
   Its `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
 - `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it has finished.
@@ -167,7 +167,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 ### Local Approval
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
-The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
+The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, blank-looking, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
 The cloud call waits up to 120 seconds, the command's lifetime, and a request that nobody approves in time expires without running.
@@ -552,7 +552,7 @@ Each request then appears with its ID, expiry, requester, agent, working directo
 ```
 
 The timed and until-stopped answers also approve later commands from every allowed requester and agent, as the prompt says.
-Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, non-ASCII space, and backslash characters in the request are shown escaped.
+Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, blank-looking, non-ASCII space, and backslash characters in the request are shown escaped.
 The command's length in characters and lines appears right above the answer prompt, so scroll up when the request is longer than the terminal.
 If standard input is not an interactive terminal, input reaches its end, or the bridge runs as a background job of its terminal, requests are rejected with guidance instead of waiting.
 To approve commands without asking for part of a run, start it with `--shell-auto-approve-minutes`, from 1 to 60; this requires saved shell access and is never saved itself.
