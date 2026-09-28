@@ -1411,6 +1411,11 @@ Add `--open-browser` to open the approval link in your default browser.
 `connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
 You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
 
+If this machine is already connected, pairing again creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
+In a terminal, `connect` asks before pairing again.
+Without a terminal, it does not pair and exits with code `3`, so scripts and the macOS app can tell this apart from a failure (exit code `1`).
+Add `--force` to pair again without asking.
+
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 
 - `MINDROOM_PROVISIONING_URL`

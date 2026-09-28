@@ -78,6 +78,18 @@ final class MindRoomRuntimeTests: XCTestCase {
         XCTAssertEqual(command.environment["MINDROOM_CONFIG_PATH"], "/Users/example/.mindroom/config.yaml")
     }
 
+    func testOnlyReconnectForcesPairingAnAlreadyConnectedMac() {
+        let runtime = MindRoomRuntime(
+            homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+            bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(runtime.command(for: .pairHosted).arguments, ["mindroom", "connect", "--open-browser"])
+        XCTAssertEqual(runtime.command(for: .reconnectHosted).arguments, ["mindroom", "connect", "--open-browser", "--force"])
+        XCTAssertEqual(runtime.command(for: .reconnectHosted).environment["MINDROOM_CONFIG_PATH"], "/Users/example/.mindroom/config.yaml")
+    }
+
     func testHostedConfigCommandUsesPublicProfileWithoutPrompts() {
         let runtime = MindRoomRuntime(
             homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),

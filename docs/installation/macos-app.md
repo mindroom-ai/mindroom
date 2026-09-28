@@ -51,6 +51,7 @@ The app detects the command-line runtime separately from the background service:
    **Prepare Configuration** creates missing files and keeps existing configuration and credentials.
    Expand **Connect or reconnect your chat account** and choose **Connect Account** to open your browser on MindRoom Chat.
    Sign in if needed and click **Approve**; this completes when you approve or after 10 minutes.
+   If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.
    Add AI provider credentials to the adjacent `.env`, or configure a local model, using **Open Config Folder**.
 3. **Check** runs `mindroom doctor` against the displayed configuration and the installed service's saved storage path.
    It checks configuration, providers, Matrix connectivity, and storage.

@@ -206,6 +206,40 @@ final class CommandRunnerTests: XCTestCase {
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--open-browser"]))
         XCTAssertEqual(runner.feedback?.title, "Pair Chat Account")
+        XCTAssertFalse(runner.needsReconnectConfirmation)
+    }
+
+    @MainActor
+    func testAlreadyConnectedPairingAsksInsteadOfReportingFailure() async {
+        let completed = expectation(description: "Pairing refused")
+        let runner = MindRoomCommandRunner(processRunner: { invocation in
+            invocation.arguments.contains("connect")
+                ? CommandResult(exitCode: MindRoomCommand.alreadyConnectedExitCode, output: "This machine is already connected.")
+                : CommandResult(exitCode: 0, output: "MindRoom service: running (pid 123)")
+        })
+        runner.onCommandFinished = { _, _ in completed.fulfill() }
+        runner.run(.pairHosted)
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertTrue(runner.needsReconnectConfirmation)
+        XCTAssertNil(runner.feedback)
+        XCTAssertFalse(runner.isRunningCommand)
+    }
+
+    @MainActor
+    func testReconnectHostedForcesPairing() async {
+        let completed = expectation(description: "Reconnect finished")
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(processRunner: { invocation in
+            recorder.record(invocation.arguments)
+            return CommandResult(exitCode: 0, output: "Paired")
+        })
+        runner.onCommandFinished = { _, _ in completed.fulfill() }
+        runner.run(.reconnectHosted)
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--open-browser", "--force"]))
+        XCTAssertEqual(runner.feedback?.title, "Reconnect Chat Account")
+        XCTAssertEqual(runner.feedback?.result.isSuccess, true)
+        XCTAssertFalse(runner.needsReconnectConfirmation)
     }
 }
 

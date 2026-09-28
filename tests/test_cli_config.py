@@ -28,7 +28,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
-from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
+from mindroom.cli.main import _CONNECT_ALREADY_CONNECTED_EXIT_CODE, _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -3927,26 +3927,58 @@ class TestConnect:
         assert "Approval timed out" in result.output
         assert "Run the command again to get a new link" in result.output
 
-    def test_connect_warns_before_repairing_a_connected_machine(
+    def test_connect_refuses_to_repair_a_connected_machine_without_a_terminal(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Non-interactive callers such as the macOS app are warned but not prompted."""
+        """Non-interactive callers such as the macOS app need --force; nothing is contacted otherwise."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        env_path = tmp_path / ".env"
+        env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
+        posts: list[str] = []
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda url, **_kw: posts.append(url))
+
+        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+
+        assert result.exit_code == _CONNECT_ALREADY_CONNECTED_EXIT_CODE == 3
+        output = normalize_console_output(result.output)
+        assert "already connected" in output
+        assert "new agent namespace" in output
+        assert "mindroom connect --force" in output
+        assert "Pair again?" not in output
+        assert posts == []
+        assert env_path.read_text() == "MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n"
+
+    @pytest.mark.parametrize("interactive", [False, True])
+    def test_connect_force_repairs_a_connected_machine_without_asking(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        interactive: bool,
+    ) -> None:
+        """--force warns and pairs again without a prompt, with or without a terminal."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         (tmp_path / ".env").write_text("MINDROOM_LOCAL_CLIENT_ID=old-id\nMINDROOM_LOCAL_CLIENT_SECRET=old-secret\n")
         responses = self._device_flow_responses()
+        monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: interactive)
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
         monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
-        result = _invoke_with_runtime(["connect", "--provisioning-url", "https://provisioning.example"], cfg)
+        result = _invoke_with_runtime(
+            ["connect", "--provisioning-url", "https://provisioning.example", "--force"],
+            cfg,
+        )
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
         assert "already connected" in output
         assert "new agent namespace" in output
         assert "Pair again?" not in output
+        assert "--force" not in output
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in (tmp_path / ".env").read_text()
 
     def test_connect_asks_before_repairing_in_a_terminal(

@@ -28,6 +28,8 @@ final class MindRoomCommandRunner: ObservableObject {
     @Published private(set) var setupCheck: CommandResult?
     @Published private(set) var hasRefreshedStatus = false
     @Published private(set) var isRefreshingStatus = false
+    /// Set when Connect Account finds this Mac already connected, so the view can ask before pairing again.
+    @Published var needsReconnectConfirmation = false
 
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
@@ -109,8 +111,9 @@ final class MindRoomCommandRunner: ObservableObject {
     private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
         guard runningCommandTitle == nil else { return }
         feedback = nil
+        needsReconnectConfirmation = false
         switch action {
-        case .installRuntime, .updateRuntime, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .checkSetup:
+        case .installRuntime, .updateRuntime, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted, .checkSetup:
             setupCheck = nil
         default: break
         }
@@ -133,10 +136,15 @@ final class MindRoomCommandRunner: ObservableObject {
                 }
                 self.runningCommandTitle = nil
                 self.lastOutput = completedResult.output
-                self.feedback = CommandFeedback(
+                // An already-connected Mac is a question for the user, not a failed action.
+                let alreadyConnected = action == .pairHosted && completedResult.exitCode == MindRoomCommand.alreadyConnectedExitCode
+                self.feedback = alreadyConnected ? nil : CommandFeedback(
                     title: command.title, successMessage: command.successMessage, result: completedResult,
                     needsAttention: action == .checkSetup && completedResult.isSuccess && !completedResult.setupCheckPassed
                 )
+                if alreadyConnected {
+                    self.needsReconnectConfirmation = true
+                }
                 self.onCommandFinished?(command, completedResult)
                 self.refreshStatus()
             }

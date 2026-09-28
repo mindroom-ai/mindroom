@@ -69,6 +69,11 @@ final class MindRoomCommandTests: XCTestCase {
         XCTAssertEqual(command.runtimeAction, .pairHosted)
     }
 
+    func testReconnectHostedMapsToForcedRuntimeAction() {
+        XCTAssertEqual(MindRoomCommand.reconnectHosted.runtimeAction, .reconnectHosted)
+        XCTAssertEqual(MindRoomCommand.reconnectHosted.title, "Reconnect Chat Account")
+    }
+
     func testMenuCommandsExposeTitles() {
         XCTAssertEqual(MindRoomCommand.installRuntime.title, "Install MindRoom Runtime")
         XCTAssertEqual(MindRoomCommand.openDashboard.title, "Open Dashboard")
@@ -80,7 +85,7 @@ final class MindRoomCommandTests: XCTestCase {
         let commands: [MindRoomCommand] = [
             .installRuntime, .updateRuntime, .installService, .startService, .stopService,
             .restartService, .initializeHostedConfig, .initializeSelfHostedConfig,
-            .pairHosted,
+            .pairHosted, .reconnectHosted,
         ]
         for command in commands {
             XCTAssertNotNil(command.successMessage, "\(command.title) has no success message")

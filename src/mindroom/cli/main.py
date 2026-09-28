@@ -47,6 +47,9 @@ AI agents that live in Matrix and work everywhere via bridges.
 _CONFIG_INIT_PROVIDER_CHOICES = (
     "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
 )
+# Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
+# The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
+_CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
 
 app = typer.Typer(
     help=_HELP,
@@ -595,8 +598,17 @@ def connect(
         "-p",
         help="Override auto-detection and use this config file path for .env persistence.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Pair again even when this machine is already connected.",
+    ),
 ) -> None:
-    """Connect this local MindRoom to your MindRoom Chat account by approving a link."""
+    """Connect this local MindRoom to your MindRoom Chat account by approving a link.
+
+    When this machine is already connected, a terminal asks before pairing again.
+    Without a terminal it exits with code 3 unless --force is given.
+    """
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
     try:
@@ -609,7 +621,10 @@ def connect(
                 "Pairing again creates a new connection and a new agent namespace: "
                 "existing agents keep working, and new agents get the new namespace.",
             )
-            if _stdin_is_interactive():
+            if not force:
+                if not _stdin_is_interactive():
+                    console.print("Run `mindroom connect --force` to pair again.")
+                    raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
                 typer.confirm("Pair again?", abort=True)
         cli_connect.pair_local_install(
             runtime_paths,
