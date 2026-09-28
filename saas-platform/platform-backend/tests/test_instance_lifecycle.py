@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,7 +12,8 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from backend.deps import verify_admin, verify_user
-from backend.openrouter import OpenRouterKeyNotFoundError
+from backend.openrouter import CreatedOpenRouterKey, OpenRouterKeyNotFoundError
+from backend.pricing import get_plan_details
 from backend.services.instance_lifecycle import (
     LifecycleSummary,
     reconcile_all_subscriptions,
@@ -19,6 +21,7 @@ from backend.services.instance_lifecycle import (
 )
 from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
 from backend.tasks.cleanup import run_cleanup_job
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
 
@@ -986,6 +989,72 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
     platform.start.assert_not_awaited()
     assert platform.subscription()["status"] == "cancelled"
     assert platform.instance()["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_unpublished_key() -> None:
+    hobby_budget = get_plan_details("hobby").included_ai_budget_usd
+    # The stored key is stale (old budget), so provisioning mints a replacement.
+    db = FakeSupabase(
+        {
+            "instances": [
+                _instance(
+                    "stopped",
+                    openrouter_key_hash="hash_A",
+                    openrouter_key_limit_usd=hobby_budget + 1,
+                    openrouter_key_limit_reset="monthly",
+                )
+            ]
+        }
+    )
+    published = {"openrouter_key": "key_A"}
+    alive = {"hash_A"}
+    minted = iter(["B", "C"])
+    apply_attempts = 0
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        suffix = next(minted)
+        alive.add(f"hash_{suffix}")
+        return CreatedOpenRouterKey(f"key_{suffix}", f"hash_{suffix}", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        nonlocal apply_attempts
+        apply_attempts += 1
+        if apply_attempts == 1:
+            msg = "Failed to apply instance Secret mindroom-api-keys-7"
+            raise RuntimeError(msg)
+        published.update(secret_data)
+        return "hash"
+
+    async def kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:  # noqa: ARG001
+        for key, value in published.items():
+            if f"-o=jsonpath={{.data.{key}}}" in args:
+                return 0, base64.b64encode(value.encode()).decode(), ""
+        return 0, "", ""
+
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", apply_secret),
+        patch(f"{service}.run_kubectl", kubectl),
+        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        with pytest.raises(HTTPException):
+            await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
+        assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
+        await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
+
+    assert published["openrouter_key"] == "key_C"
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_C"
+    assert alive == {"hash_C"}
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:

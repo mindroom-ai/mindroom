@@ -519,19 +519,22 @@ async def _provision_openrouter_key(
     tier: str,
     existing_instance_row: Mapping[str, Any] | None,
     namespace: str,
-) -> str:
-    """Return the OpenRouter key value this tenant instance should receive."""
+) -> tuple[str, CreatedOpenRouterKey | None]:
+    """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
+
+    A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
+    or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
+    """
     plan = get_plan_details(tier)
     monthly_limit_usd = plan.included_ai_budget_usd if plan else 0
     if monthly_limit_usd <= 0:
-        return ""
+        return "", None
 
     if _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
         existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         if existing_key:
-            return existing_key
+            return existing_key, None
 
-    superseded_key_hash = _stored_openrouter_key_hash(existing_instance_row)
     create_key = partial(
         create_openrouter_key,
         management_api_key=OPENROUTER_PROVISIONING_API_KEY,
@@ -546,7 +549,13 @@ async def _provision_openrouter_key(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except OpenRouterError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return created_key.key, created_key
 
+
+async def _commit_openrouter_key(
+    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, superseded_key_hash: str | None
+) -> None:
+    """Record a newly published key and revoke the key it replaces."""
     metadata_persisted = False
     try:
         await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
@@ -569,7 +578,17 @@ async def _provision_openrouter_key(
                 instance_id,
                 exc_info=True,
             )
-    return created_key.key
+
+
+async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
+    """Best-effort delete of a key whose Secret was never published, so the next attempt mints a fresh one."""
+    delete_key = partial(
+        delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
+    )
+    try:
+        await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterError:
+        logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
 
 
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
@@ -678,7 +697,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             await _existing_instance_storage_class_name(customer_id, namespace)
         ) or INSTANCE_STORAGE_CLASS_NAME
     try:
-        openrouter_key = await _provision_openrouter_key(
+        openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
             account_id=account_id,
             instance_id=customer_id,
@@ -803,7 +822,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         _append_matrix_oidc_helm_args(helm_args)
         # Apply before Helm so pods restarted by the new secret hash read the new values;
         # Synapse reads its OIDC client secret only at startup.
-        await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        try:
+            await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        except Exception:
+            if created_openrouter_key is not None:
+                await _discard_openrouter_key(created_openrouter_key, customer_id)
+            raise
+        if created_openrouter_key is not None:
+            await _commit_openrouter_key(
+                sb, customer_id, created_openrouter_key, _stored_openrouter_key_hash(existing_instance_row)
+            )
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
