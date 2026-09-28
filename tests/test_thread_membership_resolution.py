@@ -200,7 +200,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         }
 
-        resolved_thread_ids = await resolve_local_event_graph_thread_ids(
+        graph_threads = await resolve_local_event_graph_thread_ids(
             event_infos=event_infos,
             ordered_event_ids=[
                 plain_reply_2_id,
@@ -209,11 +209,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ],
         )
 
-        assert resolved_thread_ids == {
+        assert graph_threads.thread_ids == {
             thread_reply_id: thread_root_id,
             plain_reply_1_id: thread_root_id,
             plain_reply_2_id: thread_root_id,
         }
+        assert graph_threads.indeterminate_event_ids == frozenset()
 
     @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
@@ -1049,12 +1050,42 @@ async def test_batch_resolution_cost_grows_linearly_with_attacker_ordered_timest
     """A reply chain whose timestamps run backwards resolves with a bounded number of lookups per event."""
     infos = _reply_chain(length)
 
-    resolved = await resolve_local_event_graph_thread_ids(
+    graph_threads = await resolve_local_event_graph_thread_ids(
         event_infos=infos,
         ordered_event_ids=list(reversed(list(infos))),
     )
 
-    assert resolved == dict.fromkeys(infos, "$root")
+    assert graph_threads.thread_ids == dict.fromkeys(infos, "$root")
+    assert infos.lookups <= 4 * len(infos)
+
+
+@pytest.mark.asyncio
+async def test_batch_resolution_marks_a_chain_to_an_unseen_event_indeterminate_in_linear_time() -> None:
+    """Replies leading to an event the snapshot lacks are indeterminate, found with a bounded number of lookups."""
+    infos = _reply_chain(3000)
+    child = infos["$child"]
+    infos["$child"] = EventInfo.from_event(
+        {
+            "content": {
+                "body": "reply to an unseen event",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$unseen"}},
+            },
+            "event_id": "$child",
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        },
+    )
+    assert child.thread_id == "$root"
+    infos.lookups = 0
+
+    graph_threads = await resolve_local_event_graph_thread_ids(
+        event_infos=infos,
+        ordered_event_ids=list(reversed(list(infos))),
+    )
+
+    assert graph_threads.thread_ids == {}
+    assert graph_threads.indeterminate_event_ids == frozenset(infos)
     assert infos.lookups <= 4 * len(infos)
 
 

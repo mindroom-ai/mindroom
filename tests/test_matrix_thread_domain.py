@@ -26,7 +26,6 @@ from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     _page_event_info_counts_as_thread_child_proof,
     _ThreadRootProof,
-    map_backed_thread_membership_access,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
@@ -58,6 +57,30 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
             "type": "m.room.message",
             "content": content,
         },
+    )
+
+
+def _in_memory_access(event_infos: dict[str, EventInfo]) -> ThreadMembershipAccess:
+    """Resolve membership over one fixed event snapshot, proving roots from their threaded children."""
+
+    async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+        return None
+
+    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+        return event_infos.get(event_id)
+
+    async def prove_thread_root(_room_id: str, thread_root_id: str) -> _ThreadRootProof:
+        if any(
+            _page_event_info_counts_as_thread_child_proof(thread_root_id, event_id=event_id, event_info=event_info)
+            for event_id, event_info in event_infos.items()
+        ):
+            return _ThreadRootProof.proven()
+        return _ThreadRootProof.not_a_thread_root()
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        prove_thread_root=prove_thread_root,
     )
 
 
@@ -218,10 +241,7 @@ async def test_resolve_event_thread_membership_promotes_plain_reply_transitively
     resolution = await resolve_event_thread_membership(
         "!room:localhost",
         event_infos["$plain-two:localhost"],
-        access=map_backed_thread_membership_access(
-            event_infos=event_infos,
-            resolved_thread_ids={},
-        ),
+        access=_in_memory_access(event_infos),
     )
 
     assert resolution == ThreadResolution._threaded("$thread-root:localhost")
@@ -254,49 +274,10 @@ async def test_resolve_event_thread_membership_proves_current_root_when_allowed(
         event_infos["$thread-root:localhost"],
         event_id="$thread-root:localhost",
         allow_current_root=True,
-        access=map_backed_thread_membership_access(
-            event_infos=event_infos,
-            resolved_thread_ids={},
-        ),
+        access=_in_memory_access(event_infos),
     )
 
     assert resolution == ThreadResolution._threaded("$thread-root:localhost")
-
-
-class _CountingEventInfos(dict[str, EventInfo]):
-    """An event map that counts full sweeps over its entries."""
-
-    sweeps = 0
-
-    def items(self):  # noqa: ANN202 - dict's own item view
-        type(self).sweeps += 1
-        return super().items()
-
-
-@pytest.mark.asyncio
-async def test_map_backed_root_proofs_answer_from_one_index_over_the_scanned_events() -> None:
-    """Proving many candidate roots must not sweep every scanned event once per candidate."""
-    event_infos = _CountingEventInfos(
-        {
-            f"$root-{index}:localhost": _message_event_info({"body": f"root {index}", "msgtype": "m.text"})
-            for index in range(50)
-        },
-    )
-    event_infos["$reply:localhost"] = _message_event_info(
-        {
-            "body": "thread reply",
-            "msgtype": "m.text",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root-7:localhost"},
-        },
-    )
-    _CountingEventInfos.sweeps = 0
-    access = map_backed_thread_membership_access(event_infos=event_infos, resolved_thread_ids={})
-
-    proofs = [await access.prove_thread_root("!room:localhost", event_id) for event_id in list(event_infos)]
-
-    assert [proof == _ThreadRootProof.proven() for proof in proofs].count(True) == 1
-    assert (await access.prove_thread_root("!room:localhost", "$root-7:localhost")) == _ThreadRootProof.proven()
-    assert _CountingEventInfos.sweeps <= 1
 
 
 @pytest.mark.asyncio

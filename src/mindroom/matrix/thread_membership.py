@@ -346,38 +346,6 @@ async def resolve_related_event_thread_id_best_effort(
     return resolution.thread_id
 
 
-def map_backed_thread_membership_access(
-    *,
-    event_infos: Mapping[str, EventInfo],
-    resolved_thread_ids: dict[str, str],
-) -> ThreadMembershipAccess:
-    """Return one thread-membership access adapter backed by in-memory event maps.
-
-    ``event_infos`` is a fixed snapshot: root proofs answer from one index of
-    the roots its events prove, so proving every candidate costs one sweep.
-    """
-    proven_root_ids = _proven_thread_root_ids(event_infos)
-
-    async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
-        return resolved_thread_ids.get(event_id)
-
-    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-        return event_infos.get(event_id)
-
-    async def prove_thread_root(_room_id: str, thread_root_id: str) -> _ThreadRootProof:
-        if thread_root_id in proven_root_ids:
-            return _ThreadRootProof.proven()
-        return _ThreadRootProof.not_a_thread_root()
-
-    return _conversation_relation_thread_membership_access(
-        ThreadMembershipAccess(
-            lookup_thread_id=lookup_thread_id,
-            fetch_event_info=fetch_event_info,
-            prove_thread_root=prove_thread_root,
-        ),
-    )
-
-
 def _proven_thread_root_ids(event_infos: Mapping[str, EventInfo]) -> frozenset[str]:
     """Return every root that one fixed event snapshot proves has a real threaded child."""
     return frozenset(
@@ -392,69 +360,94 @@ def _proven_thread_root_ids(event_infos: Mapping[str, EventInfo]) -> frozenset[s
     )
 
 
+@dataclass(frozen=True)
+class _LocalWalkEnd:
+    """Where one related-event walk over a fixed snapshot ends."""
+
+    state: ThreadResolutionState
+    thread_id: str | None = None
+
+
+_LOCAL_WALK_ROOM_LEVEL = _LocalWalkEnd(ThreadResolutionState.ROOM_LEVEL)
+_LOCAL_WALK_INDETERMINATE = _LocalWalkEnd(ThreadResolutionState.INDETERMINATE)
+
+
+@dataclass(frozen=True)
+class _LocalGraphThreads:
+    """Thread membership of every event in one fixed local event graph."""
+
+    thread_ids: dict[str, str]
+    """Each threaded event's thread root."""
+    indeterminate_event_ids: frozenset[str]
+    """Events whose relations lead to an event the snapshot lacks or that cannot carry thread membership."""
+
+
 def _walk_local_relations(
     start_event_id: str,
     *,
     event_infos: Mapping[str, EventInfo],
     proven_root_ids: frozenset[str],
-    related_results: dict[str, str | None],
-) -> str | None:
-    """Return the thread a related-event walk from one event reaches, remembering it for every event visited.
+    walk_ends: dict[str, _LocalWalkEnd],
+) -> _LocalWalkEnd:
+    """Return where a related-event walk from one event ends, remembering it for every event visited.
 
     Applies ``resolve_related_event_thread_membership``'s rules over a fixed
     snapshot: a native thread relation or a proven relation-free root ends the
-    walk threaded; a missing event, one that cannot carry thread membership, a
-    relation-free event without threaded children, or a cycle ends it
-    unthreaded. Every event on one walk reaches the same end, so recording the
-    answer for each of them means no event is walked twice.
+    walk threaded; a relation-free event without threaded children or a cycle
+    ends it at room level; a missing event or one that cannot carry thread
+    membership leaves it indeterminate. Every event on one walk reaches the
+    same end, so recording it for each of them means no event is walked twice.
     """
     path: list[str] = []
     on_path: set[str] = set()
     current_event_id = start_event_id
     while True:
-        if current_event_id in related_results:
-            thread_id = related_results[current_event_id]
+        if current_event_id in walk_ends:
+            end = walk_ends[current_event_id]
             break
         if current_event_id in on_path:
-            thread_id = None
+            end = _LOCAL_WALK_ROOM_LEVEL
             break
         path.append(current_event_id)
         on_path.add(current_event_id)
         event_info = event_infos.get(current_event_id)
         if event_info is None or not event_type_supports_thread_relations(event_info.event_type):
-            thread_id = None
+            end = _LOCAL_WALK_INDETERMINATE
             break
         if event_info.thread_id is not None:
-            thread_id = event_info.thread_id
+            end = _LocalWalkEnd(ThreadResolutionState.THREADED, event_info.thread_id)
             break
         next_target = _next_related_event_target(event_info, current_event_id=current_event_id)
         if next_target is None:
             proven = event_info.can_be_thread_root and current_event_id in proven_root_ids
-            thread_id = current_event_id if proven else None
+            end = _LocalWalkEnd(ThreadResolutionState.THREADED, current_event_id) if proven else _LOCAL_WALK_ROOM_LEVEL
             break
         current_event_id = next_target
     for event_id in path:
-        related_results[event_id] = thread_id
-    return thread_id
+        walk_ends[event_id] = end
+    return end
 
 
 async def resolve_local_event_graph_thread_ids(
     *,
     event_infos: Mapping[str, EventInfo],
     ordered_event_ids: Sequence[str],
-) -> dict[str, str]:
-    """Return the thread of every threaded event in one fixed local event graph.
+) -> _LocalGraphThreads:
+    """Return the thread membership of every event in one fixed local event graph.
 
     Gives each event the answer ``resolve_event_thread_membership`` reaches
-    over ``map_backed_thread_membership_access`` iterated to a fixpoint,
+    over an in-memory access to the same snapshot iterated to a fixpoint,
     including relation chains longer than the per-walk hop bound, but walks
     each event's relations once, so the cost grows with the number of events
-    whatever order their timestamps put them in. It hands the event loop back
-    every few hundred events.
+    whatever order their timestamps put them in. Beyond the hop bound a walk
+    that reaches a missing event is indeterminate rather than room level,
+    which only fails a read closed. It hands the event loop back every few
+    hundred events.
     """
     proven_root_ids = _proven_thread_root_ids(event_infos)
-    related_results: dict[str, str | None] = {}
-    resolved: dict[str, str] = {}
+    walk_ends: dict[str, _LocalWalkEnd] = {}
+    thread_ids: dict[str, str] = {}
+    indeterminate_event_ids: set[str] = set()
     for index, event_id in enumerate(ordered_event_ids):
         if index and index % _LOCAL_GRAPH_YIELD_INTERVAL == 0:
             await asyncio.sleep(0)
@@ -462,20 +455,22 @@ async def resolve_local_event_graph_thread_ids(
         if event_info is None:
             continue
         if event_info.thread_id is not None:
-            resolved[event_id] = event_info.thread_id
+            thread_ids[event_id] = event_info.thread_id
             continue
         related_event_id = event_info.next_related_event_id("")
         if related_event_id is None:
             continue
-        thread_id = _walk_local_relations(
+        end = _walk_local_relations(
             related_event_id,
             event_infos=event_infos,
             proven_root_ids=proven_root_ids,
-            related_results=related_results,
+            walk_ends=walk_ends,
         )
-        if thread_id is not None:
-            resolved[event_id] = thread_id
-    return resolved
+        if end.thread_id is not None:
+            thread_ids[event_id] = end.thread_id
+        elif end.state is ThreadResolutionState.INDETERMINATE:
+            indeterminate_event_ids.add(event_id)
+    return _LocalGraphThreads(thread_ids, frozenset(indeterminate_event_ids))
 
 
 def _page_event_info_counts_as_thread_child_proof(
