@@ -1101,6 +1101,60 @@ def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -
     assert tool.limits.max_tool_calls_per_minute == 30
 
 
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("false", False),
+        (" FALSE ", False),
+        ("0", False),
+        ("off", False),
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        (False, False),
+        (True, True),
+    ],
+)
+def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
+    tmp_path: Path,
+    stored: object,
+    expected: bool,
+) -> None:
+    """Credential seeds resolve to strings, so a stored "false" must not enable a boolean option."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "browser",
+        runtime_paths,
+        credential_overrides={"allow_private_networks": stored},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool._allow_private_networks is expected
+
+
+@pytest.mark.parametrize("stored", ["maybe", "", 1, 0.0, ["true"]])
+def test_stored_boolean_tool_config_rejects_non_boolean_values(tmp_path: Path, stored: object) -> None:
+    """Unrecognized stored values for a boolean option fail instead of silently choosing a truthiness."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ToolConfigOverrideError, match=r"'browser\.allow_private_networks' must be a boolean"):
+        get_tool_by_name(
+            "browser",
+            runtime_paths,
+            credential_overrides={"allow_private_networks": stored},
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
+
+
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
     """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
     runtime_paths = resolve_runtime_paths(

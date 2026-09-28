@@ -493,9 +493,29 @@ def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: obj
     return coerced
 
 
+_STORED_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_STORED_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: object) -> bool | None:
+    """Normalize a stored boolean field; env and file credential seeds always resolve to strings."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _STORED_TRUE_VALUES:
+            return True
+        if normalized in _STORED_FALSE_VALUES:
+            return False
+    msg = f"Stored config value for '{tool_name}.{field_name}' must be a boolean."
+    raise ToolConfigOverrideError(msg)
+
+
 def _coerce_runtime_tool_config_value(tool_name: str, field: ConfigField, value: object) -> object:
     if field.type == "number":
         return _coerce_number_tool_config_value(tool_name, field.name, value)
+    if field.type == "boolean":
+        return _coerce_boolean_tool_config_value(tool_name, field.name, value)
     return value
 
 
