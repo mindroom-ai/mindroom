@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mindroom.http_error_detail import error_detail_from_response
 from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
@@ -182,7 +183,11 @@ class ScriptWorkerClient:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message, failure_kind="worker") from exc
         if response.status_code >= 400:
-            detail = _response_error(response)
+            # Validation errors echo rejected request values, such as the launch's config snapshot.
+            detail = error_detail_from_response(
+                response,
+                fallback=f"Worker script request failed with status {response.status_code}.",
+            )
             request_failure = response.status_code in {400, 413, 422}
             raise ScriptWorkerError(detail, failure_kind="tool" if request_failure else "worker")
         try:
@@ -203,18 +208,3 @@ class ScriptWorkerClient:
         kind: Literal["tool", "worker"] = "tool" if failure_kind == "tool" else "worker"
         error = data.get("error")
         raise ScriptWorkerError(str(error or "Worker script operation failed."), failure_kind=kind)
-
-
-def _response_error(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        detail = payload.get("detail")
-        if isinstance(detail, str) and detail:
-            return detail
-        error = payload.get("error")
-        if isinstance(error, str) and error:
-            return error
-    return response.text.strip() or f"Worker script request failed with status {response.status_code}."

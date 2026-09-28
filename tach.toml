@@ -86,6 +86,7 @@ depends_on = []
 visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
+    "mindroom.script_runs.worker_client",
 ]
 
 [[modules]]
@@ -1898,7 +1899,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.script_runs.worker_client"
-depends_on = ["mindroom.script_runs.compatibility", "mindroom.workers.models"]
+depends_on = ["mindroom.http_error_detail", "mindroom.script_runs.compatibility", "mindroom.workers.models"]
 
 [[modules]]
 path = "mindroom.script_runs.compatibility"

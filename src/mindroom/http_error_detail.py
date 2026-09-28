@@ -15,18 +15,19 @@ class _ErrorResponse(Protocol):
     def json(self) -> object: ...
 
 
-def error_detail_from_response(response: _ErrorResponse) -> str:
+def error_detail_from_response(response: _ErrorResponse, *, fallback: str = "unknown error") -> str:
     """Extract a compact, safe error detail from a JSON or plaintext error response.
 
     FastAPI validation errors carry ``detail`` as a list whose items echo the
     submitted request body under ``input``; only ``loc``/``msg`` are kept so
     secrets in the request body never reach error messages or logs. The raw
     body text is used only when the body is not JSON at all.
+    ``fallback`` is returned when the response carries no usable detail.
     """
     try:
         raw = response.json()
     except ValueError:
-        return response.text.strip()[:_MAX_LENGTH] or "unknown error"
+        return response.text.strip()[:_MAX_LENGTH] or fallback
     body = _json_object(raw)
     detail = body.get("detail") if body is not None else None
     if isinstance(detail, str) and detail.strip():
@@ -35,7 +36,7 @@ def error_detail_from_response(response: _ErrorResponse) -> str:
         parts = [part for part in map(_validation_error_part, detail) if part is not None]
         if parts:
             return "; ".join(parts)[:_MAX_LENGTH]
-    return "unknown error"
+    return fallback
 
 
 def _json_object(value: object) -> dict[str, object] | None:
