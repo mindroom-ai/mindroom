@@ -712,6 +712,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "function_name": "add",
         "args": [1, 2],
         "kwargs": {},
+        "config_snapshot": None,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 
@@ -5118,7 +5119,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
             credentials_manager=None,
         )
 
-    assert ("config_snapshot" in captured["json"]) is sends_snapshot
+    assert (captured["json"]["config_snapshot"] is not None) is sends_snapshot
     assert "sk-live-model-key" not in json.dumps(captured["json"])
     if sends_snapshot:
         snapshot = captured["json"]["config_snapshot"]
@@ -5228,7 +5229,7 @@ def test_static_runner_saves_attachment_for_agent_added_after_seeding(
 
     assert receipt is not None
     assert (workspace / "inputs" / "live.bin").read_bytes() == payload_bytes
-    assert "config_snapshot" in sent_payloads[0]
+    assert sent_payloads[0]["config_snapshot"] is not None
     assert "sk-live-model-key" not in json.dumps(sent_payloads)
 
 
@@ -5252,7 +5253,7 @@ def test_static_runner_views_file_for_agent_added_after_seeding(
     assert result is not None
     assert result.images is not None
     assert result.images[0].mime_type == "image/png"
-    assert "config_snapshot" in sent_payloads[0]
+    assert sent_payloads[0]["config_snapshot"] is not None
     assert "sk-live-model-key" not in json.dumps(sent_payloads)
 
 

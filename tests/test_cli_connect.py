@@ -712,6 +712,7 @@ def test_pair_local_install_shows_qr_only_when_terminal(tmp_path: Path) -> None:
 
     terminal_output = terminal_out.getvalue()
     assert "or enter code ABCD-EFGH" in terminal_output
+    assert "Approve only if the page shows code ABCD-EFGH" in terminal_output
     assert "█" in terminal_output or "▀" in terminal_output  # QR present
 
     # Non-terminal: QR hidden

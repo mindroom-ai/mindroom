@@ -4170,6 +4170,11 @@ depends_on = [
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
+path = "mindroom.cli.pairing_probes"
+depends_on = []
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
@@ -4213,6 +4218,7 @@ depends_on = [
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
+    "mindroom.cli.pairing_probes",
     "mindroom.cli.plugins",
     "mindroom.cli.service",
     "mindroom.cli.trigger",
@@ -6376,6 +6382,7 @@ expose = [
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
+    "runner_config_snapshot",
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
