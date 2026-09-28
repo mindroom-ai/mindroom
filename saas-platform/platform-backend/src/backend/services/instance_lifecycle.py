@@ -51,6 +51,7 @@ LIFECYCLE_INSTANCE_COLUMNS = (
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
 _PAGE_SIZE = 1000
+_STRIPE_REFRESH_ATTEMPTS = 3
 _INSTANCES_NAMESPACE = "mindroom-instances"
 # Serializes webhook-triggered and nightly runs for the same subscription within this process.
 _subscription_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -69,12 +70,18 @@ class LifecycleSummary:
 
 
 async def reconcile_subscription_instances(
-    subscription_id: str, *, now: datetime | None = None, summary: LifecycleSummary | None = None
+    subscription_id: str,
+    *,
+    now: datetime | None = None,
+    summary: LifecycleSummary | None = None,
+    refresh_from_stripe: bool = False,
 ) -> LifecycleSummary:
     """Bring every instance of one subscription to the state its entitlement requires.
 
     The subscription and its instances are read inside the per-subscription lock, so a run never acts on
     a snapshot that a concurrent webhook or nightly run already changed.
+    The stored status is refreshed from Stripe before any stop or resume, and always when
+    `refresh_from_stripe` is set (the nightly run), so a lost or out-of-order webhook cannot win.
     """
     summary = summary or LifecycleSummary()
     now = now or datetime.now(UTC)
@@ -93,9 +100,13 @@ async def reconcile_subscription_instances(
             or []
         )
         entitled = is_subscription_service_active(subscription, now=now)
-        if not entitled and any(instance.get("status") != "deprovisioned" for instance in instances):
-            # Never stop or tear down on a stored status alone: a lost or out-of-order webhook can leave it stale.
-            subscription = await _sync_status_from_stripe(sb, subscription)
+        would_stop = not entitled and any(instance.get("status") != "deprovisioned" for instance in instances)
+        would_resume = entitled and any(instance.get("lifecycle_stopped_at") for instance in instances)
+        if refresh_from_stripe or would_stop or would_resume:
+            refreshed = await _refresh_status_from_stripe(sb, subscription_id)
+            if refreshed is None:
+                return summary
+            subscription = refreshed
             entitled = is_subscription_service_active(subscription, now=now)
         for instance in instances:
             try:
@@ -138,37 +149,60 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
     )
     for subscription_id in subscription_ids:
         try:
-            await reconcile_subscription_instances(subscription_id, now=now, summary=summary)
+            await reconcile_subscription_instances(subscription_id, now=now, summary=summary, refresh_from_stripe=True)
         except Exception as exc:
             logger.exception("Instance lifecycle reconcile failed for subscription %s", subscription_id)
             summary.errors.append(f"subscription {subscription_id}: {exc}")
     return summary
 
 
-async def _sync_status_from_stripe(sb: Client, subscription: dict[str, Any]) -> dict[str, Any]:
-    """Return the subscription with its status refreshed from Stripe, storing any correction.
+async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[str, Any] | None:
+    """Return the subscription row with its status refreshed from Stripe, storing any correction.
 
     Subscriptions without a Stripe id (platform trials, free tier) and deployments without Stripe keep the
     stored status. Any Stripe API error propagates so no instance is stopped on an unverified status.
+    A webhook can rebind the row to a new Stripe subscription while Stripe is queried, so the correction is
+    only written while the row is still bound to the queried subscription; otherwise the refresh restarts.
     """
-    stripe_subscription_id = subscription.get("stripe_subscription_id")
-    if not stripe_subscription_id or not stripe.api_key:
-        return subscription
-    remote = await anyio.to_thread.run_sync(stripe.Subscription.retrieve, stripe_subscription_id)
-    status = db_subscription_status(str(remote["status"]))
-    trial_end = remote.get("trial_end")
-    trial_ends_at = datetime.fromtimestamp(trial_end, tz=UTC).isoformat() if trial_end else None
-    if status == subscription.get("status") and trial_ends_at == subscription.get("trial_ends_at"):
-        return subscription
-    logger.warning(
-        "Subscription %s was stored as %s but Stripe reports %s; correcting it",
-        subscription["id"],
-        subscription.get("status"),
-        status,
-    )
-    fields = {"status": status, "trial_ends_at": trial_ends_at, "updated_at": datetime.now(UTC).isoformat()}
-    sb.table("subscriptions").update(fields).eq("id", subscription["id"]).execute()
-    return {**subscription, **fields}
+    for _ in range(_STRIPE_REFRESH_ATTEMPTS):
+        rows = sb.table("subscriptions").select("*").eq("id", subscription_id).limit(1).execute().data
+        if not rows:
+            return None
+        subscription = rows[0]
+        stripe_subscription_id = subscription.get("stripe_subscription_id")
+        if not stripe_subscription_id or not stripe.api_key:
+            return subscription
+        remote = await anyio.to_thread.run_sync(stripe.Subscription.retrieve, stripe_subscription_id)
+        trial_end = remote.get("trial_end")
+        fields = {
+            "status": db_subscription_status(str(remote["status"])),
+            "trial_ends_at": datetime.fromtimestamp(trial_end, tz=UTC).isoformat() if trial_end else None,
+        }
+        unchanged = subscription.get("status") == fields["status"] and parse_timestamp(
+            subscription.get("trial_ends_at")
+        ) == parse_timestamp(fields["trial_ends_at"])
+        query = sb.table("subscriptions")
+        if unchanged:
+            written = query.select("*").eq("id", subscription_id).eq("stripe_subscription_id", stripe_subscription_id)
+        else:
+            written = (
+                query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
+                .eq("id", subscription_id)
+                .eq("stripe_subscription_id", stripe_subscription_id)
+            )
+        current = written.execute().data
+        if current and current[0].get("status") == fields["status"]:
+            if not unchanged:
+                logger.warning(
+                    "Subscription %s was stored as %s but Stripe reports %s; corrected it",
+                    subscription_id,
+                    subscription.get("status"),
+                    fields["status"],
+                )
+            return current[0]
+        logger.info("Subscription %s changed while Stripe was queried; refreshing again", subscription_id)
+    msg = f"Subscription {subscription_id} kept changing while its Stripe status was refreshed"
+    raise RuntimeError(msg)
 
 
 def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

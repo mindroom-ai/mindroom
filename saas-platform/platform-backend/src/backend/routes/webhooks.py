@@ -129,7 +129,16 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     subscription_data["account_id"] = account_id
 
     # Check if subscription already exists for this account
-    existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+    existing = sb.table("subscriptions").select("id,stripe_subscription_id").eq("account_id", account_id).execute()
+    current_stripe_id = existing.data[0].get("stripe_subscription_id") if existing.data else None
+    if current_stripe_id and current_stripe_id != subscription["id"]:
+        # A delayed creation event for an older Stripe subscription must not replace a newer binding.
+        current_created = stripe.Subscription.retrieve(current_stripe_id)["created"]
+        if subscription["created"] < current_created:
+            logger.info(
+                "Ignoring creation of Stripe subscription %s older than %s", subscription["id"], current_stripe_id
+            )
+            return True, account_id
 
     if existing.data:
         # Update existing subscription

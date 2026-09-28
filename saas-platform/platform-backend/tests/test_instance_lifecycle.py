@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 from backend.deps import verify_admin, verify_user
 from backend.openrouter import OpenRouterKeyNotFoundError
-from backend.services.instance_lifecycle import LifecycleSummary, reconcile_subscription_instances
+from backend.services.instance_lifecycle import (
+    LifecycleSummary,
+    reconcile_all_subscriptions,
+    reconcile_subscription_instances,
+)
 from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
 from backend.tasks.cleanup import run_cleanup_job
 from fastapi.testclient import TestClient
@@ -452,6 +456,185 @@ async def test_stale_stored_status_is_corrected_from_stripe_instead_of_stopping(
     platform.kubectl.assert_not_awaited()
     assert platform.instance()["teardown_after"] is None
     assert summary.errors == []
+
+
+@pytest.mark.asyncio
+async def test_resubscription_during_stripe_refresh_is_not_overwritten(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    # Stored as active, so the old subscription's "canceled" from Stripe would be written as a correction.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=31)).isoformat(),
+            teardown_after=(now - timedelta(days=1)).isoformat(),
+        )
+    )
+    platform.stripe.api_key = "sk_test"
+
+    def retrieve(stripe_subscription_id: str) -> dict[str, Any]:
+        if stripe_subscription_id == "sub_stripe_1":
+            # The resubscription webhook rebinds the row while the old subscription is being fetched.
+            platform.subscription().update({"stripe_subscription_id": "sub_stripe_2", "status": "active"})
+            return {"status": "canceled", "trial_end": None}
+        return {"status": "active", "trial_end": None}
+
+    platform.stripe.Subscription.retrieve.side_effect = retrieve
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    assert platform.subscription()["status"] == "active"
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_2"
+    platform.uninstall.assert_not_awaited()
+    platform.start.assert_awaited_once_with(7)
+
+
+@pytest.mark.asyncio
+async def test_nightly_run_stops_instance_restarted_by_a_stale_active_event(platform: Platform) -> None:
+    # A delayed "active" update after the cancellation resumed the instance and left the row active.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+
+    summary = await reconcile_all_subscriptions()
+
+    assert platform.subscription()["status"] == "cancelled"
+    assert platform.scaled_down()
+    assert platform.instance()["status"] == "stopped"
+    assert summary.instances_stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_nightly_run_reprovisions_torn_down_instance_after_a_missed_payment_update(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("unpaid"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "deprovisioned",
+            openrouter_key_hash=None,
+            lifecycle_stopped_at=(now - timedelta(days=40)).isoformat(),
+            teardown_after=(now - timedelta(days=10)).isoformat(),
+        )
+    )
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+
+    await reconcile_all_subscriptions()
+
+    assert platform.subscription()["status"] == "active"
+    platform.provision.assert_awaited_once()
+    assert platform.instance()["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_held_instance_is_not_resumed_on_a_stale_active_status(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.start.assert_not_awaited()
+    assert platform.subscription()["status"] == "cancelled"
+    assert platform.instance()["status"] == "stopped"
+
+
+def test_delayed_creation_of_an_older_subscription_keeps_the_newer_binding(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", stripe_subscription_id="sub_stripe_new"))
+    platform.db.tables["instances"].append(_instance("running"))
+    old_created = {**_stripe_subscription("incomplete"), "created": 1_700_000_000}
+
+    with patch(
+        "backend.routes.webhooks.stripe.Subscription.retrieve", return_value={"created": 1_750_000_000}
+    ) as retrieve:
+        _send_webhook("customer.subscription.created", old_created)
+
+    retrieve.assert_called_once_with("sub_stripe_new")
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_new"
+    assert platform.subscription()["status"] == "active"
+    assert platform.instance()["status"] == "running"
+
+
+def test_creation_of_a_newer_subscription_replaces_the_old_binding(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("cancelled", stripe_subscription_id="sub_stripe_old"))
+    newer = {**_stripe_subscription("active"), "created": 1_750_000_000}
+
+    with patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value={"created": 1_700_000_000}):
+        _send_webhook("customer.subscription.created", newer)
+
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_1"
+    assert platform.subscription()["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_expired_trial_stops_instance_and_pauses_subscription(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(
+        _subscription(
+            "trialing", tier="byok", stripe_subscription_id=None, trial_ends_at=(now - timedelta(days=1)).isoformat()
+        )
+    )
+    platform.db.tables["instances"].append(_instance("running", tier="byok", openrouter_key_hash=None))
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.kubectl.assert_has_awaits(
+        [
+            call(["scale", "deployment/mindroom-7", "--replicas=0"], namespace="mindroom-instances"),
+            call(["scale", "deployment/synapse-7", "--replicas=0"], namespace="mindroom-instances"),
+        ]
+    )
+    assert platform.instance()["status"] == "stopped"
+    assert platform.subscription()["status"] == "paused"
+    assert summary.instances_stopped == 1
+    assert summary.subscriptions_paused == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpired_trial_keeps_running(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(
+        _subscription(
+            "trialing", tier="byok", stripe_subscription_id=None, trial_ends_at=(now + timedelta(days=2)).isoformat()
+        )
+    )
+    platform.db.tables["instances"].append(_instance("running", tier="byok", openrouter_key_hash=None))
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.kubectl.assert_not_awaited()
+    assert platform.instance()["status"] == "running"
+    assert platform.subscription()["status"] == "trialing"
+    assert summary.subscriptions_paused == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_tenant_scale_down_records_error_without_marking_stopped(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(
+        _subscription(
+            "trialing", tier="byok", stripe_subscription_id=None, trial_ends_at=(now - timedelta(days=1)).isoformat()
+        )
+    )
+    platform.db.tables["instances"].append(_instance("running", tier="byok", openrouter_key_hash=None))
+    platform.kubectl.side_effect = [(0, "scaled", ""), (1, "", "synapse scale forbidden")]
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    instance = platform.instance()
+    assert instance["status"] == "running"
+    assert "synapse scale forbidden" in instance["lifecycle_error"]
+    assert instance["teardown_after"] is not None
+    assert summary.errors == ["instance 7: kubectl scale failed for deployment/synapse-7: synapse scale forbidden"]
 
 
 @pytest.mark.asyncio
