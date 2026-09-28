@@ -621,7 +621,7 @@ def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path
     """Nesting that overflows libyaml's C stack must fall back like LocalSkills, not kill the process."""
     storage, root = _workspace_skills(tmp_path)
     (root / "nested").mkdir()
-    depth = 30_000
+    depth = 3000
     (root / "nested" / "SKILL.md").write_text(
         f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n",
         encoding="utf-8",
@@ -687,6 +687,33 @@ def test_planted_frontmatter_never_stalls_loading_or_hides_other_skills(tmp_path
     names = _skill_names(_load_agent_skills(tmp_path, storage))
     assert time.monotonic() - started < 2
     assert names == ["alpha", "beta", "zeta"]
+
+
+def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> None:
+    """The primary parses at most a bounded amount of worker-writable frontmatter per skill and per workspace."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
+    (workspace_skills / "aaa").mkdir()
+    (workspace_skills / "aaa" / "SKILL.md").write_text(
+        f"---\nname: aaa\ndescription: d\nnote: {'n' * cap}\n---\nbody\n",
+        encoding="utf-8",
+    )
+    per_skill = cap - 64
+    fitting = workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill
+    for index in range(fitting + 3):
+        name = f"b-{index:02d}"
+        (workspace_skills / name).mkdir()
+        (workspace_skills / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\nnote: {'n' * (per_skill - 40)}\n---\nbody\n",
+            encoding="utf-8",
+        )
+    with capture_logs() as logs:
+        names = _skill_names(_load_agent_skills(tmp_path, storage))
+    assert "aaa" not in names
+    assert 0 < len(names) < fitting + 3
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert "Refused a workspace skill whose frontmatter is too large" in events
+    assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
 
 
 def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:
@@ -1166,7 +1193,7 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
     """Descriptions reach every system prompt, so they are capped and counted with the rest of each skill."""
     storage, workspace_skills = _workspace_skills(tmp_path)
     for index in range(20):
-        _write_skill(workspace_skills, f"skill-{index:02d}", "d" * (900 << 10))
+        _write_skill(workspace_skills, f"skill-{index:02d}", "d" * 4000)
 
     with capture_logs() as logs:
         skills = _load_agent_skills(tmp_path, storage)

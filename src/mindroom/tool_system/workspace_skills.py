@@ -11,6 +11,7 @@ import os
 import re
 import threading
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -40,6 +41,10 @@ MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+# The primary parses worker-writable frontmatter with pure-Python YAML and JSON5, so both its size per skill and its
+# total per workspace stay bounded; skill bodies are never parsed.
+_MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES = 8 << 10
+MAX_WORKSPACE_FRONTMATTER_BYTES = 64 << 10
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
@@ -185,6 +190,10 @@ def normalized_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+class SkillFrontmatterTooLargeError(ValueError):
+    """Workspace frontmatter over the size the primary parses."""
+
+
 def parse_skill_markdown(content: str, *, loose: bool = False, trusted: bool = False) -> tuple[dict[str, Any], str]:
     """Split SKILL.md into its frontmatter mapping and instruction body.
 
@@ -195,6 +204,9 @@ def parse_skill_markdown(content: str, *, loose: bool = False, trusted: bool = F
     match = match_frontmatter(content)
     if match is None:
         return {}, content
+    if not trusted and len(match.group(1).encode()) > _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES:
+        msg = f"SKILL.md frontmatter exceeds {_MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES >> 10} KiB"
+        raise SkillFrontmatterTooLargeError(msg)
     try:
         frontmatter = _strict_frontmatter(match.group(1), trusted=trusted)
     except YAMLError:
@@ -295,8 +307,8 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """
     skills: list[Skill] = []
     loaded_bytes = 0
-    for _directory, skill, size in _measured_skills(skills_root):
-        loaded_bytes += size
+    for _directory, skill, share in _measured_skills(skills_root):
+        loaded_bytes += share.prompt_bytes
         if loaded_bytes > MAX_WORKSPACE_SKILLS_BYTES:
             logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
             break
@@ -304,25 +316,78 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
     return skills
 
 
-def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, int]]:
-    """Yield the skills loading reads, each with its budget share, measured inside the guard that skips one skill."""
+@dataclass(frozen=True)
+class _SkillBudgetShare:
+    """One loaded skill's share of the workspace prompt budget and of its frontmatter parse budget."""
 
-    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | None:
-        skill = _load_workspace_skill(skill_fd, skills_root, directory)
-        return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
+    prompt_bytes: int
+    frontmatter_bytes: int
 
-    return _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS)
+
+_FRONTMATTER_BUDGET_SPENT = object()
+
+
+def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, _SkillBudgetShare]]:
+    """Yield the skills loading reads with their budget shares, measured inside the guard that skips one skill.
+
+    Frontmatter is parsed only while the workspace's frontmatter budget lasts, so planted skill files cannot make the
+    primary parse more than that per load.
+    """
+    parsed_bytes = 0
+
+    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, _SkillBudgetShare] | object | None:
+        nonlocal parsed_bytes
+        content = _read_skill_markdown(skill_fd, skills_root, directory)
+        if content is None:
+            return None
+        size = _checked_frontmatter_bytes(content, skills_root / directory / SKILL_FILENAME)
+        if size is None:
+            return None
+        if parsed_bytes + size > MAX_WORKSPACE_FRONTMATTER_BYTES:
+            return _FRONTMATTER_BUDGET_SPENT
+        parsed_bytes += size
+        skill = workspace_skill(
+            content,
+            skills_root,
+            directory,
+            scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
+            references=list_support_files(skill_fd, skills_root / directory, "references"),
+        )
+        return None if skill is None else (directory, skill, _SkillBudgetShare(skill_prompt_bytes(skill), size))
+
+    for result in _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS):
+        if result is _FRONTMATTER_BUDGET_SPENT:
+            logger.warning(
+                "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
+                path=str(skills_root),
+            )
+            return
+        yield cast("tuple[str, Skill, _SkillBudgetShare]", result)
+
+
+def frontmatter_bytes(content: str) -> int:
+    """Return the size of a SKILL.md's frontmatter, the part the primary parses; a body is never parsed."""
+    match = match_frontmatter(normalized_newlines(content))
+    return len(match.group(1).encode()) if match is not None else 0
+
+
+def _checked_frontmatter_bytes(content: str, path: Path) -> int | None:
+    size = frontmatter_bytes(content)
+    if size > _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES:
+        logger.warning("Refused a workspace skill whose frontmatter is too large", path=str(path), size=size)
+        return None
+    return size
 
 
 def skill_prompt_bytes(skill: Skill) -> int:
-    """Return one skill's share of the workspace prompt budget: every system prompt carries these parts."""
+    """Return one skill's share of the workspace prompt budget: loaded skill content, not only its prompt listing."""
     prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
     return len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
 
 
-def workspace_skill_prompt_bytes(skills_root: Path) -> dict[str, int]:
-    """Return the prompt-budget share of every skill directory loading reads, as it measures them."""
-    return {directory: size for directory, _skill, size in _measured_skills(skills_root)}
+def workspace_skill_budget_shares(skills_root: Path) -> dict[str, _SkillBudgetShare]:
+    """Return the budget shares of every skill directory loading reads, as it measures them."""
+    return {directory: share for directory, _skill, share in _measured_skills(skills_root)}
 
 
 def support_entry_count(skill_fd: int, directory: str) -> int:
@@ -346,7 +411,7 @@ def workspace_skill_directories(skills_root: Path) -> list[str]:
     )
 
 
-def _frontmatter_name(frontmatter: dict[str, Any], directory: str) -> str | None:
+def frontmatter_name(frontmatter: dict[str, Any], directory: str) -> str | None:
     """Return the stripped name a skill loads under, its directory's when it names none, or None when it is unusable."""
     name = frontmatter.get("name", directory)
     return name.strip() if isinstance(name, str) and name.strip() else None
@@ -356,27 +421,18 @@ def workspace_skill_name(content: str, directory: str) -> str | None:
     """Return the name a workspace SKILL.md loads under, read loosely like skill loading, or None when it has none."""
     try:
         frontmatter, _instructions = parse_skill_markdown(content, loose=True)
-    except TypeError:
+    except (TypeError, SkillFrontmatterTooLargeError):
         return None
-    return _frontmatter_name(frontmatter, directory)
+    return frontmatter_name(frontmatter, directory)
 
 
-def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> Skill | None:
+def _read_skill_markdown(skill_fd: int, skills_root: Path, directory: str) -> str | None:
     path = skills_root / directory / SKILL_FILENAME
     try:
-        content = read_text_at(skill_fd, SKILL_FILENAME)
+        return read_text_at(skill_fd, SKILL_FILENAME)
     except (OSError, ValueError) as exc:
         logger.warning("Refused a workspace skill file", path=str(path), error=str(exc))
         return None
-    if content is None:
-        return None
-    return workspace_skill(
-        content,
-        skills_root,
-        directory,
-        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
-        references=list_support_files(skill_fd, skills_root / directory, "references"),
-    )
 
 
 def workspace_skill(
@@ -391,7 +447,7 @@ def workspace_skill(
     path = skills_root / directory / SKILL_FILENAME
     frontmatter, instructions = parse_skill_markdown(content, loose=True)
     # Skill normalization drops a skill without a usable name.
-    name = _frontmatter_name(frontmatter, directory) or ""
+    name = frontmatter_name(frontmatter, directory) or ""
     if len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
         logger.warning("Refused a workspace skill whose name is too long", path=str(path))
         return None

@@ -10,8 +10,9 @@ shares, goes through ``safe_load_untrusted`` instead: libyaml's composer
 recurses in C, so deeply nested input overflows the C stack and kills the
 process, where the pure-Python loader raises ``RecursionError``. It also
 refuses aliases, because a few hundred bytes of nested aliases expand to
-gigabytes once anything serializes the result, and base-60 or oversized
-integers, which take quadratic time to build or cannot be written back.
+gigabytes once anything serializes the result, merge keys and base-60 or
+oversized integers, which take quadratic time to build or cannot be written
+back, and flow collections nested deeper than a few dozen levels.
 
 ``SafeLoader`` is also the base for custom safe loaders, so they share the
 same libyaml preference and pure-Python fallback.
@@ -27,6 +28,7 @@ from typing import IO, Any, TypedDict, Unpack, overload
 import yaml
 from yaml.composer import ComposerError
 from yaml.constructor import ConstructorError
+from yaml.scanner import ScannerError
 
 try:
     from yaml import CSafeDumper
@@ -61,14 +63,29 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
 
 # Python refuses to convert integers of more than 4300 digits to text; a hexadecimal literal this short stays below.
 _MAX_UNTRUSTED_INT_CHARS = 1000
+# The pure-Python scanner's work grows with input size times flow nesting depth.
+_MAX_UNTRUSTED_FLOW_DEPTH = 32
 
 
 class _UntrustedSafeLoader(yaml.SafeLoader):
     """Pure-Python safe loader for input untrusted code can write, refusing what grows beyond the input's size.
 
-    Aliases can nest into an expansion bomb, a YAML 1.1 base-60 integer takes quadratic time to build, and an integer
-    too long to convert back to text fails whatever serializes the result.
+    Aliases can nest into an expansion bomb, merge keys and YAML 1.1 base-60 integers take quadratic time to build,
+    deep flow nesting multiplies scanning time, and an integer too long to convert back to text fails whatever
+    serializes the result.
     """
+
+    def fetch_flow_collection_start(self, TokenClass: type[yaml.Token]) -> None:  # noqa: N803 - PyYAML's name
+        if self.flow_level >= _MAX_UNTRUSTED_FLOW_DEPTH:
+            message = "flow collections nested this deeply are not accepted in untrusted input"
+            raise ScannerError(None, None, message, self.get_mark())
+        super().fetch_flow_collection_start(TokenClass)
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        if any(key_node.tag == "tag:yaml.org,2002:merge" for key_node, _value_node in node.value):
+            message = "merge keys are not accepted in untrusted input"
+            raise ConstructorError(None, None, message, node.start_mark)
+        super().flatten_mapping(node)
 
     def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node | None:
         if self.check_event(yaml.AliasEvent):

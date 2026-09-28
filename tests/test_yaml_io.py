@@ -114,8 +114,8 @@ def test_prefers_libyaml_classes_when_available() -> None:
 
 @pytest.mark.parametrize(
     "document",
-    ["a: &a [x]\nb: *a", "n: 1:0:0", "n: 0x" + "f" * 2000],
-    ids=["alias", "base-60 integer", "oversized integer"],
+    ["a: &a [x]\nb: *a", "n: 1:0:0", "n: 0x" + "f" * 2000, "a: {<<: {}}", "k: " + "[" * 40 + "]" * 40],
+    ids=["alias", "base-60 integer", "oversized integer", "merge key", "deep flow nesting"],
 )
 def test_untrusted_loads_refuse_what_grows_beyond_the_input(document: str) -> None:
     """Aliases expand, base-60 integers build in quadratic time, and oversized ones cannot be written back."""

@@ -15,7 +15,7 @@ import re
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from yaml import YAMLError
 
@@ -25,14 +25,18 @@ from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import find_credential
 from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
+    MAX_WORKSPACE_FRONTMATTER_BYTES,
     MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
     MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
     MAX_WORKSPACE_SKILL_NAME_CHARS,
     MAX_WORKSPACE_SKILLS,
     MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
+    SkillFrontmatterTooLargeError,
     SkillUsage,
     forget_missing_skill_usage,
+    frontmatter_bytes,
+    frontmatter_name,
     list_entries,
     list_support_files,
     load_skill_usage,
@@ -45,12 +49,12 @@ from mindroom.tool_system.workspace_skills import (
     support_entry_count,
     update_skill_usage,
     workspace_skill,
+    workspace_skill_budget_shares,
     workspace_skill_name,
-    workspace_skill_prompt_bytes,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -104,6 +108,21 @@ def _validate_skill_name(name: str) -> None:
         raise SkillEditError(msg)
 
 
+def _parsed_markdown(content: str) -> tuple[dict[str, Any], str]:
+    """Return an edited SKILL.md's strict frontmatter and body, refusing what skill loading could not read."""
+    if not content.startswith("---"):
+        msg = "SKILL.md must start with YAML frontmatter (---)."
+        raise SkillEditError(msg)
+    try:
+        return parse_skill_markdown(content)
+    except SkillFrontmatterTooLargeError as exc:
+        msg = f"{exc}; keep the frontmatter to the name, description, and metadata, and move detail into the body."
+        raise SkillEditError(msg) from exc
+    except (TypeError, YAMLError) as exc:
+        msg = f"SKILL.md frontmatter is not a valid YAML mapping: {exc}"
+        raise SkillEditError(msg) from exc
+
+
 def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> None:
     """Check a SKILL.md: frontmatter ``name`` must stay ``name``, and new skills need a short description."""
     if len(content) > _MAX_SKILL_MARKDOWN_CHARS:
@@ -112,14 +131,7 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
             "Move depth into references/."
         )
         raise SkillEditError(msg)
-    if not content.startswith("---"):
-        msg = "SKILL.md must start with YAML frontmatter (---)."
-        raise SkillEditError(msg)
-    try:
-        frontmatter, body = parse_skill_markdown(content)
-    except (TypeError, YAMLError) as exc:
-        msg = f"SKILL.md frontmatter is not a valid YAML mapping: {exc}"
-        raise SkillEditError(msg) from exc
+    frontmatter, body = _parsed_markdown(content)
     description = frontmatter.get("description")
     frontmatter_name = frontmatter.get("name")
     # Like skill loading, surrounding whitespace is not part of the name.
@@ -196,19 +208,48 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
     content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
     if content is None:
         return None
-    # An edit keeps the name the skill loads under, or its directory's when it has none, so an edit can repair it.
-    skill_name = (workspace_skill_name(markdown, name) if markdown is not None else None) or name
     try:
         frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
-    except (TypeError, YAMLError):
-        # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's.
+    except (TypeError, ValueError, YAMLError):
+        # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's; an edit
+        # keeps the name skill loading reads loosely, or the directory's, so an edit can repair it.
+        skill_name = (workspace_skill_name(markdown, name) if markdown is not None else None) or name
         return SkillFile(content=content, digest=content_digest(content), learned=False, name=skill_name)
     return SkillFile(
         content=content,
         digest=content_digest(content),
         learned=_learner_owns(frontmatter, usage, path=name),
-        name=skill_name,
+        # An edit keeps the name the skill loads under, or its directory's when it has none, so an edit can repair it.
+        name=frontmatter_name(frontmatter, name) or name,
     )
+
+
+def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> frozenset[str]:
+    """Return which of the given workspace skill directories the learner owns, reading the usage file once."""
+    directories = list(directories)
+    if not directories:
+        return frozenset()
+    learned: set[str] = set()
+    try:
+        with open_skills_root(skills_root) as root_fd:
+            usage = load_skill_usage(root_fd)
+            for directory in directories:
+                try:
+                    with _open_skill(root_fd, directory) as skill_fd:
+                        markdown = _read_skill_file(
+                            skill_fd,
+                            directory,
+                            SKILL_FILENAME,
+                            usage.get(directory, SkillUsage()),
+                        )
+                except (OSError, ValueError):
+                    continue
+                if markdown is not None and markdown.learned:
+                    learned.add(directory)
+    except OSError:
+        # Skill loading already warned about a skills directory it could not open.
+        return frozenset()
+    return frozenset(learned)
 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
@@ -280,11 +321,17 @@ def _require_prompt_budget(
     )
     if changed is None:
         return
-    others = sum(size for directory, size in workspace_skill_prompt_bytes(skills_root).items() if directory != name)
-    if others + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
+    others = [share for directory, share in workspace_skill_budget_shares(skills_root).items() if directory != name]
+    if sum(share.prompt_bytes for share in others) + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
         msg = (
             f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
             "budget, and skill loading would skip some; shorten or merge skills instead."
+        )
+        raise SkillEditError(msg)
+    if sum(share.frontmatter_bytes for share in others) + frontmatter_bytes(markdown) > MAX_WORKSPACE_FRONTMATTER_BYTES:
+        msg = (
+            f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
+            "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
         )
         raise SkillEditError(msg)
 
@@ -430,18 +477,20 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     """
     if not skills_root.is_dir():
         return []
+    # Only skills that loading reads can be learned or used, and reading no more bounds what the pass parses.
+    loaded = list(workspace_skill_budget_shares(skills_root)) if archive_after_days > 0 else []
     with open_skills_root(skills_root) as root_fd:
-        archived = _archive_inactive(root_fd, archive_after_days=archive_after_days, now=now)
+        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now)
         forget_missing_skill_usage(root_fd)
     return archived
 
 
-def _archive_inactive(root_fd: int, *, archive_after_days: int, now: datetime) -> list[str]:
+def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: int, now: datetime) -> list[str]:
     if archive_after_days <= 0:
         return []
     archived: list[str] = []
     usage = load_skill_usage(root_fd)
-    for name in list_entries(root_fd, directories=True):
+    for name in loaded:
         try:
             with open_directory_within_root(root_fd, name) as skill_fd:
                 markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))

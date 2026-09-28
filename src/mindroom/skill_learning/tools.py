@@ -23,6 +23,7 @@ from mindroom.skill_learning.library import (
     SkillFile,
     content_digest,
     create_skill,
+    learned_skill_directories,
     read_skill_file,
     remove_skill_file,
     support_file_paths,
@@ -101,19 +102,21 @@ class SkillCatalog:
 def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
     """Return the skills the agent loads now, with the strict ownership check that edits use."""
     skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
-    entries: dict[str, _CatalogEntry] = {}
-    for skill in skills.get_all_skills() if skills is not None else []:
-        source = Path(skill.source_path)
-        in_workspace = source.parent == skills_root
-        entries[skill.name] = _CatalogEntry(
+    loaded = skills.get_all_skills() if skills is not None else []
+    workspace_directories = {
+        skill.name: Path(skill.source_path).name for skill in loaded if Path(skill.source_path).parent == skills_root
+    }
+    learned = learned_skill_directories(skills_root, workspace_directories.values())
+    entries = {
+        skill.name: _CatalogEntry(
             name=skill.name,
             description=skill.description,
-            directory=source.name if in_workspace else None,
-            learned=in_workspace
-            and (current := read_skill_file(skills_root, source.name)) is not None
-            and current.learned,
+            directory=workspace_directories.get(skill.name),
+            learned=workspace_directories.get(skill.name) in learned,
             instructions=skill.instructions,
         )
+        for skill in loaded
+    }
     reserved = {name.lower() for name in entries} | {listing.name.lower() for listing in list_skill_listings()}
     return SkillCatalog(skills, entries, frozenset(reserved))
 
@@ -346,7 +349,8 @@ class SkillTools:
             name=name,
             action="created",
         )
-        frontmatter, instructions = parse_skill_markdown(content)
+        # Parsing takes time on long content, so it runs off the event loop like the write.
+        frontmatter, instructions = await asyncio.to_thread(parse_skill_markdown, content)
         self.catalog[name] = _CatalogEntry(
             name,
             frontmatter["description"],

@@ -14715,7 +14715,8 @@ Workspace skills are read through no-follow descriptors because worker code can 
 Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed.
 A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
 `skill_manage` refuses a change that would cross one of these limits, so a skill it writes always loads.
-Workspace frontmatter may not use YAML aliases, which a few hundred bytes can nest into gigabytes; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
+The primary parses workspace frontmatter, which worker code can write, with bounded work: at most 8 KiB of frontmatter per skill and 64 KiB per workspace, so a skill with larger frontmatter is refused and skills past the workspace budget are skipped, each with a warning.
+Workspace frontmatter may not use YAML aliases, merge keys, flow collections nested more than 32 levels deep, base-60 integers, or integer literals over 1000 characters, which can expand or take superlinear time to parse; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
 Each workspace skill lives in its own directory, `skills/<name>/SKILL.md`; a `SKILL.md` placed directly in `skills/` is ignored with a warning.
@@ -21688,7 +21689,7 @@ Reads through those descriptors are capped per surface.
 | Surface | Cap | Above the cap |
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
-| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 KiB of frontmatter per skill and 64 KiB per workspace; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace | The file or a skill with a longer name or frontmatter is refused, a longer description or listing is truncated, and skills beyond a budget or the count are skipped, each with a warning |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Delegation event logs | 4 MiB per event, 256 MiB per log | An event that would exceed either cap is refused before it is written, other events stop 1 MiB short of the log cap so the terminal event still fits, and a planted log above them makes the record unreadable; values above 64 KiB already move to artifacts |

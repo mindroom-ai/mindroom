@@ -43,6 +43,7 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
 from mindroom.skill_learning import runner as runner_module
+from mindroom.skill_learning import tools as tools_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
@@ -2228,7 +2229,7 @@ async def test_chat_skill_manage_refuses_a_skills_directory_replaced_by_a_link(t
 def test_deeply_nested_skill_content_is_refused_and_archival_skips_it(tmp_path: Path) -> None:
     """Nesting that overflows libyaml's C stack is invalid YAML to the library, never a crash of the primary."""
     root = tmp_path / "skills"
-    depth = 30_000
+    depth = 3000
     nested = f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n"
     with pytest.raises(library.SkillEditError, match="not a valid YAML mapping"):
         library.create_skill(root, "nested", nested, reserved_names=frozenset(), learner=False)
@@ -2728,6 +2729,84 @@ def test_the_prompt_budget_counts_only_the_skills_loading_reads(tmp_path: Path) 
     edited = LEARNED.replace("1. Run the smoke test.", "1. Run smoke.")
     library.write_skill_file(root, "deploy-checks", "SKILL.md", edited, expected_digest=current.digest, learner=True)
     assert (root / "deploy-checks" / "SKILL.md").read_text() == edited
+
+
+def test_skill_manage_refuses_frontmatter_past_its_parse_caps(tmp_path: Path) -> None:
+    """A skill's frontmatter over the per-skill cap, or one that crosses the workspace budget, is refused."""
+    root = tmp_path / "skills"
+    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
+    oversized = LEARNED.replace("description:", f"note: {'n' * cap}\ndescription:")
+    with pytest.raises(library.SkillEditError, match="frontmatter exceeds"):
+        library.create_skill(root, "deploy-checks", oversized, reserved_names=frozenset(), learner=True)
+    per_skill = cap - 256
+    for index in range(workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill):
+        name = f"a-{index:02d}"
+        _write_skill(root, name, f"---\nname: {name}\ndescription: d\nnote: {'n' * per_skill}\n---\nbody\n")
+    near_cap = LEARNED.replace("description:", f"note: {'n' * per_skill}\ndescription:")
+    with pytest.raises(library.SkillEditError, match="parse budget"):
+        library.create_skill(root, "deploy-checks", near_cap, reserved_names=frozenset(), learner=True)
+    assert not (root / "deploy-checks").exists()
+
+
+def test_the_catalog_reads_the_usage_file_once(tmp_path: Path) -> None:
+    """Ownership comes from one read of the usage file, however many workspace skills load."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    for index in range(5):
+        library.create_skill(
+            root,
+            f"skill-{index}",
+            LEARNED.replace("deploy-checks", f"skill-{index}"),
+            reserved_names=frozenset(),
+            learner=True,
+        )
+    real = library.load_skill_usage
+    reads: list[int] = []
+
+    def counted(root_fd: int) -> dict[str, Any]:
+        reads.append(root_fd)
+        return real(root_fd)
+
+    with patch.object(library, "load_skill_usage", counted):
+        catalog = load_skill_catalog(config, paths, "mind", root)
+    assert len(reads) == 1
+    assert all(catalog.entries[f"skill-{index}"].learned for index in range(5))
+
+
+@pytest.mark.asyncio
+async def test_a_created_skill_is_parsed_off_the_event_loop(tmp_path: Path) -> None:
+    """Parsing long content takes time, so the review's create parses it in a thread like the write."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    threads: list[threading.Thread] = []
+    real = tools_module.parse_skill_markdown
+
+    def recorded(content: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        threads.append(threading.current_thread())
+        return real(content, **kwargs)
+
+    tools = SkillTools(root, {}, frozenset(), progress=ReviewProgress())
+    with patch.object(tools_module, "parse_skill_markdown", recorded):
+        result = json.loads(await tools.skill_manage("create", "deploy-checks", content=LEARNED))
+    assert result["success"], result
+    assert threads
+    assert threading.main_thread() not in threads
+
+
+def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
+    """Directories past the skill count never load, so archival neither parses nor archives them."""
+    root = tmp_path / "skills"
+    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
+    old = datetime.now(UTC) - timedelta(days=90)
+    for index in range(count + 1):
+        name = f"s-{index:03d}"
+        # The learned flag makes a skill the learner's without skill_manage, which refuses the one past the count.
+        _write_skill(root, name, LEARNED.replace("deploy-checks", name))
+        with open_skills_root(root) as root_fd:
+            update_skill_usage(root_fd, name, lambda usage: usage.model_copy(update={"created_at": old}))
+    archived = library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
+    assert len(archived) == count
+    assert (root / f"s-{count:03d}").exists()
 
 
 @pytest.mark.parametrize("change", ["create", "edit"])
