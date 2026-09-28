@@ -238,3 +238,4 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 - **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
+- **16 MiB request bodies** — like every dashboard API route, `/v1` answers 413 to a request body above 16 MiB, including inline image data that MindRoom would ignore anyway

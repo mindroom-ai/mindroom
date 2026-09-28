@@ -5089,6 +5089,7 @@ square_root(144)
 ### Notes
 
 - Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
+- `factorial()` accepts `n` up to 1558, the largest factorial whose digits Python prints under its default integer-to-string limit, and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error payload immediately, so one call cannot hold the process shared by every agent.
 - Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
 ## [`reasoning`]
@@ -5262,7 +5263,8 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, at most 300, and then returns a confirmation string.
+Negative durations and durations above 300 seconds return an error message without waiting.
 `sleep` defaults to primary execution.
 
 ### Configuration
@@ -5287,7 +5289,7 @@ sleep(5)
 
 ### Notes
 
-- `sleep` is useful for deliberate polling loops or staged workflows, but it still ties up the runtime that executes it while the delay is in progress.
+- `sleep` is useful for deliberate polling loops or staged workflows; the wait runs on the event loop, so it holds no thread while the delay is in progress, but the agent's response stays open until it returns.
 - If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
 
 ## Related Docs
@@ -6678,6 +6680,7 @@ read_url("https://docs.mindroom.chat")
 - Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
 - Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
 - Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
+- Each page and redirect hop is requested uncompressed and read up to 2 MiB; a larger page, or one the server compresses anyway, fails instead of being buffered in the primary process.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
@@ -19998,6 +20001,7 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 - **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
+- **16 MiB request bodies** — like every dashboard API route, `/v1` answers 413 to a request body above 16 MiB, including inline image data that MindRoom would ignore anyway
 
 # Architecture
 
@@ -21557,6 +21561,21 @@ A worker isolates unconfined tools that support worker routing (`shell`, `python
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
+
+## Shared primary availability
+
+The primary process runs every agent, the Matrix sync loops, and the dashboard API, so one room message, fetched page, tool call, or HTTP request must not stall or exhaust it for everyone else.
+These bounds hold for trusted and untrusted callers alike, because the cost of one request lands on every other requester of the same process.
+
+| Input | Bound | Above the bound |
+|---|---|---|
+| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because their file parts spool to disk and they enforce their own per-file limit |
+| Explicit Matrix user IDs in message text | Only prefixes within the 255-byte user ID limit are validated, and span overlaps use a sorted search | Mention scanning stays linear in the body length |
+| Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from header data | PNG pixel data is never decoded, so an eXIf chunk after the image data is ignored |
+| `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
+| Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams | The sidecar stays unresolved |
+| `calculator` | `factorial()` up to 1558 and `is_prime()` up to 10**12 | A JSON error payload, returned before any computation |
+| `sleep` | 300 seconds, awaited on the event loop so no thread is held | An error message, returned without waiting |
 
 ## Known gaps
 

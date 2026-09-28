@@ -78,6 +78,21 @@ The rest require the primary runtime and cannot run in a worker (`claude_agent`,
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
+## Shared primary availability
+
+The primary process runs every agent, the Matrix sync loops, and the dashboard API, so one room message, fetched page, tool call, or HTTP request must not stall or exhaust it for everyone else.
+These bounds hold for trusted and untrusted callers alike, because the cost of one request lands on every other requester of the same process.
+
+| Input | Bound | Above the bound |
+|---|---|---|
+| Dashboard API request bodies | 16 MiB, checked against `Content-Length` and while the body streams | 413 before any route parses the body; multipart knowledge uploads are exempt because their file parts spool to disk and they enforce their own per-file limit |
+| Explicit Matrix user IDs in message text | Only prefixes within the 255-byte user ID limit are validated, and span overlaps use a sorted search | Mention scanning stays linear in the body length |
+| Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from header data | PNG pixel data is never decoded, so an eXIf chunk after the image data is ignored |
+| `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
+| Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams | The sidecar stays unresolved |
+| `calculator` | `factorial()` up to 1558 and `is_prime()` up to 10**12 | A JSON error payload, returned before any computation |
+| `sleep` | 300 seconds, awaited on the event loop so no thread is held | An error message, returned without waiting |
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
