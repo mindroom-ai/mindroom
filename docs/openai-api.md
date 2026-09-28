@@ -191,6 +191,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (usage stats are always zeros)
+- `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
 
 Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
 

@@ -638,7 +638,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                     config,
                     runtime_paths,
                     thread_history,
-                    req.user,
                     execution_identity=execution_identity,
                     refresh_scheduler=knowledge_refresh_scheduler,
                 )
@@ -652,7 +651,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                         config,
                         runtime_paths,
                         thread_history,
-                        req.user,
                         execution_identity=execution_identity,
                         refresh_scheduler=knowledge_refresh_scheduler,
                     )
@@ -682,7 +680,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                     config,
                     runtime_paths,
                     thread_history,
-                    req.user,
                     knowledge,
                     execution_identity=execution_identity,
                     refresh_scheduler=knowledge_refresh_scheduler,
@@ -696,7 +693,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                         config,
                         runtime_paths,
                         thread_history,
-                        req.user,
                         knowledge,
                         execution_identity=execution_identity,
                         refresh_scheduler=knowledge_refresh_scheduler,
@@ -740,7 +736,6 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -790,7 +785,6 @@ async def _stream_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1018,7 +1012,6 @@ async def _non_stream_team_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
@@ -1093,7 +1086,7 @@ async def _non_stream_team_completion(
                     response = await team.arun(
                         prepared_team_run.prompt,
                         session_id=session_id,
-                        user_id=user,
+                        user_id=execution_identity.requester_id if execution_identity else None,
                         metadata=prepared_team_run.run_metadata,
                     )
             except Exception:
@@ -1142,7 +1135,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
@@ -1241,7 +1233,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                                 stream=True,
                                 stream_events=True,
                                 session_id=session_id,
-                                user_id=user,
+                                user_id=execution_identity.requester_id if execution_identity else None,
                                 metadata=prepared_team_run.run_metadata,
                             ),
                         ),

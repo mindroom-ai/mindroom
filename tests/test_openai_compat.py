@@ -48,6 +48,7 @@ from mindroom.api.openai_compat import (
     _is_error_response,
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
@@ -1727,7 +1728,6 @@ class TestStreamingCompletion:
                 test_config,
                 _runtime_paths(),
                 None,
-                None,
             )
 
         assert isinstance(response, openai_compat._OpenAIStreamingResponse)
@@ -1782,7 +1782,6 @@ class TestStreamingCompletion:
                 "session-123",
                 test_config,
                 runtime_paths,
-                None,
                 None,
                 None,
                 execution_identity=execution_identity,
@@ -3044,6 +3043,82 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
         yield client
 
 
+def _post_team_completion_capturing_run_user(
+    client: TestClient,
+    *,
+    stream: bool,
+    headers: dict[str, str] | None = None,
+) -> MagicMock:
+    """Post one team completion carrying a spoofed body ``user`` and return the captured ``team.arun``."""
+    mock_team = _make_test_team()
+
+    async def stream_events() -> AsyncIterator[object]:
+        yield TeamContentEvent(content="Team answer")
+
+    async def run() -> TeamRunOutput:
+        return TeamRunOutput(content="Team answer")
+
+    mock_team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
+    with (
+        patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
+        ),
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ),
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            headers=headers or {},
+            json={
+                "model": "team/super_team",
+                "messages": [{"role": "user", "content": "Build it"}],
+                "stream": stream,
+                "user": "@victim:localhost",
+            },
+        )
+    assert response.status_code == 200
+    assert "Team answer" in response.text
+    return mock_team.arun
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_team_run_ignores_request_body_user_without_requester(team_app_client: TestClient, stream: bool) -> None:
+    """The request body ``user`` must not choose the Agno user scope of a team run."""
+    arun = _post_team_completion_capturing_run_user(team_app_client, stream=stream)
+
+    assert arun.call_args.kwargs["user_id"] is None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config: Config, stream: bool) -> None:
+    """A mapped key's canonical requester, never the body ``user``, owns the team run's Agno user scope."""
+    team_config.teams["super_team"].access = ResponderAccessConfig(users=["@alice:localhost"])
+    runtime_paths = _runtime_paths(
+        {
+            "OPENAI_COMPAT_API_KEYS": "alice-key",
+            "OPENAI_COMPAT_API_KEY_REQUESTERS": json.dumps({"alice-key": "@alice:localhost"}),
+        },
+    )
+    persist_entity_accounts(team_config, runtime_paths)
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        arun = _post_team_completion_capturing_run_user(
+            client,
+            stream=stream,
+            headers={"Authorization": "Bearer alice-key"},
+        )
+
+    assert arun.call_args.kwargs["user_id"] == "@alice:localhost"
+
+
 class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
@@ -3326,7 +3401,6 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
-                "@api-user:localhost",
                 execution_identity=execution_identity,
             )
 
@@ -3589,7 +3663,6 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
-                "@api-user:localhost",
                 execution_identity=execution_identity,
             )
 
@@ -4060,7 +4133,6 @@ class TestTeamCompletion:
                 "session-123",
                 team_config,
                 runtime_paths,
-                None,
                 None,
                 execution_identity=execution_identity,
             )
