@@ -96,7 +96,7 @@ def test_upsert_env_values_refuses_symlink_destination(tmp_path: Path) -> None:
     [
         'secret\nMINDROOM_STORAGE_PATH="/tmp/x\nExecStartPre=/bin/sh -c id\n#"',
         "secret\rMATRIX_HOMESERVER=https://attacker.example",
-        "secret MATRIX_HOMESERVER=https://attacker.example",
+        "secret\u2028MATRIX_HOMESERVER=https://attacker.example",
         "secret\x0bMATRIX_HOMESERVER=https://attacker.example",
         "secret\x00",
     ],

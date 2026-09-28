@@ -342,7 +342,7 @@ def _pair_once(responses: list[httpx.Response]) -> cli_connect.PairCompleteResul
 def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path: Path, owner_user_id: str) -> None:
     """A service-supplied owner that is not a Matrix user ID is flagged and never spliced into YAML."""
     result = _pair_once(
-        [httpx.Response(200, json=_START), httpx.Response(200, json={**_CONNECTED, "owner_user_id": owner_user_id})]
+        [httpx.Response(200, json=_START), httpx.Response(200, json={**_CONNECTED, "owner_user_id": owner_user_id})],
     )
     assert result is not None
     assert result.owner_user_id is None

@@ -156,13 +156,8 @@ def _install_service() -> InstallResult:
     unit_path = _get_unit_path()
     unit_name = _get_unit_name()
     try:
-        service_environment = resolve_service_environment(uv_path)
-    except ServiceConfigMissingError as exc:
-        return InstallResult(success=False, message=str(exc))
-
-    try:
-        unit_content = _generate_unit_file(uv_path, service_environment)
-    except ValueError as exc:
+        unit_content = _generate_unit_file(uv_path, resolve_service_environment(uv_path))
+    except (ServiceConfigMissingError, ValueError) as exc:
         return InstallResult(success=False, message=str(exc))
 
     unit_path.parent.mkdir(parents=True, exist_ok=True)

@@ -31,8 +31,8 @@ from mindroom.services.manager import get_service_manager
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
 from mindroom.services.systemd import _get_log_args as _get_systemd_log_args
-from mindroom.services.systemd import _install_service as _install_systemd_service
 from mindroom.services.systemd import _get_service_environment as _get_systemd_service_environment
+from mindroom.services.systemd import _install_service as _install_systemd_service
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
@@ -165,11 +165,11 @@ def test_systemd_unit_runs_mindroom() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        "/tmp/x\nExecStartPre=/bin/sh -c id\n#",
-        "/tmp/x\rExecStartPre=/bin/sh -c id",
-        "/tmp/x\x00",
-        "/tmp/x\x1b[2J",
-        "/tmp/x\x7f",
+        "/srv/mindroom\nExecStartPre=/bin/sh -c id\n#",
+        "/srv/mindroom\rExecStartPre=/bin/sh -c id",
+        "/srv/mindroom\x00",
+        "/srv/mindroom\x1b[2J",
+        "/srv/mindroom\x7f",
     ],
 )
 def test_systemd_unit_refuses_control_characters_in_environment(value: str) -> None:
@@ -189,7 +189,9 @@ def test_systemd_install_reports_an_unwritable_environment_without_touching_the_
         "mindroom.services.systemd",
         find_uv=MagicMock(return_value=Path("/usr/bin/uv")),
         _get_unit_path=MagicMock(return_value=unit_path),
-        resolve_service_environment=MagicMock(return_value={"MINDROOM_STORAGE_PATH": "/tmp/x\nExecStartPre=/bin/id"}),
+        resolve_service_environment=MagicMock(
+            return_value={"MINDROOM_STORAGE_PATH": "/srv/mindroom\nExecStartPre=/bin/id"},
+        ),
         subprocess=systemctl,
     ):
         result = _install_systemd_service()
