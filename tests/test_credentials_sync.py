@@ -4,7 +4,6 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 import pytest
 from structlog.testing import capture_logs
@@ -57,15 +56,35 @@ def _credential_seed_json(service: str = "google_oauth_client") -> str:
     )
 
 
-def _import_notices(events: list[dict[str, Any]], service: str) -> list[dict[str, Any]]:
-    """Extract credential import/update notices for a service."""
+def _isolated_runtime_paths(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file: str = "",
+) -> constants_mod.RuntimePaths:
+    """Build runtime paths from an explicit process env and config-adjacent .env, ignoring os.environ."""
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir(exist_ok=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    return constants_mod.resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={**process_env, SHARED_CREDENTIALS_PATH_ENV: str(credentials_dir)},
+    )
+
+
+def _import_notices(events: list[dict[str, object]]) -> list[dict[str, object]]:
     return [
-        e
-        for e in events
-        if e.get("log_level") == "info"
-        and e.get("service") == service
-        and e.get("event") in ("credential_imported_from_env", "credential_updated_from_env")
+        event for event in events if event["event"] in {"credential_imported_from_env", "credential_updated_from_env"}
     ]
+
+
+def _to_stop(service: str) -> str:
+    return (
+        "remove the variable (and any _FILE variant) from the process environment and .env, "
+        f"or this service's entry from its seed declaration, then DELETE /api/credentials/{service}"
+    )
 
 
 class TestCredentialsSync:
@@ -566,16 +585,21 @@ class TestCredentialsSync:
             ),
         )
 
-        assert len(calls) == 1
-        call = calls[0]
-        assert call["service"] == "google_oauth_client"
-        assert call["credentials"] == {"client_id": "client-id", "client_secret": "client-secret"}
-        assert call["env_vars"] == ["MINDROOM_CREDENTIAL_SEEDS_FILE"]
-        assert (
-            call["stop_instruction_override"]
-            == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_FILE, "
-            "then DELETE /api/credentials/google_oauth_client"
-        )
+        assert calls == [
+            {
+                "service": "google_oauth_client",
+                "credentials": {"client_id": "client-id", "client_secret": "client-secret"},
+                "runtime_paths": constants_mod.resolve_runtime_paths(
+                    config_path=config_path,
+                    storage_path=tmp_path,
+                    process_env={
+                        "OAUTH_CLIENT_ID": "client-id",
+                        "OAUTH_CLIENT_SECRET": "client-secret",
+                    },
+                ),
+                "env_var": "MINDROOM_CREDENTIAL_SEEDS_FILE",
+            },
+        ]
 
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,
@@ -750,7 +774,7 @@ class TestCredentialsSync:
                     "token": "ghp-test-token",
                 },
                 "runtime_paths": runtime_paths,
-                "env_vars": ["GITHUB_TOKEN"],
+                "env_var": "GITHUB_TOKEN",
             },
         ]
 
@@ -1191,371 +1215,154 @@ class TestCredentialsSync:
         openai_files = list(temp_credentials_dir.glob("openai_*.json"))
         assert len(openai_files) == 1
 
-    def test_credential_import_notice_on_first_import(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """First credential import should emit a user-visible notice."""
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-new-key")
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        openai_notices = _import_notices(events, "openai")
-        assert len(openai_notices) == 1
-
-        notice = openai_notices[0]
-        assert notice["event"] == "credential_imported_from_env"
-        assert notice["env_var"] == "OPENAI_API_KEY"
-        assert notice["service"] == "openai"
-        assert (
-            notice["to_stop"]
-            == "remove OPENAI_API_KEY from process environment/.env, then DELETE /api/credentials/openai"
-        )
-        assert "sk-new-key" not in json.dumps(events)
-
-    def test_credential_import_notice_on_value_change(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Changing credential value should emit a notice."""
-        cm = CredentialsManager(base_path=temp_credentials_dir)
-        cm.save_credentials("openai", {"api_key": "sk-old-key", "_source": "env"})
-
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-changed-key")
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        openai_notices = _import_notices(events, "openai")
-        assert len(openai_notices) == 1
-
-        notice = openai_notices[0]
-        assert notice["event"] == "credential_updated_from_env"
-        assert notice["env_var"] == "OPENAI_API_KEY"
-        all_logs = json.dumps(events)
-        assert "sk-old-key" not in all_logs
-        assert "sk-changed-key" not in all_logs
-
-    def test_credential_import_no_notice_when_unchanged(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Unchanged credential value should NOT emit a notice or save."""
-        cm = CredentialsManager(base_path=temp_credentials_dir)
-        original_creds = {"api_key": "sk-same-key", "_source": "env"}
-        cm.save_credentials("openai", original_creds)
-
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-same-key")
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        original_save = CredentialsManager.save_credentials
-        save_calls: list[str] = []
-
-        def tracked_save(self: CredentialsManager, service: str, credentials: dict[str, Any]) -> None:
-            save_calls.append(service)
-            original_save(self, service, credentials)
-
-        monkeypatch.setattr(CredentialsManager, "save_credentials", tracked_save)
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        openai_notices = _import_notices(events, "openai")
-        assert len(openai_notices) == 0
-
-        openai_unchanged_events = [
-            e for e in events if e["event"] == "credential_env_sync_unchanged" and e["service"] == "openai"
-        ]
-        assert len(openai_unchanged_events) == 1
-
-        assert "openai" not in save_calls
-        assert cm.get_api_key("openai") == "sk-same-key"
-
-    def test_credential_import_notice_values_never_logged(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Credential values should NEVER appear in any log output."""
-        secret_value = "sk-super-secret-value-12345"  # noqa: S105
-        monkeypatch.setenv("ANTHROPIC_API_KEY", secret_value)
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        all_log_text = json.dumps(events)
-        assert secret_value not in all_log_text
-
     @pytest.mark.parametrize(
-        ("process_env_value", "env_file_value", "expected_source"),
+        ("process_env", "env_file", "expected_source"),
         [
-            ("sk-process-env", None, "process_env"),
-            (None, "sk-env-file", "env_file"),
-            ("sk-process-env", "sk-env-file", "process_env_overrides_env_file"),
+            ({"OPENAI_API_KEY": "sk-secret"}, "", "process_env"),
+            ({}, "OPENAI_API_KEY=sk-secret\n", "env_file"),
+            ({"OPENAI_API_KEY": "sk-secret"}, "OPENAI_API_KEY=sk-other\n", "process_env_overrides_env_file"),
         ],
     )
-    def test_credential_import_notice_distinguishes_env_source(
+    def test_first_import_logs_notice_naming_variable_and_source(
         self,
         tmp_path: Path,
-        process_env_value: str | None,
-        env_file_value: str | None,
+        process_env: dict[str, str],
+        env_file: str,
         expected_source: str,
     ) -> None:
-        """Notice should distinguish process env vs .env file as source."""
-        config_dir = tmp_path / "cfg"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        credentials_dir = tmp_path / "credentials"
-        credentials_dir.mkdir()
+        """A first import logs one notice with its variable, source, and stop path, but never the value."""
+        runtime_paths = _isolated_runtime_paths(tmp_path, process_env, env_file)
 
-        config_path = config_dir / "config.yaml"
-        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        with capture_logs() as events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
 
-        process_env = {}
-        if process_env_value:
-            process_env["OPENAI_API_KEY"] = process_env_value
-        process_env[SHARED_CREDENTIALS_PATH_ENV] = str(credentials_dir)
+        assert _import_notices(events) == [
+            {
+                "event": "credential_imported_from_env",
+                "log_level": "info",
+                "service": "openai",
+                "env_var": "OPENAI_API_KEY",
+                "source": expected_source,
+                "to_stop": _to_stop("openai"),
+            },
+        ]
+        assert "sk-secret" not in json.dumps(events)
+        assert "sk-other" not in json.dumps(events)
 
-        if env_file_value:
-            (config_dir / ".env").write_text(
-                f"OPENAI_API_KEY={env_file_value}\n{SHARED_CREDENTIALS_PATH_ENV}={credentials_dir}\n",
-                encoding="utf-8",
-            )
-
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path,
-            process_env=process_env,
+    def test_changed_value_logs_update_notice(self, tmp_path: Path) -> None:
+        """A changed env value logs an update notice without either value."""
+        runtime_paths = _isolated_runtime_paths(tmp_path, {"OPENAI_API_KEY": "sk-new-secret"})
+        CredentialsManager(base_path=tmp_path / "credentials").save_credentials(
+            "openai",
+            {"api_key": "sk-old-secret", "_source": "env"},
         )
 
         with capture_logs() as events:
             sync_env_to_credentials(runtime_paths=runtime_paths)
 
-        openai_notices = _import_notices(events, "openai")
-        assert len(openai_notices) == 1
-        notice = openai_notices[0]
-        assert notice["source"] == expected_source
+        assert _import_notices(events) == [
+            {
+                "event": "credential_updated_from_env",
+                "log_level": "info",
+                "service": "openai",
+                "env_var": "OPENAI_API_KEY",
+                "source": "process_env",
+                "to_stop": _to_stop("openai"),
+            },
+        ]
+        assert "sk-new-secret" not in json.dumps(events)
+        assert "sk-old-secret" not in json.dumps(events)
 
-    def test_credential_import_notice_names_file_var_correctly(
+    def test_unchanged_value_is_not_saved_or_announced(
         self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Notice should name GITHUB_TOKEN_FILE when that var provides the value, not GITHUB_TOKEN."""
-        token_file = temp_credentials_dir.parent / "github-token"
-        token_file.write_text("ghp-file-token\n", encoding="utf-8")
-
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.setenv("GITHUB_TOKEN_FILE", str(token_file))
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        github_notices = _import_notices(events, "github_private")
-        assert len(github_notices) == 1
-        notice = github_notices[0]
-        assert notice["env_var"] == "GITHUB_TOKEN_FILE"
-        assert (
-            notice["to_stop"] == "remove GITHUB_TOKEN_FILE from process environment/.env, "
-            "then DELETE /api/credentials/github_private"
-        )
-
-    def test_credential_import_notice_for_adc_path_change(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """ADC path change should emit a notice."""
-        cm = CredentialsManager(base_path=temp_credentials_dir)
-        cm.save_credentials(
-            "google_vertex_adc",
-            {"application_credentials_path": "/old/path.json", "_source": "env"},
-        )
-
-        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/new/path.json")
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        adc_notices = _import_notices(events, "google_vertex_adc")
-        assert len(adc_notices) == 1
-        notice = adc_notices[0]
-        assert notice["event"] == "credential_updated_from_env"
-        assert notice["env_var"] == "GOOGLE_APPLICATION_CREDENTIALS"
-        assert (
-            notice["to_stop"] == "remove GOOGLE_APPLICATION_CREDENTIALS from process environment/.env, "
-            "then DELETE /api/credentials/google_vertex_adc"
-        )
-
-    def test_credential_import_notice_for_declared_seeds(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Declared credential seeds should emit notices naming the seed env var and service."""
-        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
-        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
-        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        seed_notices = _import_notices(events, "google_oauth_client")
-        assert len(seed_notices) == 1
-        notice = seed_notices[0]
-        assert notice["env_var"] == "MINDROOM_CREDENTIAL_SEEDS_JSON"
-        assert (
-            notice["to_stop"] == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_JSON, "
-            "then DELETE /api/credentials/google_oauth_client"
-        )
-
-    @pytest.mark.parametrize(
-        ("file_var", "service", "existing_key"),
-        [
-            ("GITHUB_TOKEN_FILE", "github_private", None),
-            ("GITHUB_TOKEN_FILE", "github_private", "ghp-existing"),
-            ("EMBEDDER_API_KEY_FILE", "embedder", None),
-            ("EMBEDDER_API_KEY_FILE", "embedder", "sk-existing"),
-        ],
-    )
-    def test_credential_import_rejects_empty_secret_files(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        file_var: str,
-        service: str,
-        existing_key: str | None,
-    ) -> None:
-        """Empty or whitespace-only secret files should not create credentials."""
-        cm = CredentialsManager(base_path=temp_credentials_dir)
-        if existing_key:
-            if service == "github_private":
-                cm.save_credentials(service, {"username": "x-access-token", "token": existing_key, "_source": "env"})
-            else:
-                cm.save_credentials(service, {"api_key": existing_key, "_source": "env"})
-
-        empty_file = temp_credentials_dir.parent / "empty-key"
-        empty_file.write_text("   \n  \t  \n", encoding="utf-8")
-
-        base_var = file_var.removesuffix("_FILE")
-        monkeypatch.delenv(base_var, raising=False)
-        monkeypatch.setenv(file_var, str(empty_file))
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        notices = _import_notices(events, service)
-        assert len(notices) == 0
-
-        if existing_key:
-            if service == "github_private":
-                creds = cm.load_credentials(service)
-                assert creds is not None
-                assert creds["token"] == existing_key
-            else:
-                assert cm.get_api_key(service) == existing_key
-        else:
-            assert cm.load_credentials(service) is None
-
-    def test_credential_import_notice_includes_file_fallback_when_both_set(
-        self,
-        temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Stop instructions should mention both NAME and NAME_FILE when both are configured."""
-        token_file = temp_credentials_dir.parent / "github-token-file"
-        token_file.write_text("ghp-from-file\n", encoding="utf-8")
-
-        monkeypatch.setenv("GITHUB_TOKEN", "ghp-from-direct")
-        monkeypatch.setenv("GITHUB_TOKEN_FILE", str(token_file))
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
-        )
-
-        with capture_logs() as events:
-            sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        github_notices = _import_notices(events, "github_private")
-        assert len(github_notices) == 1
-        notice = github_notices[0]
-        assert notice["env_var"] == "GITHUB_TOKEN"
-        assert (
-            notice["to_stop"] == "remove GITHUB_TOKEN and GITHUB_TOKEN_FILE from process environment/.env, "
-            "then DELETE /api/credentials/github_private"
-        )
-
-    def test_credential_import_notice_for_seed_declared_in_both_variables(
-        self,
-        temp_credentials_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Seed declared in both JSON and FILE variables should show both in stop instruction."""
-        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
-        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
-
-        seed_file = tmp_path / "seeds.json"
-        seed_file.write_text(_credential_seed_json(), encoding="utf-8")
-
-        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
-        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_FILE", str(seed_file))
-
-        runtime_paths = _runtime_paths(
-            temp_credentials_dir.parent,
-            shared_credentials_dir=temp_credentials_dir,
+        """An unchanged env value neither rewrites the credential file nor logs a notice."""
+        runtime_paths = _isolated_runtime_paths(tmp_path, {"OPENAI_API_KEY": "sk-same"})
+        CredentialsManager(base_path=tmp_path / "credentials").save_credentials(
+            "openai",
+            {"api_key": "sk-same", "_source": "env"},
+        )
+        saved: list[str] = []
+        monkeypatch.setattr(
+            CredentialsManager,
+            "save_credentials",
+            lambda _self, service, _creds: saved.append(service),
         )
 
         with capture_logs() as events:
             sync_env_to_credentials(runtime_paths=runtime_paths)
 
-        seed_notices = _import_notices(events, "google_oauth_client")
-        assert len(seed_notices) >= 1
-        notice = seed_notices[0]
-        assert (
-            notice["to_stop"] == "remove the google_oauth_client entry from MINDROOM_CREDENTIAL_SEEDS_FILE "
-            "and MINDROOM_CREDENTIAL_SEEDS_JSON, then DELETE /api/credentials/google_oauth_client"
+        assert saved == []
+        assert _import_notices(events) == []
+
+    @pytest.mark.parametrize("existing_key", [None, "sk-existing"])
+    def test_blank_secret_file_is_not_imported(self, tmp_path: Path, existing_key: str | None) -> None:
+        """A blank NAME_FILE neither creates a credential nor overwrites a stored one."""
+        secret_file = tmp_path / "openai-key"
+        secret_file.write_text("  \n\t\n", encoding="utf-8")
+        runtime_paths = _isolated_runtime_paths(tmp_path, {"OPENAI_API_KEY_FILE": str(secret_file)})
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        if existing_key is not None:
+            manager.save_credentials("openai", {"api_key": existing_key, "_source": "env"})
+
+        with capture_logs() as events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        assert _import_notices(events) == []
+        assert manager.get_api_key("openai") == existing_key
+
+    def test_empty_name_with_readable_file_names_file_variable(self, tmp_path: Path) -> None:
+        """An empty NAME falls back to NAME_FILE, and the notice names NAME_FILE and its source."""
+        secret_file = tmp_path / "openai-key"
+        secret_file.write_text("sk-from-file\n", encoding="utf-8")
+        runtime_paths = _isolated_runtime_paths(
+            tmp_path,
+            {"OPENAI_API_KEY": ""},
+            f"OPENAI_API_KEY_FILE={secret_file}\n",
         )
+
+        with capture_logs() as events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        assert [(notice["env_var"], notice["source"]) for notice in _import_notices(events)] == [
+            ("OPENAI_API_KEY_FILE", "env_file"),
+        ]
+        assert CredentialsManager(base_path=tmp_path / "credentials").get_api_key("openai") == "sk-from-file"
+
+    def test_valid_name_ignores_unresolvable_file_variable(self, tmp_path: Path) -> None:
+        """A non-empty NAME is imported without resolving a broken NAME_FILE path."""
+        runtime_paths = _isolated_runtime_paths(
+            tmp_path,
+            {"OPENAI_API_KEY": "sk-direct", "OPENAI_API_KEY_FILE": "~mindroom-nonexistent-user/key"},
+        )
+
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        assert CredentialsManager(base_path=tmp_path / "credentials").get_api_key("openai") == "sk-direct"
+
+    def test_seed_notice_names_declaration_variable(self, tmp_path: Path) -> None:
+        """A seeded service notice names the declaration variable that supplied the seed."""
+        runtime_paths = _isolated_runtime_paths(
+            tmp_path,
+            {
+                "OAUTH_CLIENT_ID": "client-id",
+                "OAUTH_CLIENT_SECRET": "client-secret",
+                "MINDROOM_CREDENTIAL_SEEDS_JSON": _credential_seed_json(),
+            },
+        )
+
+        with capture_logs() as events:
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        assert _import_notices(events) == [
+            {
+                "event": "credential_imported_from_env",
+                "log_level": "info",
+                "service": "google_oauth_client",
+                "env_var": "MINDROOM_CREDENTIAL_SEEDS_JSON",
+                "source": "process_env",
+                "to_stop": _to_stop("google_oauth_client"),
+            },
+        ]

@@ -457,19 +457,13 @@ Set the API key for each provider you use in `config.yaml`:
 For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
 A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
-All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
-
-**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, supported provider and bootstrap environment variables from your process environment or config-adjacent `.env` file are automatically stored in the shared credentials store.
-MindRoom imports these variables: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
-All API key and token variables (except `GOOGLE_APPLICATION_CREDENTIALS`) also accept a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE`), and the actual source variable name appears in notices and stop instructions.
-Credential seeds can be declared via `MINDROOM_CREDENTIAL_SEEDS_JSON` (inline JSON) or `MINDROOM_CREDENTIAL_SEEDS_FILE` (path to a JSON file); see the Credential Seeds section for details.
-On first import or when a value changes, MindRoom logs which variable was imported, where it came from (process environment or `.env`), and the credential service name it was stored under.
-When a variable is set in both sources, the process environment value takes precedence and the `.env` value is overridden.
-Unchanged values on subsequent runs stay quiet.
-Values are never printed or logged.
-To stop automatic import: remove the variable from your environment or `.env` file (or both if set in both places, and including any configured `_FILE` fallback), then delete the stored credential via the dashboard Credentials tab or API endpoint `DELETE /api/credentials/{service}`.
-Credentials set through the dashboard (marked `_source=ui`) and legacy credentials with no source marker are never overwritten by environment sync.
+**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`), read only when the plain variable is unset or empty; see [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
+Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
+When a stored value is first imported or changes, MindRoom logs one notice naming the service, the variable that supplied it, and whether it came from the process environment, `.env`, or the process environment overriding `.env`.
+Values are never logged, and unchanged values are neither announced nor rewritten.
+To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env` (for a seed, remove that service's entry from each declaration that lists it), then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Environment sync never overwrites credentials saved through the dashboard (`_source=ui`) or legacy credentials without a source marker.
 
 ### Codex CLI Subscription Auth
 
@@ -1004,6 +998,8 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
+To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
 ## Credential Storage Encryption
 
