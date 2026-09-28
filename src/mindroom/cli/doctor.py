@@ -611,7 +611,10 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
+    api_key = config.memory.llm.config.get("api_key") or (
+        get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    )
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",

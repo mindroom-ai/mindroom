@@ -3654,6 +3654,34 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
 
+    def test_memory_llm_explicit_key_is_validated_without_env_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates the explicit memory LLM key Mem0 uses instead of asking for the shared one."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            _VALID_CONFIG
+            + "memory:\n  llm:\n    provider: openai\n    config:\n      model: m\n      api_key: sk-mem\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        sent_headers: list[dict[str, str]] = []
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.httpx.get",
+            lambda *_a, headers=None, **_kw: sent_headers.append(headers or {}) or httpx.Response(200, json={}),
+        )
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert "Memory LLM: openai/m API key valid" in result.output
+        assert {"Authorization": "Bearer sk-mem"} in sent_headers
+
     def test_memory_llm_openai_base_url_used_when_host_absent(
         self,
         tmp_path: Path,
