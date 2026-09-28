@@ -587,7 +587,7 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
 def _should_note_missing_administrator(config_path: Path, owner_user_id: str) -> bool:
     """Return True when the config's administrators list omits the user.
 
-    Return False when the config cannot be read, is not a mapping, or has a non-list administrators value.
+    Return False when the config cannot be read, does not load as a mapping, or has a non-list administrators value.
     A missing or null administrators value counts as an empty list.
     """
     try:
