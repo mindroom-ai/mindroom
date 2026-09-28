@@ -466,7 +466,7 @@ describe('SettingsPage', () => {
       expect(screen.getByText(/Deletion audit record:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/After successful account deletion, a deletion audit record retains your account UUID/)).toBeInTheDocument()
       expect(screen.getByText(/External data:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/Account cleanup removes your hosted instances with their Matrix data and persistent volumes, but does not delete the authentication user/)).toBeInTheDocument()
+      expect(screen.getByText(/Account cleanup removes your hosted instances with their Matrix data and persistent volumes and deletes your login, but does not delete Stripe customer or subscription records/)).toBeInTheDocument()
     })
   })
 

@@ -369,7 +369,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
-                <strong>External data:</strong> Account cleanup removes your hosted instances with their Matrix data and persistent volumes, but does not delete the authentication user, Stripe customer or subscription records, or copies held by other Matrix homeservers. Separate processor and operator policies apply.
+                <strong>External data:</strong> Account cleanup removes your hosted instances with their Matrix data and persistent volumes and deletes your login, but does not delete Stripe customer or subscription records or copies held by other Matrix homeservers. Separate processor and operator policies apply.
               </span>
             </div>
           </div>
