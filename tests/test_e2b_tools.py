@@ -94,11 +94,7 @@ def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
     def build(workspace_root: Path | None) -> MindRoomE2BTools:
-        return MindRoomE2BTools(
-            api_key="test",
-            tool_output_workspace_root=workspace_root,
-            tool_output_trusted_root=workspace_root,
-        )
+        return MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
 
     return build
 
@@ -150,81 +146,6 @@ def test_registry_injects_workspace_into_model_entrypoints(
     assert upload("report.csv") == "/home/user/report.csv"
     assert "Error uploading file" in _error(upload(str(outside / "secret.env")))
     assert _files(tool).stored == {"report.csv": b"a,b\n"}
-
-
-@pytest.mark.parametrize("workspace_path", ["agents/writer/workspace", "private_instances/owner/writer/workspace"])
-@pytest.mark.parametrize("swap_workspace", [False, True], ids=["ancestor", "workspace"])
-@pytest.mark.parametrize("publication", ["download", "png", "chart"])
-def test_registered_output_rejects_workspace_ancestor_swap(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001
-    tmp_path: Path,
-    workspace_path: str,
-    swap_workspace: bool,
-    publication: str,
-) -> None:
-    """E2B publishers cannot follow a replaced workspace or ancestor."""
-    runtime = test_runtime_paths(tmp_path / "runtime")
-    workspace = runtime.storage_root / workspace_path
-    workspace.mkdir(parents=True)
-    tool = get_tool_by_name(
-        "e2b",
-        runtime,
-        credential_overrides={"api_key": "test"},
-        disable_sandbox_proxy=True,
-        tool_output_workspace_root=workspace,
-        worker_target=None,
-    )
-    assert isinstance(tool, MindRoomE2BTools)
-    _files(tool).stored["result.txt"] = b"report"
-    tool.last_execution = Execution(results=[Result(chart=_CHART, png=base64.b64encode(_PNG_BYTES).decode())])
-    replaced = workspace if swap_workspace else workspace.parent
-    replaced.rename(replaced.with_name(f"{replaced.name}-original"))
-    victim = tmp_path / f"victim-{publication}-{swap_workspace}"
-    victim.mkdir()
-    if not swap_workspace:
-        (victim / "workspace").mkdir()
-    replaced.symlink_to(victim, target_is_directory=True)
-
-    if publication == "download":
-        assert _error(tool.download_file_from_sandbox("result.txt", "results/report.txt")).startswith(
-            "Error downloading file:",
-        )
-        output = "results/report.txt"
-    elif publication == "png":
-        result = tool.download_png_result(Agent(), output_path="results/plot.png")
-        assert "saving it failed" in result.content
-        output = "results/plot.png"
-    else:
-        result = tool.download_chart_data(Agent(), output_path="results/chart.json", add_as_artifact=False)
-        assert "Error extracting chart data" in result.content
-        output = "results/chart.json"
-    assert not (victim / ("" if swap_workspace else "workspace") / output).exists()
-
-
-def test_registered_output_does_not_recreate_deleted_workspace(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001
-    tmp_path: Path,
-) -> None:
-    """E2B output fails closed when its authorized workspace has been removed."""
-    runtime = test_runtime_paths(tmp_path / "runtime")
-    workspace = runtime.storage_root / "agents" / "writer" / "workspace"
-    workspace.mkdir(parents=True)
-    tool = get_tool_by_name(
-        "e2b",
-        runtime,
-        credential_overrides={"api_key": "test"},
-        disable_sandbox_proxy=True,
-        tool_output_workspace_root=workspace,
-        worker_target=None,
-    )
-    assert isinstance(tool, MindRoomE2BTools)
-    _files(tool).stored["result.txt"] = b"report"
-    workspace.rmdir()
-
-    result = tool.download_file_from_sandbox("result.txt", "reports/result.txt")
-
-    assert _error(result).startswith("Error downloading file:")
-    assert not workspace.exists()
 
 
 def test_upload_reads_workspace_relative_file(

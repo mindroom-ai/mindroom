@@ -64,7 +64,7 @@ def test_output_file_schema_matches_execution_preparation(
     )
     if custom_parameters:
         function.parameters = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
-    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path))
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
     original_entrypoint = function.entrypoint
     expected = function.model_copy(deep=True)
     expected.process_entrypoint(strict=strict)
@@ -101,11 +101,11 @@ def test_output_file_schema_reuses_metadata_without_sharing_execution_owners(
     first_owner, second_owner = _EchoTool("first"), _EchoTool("second")
     first = wrap_function_for_output_files(
         Function(name="echo", entrypoint=first_owner.echo if bound_method else _echo),
-        ToolOutputFilePolicy(workspace_root=tmp_path / "first", trusted_root=tmp_path / "first"),
+        ToolOutputFilePolicy(workspace_root=tmp_path / "first"),
     )
     second = wrap_function_for_output_files(
         Function(name="echo", entrypoint=second_owner.echo if bound_method else _echo),
-        ToolOutputFilePolicy(workspace_root=tmp_path / "second", trusted_root=tmp_path / "second"),
+        ToolOutputFilePolicy(workspace_root=tmp_path / "second"),
     )
     first_schema = cached_processed_schema(first, strict=False)
     assert first_schema is not None
@@ -126,7 +126,7 @@ def test_output_file_schema_reuses_metadata_without_sharing_execution_owners(
 def test_output_file_schema_cache_does_not_retain_tool_owner_or_policy(tmp_path: Path) -> None:
     """Cached prompt metadata must not extend a requester's execution-state lifetime."""
     owner = _EchoTool("private")
-    policy = ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path)
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path)
     owner_ref, policy_ref = weakref.ref(owner), weakref.ref(policy)
     function = wrap_function_for_output_files(Function(name="echo", entrypoint=owner.echo), policy)
 
@@ -150,7 +150,7 @@ def test_output_file_schema_does_not_retain_dynamic_closure(tmp_path: Path) -> N
 
         function = wrap_function_for_output_files(
             Function(name="dynamic", entrypoint=dynamic),
-            ToolOutputFilePolicy(tmp_path, tmp_path),
+            ToolOutputFilePolicy(tmp_path),
         )
         return function, weakref.ref(owner)
 
@@ -210,7 +210,7 @@ def test_output_file_schema_keeps_default_captured_owners_out_of_cache(
     assert dynamic.__closure__ is None
     function = wrap_function_for_output_files(
         Function(name="dynamic", entrypoint=dynamic),
-        ToolOutputFilePolicy(tmp_path, tmp_path),
+        ToolOutputFilePolicy(tmp_path),
     )
 
     assert cached_processed_schema(function, strict=False) is not None
@@ -235,7 +235,7 @@ def test_schema_cache_does_not_retain_user_input_annotation_types(tmp_path: Path
 
         ask.__annotations__["answer"] = Answer
         function = Function(name="ask", entrypoint=ask, requires_user_input=True, user_input_fields=["answer"])
-        return wrap_function_for_output_files(function, ToolOutputFilePolicy(tmp_path, tmp_path)), weakref.ref(owner)
+        return wrap_function_for_output_files(function, ToolOutputFilePolicy(tmp_path)), weakref.ref(owner)
 
     function, owner_ref = build_function()
     snapshot = cached_processed_schema(function, strict=False)
@@ -307,7 +307,7 @@ def test_worker_proxy_schema_reuse(
 
     def build(owner: _EchoTool) -> Function:
         function = Function(name="echo", entrypoint=owner.echo)
-        policy = ToolOutputFilePolicy(tmp_path / owner.prefix, tmp_path / owner.prefix)
+        policy = ToolOutputFilePolicy(tmp_path / owner.prefix)
         if output_order == "before":
             wrap_function_for_output_files(function, policy)
         function = wrap_proxy(function, "example", "echo", runtime_paths=runtime_paths, credentials_manager=None)

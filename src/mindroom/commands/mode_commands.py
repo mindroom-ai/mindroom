@@ -138,7 +138,6 @@ def handle_mode_command(  # noqa: PLR0911 - independent authorization and deploy
             config,
             runtime_paths=runtime_paths,
             state_storage_path=root,
-            lexical_state_storage_path=storage.lexical_state_root,
             use_state_storage_path=storage.execution.policy.private_workspace_enabled,
         )
         if workspace is None:

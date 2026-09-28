@@ -61,12 +61,7 @@ class DesktopShellOutput(ShellOutputCapture):
 
     def __init__(self, directory: str) -> None:
         super().__init__(
-            ShellOutputDestination(
-                workspace_root=directory,
-                trusted_root=directory,
-                path="",
-                max_bytes=MAX_SHELL_OUTPUT_BYTES,
-            ),
+            ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES),
             None,
         )
         self.exit_code: int | None = None

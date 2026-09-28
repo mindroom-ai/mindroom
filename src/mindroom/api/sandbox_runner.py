@@ -863,7 +863,6 @@ def _resolve_entrypoint(
             allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
             tool_output_workspace_root=tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-            tool_output_trusted_root=tool_output_workspace_root,
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -1725,7 +1724,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     if not isinstance(workspace_root, Path):
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=workspace_root[0], failure_kind=workspace_root[1])
 
-    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths, trusted_root=workspace_root)
+    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
     path_error = validate_output_path(policy, output_path)
     if path_error is not None:
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=path_error, failure_kind="tool")

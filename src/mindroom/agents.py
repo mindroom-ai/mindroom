@@ -562,7 +562,6 @@ def _build_registered_agent_tool(
     agent_name: str,
     tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
-    output_workspace_path: Path | None,
     tool_output_auto_save_threshold_bytes: int,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
@@ -592,7 +591,7 @@ def _build_registered_agent_tool(
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         allowed_shared_services=allowed_shared_services,
-        tool_output_workspace_root=output_workspace_path,
+        tool_output_workspace_root=workspace_path,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )
@@ -654,12 +653,11 @@ def _agent_tool_output_file_policy(
     tool_output_auto_save_threshold_bytes: int,
 ) -> ToolOutputFilePolicy | None:
     """Resolve the shared output-file policy for one agent's in-process tools."""
-    if agent_runtime.workspace is None:
+    if agent_runtime.tool_base_dir is None:
         return None
     return ToolOutputFilePolicy.from_runtime(
-        agent_runtime.workspace.lexical_root,
+        agent_runtime.tool_base_dir,
         runtime_paths,
-        trusted_root=runtime_paths.storage_root,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
     )
 
@@ -890,7 +888,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_name,
         tool_config_overrides,
         agent_runtime.tool_base_dir,
-        agent_runtime.workspace.lexical_root if agent_runtime.workspace is not None else None,
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.execution.is_private,
         execution_identity,

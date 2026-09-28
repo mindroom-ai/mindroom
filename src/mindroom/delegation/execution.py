@@ -570,7 +570,6 @@ def _prepare_delegation_output(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=storage.state_root,
-        lexical_state_storage_path=storage.lexical_state_root,
         use_state_storage_path=storage.execution.policy.private_workspace_enabled,
     )
     if workspace is None:
@@ -580,9 +579,8 @@ def _prepare_delegation_output(
             }
         return None
     policy = ToolOutputFilePolicy.from_runtime(
-        workspace.lexical_root,
+        workspace.root,
         runtime_paths,
-        trusted_root=runtime_paths.storage_root,
         auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
     return prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)

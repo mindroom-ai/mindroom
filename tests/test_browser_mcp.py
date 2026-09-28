@@ -204,10 +204,7 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
         )
 
     function = Function(name="browser_snapshot", entrypoint=result)
-    wrap_function_for_output_files(
-        function,
-        ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path, auto_save_threshold_bytes=5),
-    )
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5))
     output = await function.entrypoint(mindroom_output_path=path)
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:

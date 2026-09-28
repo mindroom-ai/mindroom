@@ -9,7 +9,7 @@ import os
 import signal
 import tempfile
 import time
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -19,38 +19,12 @@ from agno.tools.function import FunctionCall
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
 from mindroom.shell_execution import kill_all_records, run_command
-from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell_output_capture import ShellOutputDestination
 from mindroom.shell_supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
-
-
-def test_capture_rejects_workspace_swap_after_serialization(tmp_path: Path) -> None:
-    """Supervisor transport retains the root that rejects a later workspace swap."""
-    workspace = tmp_path / "agents/writer/workspace"
-    workspace.mkdir(parents=True)
-    destination = ShellOutputDestination.from_payload(
-        {"workspace_root": str(workspace), "path": "report.txt", "max_bytes": 1024, "trusted_root": str(tmp_path)},
-    )
-    assert destination is not None
-    restored = ShellOutputDestination.from_payload(asdict(destination))
-    assert restored is not None
-    workspace.rename(workspace.with_name("workspace-original"))
-    victim = tmp_path / "victim"
-    victim.mkdir()
-    workspace.symlink_to(victim, target_is_directory=True)
-    capture = ShellOutputCapture(restored, cwd=None)
-    try:
-        capture.stdout.append("report")
-        capture.stdout.reached_eof = capture.stderr.reached_eof = True
-        result = json.loads(capture.publish(0))
-        assert result["mindroom_tool_output"]["status"] == "error"
-        assert not (victim / "report.txt").exists()
-    finally:
-        capture.close()
-
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -69,7 +43,7 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
+        storage_path=tmp_path / "storage",
         process_env={},
     )
     try:
@@ -215,10 +189,7 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
             process_env={},
         ),
     )
-    wrap_toolkit_for_output_files(
-        tool,
-        ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path, max_bytes=60000),
-    )
+    wrap_toolkit_for_output_files(tool, ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
     destination = tmp_path / "existing.txt"
     destination.write_text("keep existing")
     result = await FunctionCall(
@@ -347,7 +318,7 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         cwd=str(tmp_path),
         tail=100,
         timeout=0,
-        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
     )
     assert result.handle is not None
     record = registry[result.handle]
@@ -391,7 +362,7 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
             cwd=str(tmp_path),
             tail=100,
             timeout=30,
-            output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "never.txt", 10000),
+            output_destination=ShellOutputDestination(str(tmp_path), "never.txt", 10000),
         ),
     )
     await spawning.wait()
@@ -494,7 +465,7 @@ async def test_reader_failure_never_publishes_partial_output(
         cwd=str(tmp_path),
         tail=100,
         timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "partial.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
     )
     if result.handle is not None:
         record = registry[result.handle]
@@ -525,7 +496,7 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
         cwd=str(tmp_path),
         tail=100,
         timeout=30,
-        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "output.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), "output.txt", 10000),
     )
     assert result.message.startswith("Error:")
     assert "Cannot create capture spool" in result.message
@@ -569,7 +540,7 @@ async def test_publication_io_failure_settles_capture(
         cwd=str(tmp_path),
         tail=100,
         timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 10000),
+        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
     )
     if result.handle is not None:
         record = registry[result.handle]
@@ -677,7 +648,7 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         cwd=str(tmp_path),
         tail=100,
         timeout=0,
-        output_destination=ShellOutputDestination(str(tmp_path), str(tmp_path), "missing.txt", 3000000),
+        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 3000000),
     )
     assert result.handle is not None
     record = registry[result.handle]

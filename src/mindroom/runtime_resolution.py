@@ -77,7 +77,6 @@ class ResolvedAgentStorage:
 
     execution: ResolvedAgentExecution
     state_root: Path
-    lexical_state_root: Path
     session_state_root: Path
 
 
@@ -100,22 +99,20 @@ def _knowledge_refresh_enabled(
     return file_watch_enabled or has_git_sync
 
 
-def _resolve_private_scope_roots(
+def _resolve_private_scope_root(
     *,
     runtime_paths: RuntimePaths,
     worker_key: str,
-) -> tuple[Path, Path]:
-    """Return lexical and canonical requester-scoped roots, rejecting symlink escapes."""
-    lexical_root = private_instance_scope_root_path(
+) -> Path:
+    """Return one canonical requester-scoped private root and reject symlink escapes."""
+    return resolve_relative_path_within_root(
         runtime_paths.storage_root,
-        worker_key=worker_key,
-    )
-    resolved_root = resolve_relative_path_within_root(
-        runtime_paths.storage_root,
-        lexical_root.relative_to(runtime_paths.storage_root.expanduser().resolve()),
+        private_instance_scope_root_path(
+            runtime_paths.storage_root,
+            worker_key=worker_key,
+        ).relative_to(runtime_paths.storage_root.expanduser().resolve()),
         field_name="Private scope root",
     )
-    return lexical_root, resolved_root
 
 
 def resolve_private_requester_scope_root(
@@ -135,10 +132,25 @@ def resolve_private_requester_scope_root(
     if requester_worker_key is None:
         msg = "Requester-scoped private root requires a worker key"
         raise ValueError(msg)
-    return _resolve_private_scope_roots(
+    return _resolve_private_scope_root(
         runtime_paths=runtime_paths,
         worker_key=requester_worker_key,
-    )[1]
+    )
+
+
+def _resolved_private_state_root(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_key: str,
+    agent_name: str,
+) -> Path:
+    """Return one canonical private-instance state root and reject symlink escapes."""
+    return resolve_relative_path_within_root(
+        _resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key),
+        agent_name,
+        field_name="Private state root",
+        root_label="private scope root",
+    )
 
 
 def resolve_agent_execution(
@@ -215,7 +227,6 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
-        lexical_state_storage_path=resolved_storage.lexical_state_root,
         use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
         create=create,
     )
@@ -277,27 +288,19 @@ def resolve_agent_storage(
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
             raise ValueError(msg)
-        lexical_scope_root, scope_root = _resolve_private_scope_roots(
+        state_root = _resolved_private_state_root(
             runtime_paths=runtime_paths,
             worker_key=worker_key,
-        )
-        lexical_state_root = lexical_scope_root / agent_name
-        state_root = resolve_relative_path_within_root(
-            scope_root,
-            agent_name,
-            field_name="Private state root",
-            root_label="private scope root",
+            agent_name=agent_name,
         )
     else:
-        lexical_state_root = resolve_agent_state_storage_path(
+        state_root = resolve_agent_state_storage_path(
             agent_name=agent_name,
             base_storage_path=runtime_paths.storage_root,
-        )
-        state_root = lexical_state_root.resolve()
+        ).resolve()
     return ResolvedAgentStorage(
         execution=resolved_execution,
         state_root=state_root,
-        lexical_state_root=lexical_state_root,
         session_state_root=resolve_session_state_root(state_root, runtime_paths),
     )
 

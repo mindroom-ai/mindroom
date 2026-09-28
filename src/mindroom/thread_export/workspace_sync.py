@@ -480,7 +480,6 @@ def _private_export_dir(
             config,
             runtime_paths=runtime_paths,
             state_storage_path=state_root,
-            lexical_state_storage_path=state_root,
             use_state_storage_path=True,
         )
     except ValueError:

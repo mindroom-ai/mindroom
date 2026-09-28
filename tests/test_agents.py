@@ -33,7 +33,6 @@ from mindroom import path_confinement, prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
-    _agent_tool_output_file_policy,
     _apply_preload_cap,
     _load_context_files,
     _prune_toolkit_functions,
@@ -1185,35 +1184,6 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["duckduckgo"] is None
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_preserves_lexical_workspace_for_output_policy(
-    mock_storage: MagicMock,  # noqa: ARG001
-    mock_get_tool_by_name: MagicMock,
-    tmp_path: Path,
-) -> None:
-    """Output publishers retain workspace ancestry even when it was linked before construction."""
-    mock_get_tool_by_name.return_value = MagicMock()
-    target = agent_workspace_root_path(tmp_path, "other")
-    target.mkdir(parents=True)
-    linked_state = agent_workspace_root_path(tmp_path, "general").parent
-    linked_state.symlink_to(target.parent, target_is_directory=True)
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].tools = ["duckduckgo"]
-    config.agents["general"].include_default_tools = False
-
-    _create_agent_for_test("general", config=config)
-
-    assert mock_get_tool_by_name.call_args.kwargs["tool_output_workspace_root"] == linked_state / "workspace"
-    agent_runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None)
-    policy = _agent_tool_output_file_policy(agent_runtime, runtime_paths, 100_000)
-    assert policy is not None
-    assert policy.workspace_root == linked_state / "workspace"
-    assert policy.trusted_root == runtime_paths.storage_root
-
-
 def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:
     """MindRoom-owned direct toolkits should use the same central output-file wrapper."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -1795,8 +1765,7 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
         resolved_thread_id="$thread",
         session_id="s1",
     )
-    expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
-    assert expected_worker_key is not None
+
     runtime = resolve_agent_runtime(
         "general",
         config,
@@ -1804,13 +1773,13 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
         execution_identity=identity,
         create=True,
     )
+    expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert expected_worker_key is not None
     assert runtime.execution.is_private is True
     assert runtime.execution.worker_key == expected_worker_key
-    lexical_state_root = private_instance_scope_root_path(tmp_path, expected_worker_key) / "general"
-    assert runtime.state_root == lexical_state_root
+    assert runtime.state_root == (private_instance_scope_root_path(tmp_path, expected_worker_key) / "general")
     assert runtime.workspace is not None
     assert runtime.workspace.root == runtime.state_root / "mind_data"
-    assert runtime.workspace.lexical_root == lexical_state_root / "mind_data"
     assert runtime.tool_base_dir == runtime.workspace.root
     assert runtime.file_memory_root == runtime.workspace.root
 

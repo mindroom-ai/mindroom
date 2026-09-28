@@ -497,7 +497,6 @@ def _resolve_workspace(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=resolved.state_root,
-        lexical_state_storage_path=resolved.lexical_state_root,
         use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
     )
     if workspace is None:

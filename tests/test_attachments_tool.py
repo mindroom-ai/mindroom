@@ -208,7 +208,7 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     )
     image_path = tmp_path / "plot.jpg"  # Byte detection must win over the extension.
     image_path.write_bytes(image_bytes)
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment("plot.jpg"))
         attachment_id = registered["attachment_id"]
@@ -251,7 +251,7 @@ async def test_get_attachment_view_returns_other_media(
 ) -> None:
     """Audio, documents, and video use their native model media fields."""
     (tmp_path / filename).write_bytes(payload_bytes)
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment(filename))
         result = await tool.get_attachment(registered["attachment_id"], view=True)
@@ -273,7 +273,7 @@ async def test_get_attachment_view_returns_other_media(
 async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, filename: str, data: bytes) -> None:
     """Empty and unsupported documents give a recoverable tool error, not an exception."""
     (tmp_path / filename).write_bytes(data)
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment(filename))
         result = await tool.get_attachment(registered["attachment_id"], view=True)
@@ -305,7 +305,7 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
     """Viewing must fail explicitly rather than forward unusable media or silently save."""
     image_path = tmp_path / "plot.png"
     image_path.write_bytes(b"not an image")
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment("plot.png"))
         retained_path = Path(registered["attachment"]["local_path"])
@@ -339,7 +339,7 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     """Unsafe-local opt-in should write attachment bytes into the primary workspace."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(
@@ -409,7 +409,7 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsa
     """Attachment save paths should reuse the normal workspace output path policy."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(
@@ -439,7 +439,7 @@ async def test_attachments_tool_get_attachment_out_of_context_save_does_not_send
 ) -> None:
     """Out-of-context IDs should fail before reading or sending attachment bytes."""
     workspace = tmp_path / "workspace"
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(
@@ -483,7 +483,6 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
         tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
@@ -535,7 +534,6 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
         worker_target=_shared_worker_target(),
         worker_tools_override=worker_tools_override,
         tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
@@ -595,7 +593,6 @@ async def test_attachments_tool_get_attachment_worker_save_ignores_primary_works
         worker_target=_shared_worker_target(),
         worker_tools_override=["file"],
         tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
@@ -952,7 +949,7 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(tmp_path: Path) -> None:
     """Registering from a thread-start context should persist the resolved thread root."""
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context_with_thread_scope(
@@ -978,7 +975,7 @@ async def test_attachments_tool_register_attachment_resolves_relative_paths_from
     generated_file = workspace / "scratch" / "generated.txt"
     generated_file.parent.mkdir()
     generated_file.write_text("artifact", encoding="utf-8")
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path)
 
     with tool_runtime_context(ctx):
@@ -1000,10 +997,7 @@ async def test_attachments_tool_register_attachment_accepts_workspace_below_link
     (real_storage / "workspace" / "scratch").mkdir(parents=True)
     (real_storage / "workspace" / "scratch" / "generated.txt").write_text("artifact", encoding="utf-8")
     (tmp_path / "linked").symlink_to(real_storage)
-    tool = AttachmentTools(
-        tool_output_workspace_root=tmp_path / "linked" / "workspace",
-        tool_output_trusted_root=tmp_path,
-    )
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path / "linked" / "workspace")
 
     with tool_runtime_context(_tool_context(tmp_path)):
         payload = json.loads(await tool.register_attachment("scratch/../scratch/generated.txt"))
@@ -1021,10 +1015,7 @@ async def test_register_attachment_rejects_workspace_root_replaced_by_link(tmp_p
     credentials.mkdir()
     (credentials / "gmail_credentials.json").write_text("SECRET_TOKEN", encoding="utf-8")
     (agent_root / "workspace").symlink_to(credentials)
-    tool = AttachmentTools(
-        tool_output_workspace_root=agent_root / "workspace",
-        tool_output_trusted_root=tmp_path,
-    )
+    tool = AttachmentTools(tool_output_workspace_root=agent_root / "workspace")
 
     with tool_runtime_context(_tool_context(tmp_path)):
         payload = json.loads(await tool.register_attachment("gmail_credentials.json"))
@@ -1046,7 +1037,7 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
     secret.write_text("SECRET_API_KEY", encoding="utf-8")
     notes = workspace / "notes.txt"
     notes.write_text("public notes", encoding="utf-8")
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path, process_env={"MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true"})
 
     with (
@@ -1103,7 +1094,7 @@ async def test_attachments_tool_register_attachment_accepts_absolute_workspace_p
     workspace.mkdir()
     generated_file = workspace / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path)
 
     with tool_runtime_context(ctx):
@@ -1138,7 +1129,7 @@ async def test_attachments_tool_register_attachment_rejects_paths_outside_worksp
 ) -> None:
     """Absolute, home-relative, symlinked, and traversal paths must not escape the workspace."""
     workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path)
 
     with (
@@ -1157,7 +1148,7 @@ async def test_attachments_tool_register_attachment_reports_os_errors(tmp_path: 
     """An OS-level path error must become an error payload, not an exception."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = AttachmentTools(tool_output_workspace_root=workspace, tool_output_trusted_root=workspace)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path)
 
     with tool_runtime_context(ctx):
@@ -1205,11 +1196,7 @@ async def test_attachments_tool_register_attachment_outside_workspace_follows_fi
 ) -> None:
     """Unrestricted agents register any readable file; workspace agents keep the rejection."""
     workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
-    tool = AttachmentTools(
-        tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
-        file_access=file_access,
-    )
+    tool = AttachmentTools(tool_output_workspace_root=workspace, file_access=file_access)
 
     with tool_runtime_context(_tool_context(tmp_path)):
         payload = json.loads(await tool.register_attachment(requested_path.format(outside=tmp_path / "outside")))
@@ -1329,7 +1316,7 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_path: Path) -> None:
     """Registering a file should make it available for matrix_message_attachments in the same context."""
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)
@@ -1361,7 +1348,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
     """Registering a local path should preserve filename, MIME type, and media kind."""
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "clip.wav"
     generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     ctx = _tool_context(tmp_path)
@@ -1385,7 +1372,7 @@ async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_available_after_task_boundary(tmp_path: Path) -> None:
     """Registered attachments should remain available when a later tool call runs in another task."""
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path, tool_output_trusted_root=tmp_path)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)

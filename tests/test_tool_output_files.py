@@ -35,8 +35,6 @@ from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     ensure_output_path_schema_optional,
-    finalize_tool_output_file,
-    prepare_tool_output_file,
     saved_tool_output_receipt,
     validate_output_path_syntax,
     wrap_function_for_output_files,
@@ -50,7 +48,7 @@ if TYPE_CHECKING:
 
 
 def _policy(tmp_path: Path, *, max_bytes: int = 1024 * 1024) -> ToolOutputFilePolicy:
-    return ToolOutputFilePolicy(workspace_root=tmp_path, trusted_root=tmp_path, max_bytes=max_bytes)
+    return ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=max_bytes)
 
 
 def _first_function(toolkit: Toolkit) -> Function:
@@ -91,83 +89,10 @@ def _assert_output_path_schema_is_optional(function: Function) -> None:
 def test_runtime_policy_defaults_to_50_kib_auto_save_threshold(tmp_path: Path) -> None:
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
-    policy = ToolOutputFilePolicy.from_runtime(tmp_path, runtime_paths, trusted_root=tmp_path)
+    policy = ToolOutputFilePolicy.from_runtime(tmp_path, runtime_paths)
 
     assert DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES == 50 * 1024
     assert policy.auto_save_threshold_bytes == DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-
-
-@pytest.mark.parametrize("workspace_path", ["agents/writer/workspace", "private_instances/owner/writer/workspace"])
-@pytest.mark.parametrize("swap_workspace", [False, True], ids=["ancestor", "workspace"])
-@pytest.mark.parametrize("publication", ["bytes", "explicit", "auto"])
-def test_primary_output_rejects_workspace_ancestor_swap(
-    tmp_path: Path,
-    workspace_path: str,
-    swap_workspace: bool,
-    publication: str,
-) -> None:
-    """A replaced workspace or ancestor cannot redirect a primary-process write."""
-    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
-    workspace = tmp_path / workspace_path
-    workspace.mkdir(parents=True)
-    policy = ToolOutputFilePolicy.from_runtime(
-        workspace,
-        runtime,
-        trusted_root=runtime.storage_root,
-        auto_save_threshold_bytes=1,
-    )
-    request = prepare_tool_output_file(
-        policy,
-        tool_name="report",
-        output_path=None if publication == "auto" else "reports/result.txt",
-    )
-    assert not isinstance(request, dict)
-    replaced = workspace if swap_workspace else workspace.parent
-    replaced.rename(replaced.with_name(f"{replaced.name}-original"))
-    victim = tmp_path.parent / f"{tmp_path.name}-victim-{publication}-{swap_workspace}"
-    victim.mkdir()
-    if not swap_workspace:
-        (victim / "workspace").mkdir()
-    replaced.symlink_to(victim, target_is_directory=True)
-
-    if publication == "bytes":
-        result = write_bytes_to_output_path(policy, "reports/result.txt", b"report")
-        assert isinstance(result, str)
-    else:
-        result = finalize_tool_output_file(request, "report")
-        assert _receipt(result)["status"] == "error"
-    assert not (victim / ("" if swap_workspace else "workspace") / "reports" / "result.txt").exists()
-    assert not list(victim.rglob("mindroom_tool_outputs"))
-
-
-def test_worker_output_uses_workspace_outside_runtime_storage(tmp_path: Path) -> None:
-    runtime = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "worker_state",
-        process_env={},
-    )
-    workspace = tmp_path / "mounted_workspace"
-    workspace.mkdir()
-    policy = ToolOutputFilePolicy.from_runtime(workspace, runtime, trusted_root=workspace)
-
-    result = write_bytes_to_output_path(policy, "report.txt", b"report")
-
-    assert not isinstance(result, str)
-    assert (workspace / "report.txt").read_bytes() == b"report"
-    assert not runtime.storage_root.exists()
-
-
-def test_primary_output_does_not_recreate_deleted_workspace(tmp_path: Path) -> None:
-    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
-    workspace = tmp_path / "agents" / "writer" / "workspace"
-    workspace.mkdir(parents=True)
-    policy = ToolOutputFilePolicy.from_runtime(workspace, runtime, trusted_root=runtime.storage_root)
-    workspace.rmdir()
-
-    result = write_bytes_to_output_path(policy, "reports/result.txt", b"report")
-
-    assert isinstance(result, str)
-    assert not workspace.exists()
 
 
 def _receipt(result: object) -> dict[str, object]:
@@ -973,12 +898,7 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
     marker = "ISSUE200_AUTO_MARKER"
     raw_output = marker * 1_000
     toolkit = _EchoToolkit(result=raw_output)
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=100_000,
-        auto_save_threshold_bytes=100,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100_000, auto_save_threshold_bytes=100)
     wrap_toolkit_for_output_files(toolkit, policy)
 
     result = FunctionCall(
@@ -999,12 +919,7 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 
 
 def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> None:
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=10_000,
-        auto_save_threshold_bytes=40,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=40)
     toolkit = _EchoToolkit(result={"items": ["z" * 30, "a" * 30]})
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1023,12 +938,7 @@ def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 
 
 def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path: Path) -> None:
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=10_000,
-        auto_save_threshold_bytes=10,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result="x" * 200)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1046,12 +956,7 @@ def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path
 
 def test_large_result_over_auto_save_limit_returns_compact_error(tmp_path: Path) -> None:
     marker = "ISSUE200_TOO_LARGE"
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=100,
-        auto_save_threshold_bytes=10,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=marker * 20)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1075,12 +980,7 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
             raise RuntimeError(msg)
 
     raw_result = Unstringable()
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=100,
-        auto_save_threshold_bytes=10,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=raw_result)
     wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1096,12 +996,7 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
 
 def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> None:
     raw_result = "x" * 200
-    policy = ToolOutputFilePolicy(
-        workspace_root=tmp_path,
-        trusted_root=tmp_path,
-        max_bytes=1_000,
-        auto_save_threshold_bytes=10,
-    )
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=1_000, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=raw_result)
     wrap_toolkit_for_output_files(toolkit, policy)
 

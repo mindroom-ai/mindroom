@@ -441,7 +441,6 @@ class AttachmentTools(Toolkit):
         worker_target: ResolvedWorkerTarget | None = None,
         worker_tools_override: list[str] | None = None,
         tool_output_workspace_root: Path | None = None,
-        tool_output_trusted_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
         self._runtime_paths = runtime_paths
@@ -449,7 +448,6 @@ class AttachmentTools(Toolkit):
         self._file_access = file_access
         self._worker_tools_override = worker_tools_override
         self._tool_output_workspace_root = tool_output_workspace_root
-        self._tool_output_trusted_root = tool_output_trusted_root
         super().__init__(
             name="attachments",
             tools=[
@@ -660,12 +658,8 @@ class AttachmentTools(Toolkit):
             worker_tools_override=self._worker_tools_override,
         )
         local_policy = (
-            ToolOutputFilePolicy.from_runtime(
-                self._tool_output_workspace_root,
-                runtime_paths,
-                trusted_root=self._tool_output_trusted_root,
-            )
-            if self._tool_output_workspace_root is not None and self._tool_output_trusted_root is not None
+            ToolOutputFilePolicy.from_runtime(self._tool_output_workspace_root, runtime_paths)
+            if self._tool_output_workspace_root is not None
             else None
         )
         return use_worker, local_policy

@@ -83,7 +83,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         catalog=catalog,
         worker=Worker(),
         authorize=authorize,
-        output_file_policy=policy or ToolOutputFilePolicy(tmp_path / "workspace", tmp_path / "workspace"),
+        output_file_policy=policy or ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     facade = MinimalBashTools(execute=owner.execute_bash)
     function = prepare_agent_tools(
@@ -199,12 +199,7 @@ async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path
 async def test_completed_large_media_result_uses_workspace_artifact(tmp_path, failure, content) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
-    policy = ToolOutputFilePolicy(
-        root,
-        root,
-        max_bytes=8 if failure else 1000000,
-        auto_save_threshold_bytes=1000000,
-    )
+    policy = ToolOutputFilePolicy(root, max_bytes=8 if failure else 1000000, auto_save_threshold_bytes=1000000)
     owner, _messages, events, receipt = await _run(
         tmp_path,
         ToolResult(

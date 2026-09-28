@@ -143,7 +143,6 @@ async def _upload_to_google_drive(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
         tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
         file_access=file_access,
     )
     service = _FakeDriveService()
@@ -181,12 +180,7 @@ async def _upload_to_e2b(
     raw_path: str,
 ) -> bool:
     monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
-    tool = MindRoomE2BTools(
-        api_key="test",
-        tool_output_workspace_root=workspace,
-        tool_output_trusted_root=workspace,
-        file_access=file_access,
-    )
+    tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
     assert isinstance(tool.sandbox, _FakeSandbox)
     tool.upload_file(raw_path, "upload.bin")
     return tool.sandbox.files.stored.get("upload.bin") == _PNG

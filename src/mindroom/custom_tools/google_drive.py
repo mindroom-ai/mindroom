@@ -35,7 +35,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.path_confinement import (
-    open_creatable_directory_within_existing_root,
+    open_directory_within_root,
     resolve_path_within_root,
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
@@ -125,7 +125,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
-        tool_output_trusted_root: Path | None = None,
         file_access: FileAccess = "workspace",
         write: bool = True,
         **kwargs: Any,  # noqa: ANN401
@@ -164,10 +163,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._creds_manager = credentials_manager
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
-        if tool_output_workspace_root is not None and tool_output_trusted_root is None:
-            msg = "Google Drive downloads require a trusted workspace root"
-            raise ValueError(msg)
-        self._output_root = tool_output_trusted_root
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
@@ -545,13 +540,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 return json.dumps(
                     {"error": "Google Drive download target escapes the download directory", "file": metadata},
                 )
-            assert self._output_root is not None
             with (
-                open_creatable_directory_within_existing_root(
-                    self._output_root,
-                    self._workspace_root,
-                    "google-drive-downloads",
-                ) as directory_fd,
+                open_directory_within_root(self._workspace_root, "google-drive-downloads", create=True) as directory_fd,
                 atomic_write_file_at(directory_fd, path.name) as file_handle,
             ):
                 if target_mime:

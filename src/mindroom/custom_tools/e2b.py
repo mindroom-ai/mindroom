@@ -15,16 +15,16 @@ from agno.tools.function import ToolResult
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import open_creatable_directory_within_existing_root, resolve_path_within_root
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
 
 
-def _write_within_root(root: Path, workspace: Path, relative: Path, payload: bytes | bytearray) -> None:
+def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -> None:
     """Atomically publish bytes at a canonical path below a pinned root."""
     with (
-        open_creatable_directory_within_existing_root(root, workspace, relative.parent) as directory,
+        open_directory_within_root(root, relative.parent, create=True) as directory,
         atomic_write_file_at(directory, relative.name) as output,
     ):
         output.write(payload)
@@ -48,33 +48,25 @@ class MindRoomE2BTools(E2BTools):
         sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
-        tool_output_trusted_root: Path | None = None,
         file_access: FileAccess = "workspace",
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
-        if tool_output_workspace_root is not None and tool_output_trusted_root is None:
-            msg = "E2B local output requires a trusted workspace root"
-            raise ValueError(msg)
-        self._output_root = tool_output_trusted_root
         self._file_access = file_access
         super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
 
-    def _workspace_location(self, path: str) -> tuple[Path, Path, Path]:
-        """Return the trusted root, lexical workspace, and canonical workspace-relative path."""
+    def _workspace_location(self, path: str) -> tuple[Path, Path]:
+        """Return the canonical workspace root and the canonical relative path below it."""
         if self._workspace_root is None:
             msg = "E2B local file transfers require an agent workspace"
             raise ValueError(msg)
         requested = Path(path)
-        root = self._workspace_root.expanduser().absolute()
+        root = self._workspace_root.resolve()
         if not requested.is_absolute() and ".." not in requested.parts:
             with suppress(ValueError):
                 resolved = resolve_path_within_root(root, requested, symlinks="internal")
-                canonical_root = root.resolve()
-                if resolved != canonical_root:
-                    assert self._output_root is not None
-                    trusted_root = self._output_root.expanduser().absolute()
-                    return trusted_root, root, resolved.relative_to(canonical_root)
+                if resolved != root:
+                    return root, resolved.relative_to(root)
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)
 
@@ -117,9 +109,9 @@ class MindRoomE2BTools(E2BTools):
         """
         local_path = local_path or Path(sandbox_path).name
         try:
-            root, workspace, relative = self._workspace_location(local_path)
+            root, relative = self._workspace_location(local_path)
             content = self.sandbox.files.read(sandbox_path, format="bytes")
-            _write_within_root(root, workspace, relative, content)
+            _write_within_root(root, relative, content)
         except Exception as e:
             return json.dumps({"status": "error", "message": f"Error downloading file: {e}"})
         return local_path
@@ -147,8 +139,8 @@ class MindRoomE2BTools(E2BTools):
         if not output_path or png is None:
             return result
         try:
-            root, workspace, relative = self._workspace_location(output_path)
-            _write_within_root(root, workspace, relative, base64.b64decode(png))
+            root, relative = self._workspace_location(output_path)
+            _write_within_root(root, relative, base64.b64decode(png))
         except Exception as e:
             return ToolResult(content=f"{result.content}, but saving it failed: {e}", images=result.images)
         self.downloaded_files[result_index] = output_path
@@ -187,8 +179,8 @@ class MindRoomE2BTools(E2BTools):
             if result.chart is None:
                 return ToolResult(content=f"Result at index {result_index} does not contain interactive chart data")
             chart = result.chart.to_dict()
-            root, workspace, relative = self._workspace_location(output_path)
-            _write_within_root(root, workspace, relative, json.dumps(chart, indent=2).encode())
+            root, relative = self._workspace_location(output_path)
+            _write_within_root(root, relative, json.dumps(chart, indent=2).encode())
         except Exception as e:
             return ToolResult(content=f"Error extracting chart data: {e}")
         labels = (("title", "Title"), ("x_label", "X-axis"), ("y_label", "Y-axis"))
