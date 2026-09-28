@@ -108,8 +108,9 @@ _REVIEW_TOKEN_PATTERN = re.compile(
     r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
     r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])",
 )
-# Generated credentials contain a long run mixing letters and digits; kebab-case names such as pod,
-# image, or branch names do not, so they stay visible.
+# Only the `sk-` and `pk-` prefixes also start ordinary kebab-case names such as pod, image, or branch
+# names; a generated key has a long run mixing character classes, so those names stay visible.
+_KEBAB_PREFIXES = ("sk-", "pk-")
 _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
@@ -547,8 +548,14 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
+def _character_classes(run: str) -> int:
+    return len({"digit" if character.isdigit() else "upper" if character.isupper() else "lower" for character in run})
+
+
 def _looks_generated(token: str) -> bool:
-    return any(not run.isalpha() and not run.isdigit() for run in _RANDOM_RUN_PATTERN.findall(token))
+    if not token.startswith(_KEBAB_PREFIXES):
+        return True
+    return any(_character_classes(run) >= 2 for run in _RANDOM_RUN_PATTERN.findall(token))
 
 
 def truncate_review_text(value: str, max_length: int | None) -> str:
@@ -557,7 +564,7 @@ def truncate_review_text(value: str, max_length: int | None) -> str:
         return value
     head = value[: max_length - len(_TRUNCATED)]
     opening = head.rfind(_PLACEHOLDER_OPEN)
-    if opening > head.rfind(_PLACEHOLDER_CLOSE):
+    if opening > head.rfind(_PLACEHOLDER_CLOSE) and head[opening + 1 : opening + 2] != "=":
         head = head[:opening]
     return head + _TRUNCATED
 
@@ -658,8 +665,8 @@ def _redact_mapping(
                 label_index += 1
                 redacted_key = f"<redacted structured key {label_index}>"
         elif token_placeholders is not None:
-            # Reviewer-facing keys must encode as UTF-8; keys that differ only in lone surrogates stay distinct.
-            redacted_key = _LONE_SURROGATE_PATTERN.sub("\ufffd", key_text)
+            # Keys get the same review treatment as text; keys that become equal stay distinct.
+            redacted_key = _redact_review_tokens(key_text, max_length=None, placeholders=token_placeholders)
             while redacted_key in redacted:
                 redacted_key += "\ufffd"
         else:

@@ -1104,6 +1104,47 @@ def test_review_copy_keeps_names_that_are_not_credentials_visible(command: str) 
     assert _review_copy({"command": command}) == ({"command": command}, {})
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AIza" + "abcdefghijklmnopqrstuvwxyzABCDEFGHI",
+        "sk_live_" + "abcdefghijklmnopqrstuvwx",
+        "xoxb-" + "abcdefghijklmnopqrstuvwx",
+        "ghp_" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ",
+        "sk-" + "abcdefghijklmnopqrstUVWX",
+    ],
+)
+def test_review_copy_hides_tokens_without_digits(token: str) -> None:
+    """Generated keys do not always contain digits, and every known format still hides them."""
+    redacted, placeholders = _review_copy({"command": f"export KEY={token}"})
+
+    assert redacted == {"command": "export KEY=⟦secret-1⟧"}
+    assert placeholders == {token: "⟦secret-1⟧"}
+
+
+def test_review_copy_treats_keys_like_text() -> None:
+    """A key that looks like a placeholder is escaped, and a key that is a token is hidden."""
+    token = _fake_token("ghp_", 36)
+
+    redacted, placeholders = _review_copy({"⟦secret-1⟧": 1, token: 2})
+
+    # The escaped key still names a secret, so its value is hidden like any secret-named field.
+    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧": 2}
+    assert placeholders == {token: "⟦secret-1⟧"}
+
+
+def test_review_copy_keeps_an_escaped_opening_when_shortening() -> None:
+    """An escaped literal opening is not a placeholder, so shortening keeps the text after it."""
+    placeholders: dict[str, str] = {}
+    redacted = redact_sensitive_data(
+        {"note": "see ⟦" + "x" * 3_000},
+        max_string_length=2_048,
+        token_placeholders=placeholders,
+    )
+
+    assert redacted == {"note": "see ⟦=" + "x" * 2_027 + "... [truncated]"}
+
+
 def test_review_copy_escapes_literal_placeholder_text() -> None:
     """Text that looks like a placeholder is shown escaped, so it cannot pass for a hidden token."""
     redacted, _ = _review_copy({"command": "echo T ⟦secret-1⟧"})
