@@ -2698,7 +2698,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Whether to verify SSL certificates",
           "label": "Verify SSL",
           "name": "verify_ssl",

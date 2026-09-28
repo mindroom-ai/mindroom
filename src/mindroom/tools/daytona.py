@@ -153,7 +153,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
             label="Verify SSL",
             type="boolean",
             required=False,
-            default=False,
+            default=True,
             description="Whether to verify SSL certificates",
         ),
         ConfigField(
@@ -225,7 +225,7 @@ def daytona_tools() -> type[DaytonaTools]:
             organization_id: str | None = None,
             timeout: int = 300,
             auto_create_sandbox: bool = True,
-            verify_ssl: bool | None = False,
+            verify_ssl: bool = True,
             persistent: bool = True,
             instructions: str | None = None,
             add_instructions: bool = False,
