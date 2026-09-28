@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import typer
 
+from mindroom.constants import ensure_writable_config_path
+
 from .banner import make_banner
 from .config import (
     activate_cli_runtime,
@@ -150,7 +152,6 @@ def run(
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
 
-    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
@@ -201,7 +202,6 @@ def run(
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
 
     ensure_writable_config_path(runtime_paths=runtime_paths)
 

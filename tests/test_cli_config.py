@@ -36,6 +36,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
@@ -50,6 +51,7 @@ from mindroom.model_defaults import (
     OPENAI_GPT_TERRA,
     llama_cpp_server_command,
 )
+from mindroom.model_loading import missing_model_api_key_provider
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
@@ -2049,7 +2051,7 @@ class TestRunFirstRunSetup:
         assert started[0].env_value("OPENAI_API_KEY") == typed_key
 
     def test_skipped_key_leaves_no_key_and_says_where_to_add_it(self, tmp_path: Path) -> None:
-        """Pressing Enter at the key prompt writes no key and points to the .env file and dashboard."""
+        """Pressing Enter at the key prompt writes no key and points to the dashboard and to `.env` plus a restart."""
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
 
@@ -2066,20 +2068,41 @@ class TestRunFirstRunSetup:
         assert "ANTHROPIC_API_KEY" in output
         assert str(env_path.resolve()) in output
         assert "dashboard" in output
+        assert "restart `mindroom run`" in output
         assert len(paired) == 1
         assert len(started) == 1
         assert started[0].env_value("ANTHROPIC_API_KEY") is None
 
-    def test_provider_without_key_shows_setup_hint_instead_of_key_prompt(self, tmp_path: Path) -> None:
-        """Login-based providers skip the key prompt and show the existing setup hint."""
+    @pytest.mark.parametrize(
+        ("preset", "hint", "needs_restart"),
+        [
+            ("azure", "Azure OpenAI key and endpoint", True),
+            ("bedrock_claude", "AWS Bedrock region", True),
+            ("vertexai_claude", "Vertex AI project", True),
+            ("codex", "codex login", False),
+            ("kimi", "/login", False),
+            ("ollama", f"ollama pull {OLLAMA_GEMMA}", False),
+            ("llama_cpp", "llama.cpp server", False),
+        ],
+    )
+    def test_provider_without_key_shows_setup_hint_instead_of_key_prompt(
+        self,
+        tmp_path: Path,
+        preset: str,
+        hint: str,
+        needs_restart: bool,
+    ) -> None:
+        """Providers without one API key skip the prompt, and the hint holds while startup continues."""
         config_path = tmp_path / "config.yaml"
 
-        result, paired, started = self._invoke_run(config_path, "codex\n")
+        result, paired, started = self._invoke_run(config_path, f"{preset}\n")
 
         assert result.exit_code == 0, result.output
-        assert "API key" not in result.output
-        assert "codex login" in result.output
-        assert "provider: codex" in config_path.read_text(encoding="utf-8")
+        output = normalize_console_output(result.output)
+        assert "API key" not in output
+        assert hint in output
+        assert "before starting" not in output
+        assert ("restart `mindroom run`" in output) is needs_restart
         assert len(paired) == 1
         assert len(started) == 1
 
@@ -2170,6 +2193,54 @@ class TestRunFirstRunSetup:
         env_content = env_path.read_text(encoding="utf-8")
         assert "OPENAI_API_KEY=sk-real\n" in env_content
         assert "your-openai-key-here" not in env_content
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-real"
+
+    @pytest.mark.parametrize("exported", ["", "your-openai-key-here"])
+    def test_typed_key_wins_over_exported_empty_or_placeholder_value(self, tmp_path: Path, exported: str) -> None:
+        """An exported value that counts as unset cannot shadow the key typed at the prompt for this run."""
+        config_path = tmp_path / "config.yaml"
+
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "openai\nsk-typed\n",
+            env={"OPENAI_API_KEY": exported},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "OpenAI API key" in result.output
+        assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
+        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+
+    def test_skipped_key_comments_out_template_placeholder(self, tmp_path: Path) -> None:
+        """Skipping the key disables a leftover placeholder so it never counts as a configured credential."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=your-openai-key-here\nANTHROPIC_API_KEY=sk-real\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\n\n")
+
+        assert result.exit_code == 0, result.output
+        env_content = env_path.read_text(encoding="utf-8")
+        assert "# OPENAI_API_KEY=your-openai-key-here\n" in env_content
+        assert re.search(r"^\s*OPENAI_API_KEY=", env_content, re.MULTILINE) is None
+        assert "ANTHROPIC_API_KEY=sk-real\n" in env_content
+        assert started[0].env_value("OPENAI_API_KEY") is None
+        # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
+        sync_env_to_credentials(started[0])
+        config = load_config_yaml(config_path)
+        assert missing_model_api_key_provider(config, started[0], "default") == "openai"
+
+    def test_skipped_key_keeps_real_env_value(self, tmp_path: Path) -> None:
+        """Only a template placeholder is disabled on skip; a real key in `.env` is used and left alone."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-real\n", encoding="utf-8")
+
+        result, _paired, started = self._invoke_run(config_path, "openai\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Using OPENAI_API_KEY from your environment." in result.output
+        assert "OPENAI_API_KEY=sk-real\n" in env_path.read_text(encoding="utf-8")
         assert started[0].env_value("OPENAI_API_KEY") == "sk-real"
 
     def test_template_placeholder_key_is_reported_missing_at_startup(self, tmp_path: Path) -> None:

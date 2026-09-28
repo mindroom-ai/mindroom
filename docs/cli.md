@@ -149,8 +149,9 @@ Start MindRoom with your configuration.
 
 When no config file exists at the selected path and both stdin and stdout are a terminal, `mindroom run` first creates the hosted starter config that `mindroom config init` would create for `mindroom.chat`.
 It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, for the API key with hidden input.
-Pressing Enter skips the key; add it later to the `.env` next to `config.yaml` or through the dashboard's provider setup.
+Pressing Enter skips the key; connect the provider later through the dashboard's provider setup, or add the key to the `.env` next to `config.yaml` and restart `mindroom run`.
 It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
+`.env` is read only at startup, so settings added there after setup take effect when `mindroom run` restarts.
 The same process then pairs with MindRoom Chat and starts.
 Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.

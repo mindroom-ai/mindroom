@@ -22,9 +22,9 @@ When no config exists yet and MindRoom runs in a terminal, it asks a few setup q
 
 1. Choose a model provider preset (default `openai`).
 2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden and never printed.
-   Press Enter to skip and add the key later to `~/.mindroom/.env` or through the dashboard's provider setup.
+   Press Enter to skip, then connect the provider later through the dashboard's provider setup, or add the key to `~/.mindroom/.env` and restart `mindroom run`.
    MindRoom does not ask when the key is already set in your environment.
-   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env`.
+   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting `mindroom run`.
 
 MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
 Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`.
