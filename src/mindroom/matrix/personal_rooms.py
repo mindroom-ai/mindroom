@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import nio
 
@@ -32,6 +33,7 @@ from mindroom.matrix.client_room_admin import (
 )
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
+    DeferredPersonalRoomTrigger,
     PersonalRoomRecord,
     personal_room_digest,
     personal_room_record_path,
@@ -169,10 +171,81 @@ class PersonalRoomService:
         *,
         reinvite_departed_owner: bool = False,
     ) -> str | None:
-        """Reconcile a currently eligible human from a router-observed room."""
+        """Reconcile a currently eligible human from a router-observed room.
+
+        Also serves a trigger deferred from the same room, and retires it once
+        this attempt finishes without raising, whatever its outcome.
+        """
+        path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
+        deferred = await self._deferred_trigger(path, source_room_id)
+        room_id = await self._ensure(
+            user_id,
+            source_room_id,
+            source_client,
+            path,
+            reinvite_departed_owner=reinvite_departed_owner
+            or (deferred is not None and deferred.reinvite_departed_owner),
+        )
+        if deferred is not None:
+            await self._retire_deferred_trigger(path, deferred)
+        return room_id
+
+    async def defer_trigger(
+        self,
+        user_id: str,
+        source_room_id: str,
+        *,
+        reinvite_departed_owner: bool,
+    ) -> bool:
+        """Durably keep a failed onboarding trigger for reconciliation.
+
+        Returns False, keeping nothing, when the requester has no record yet.
+        A trigger already waiting keeps its re-invite intent.
+        """
+        path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
+        if not path.is_file():
+            return False
+        async with async_exclusive_file_lock(path.with_suffix(".lock")):
+            record = await run_blocking_until_complete(read_personal_room, path)
+            if record is None:
+                return False
+            previous = record.deferred_trigger
+            record.deferred_trigger = DeferredPersonalRoomTrigger(
+                source_room_id=source_room_id,
+                reinvite_departed_owner=reinvite_departed_owner
+                or (previous is not None and previous.reinvite_departed_owner),
+                token=uuid4().hex,
+            )
+            await run_blocking_until_complete(write_personal_room, path, record)
+        return True
+
+    async def _deferred_trigger(self, path: Path, source_room_id: str) -> DeferredPersonalRoomTrigger | None:
+        if not path.is_file():
+            return None
+        record = await run_blocking_until_complete(read_personal_room, path)
+        trigger = record.deferred_trigger if record is not None else None
+        return trigger if trigger is not None and trigger.source_room_id == source_room_id else None
+
+    async def _retire_deferred_trigger(self, path: Path, trigger: DeferredPersonalRoomTrigger) -> None:
+        """Clear exactly this deferred trigger, keeping one deferred after it was read."""
+        async with async_exclusive_file_lock(path.with_suffix(".lock")):
+            record = await run_blocking_until_complete(read_personal_room, path)
+            if record is None or record.deferred_trigger != trigger:
+                return
+            record.deferred_trigger = None
+            await run_blocking_until_complete(write_personal_room, path, record)
+
+    async def _ensure(
+        self,
+        user_id: str,
+        source_room_id: str,
+        source_client: nio.AsyncClient,
+        path: Path,
+        *,
+        reinvite_departed_owner: bool,
+    ) -> str | None:
         if await self._eligible_settings(user_id, source_room_id, source_client) is None:
             return None
-        path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
         try:
             async with async_exclusive_file_lock(path.with_suffix(".lock")):
                 settings = await self._eligible_settings(user_id, source_room_id, source_client)

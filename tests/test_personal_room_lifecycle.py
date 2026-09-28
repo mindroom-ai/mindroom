@@ -14,7 +14,12 @@ from structlog.testing import capture_logs
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
-from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
+from mindroom.matrix.personal_room_store import (
+    DeferredPersonalRoomTrigger,
+    PersonalRoomRecord,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
@@ -771,6 +776,7 @@ async def test_recorded_requester_failure_leaves_lobby_lane_to_reconciliation(
     record_intent(lifecycle, "alice")
     lifecycle._reconciled = True
     coordination.owner.ensure.side_effect = RuntimeError("Personal-room ownership or membership does not match")
+    coordination.owner.defer_trigger.return_value = True
     room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
     rejoin, join = _lobby_member_events()
     with capture_logs() as logs:
@@ -778,6 +784,11 @@ async def test_recorded_requester_failure_leaves_lobby_lane_to_reconciliation(
         await lifecycle.member_event(room, rejoin)
         await lifecycle.baseline_join(join)
     assert coordination.owner.ensure.await_count == 3
+    assert [call.kwargs["reinvite_departed_owner"] for call in coordination.owner.defer_trigger.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
     assert [entry["event"] for entry in logs if entry["log_level"] in {"warning", "error"}] == [
         "Personal-room reconciliation failed",
     ] * 3
@@ -796,6 +807,7 @@ async def test_unrecorded_requester_failure_stays_with_the_journal_lane(coordina
     """Before any durable intent exists, only the journal can retry a failed lobby trigger."""
     lifecycle = coordination.lifecycle
     coordination.owner.ensure.side_effect = RuntimeError("Personal-room onboarding membership unavailable")
+    coordination.owner.defer_trigger.return_value = False
     room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
     rejoin, join = _lobby_member_events()
     with pytest.raises(RuntimeError, match="membership unavailable"):
@@ -814,3 +826,36 @@ async def test_live_trigger_cancellation_is_not_deferred(coordination: Coordinat
     coordination.owner.ensure.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
         await lifecycle.handle_command(nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost"), command())
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_retries_a_trigger_deferred_from_another_onboarding_room(
+    coordination: Coordination,
+) -> None:
+    """A trigger that failed before its room became the record's resume source is still retried from that room."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.rooms["second"] = lifecycle.runtime.config.rooms["lobby"].model_copy()
+    lifecycle.runtime.config.personal_rooms.onboarding_rooms = ["lobby", "second"]
+    state = MatrixState.load(lifecycle.runtime_paths)
+    state.add_room("second", "!second:localhost", "#second:localhost", "Second")
+    state.save(lifecycle.runtime_paths)
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal_alice:localhost",
+            source_room_id="!lobby:localhost",
+            deferred_trigger=DeferredPersonalRoomTrigger(
+                source_room_id="!second:localhost",
+                reinvite_departed_owner=True,
+                token="deferred",
+            ),
+        ),
+    )
+
+    await lifecycle._reconcile()
+
+    assert sorted(call.args[:2] for call in coordination.owner.ensure.await_args_list) == [
+        ("@alice:localhost", "!lobby:localhost"),
+        ("@alice:localhost", "!second:localhost"),
+    ]

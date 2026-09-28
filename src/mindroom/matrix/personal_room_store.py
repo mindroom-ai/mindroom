@@ -37,6 +37,20 @@ class PersonalRoomAdoption(BaseModel):
         return validate_concrete_matrix_user_ids(value, field_name="additional_user_ids")
 
 
+class DeferredPersonalRoomTrigger(BaseModel):
+    """One onboarding-room trigger that failed after the record existed, owed to reconciliation.
+
+    Reconciliation replays it through the ordinary eligibility checks, so it
+    carries intent only and grants no authority of its own.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_room_id: str
+    reinvite_departed_owner: bool = False
+    token: str
+
+
 class PersonalRoomRecord(BaseModel):
     """One user-owned room and its immutable welcome transaction."""
 
@@ -59,6 +73,7 @@ class PersonalRoomRecord(BaseModel):
     avatar_done: bool = False
     adoption: PersonalRoomAdoption | None = None
     initial_join_pending: bool = False
+    deferred_trigger: DeferredPersonalRoomTrigger | None = None
 
     @model_validator(mode="after")
     def require_adoption_room_id(self) -> PersonalRoomRecord:

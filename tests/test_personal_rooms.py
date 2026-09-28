@@ -1262,6 +1262,39 @@ async def test_reinvite_uses_current_onboarding_room_after_original_removed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_failed_rejoin_keeps_its_reinvite_for_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restart: bool,
+) -> None:
+    """A leave-to-join whose re-invite fails settles the lobby event, and reconciliation still re-invites."""
+    server = MatrixServer()
+    router, _ = bots(tmp_path, server, monkeypatch)
+    room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
+    await _dispatch_member(router, room, _room_member_event(event_id="$first"))
+    server.set_member("!personal1:localhost", "@alice:localhost", "leave")
+    server.fail_invite = True
+    await _dispatch_member(router, room, _room_member_event(event_id="$again"))
+    assert server.membership("!personal1:localhost", "@alice:localhost") == "leave"
+    path = personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost")
+    deferred = read_personal_room(path).deferred_trigger
+    assert deferred is not None
+    assert (deferred.source_room_id, deferred.reinvite_departed_owner) == ("!lobby:localhost", True)
+
+    server.fail_invite = False
+    if restart:
+        router, _ = bots(tmp_path, server, monkeypatch)
+    else:
+        router._personal_room_lifecycle._candidate_backoff.clear()
+    await router._personal_room_lifecycle._reconcile()
+
+    assert server.membership("!personal1:localhost", "@alice:localhost") == "invite"
+    assert read_personal_room(path).deferred_trigger is None
+    assert router._personal_room_lifecycle._reconciled
+
+
+@pytest.mark.asyncio
 async def test_banned_owner_is_not_reinvited_on_genuine_rejoin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An onboarding rejoin cannot override a personal-room ban."""
     server = MatrixServer()

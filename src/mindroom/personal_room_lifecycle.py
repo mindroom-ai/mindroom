@@ -208,17 +208,23 @@ class PersonalRoomLifecycle:
     ) -> None:
         """Serve one lobby trigger without letting a single requester hold the lobby's event lane.
 
-        Once the requester's intent is durably recorded, reconciliation owns
-        retrying a failed attempt, so the member or message event settles and
-        later lobby events keep flowing. A failure before that record exists,
-        such as an unreadable lobby membership, stays with the journal lane,
-        which is the only owner that could retry it.
+        Once the requester has a durable record, a failed attempt is written
+        onto it as a deferred trigger, including any re-invite intent, and
+        reconciliation owns retrying it, so the member or message event
+        settles and later lobby events keep flowing. A failure before that
+        record exists, such as an unreadable lobby membership, or while the
+        target is unavailable stays with the journal lane.
         """
         try:
             await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)
         except Exception as error:
             settings = self.runtime.config.personal_rooms
-            if settings is None or not personal_room_record_path(self.runtime_paths, settings.agent, user_id).is_file():
+            target = self.lookup_target(settings.agent) if settings is not None else None
+            if target is None or not await target.service.defer_trigger(
+                user_id,
+                source_room_id,
+                reinvite_departed_owner=reinvite_departed_owner,
+            ):
                 raise
             candidate = (user_id, source_room_id)
             previous = self._candidate_backoff.get(candidate)
@@ -289,6 +295,8 @@ class PersonalRoomLifecycle:
                 continue
             if record is not None:
                 candidates.add((record.user_id, record.resume_source_room_id or record.source_room_id))
+                if record.deferred_trigger is not None:
+                    candidates.add((record.user_id, record.deferred_trigger.source_room_id))
         return candidates, failed
 
     async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool]:
