@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import stat
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -23,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     RuntimePaths,
+    resolve_runtime_paths,
 )
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.models import IngestionConsumer
@@ -958,3 +960,37 @@ async def test_restore_only_renews_a_soft_logged_out_device(
     else:
         with pytest.raises(PermanentMatrixStartupError):
             await restore
+
+
+def _bare_tls_context() -> ssl.SSLContext:
+    """A verifying client context without any trust roots, like a Python whose OpenSSL CA paths are absent."""
+    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
+def test_matrix_tls_trusts_certifi_roots_when_system_paths_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Matrix logins verify certificates even when the Python build cannot find the system trust store."""
+    monkeypatch.setattr(client_session.ssl_module, "create_default_context", _bare_tls_context)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    context = client_session.maybe_ssl_context("https://mindroom.chat", runtime_paths=runtime_paths)
+
+    assert context is not None
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.cert_store_stats()["x509_ca"] > 0
+
+
+def test_matrix_tls_respects_explicit_trust_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An operator's SSL_CERT_FILE or SSL_CERT_DIR choice is left to OpenSSL without adding certifi."""
+    monkeypatch.setattr(client_session.ssl_module, "create_default_context", _bare_tls_context)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"SSL_CERT_FILE": str(tmp_path / "private-ca.pem")},
+    )
+
+    context = client_session.maybe_ssl_context("https://mindroom.chat", runtime_paths=runtime_paths)
+
+    assert context is not None
+    assert context.cert_store_stats()["x509_ca"] == 0

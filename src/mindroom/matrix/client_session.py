@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
+import certifi
 import nio
 
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
@@ -126,6 +127,19 @@ def matrix_startup_error(
     return ValueError(message)
 
 
+def _verifying_ssl_context(runtime_paths: RuntimePaths) -> ssl_module.SSLContext:
+    """Trust the system store plus certifi's roots, which HTTPS through httpx already uses.
+
+    Some Python builds (for example uv-managed CPython on NixOS) look for CA files the host does not have,
+    so the system store alone can be empty and every Matrix login fails certificate verification.
+    An explicit SSL_CERT_FILE or SSL_CERT_DIR is the operator's trust choice and is left to OpenSSL unchanged.
+    """
+    ssl_context = ssl_module.create_default_context()
+    if not any(name in runtime_paths.process_env for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
+        ssl_context.load_verify_locations(cafile=certifi.where())
+    return ssl_context
+
+
 def maybe_ssl_context(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -137,7 +151,7 @@ def maybe_ssl_context(
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl_module.CERT_NONE
         else:
-            ssl_context = ssl_module.create_default_context()
+            ssl_context = _verifying_ssl_context(runtime_paths)
         return ssl_context
     return None
 

@@ -23,6 +23,7 @@ dependencies = [
   "anyio>=4.10",
   "authlib>=1.6",
   "cerebras-cloud-sdk>=1.46",
+  "certifi>=2026.4.22",
   "chromadb>=1.5.8",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
