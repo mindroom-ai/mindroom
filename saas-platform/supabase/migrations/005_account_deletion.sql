@@ -1,5 +1,8 @@
 -- Account deletion changes only the account, can be cancelled only until cleanup claims it, and keeps
 -- payment and webhook records without their account link.
+-- Before applying it, list the accounts whose grace period it restarts (see the comment above the column below):
+--
+--   SELECT id, email, deleted_at FROM accounts WHERE deleted_at < NOW() - INTERVAL '7 days';
 -- Fresh installs get the same schema from 000_consolidated_complete_schema.sql.
 --
 -- Safe to paste into the Supabase SQL editor: it runs in one transaction and every
@@ -8,7 +11,22 @@
 BEGIN;
 
 -- Set once the nightly cleanup starts tearing a deleted account down; from then on it can no longer be restored.
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS hard_delete_started_at TIMESTAMPTZ NULL;
+-- The first run of this migration also restarts the 7-day grace period of every account whose deletion was
+-- requested longer ago. The soft delete of older releases left their instances running and their billing live,
+-- and these accounts are still here because their hard delete failed on payment or webhook references or never
+-- ran, so their owners could still cancel until now; without a new grace period the first cleanup after the
+-- upgrade would tear them down with no chance to cancel.
+-- Adding the column is what records the first run, so rerunning the migration never restarts a grace period.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'hard_delete_started_at'
+    ) THEN
+        ALTER TABLE accounts ADD COLUMN hard_delete_started_at TIMESTAMPTZ NULL;
+        UPDATE accounts SET deleted_at = NOW() WHERE deleted_at < NOW() - INTERVAL '7 days';
+    END IF;
+END$$;
 
 -- Payment records and webhook idempotency keys outlive the account; only their account link goes,
 -- like audit_logs. Drop every existing account foreign key on them, whatever an older schema named it.
@@ -133,7 +151,8 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 REVOKE EXECUTE ON FUNCTION claim_account_hard_delete(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION claim_account_hard_delete(UUID) TO service_role;
 
--- Hard delete only an account cleanup claimed, so a restored account keeps its rows.
+-- Hard delete only an account cleanup claimed, so a restored account keeps its rows. It keeps the accounts row,
+-- which goes with the auth user the backend deletes last.
 CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
@@ -149,8 +168,8 @@ BEGIN
     DELETE FROM subscriptions WHERE account_id = target_account_id;
     DELETE FROM audit_logs WHERE account_id = target_account_id;
 
-    -- Finally delete the account
-    DELETE FROM accounts WHERE id = target_account_id;
+    -- The accounts row goes last, with its auth user (ON DELETE CASCADE), which the backend deletes through the
+    -- Supabase admin API; until then the claimed row is what lets the next cleanup run finish the deletion.
 
     -- Audit entry for hard delete (system action)
     INSERT INTO audit_logs (action, resource_type, resource_id, details, success)

@@ -3,6 +3,7 @@
 Rows are plain dicts per table. Filters compare values as strings, like PostgREST query parameters.
 Embedded many-to-one selects such as ``subscription:subscriptions(*)`` resolve through ``<table>_id`` columns.
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
+Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
 """
 
 from __future__ import annotations
@@ -168,12 +169,36 @@ class FakeRpc:
 
 
 @dataclass
+class FakeAuthAdmin:
+    """The ``auth.admin`` user API; set ``error`` to make deletions fail."""
+
+    db: FakeSupabase
+    deleted_users: list[str] = field(default_factory=list)
+    error: Exception | None = None
+
+    def delete_user(self, user_id: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.deleted_users.append(user_id)
+        self.db.tables["accounts"] = [row for row in self.db.tables.get("accounts", []) if row["id"] != user_id]
+
+
+@dataclass
+class FakeAuth:
+    admin: FakeAuthAdmin
+
+
+@dataclass
 class FakeSupabase:
     """Minimal Supabase client backed by per-table row lists."""
 
     tables: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     rpc_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     rpc_results: dict[str, Any] = field(default_factory=dict)
+    auth: FakeAuth = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.auth = FakeAuth(FakeAuthAdmin(self))
 
     def table(self, name: str) -> FakeQuery:
         return FakeQuery(self, name)

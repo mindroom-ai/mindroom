@@ -463,8 +463,8 @@ BEGIN
     DELETE FROM subscriptions WHERE account_id = target_account_id;
     DELETE FROM audit_logs WHERE account_id = target_account_id;
 
-    -- Finally delete the account
-    DELETE FROM accounts WHERE id = target_account_id;
+    -- The accounts row goes last, with its auth user (ON DELETE CASCADE), which the backend deletes through the
+    -- Supabase admin API; until then the claimed row is what lets the next cleanup run finish the deletion.
 
     -- Audit entry for hard delete (system action)
     INSERT INTO audit_logs (action, resource_type, resource_id, details, success)

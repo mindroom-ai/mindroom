@@ -1,7 +1,6 @@
 """Stripe payment and subscription routes."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 import anyio
@@ -9,16 +8,12 @@ from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
-from backend.services import instance_lifecycle
+from backend.services import provisioner_service
+from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
-
-# A trial checkout expires soon (Stripe allows no less than 30 minutes; the margin covers clock skew), so a session
-# opened alongside another one cannot be completed much later for a second trial; the subscription-created webhook
-# ends or cancels such a trial anyway.
-_TRIAL_CHECKOUT_LIFETIME = timedelta(minutes=35)
 
 
 @dataclass(frozen=True)
@@ -37,12 +32,6 @@ def _subscription_history(customer_id: str) -> _CustomerSubscriptions:
         if running_subscription_id is None and sub.status in ["active", "trialing"]:
             running_subscription_id = sub.id
     return _CustomerSubscriptions(running_subscription_id, had_trial)
-
-
-def _refuse_pending_deletion(sb: Any, account_id: str) -> None:
-    """Refuse billing changes while the account is pending deletion; teardown cancels any subscription without refund."""
-    if not instance_lifecycle.account_may_run_instances(sb, account_id):
-        raise HTTPException(status_code=409, detail="Cancel the account deletion before changing billing")
 
 
 class CheckoutRequest(BaseModel):
@@ -69,7 +58,7 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail=f"No price found for {payload.tier} ({payload.billing_cycle})")
 
     sb = ensure_supabase()
-    _refuse_pending_deletion(sb, user["account_id"])
+    provisioner_service.assert_account_may_run_instances(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
     if result.data and result.data.get("stripe_customer_id"):
         customer_id = result.data["stripe_customer_id"]
@@ -112,7 +101,6 @@ async def create_checkout_session(
     # Add trial period if enabled for this plan; each customer gets one trial, since cancelling keeps it in Stripe
     if is_trial_enabled_for_plan(payload.tier) and not history.had_trial:
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
-        checkout_params["expires_at"] = int((datetime.now(UTC) + _TRIAL_CHECKOUT_LIFETIME).timestamp())
 
     checkout_params["customer"] = customer_id
 
@@ -132,7 +120,7 @@ async def create_portal_session(request: Request, user: Annotated[dict, Depends(
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
     sb = ensure_supabase()
-    _refuse_pending_deletion(sb, user["account_id"])
+    provisioner_service.assert_account_may_run_instances(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
 
     # Stripe customer ID is stored on the accounts table
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()

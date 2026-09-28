@@ -28,7 +28,7 @@ class TestInstancesEndpoints:
     @pytest.fixture(autouse=True)
     def account_not_pending_deletion(self):
         """These tests use accounts that are not pending deletion; test_instance_lifecycle covers the refusal."""
-        with patch("backend.services.instance_lifecycle.account_may_run_instances", return_value=True):
+        with patch("backend.services.provisioner_service.account_may_run_instances", return_value=True):
             yield
 
     @pytest.fixture

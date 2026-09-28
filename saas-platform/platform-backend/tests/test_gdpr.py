@@ -72,6 +72,12 @@ def mock_lifecycle():
         )
 
 
+def _account_deleted_at(mock_supabase: MagicMock, deleted_at: str | None) -> None:
+    """Answer the route's pending-deletion lookup of the account."""
+    lookup = mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value
+    lookup.execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+
+
 def _function_body(sql: str, name: str) -> str:
     match = re.search(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(.*?\$\$(.*?)\$\$", sql, re.DOTALL)
     assert match is not None, name
@@ -105,10 +111,30 @@ def test_account_deletion_functions_change_only_the_account() -> None:
         assert "status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END" in _function_body(
             sql, "soft_delete_account"
         )
-        assert "hard_delete_started_at IS NOT NULL" in _function_body(sql, "hard_delete_account")
+        hard_delete = _function_body(sql, "hard_delete_account")
+        assert "hard_delete_started_at IS NOT NULL" in hard_delete
+        # The accounts row goes with its auth user, which the backend deletes last, so a failure there is retried.
+        assert "DELETE FROM accounts" not in hard_delete
         claim = _function_body(sql, "claim_account_hard_delete")
         assert "AND deleted_at <= NOW() - INTERVAL '7 days';" in claim
         assert "RETURN FOUND;" in claim
+
+
+def test_upgrade_restarts_the_grace_period_of_old_deletion_requests_once() -> None:
+    """Older releases left such accounts running and billed, so the first cleanup must not tear them down unwarned.
+
+    Adding the claim column marks the first run, so rerunning the migration never restarts a grace period again.
+    """
+    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
+
+    assert re.search(
+        r"IF NOT EXISTS \(\s*SELECT 1 FROM information_schema\.columns\s*"
+        r"WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'hard_delete_started_at'\s*"
+        r"\) THEN\s*ALTER TABLE accounts ADD COLUMN hard_delete_started_at TIMESTAMPTZ NULL;\s*"
+        r"UPDATE accounts SET deleted_at = NOW\(\) WHERE deleted_at < NOW\(\) - INTERVAL '7 days';\s*END IF;",
+        migration,
+    )
+    assert "ADD COLUMN IF NOT EXISTS hard_delete_started_at" not in migration
 
 
 def test_hard_delete_keeps_payment_and_webhook_records_without_their_account_link() -> None:
@@ -353,7 +379,7 @@ class TestGDPREndpoints:
         """If the deletion cannot be recorded, the billing this request set to end renews again, and only that."""
         mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
-        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": None}])
+        _account_deleted_at(mock_supabase, None)
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -371,9 +397,7 @@ class TestGDPREndpoints:
         """The account is pending deletion after all, so its billing stays set to end and its instances stop."""
         mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
         mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
-        mock_supabase.table().select().eq().execute.return_value = MagicMock(
-            data=[{"deleted_at": datetime.now(UTC).isoformat()}]
-        )
+        _account_deleted_at(mock_supabase, datetime.now(UTC).isoformat())
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -394,7 +418,7 @@ class TestGDPREndpoints:
         mock_eq = MagicMock()
         mock_select.eq.return_value = mock_eq
         deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-        mock_eq.execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+        mock_eq.limit.return_value.execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
 
         # Mock restore_account function
         mock_rpc = MagicMock()
@@ -424,7 +448,7 @@ class TestGDPREndpoints:
     ):
         """The account is restored either way; the message says the subscription still ends if Stripe failed."""
         deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+        _account_deleted_at(mock_supabase, deleted_at)
         mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=True)
         mock_lifecycle.resume_account_billing.side_effect = stripe.APIConnectionError("stripe unavailable")
         mock_lifecycle.reconcile_account_instances.return_value = ["instance 7: helm failed"]
@@ -441,7 +465,7 @@ class TestGDPREndpoints:
     ):
         """After the grace period, or for a suspended account, restore_account returns false and nothing resumes."""
         deleted_at = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-        mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+        _account_deleted_at(mock_supabase, deleted_at)
         mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=False)
 
         response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})

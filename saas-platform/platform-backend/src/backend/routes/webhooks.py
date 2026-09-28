@@ -8,7 +8,7 @@ from backend.deps import ensure_supabase, limiter
 from backend.entitlements import db_subscription_status
 from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
-from backend.services.instance_lifecycle import reconcile_account_instances
+from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, reconcile_account_instances
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
@@ -136,7 +136,7 @@ def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) ->
 
 
 def _without_repeated_trial(subscription: dict) -> dict | None:
-    """Return the subscription to store, or None when it duplicated a running earlier trial and was cancelled.
+    """Return the subscription to store, or None when it duplicates an earlier trial and was cancelled.
 
     Checkout grants one trial per customer, but checkout sessions opened side by side can each carry one. Only the
     earliest trial counts: a later one is cancelled while the earlier subscription still runs, since the customer
@@ -150,9 +150,12 @@ def _without_repeated_trial(subscription: dict) -> dict | None:
     if not earlier:
         return subscription
     current = stripe.Subscription.retrieve(subscription["id"])
+    if current["status"] in ENDED_STRIPE_STATUSES:
+        # A redelivered event for a duplicate this handler already cancelled; the account keeps its binding.
+        return None
     if current["status"] != "trialing":
         return current
-    if any(other.status not in {"canceled", "incomplete_expired"} for other in earlier):
+    if any(other.status not in ENDED_STRIPE_STATUSES for other in earlier):
         logger.warning("Cancelling Stripe subscription %s: it duplicates an earlier trial", subscription["id"])
         stripe.Subscription.cancel(subscription["id"])
         return None

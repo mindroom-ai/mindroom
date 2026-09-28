@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from backend.services.instance_lifecycle import DELETION_BILLING_MARKER
 from fastapi.testclient import TestClient
 
 
@@ -24,6 +25,12 @@ class TestSubscriptionsEndpoints:
             sb = MagicMock()
             mock.return_value = sb
             yield sb
+
+    @pytest.fixture(autouse=True)
+    def account_may_run(self):
+        """Accounts are not pending deletion unless a test says so."""
+        with patch("backend.services.provisioner_service.account_may_run_instances", return_value=True) as may_run:
+            yield may_run
 
     @pytest.fixture
     def mock_verify_user(self):
@@ -156,6 +163,10 @@ class TestSubscriptionsEndpoints:
         data = response.json()
         assert data["success"] is True
         assert "cancelled" in data["message"] or "canceled" in data["message"]
+        # The customer's own cancellation drops a stale account deletion marker, so no later deletion resumes it.
+        mock_stripe.Subscription.modify.assert_called_once_with(
+            "stripe_sub_123", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: ""}
+        )
 
     def test_cancel_subscription_no_subscription(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
@@ -245,6 +256,28 @@ class TestSubscriptionsEndpoints:
         assert data["success"] is True
         assert "reactivated" in data["message"]
         assert data["subscription_id"] == "stripe_sub_123"
+        mock_stripe.Subscription.modify.assert_called_once_with(
+            "stripe_sub_123", cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}
+        )
+
+    @pytest.mark.parametrize("path", ["/my/subscription/cancel", "/my/subscription/reactivate"])
+    def test_account_pending_deletion_cannot_change_its_subscription(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        account_may_run: Mock,
+        path: str,
+    ):
+        """Teardown cancels the subscription without a refund, so the deletion has to be cancelled first."""
+        account_may_run.return_value = False
+
+        response = client.post(path, json={"cancel_at_period_end": False})
+
+        assert response.status_code == 409
+        mock_stripe.Subscription.modify.assert_not_called()
+        mock_stripe.Subscription.delete.assert_not_called()
 
     def test_reactivate_subscription_not_cancelled(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock

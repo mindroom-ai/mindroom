@@ -579,7 +579,13 @@ async def admin_delete_account_complete(
         f"Admin {admin['user_id']} initiating complete deletion of account {account_id} ({account.get('email')})"
     )
 
-    # 1. Cancel Stripe billing and uninstall every instance; the rows are the only record of what to tear down,
+    # 1. Mark the account pending deletion, so nothing provisions, starts, or bills it again during teardown.
+    sb.rpc(
+        "soft_delete_account",
+        {"target_account_id": account_id, "reason": "admin_complete_deletion", "requested_by": admin["user_id"]},
+    ).execute()
+
+    # 2. Cancel Stripe billing and uninstall every instance; the rows are the only record of what to tear down,
     # so they stay until this succeeds.
     instances = instances_data.get_instances_for_account(sb, account_id)
     try:
@@ -592,28 +598,29 @@ async def admin_delete_account_complete(
         )
         raise HTTPException(status_code=500, detail=detail) from e
 
-    # 2. Delete the account (cascade deletion will handle related records)
+    # 3. Delete the login; its account row and every row that cascades from it go with it.
     try:
-        sb.table("accounts").delete().eq("id", account_id).execute()
-
-        # Log the complete deletion
-        audit_log_entry(
-            account_id=admin["user_id"],
-            action="delete_complete",
-            resource_type="accounts",
-            resource_id=account_id,
-            details={
-                "deleted_email": account.get("email"),
-                "instances_deprovisioned": len(instances),
-                "had_stripe_customer": bool(account.get("stripe_customer_id")),
-            },
-        )
-
-        logger.info(f"Successfully deleted account {account_id} and all associated resources")
-
+        await instance_lifecycle.delete_auth_user(account_id)
     except Exception as e:
-        logger.exception(f"Error deleting account {account_id}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete account: {str(e)}") from None
+        logger.exception("Deleting the auth user of account %s failed; its account row is kept", account_id)
+        detail = (
+            "Billing and instances are torn down, but deleting the login failed, so the account row was kept; "
+            f"retry the deletion: {e!s}"
+        )
+        raise HTTPException(status_code=500, detail=detail) from e
+
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="delete_complete",
+        resource_type="accounts",
+        resource_id=account_id,
+        details={
+            "deleted_email": account.get("email"),
+            "instances_deprovisioned": len(instances),
+            "had_stripe_customer": bool(account.get("stripe_customer_id")),
+        },
+    )
+    logger.info(f"Successfully deleted account {account_id} and all associated resources")
 
     return {"data": {"id": account_id}}
 

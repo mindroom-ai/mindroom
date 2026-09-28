@@ -954,10 +954,29 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     }
 
 
+def _account_deletion_rows(sb: Any, account_id: str) -> list[dict[str, Any]]:
+    return sb.table("accounts").select("deleted_at").eq("id", account_id).limit(1).execute().data or []
+
+
+def account_may_run_instances(sb: Any, account_id: str) -> bool:
+    """Return whether an account may run hosted instances at all: it exists and is not pending deletion."""
+    rows = _account_deletion_rows(sb, account_id)
+    return bool(rows) and rows[0].get("deleted_at") is None
+
+
+def assert_account_may_run_instances(sb: Any, account_id: str, detail: str) -> None:
+    """Refuse the request with `detail` while the account is pending deletion, whatever its subscription says."""
+    if not account_may_run_instances(sb, account_id):
+        raise HTTPException(status_code=409, detail=detail)
+
+
 def _held_by_lifecycle(sb: Any, instance_id: str | int) -> bool:
-    """Return whether the subscription lifecycle holds the instance right now."""
-    row = get_instance(sb, instance_id, columns="lifecycle_stopped_at") or {}
-    return row.get("lifecycle_stopped_at") is not None
+    """Return whether the lifecycle holds the instance right now, or will because its account is pending deletion."""
+    row = get_instance(sb, instance_id, columns="lifecycle_stopped_at,account_id") or {}
+    if row.get("lifecycle_stopped_at") is not None:
+        return True
+    rows = _account_deletion_rows(sb, row["account_id"]) if row.get("account_id") is not None else []
+    return bool(rows) and rows[0].get("deleted_at") is not None
 
 
 async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> None:

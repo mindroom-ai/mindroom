@@ -13,8 +13,11 @@ from backend.config import ACCOUNT_DELETION_GRACE_DAYS
 from backend.deps import ensure_supabase
 from backend.entitlements import parse_timestamp
 from backend.services.instance_lifecycle import (
+    account_may_run_instances,
+    delete_auth_user,
     end_account_billing_at_period_end,
     reconcile_all_subscriptions,
+    resume_subscriptions,
     tear_down_account,
 )
 
@@ -28,9 +31,10 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
 
     Each account is first claimed, which ends its restore window, then its Stripe billing is cancelled and its
     hosted instances are uninstalled before its rows go, because those rows are the only record of what to tear
-    down. An account whose teardown or delete fails keeps its rows, is reported in `errors`, and is retried by the
-    next run. An account still inside its grace period has its renewing Stripe subscriptions set to end with their
-    period again, which covers accounts whose deletion was requested before a release that did this at request time.
+    down; its auth user goes last and takes the account row with it. An account whose teardown or delete fails keeps
+    its account row, is reported in `errors`, and is retried by the next run. An account still inside its grace
+    period has its renewing Stripe subscriptions set to end with their period again, which covers accounts whose
+    deletion was requested before a release that did this at request time.
     """
     sb = ensure_supabase()
     cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
@@ -45,7 +49,7 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
         try:
             deleted_at = parse_timestamp(account["deleted_at"])
             if deleted_at is not None and deleted_at >= cutoff_date:
-                await end_account_billing_at_period_end(account_id)
+                await _end_billing_unless_restored(sb, account_id)
                 continue
             # The claim uses the database clock, like restore_account, so a restore can never land mid-teardown.
             if not sb.rpc("claim_account_hard_delete", {"target_account_id": account_id}).execute().data:
@@ -53,6 +57,7 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
                 continue
             await tear_down_account(account_id)
             sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
+            await delete_auth_user(account_id)
         except Exception as exc:
             logger.exception("Deletion step failed for account %s; the next run retries", account_id)
             errors.append(f"account {account_id}: {exc}")
@@ -61,6 +66,16 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
         logger.info(f"Hard deleted account {account_id} after {grace_period_days} day grace period")
 
     return {"accounts_deleted": accounts_deleted, "errors": errors, "timestamp": datetime.now(UTC).isoformat()}
+
+
+async def _end_billing_unless_restored(sb: Any, account_id: str) -> None:  # noqa: ANN401
+    """Set the account's renewing billing to end, unless the customer restored the account since it was listed."""
+    if account_may_run_instances(sb, account_id):
+        return
+    scheduled = await end_account_billing_at_period_end(account_id)
+    # A restore that landed during the Stripe calls resumed only what it saw marked, so undo this run's own marks.
+    if scheduled and account_may_run_instances(sb, account_id):
+        await resume_subscriptions(scheduled)
 
 
 def cleanup_old_audit_logs(retention_days: int = 90) -> dict:

@@ -114,9 +114,9 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
                 "column is cleared."
             ),
             "external_data": (
-                "Account cleanup uninstalls hosted instances with their Matrix homeserver data and persistent volumes, "
-                "but does not delete the authentication user, Stripe customer or subscription records, or copies held "
-                "by other Matrix homeservers; separate processor and operator policies apply."
+                "Account cleanup uninstalls hosted instances with their Matrix homeserver data and persistent volumes "
+                "and deletes the authentication user, but does not delete Stripe customer or subscription records or "
+                "copies held by other Matrix homeservers; separate processor and operator policies apply."
             ),
         },
         "third_party_processors": [
@@ -182,7 +182,7 @@ async def request_account_deletion(
     except Exception as exc:
         logger.exception("Could not record the deletion request of account %s", account_id)
         # The soft delete may have committed before its response was lost; then the deletion stands.
-        if not _pending_deletion(sb, account_id):
+        if instance_lifecycle.account_may_run_instances(sb, account_id):
             raise HTTPException(status_code=500, detail=await _undo_scheduled_billing_end(scheduled)) from exc
     # An account pending deletion never runs instances, so this holds them until cleanup.
     hold_errors = await instance_lifecycle.reconcile_account_instances(account_id)
@@ -211,7 +211,8 @@ async def request_account_deletion(
         "data_deleted": (
             "Cleanup uninstalls hosted instances with their Matrix homeserver data, persistent volumes, and "
             "platform-paid AI keys, then targets application-database account, subscription, instance, "
-            "existing account-linked audit-log, and subscription-linked usage records"
+            "existing account-linked audit-log, and subscription-linked usage records, and finally deletes the "
+            "authentication user"
         ),
         "data_retained": (
             "After successful account deletion, a deletion audit record retains your account UUID. "
@@ -219,15 +220,10 @@ async def request_account_deletion(
             "Payment records and Stripe webhook event records are kept for accounting with only their account_id "
             "column cleared; they keep Stripe identifiers and event payloads that can include your account ID and "
             "invoice contact details. "
-            "Cleanup does not delete the authentication user, Stripe customer or subscription records, "
+            "Cleanup deletes the authentication user last, but does not delete Stripe customer or subscription records "
             "or copies held by other Matrix homeservers; separate processor and operator policies apply."
         ),
     }
-
-
-def _pending_deletion(sb: Any, account_id: str) -> bool:
-    rows = sb.table("accounts").select("deleted_at").eq("id", account_id).execute().data
-    return bool(rows and rows[0].get("deleted_at"))
 
 
 async def _undo_scheduled_billing_end(subscription_ids: list[str]) -> str:
@@ -295,7 +291,7 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     account_id = user["account_id"]
     sb = ensure_supabase()
 
-    if not _pending_deletion(sb, account_id):
+    if instance_lifecycle.account_may_run_instances(sb, account_id):
         return {"status": "not_pending", "message": "No deletion request found for this account"}
 
     # The RPC restores the account and records the cancellation in one transaction. It refuses after the grace

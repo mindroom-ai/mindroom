@@ -172,10 +172,7 @@ async def list_user_instances(
     return {"instances": enhanced_instances}
 
 
-def _assert_account_may_run_instances(account_id: str) -> None:
-    """Refuse to run instances for an account pending deletion, whatever its subscription says."""
-    if not instance_lifecycle.account_may_run_instances(ensure_supabase(), account_id):
-        raise HTTPException(status_code=409, detail="This account is pending deletion and cannot run instances")
+_PENDING_DELETION_DETAIL = "This account is pending deletion and cannot run instances"
 
 
 def _existing_instance_response(existing: dict[str, Any], message: str, *, success: bool = True) -> dict[str, Any]:
@@ -204,7 +201,7 @@ async def provision_user_instance(
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
-    _assert_account_may_run_instances(account_id)
+    provisioner_service.assert_account_may_run_instances(sb, account_id, _PENDING_DELETION_DETAIL)
     # Provisioning mints a platform-paid OpenRouter key, so a Stripe-billed status is confirmed with Stripe first.
     subscription = await instance_lifecycle.verified_subscription(sb, sub_result.data[0]["id"])
     if subscription is None:
@@ -282,7 +279,7 @@ async def _verify_instance_ownership_and_run(
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")
         assert_instance_entitlement(sub_result.data[0], "run")
-        _assert_account_may_run_instances(user["account_id"])
+        provisioner_service.assert_account_may_run_instances(sb, user["account_id"], _PENDING_DELETION_DETAIL)
         if instance.get("lifecycle_stopped_at"):
             # Resuming also re-enables the OpenRouter key and clears the teardown schedule.
             summary = await instance_lifecycle.reconcile_subscription_instances(instance["subscription_id"])

@@ -1,6 +1,5 @@
 """Comprehensive HTTP API tests for Stripe route endpoints."""
 
-import time
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -28,7 +27,7 @@ class TestStripeRoutesEndpoints:
     @pytest.fixture(autouse=True)
     def account_pending_deletion(self):
         """Accounts are not pending deletion unless a test says so."""
-        with patch("backend.services.instance_lifecycle.account_may_run_instances", return_value=True) as may_run:
+        with patch("backend.services.provisioner_service.account_may_run_instances", return_value=True) as may_run:
             yield may_run
 
     @pytest.mark.parametrize("path", ["/stripe/checkout", "/stripe/portal"])
@@ -242,11 +241,6 @@ class TestStripeRoutesEndpoints:
         mock_stripe.Subscription.list.assert_called_once_with(customer="cus_test_123", status="all", limit=100)
         params = mock_stripe.checkout.Session.create.call_args.kwargs
         assert ("trial_period_days" in params["subscription_data"]) is expects_trial
-        # A trial session expires soon, so one opened alongside another cannot be completed later for a second trial;
-        # Stripe accepts 30 minutes to 24 hours.
-        assert ("expires_at" in params) is expects_trial
-        if expects_trial:
-            assert 30 * 60 < params["expires_at"] - time.time() < 24 * 60 * 60
 
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
