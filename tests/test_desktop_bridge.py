@@ -574,6 +574,45 @@ async def test_remote_status_file_roots_is_bounded_while_local_status_keeps_ever
 
 
 @pytest.mark.asyncio
+async def test_read_file_replies_fit_as_recorded_and_sent_and_rebuild_the_file(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Escape-heavy text arrives in replies within the budget, and reading on from next_offset rebuilds it exactly."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    content = ("é" * 20_000 + "€" * 5_000 + "\U0001f600" * 3_000 + '"\\\t\n' * 2_000).encode()
+    (root / "notes.txt").write_bytes(content)
+    files = DesktopFilesystem((root,))
+    bridge = _local_bridge(filesystem=files)
+    root_id = _root_id(files)
+    received, offset, reads = b"", 0, 0
+    while not received or offset < len(content):
+        reads += 1
+        request_id = _longest_request_id(f"read-{reads}-")
+        command = _command(
+            "read_file",
+            request_id=request_id,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=reads,
+            parameters={"root_id": root_id, "path": "notes.txt", "offset": offset},
+        )
+        await _handle(bridge, _event(command))
+        sent = _response(transport)
+        assert sent.to_content() == bridge._journal.get(request_id).response.to_content()
+        assert sent.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+        shown = str(sent.result["text"]).encode()
+        assert shown
+        assert (sent.result["offset"], sent.result["next_offset"]) == (offset, offset + len(shown))
+        assert sent.result["eof"] is (offset + len(shown) == len(content))
+        assert sent.result["truncated"] is not sent.result["eof"]
+        received, offset = received + shown, offset + len(shown)
+    assert received == content
+    assert reads > len(content) // 16_384 + 1
+    bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_long_local_paths_reach_folder_reads_and_shell_cwd(transport: AsyncMock, tmp_path: Path) -> None:
     """Paths inside selected folders and working directories are not limited to identifier length."""
     nested = Path(*["d" * 60] * 5)

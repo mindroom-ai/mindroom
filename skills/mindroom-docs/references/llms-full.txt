@@ -9732,6 +9732,7 @@ The agent can list and read inside those folders, and there is no write, create,
 - `list_folders` returns an ID, name, and absolute path for each selected folder, plus a `truncated` flag if too many folders or paths are too long to fit one reply.
 - `list_directory` takes a `root_id` and an optional relative `path` and returns at most 200 entries, each with its name and type (`directory`, `file`, `symlink`, or `other`), plus a `truncated` flag if there are more entries than fit the folder limit or one reply.
 - `read_file` takes a `root_id`, a relative `path`, and an optional byte `offset` and returns at most 16 KiB of UTF-8 text with `next_offset`, `eof`, and `truncated`; the agent continues a longer file from `next_offset`.
+  Text that escapes heavily in JSON, such as accented or emoji characters, returns fewer bytes so the reply still fits one encrypted message, never splitting a character.
 
 Paths are relative to the selected folder, and absolute paths or `..` components are rejected.
 The bridge opens every path component relative to a folder descriptor pinned at startup and never follows symbolic links, so a link inside a selected folder cannot reach a file outside it.

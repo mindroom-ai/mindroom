@@ -926,14 +926,13 @@ class DesktopBridge:
                 ),
             )
         _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path", "offset"}))
-        return _Execution(
-            await asyncio.to_thread(
-                files.read_file,
-                _required_str_parameter(parameters, "root_id"),
-                _required_str_parameter(parameters, "path"),
-                _optional_int_parameter(parameters, "offset") or 0,
-            ),
+        read = await asyncio.to_thread(
+            files.read_file,
+            _required_str_parameter(parameters, "root_id"),
+            _required_str_parameter(parameters, "path"),
+            _optional_int_parameter(parameters, "offset") or 0,
         )
+        return _Execution(self._fit_file_read(command, read))
 
     async def _execute_shell(self, command: DesktopCommand) -> _Execution:
         """Start a command only after local approval, or read or stop one of the caller's own handles."""
@@ -1114,6 +1113,21 @@ class DesktopBridge:
 
         # Dropping later entries never grows the reply, so search for the fewest to drop.
         dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
+
+    def _fit_file_read(self, command: DesktopCommand, read: dict[str, object]) -> dict[str, object]:
+        """Keep the longest prefix of a file read whose escaped reply fits inline; the next read starts after it."""
+        text = cast("str", read["text"])
+        offset = cast("int", read["offset"])
+
+        def reply(dropped: int) -> dict[str, object]:
+            if not dropped:
+                return read
+            shown = text[: len(text) - dropped]
+            return {**read, "text": shown, "next_offset": offset + len(shown.encode()), "eof": False, "truncated": True}
+
+        # Dropping later characters never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, len(text), reply)
         return reply(dropped)
 
     def _fit_status(
