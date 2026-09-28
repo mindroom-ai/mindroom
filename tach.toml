@@ -6584,7 +6584,7 @@ depends_on = ["mindroom.config.main"]
 
 [[modules]]
 path = "mindroom.config.schema_hints"
-depends_on = []
+depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.api.config_reload"

@@ -73,7 +73,7 @@ from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
 )
-from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_secret_hinted_values
+from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -105,7 +105,6 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.redaction import REDACTED, redact_sensitive_data
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.thread_models import resolve_thread_model_override
@@ -2028,9 +2027,8 @@ def dashboard_config_schema() -> dict[str, Any]:
 
 
 def redact_authored_config(payload: dict[str, Any]) -> dict[str, Any]:
-    """Mask schema-marked secret fields and credential-named keys in one authored config payload."""
-    masked = redact_secret_hinted_values(payload, dashboard_config_schema(), replacement=REDACTED)
-    return cast("dict[str, Any]", redact_sensitive_data(masked))
+    """Redact one authored config payload for display, letting the config schema decide for typed fields."""
+    return cast("dict[str, Any]", redact_config_for_display(payload, dashboard_config_schema()))
 
 
 def failed_config_source_fingerprint(exc: BaseException) -> str | None:
