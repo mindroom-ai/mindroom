@@ -346,6 +346,43 @@ describe("ModelConfig", () => {
     });
   });
 
+  it.each([
+    { api_key: "sk-openai-config" },
+    { extra_kwargs: { api_key: "sk-openai-config", temperature: 0.2 } },
+  ])(
+    "drops config.yaml API keys when changing provider (%o)",
+    async (keyFields) => {
+      const mockedUseConfigStore = useConfigStore as unknown as {
+        mockReturnValue: (value: unknown) => void;
+      };
+      mockedUseConfigStore.mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            keyed: { provider: "openai", id: "gpt-6-astra", ...keyFields },
+          },
+        },
+      });
+      render(<ModelConfig />);
+      fireEvent.click(screen.getByText("keyed"));
+      const row = screen.getByDisplayValue("keyed").closest("tr");
+      if (!row) throw new Error("row not found");
+
+      fireEvent.click(within(row).getAllByRole("combobox")[0]);
+      fireEvent.click(screen.getByRole("option", { name: /DeepSeek/i }));
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenCalled();
+      });
+      const [, saved] = mockStore.updateConfigValue.mock.calls[0];
+      expect(JSON.stringify(saved)).not.toContain("sk-openai-config");
+      expect(saved).toMatchObject({ provider: "deepseek", id: "gpt-6-astra" });
+    },
+  );
+
   it("changes provider with inline dropdown", async () => {
     render(<ModelConfig />);
 

@@ -642,7 +642,7 @@ class ModelConfig(BaseModel):
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(
         default=None,
-        description="Optional API key (usually from env vars)",
+        description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
@@ -670,6 +670,28 @@ class ModelConfig(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset so the provider's shared key applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
+        if value is None or "api_key" not in value:
+            return value
+        normalized = dict(value)
+        api_key = normalized.pop("api_key")
+        if isinstance(api_key, str):
+            api_key = api_key.strip()
+        if api_key:
+            normalized["api_key"] = api_key
+        return normalized
 
     @field_validator("icon")
     @classmethod
@@ -721,6 +743,17 @@ class ModelConfig(BaseModel):
             msg = "Model api is only supported for provider: openai"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key is not None and "api_key" in (self.extra_kwargs or {}):
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
+            raise ValueError(msg)
+        return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
 
 class RouterConfig(BaseModel):

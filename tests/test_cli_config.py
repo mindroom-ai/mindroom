@@ -1803,6 +1803,30 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "Missing environment variables" not in result.output
 
+    def test_validate_skips_shared_key_for_models_with_their_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate does not ask for a shared key that every model of the provider replaces."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
+            "  azure:\n    provider: azure\n    id: deployment\n    api_key: sk-config\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        for env_key in ("OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+            monkeypatch.delenv(env_key, raising=False)
+            monkeypatch.delenv(f"{env_key}_FILE", raising=False)
+
+        output = normalize_console_output(runner.invoke(app, ["config", "validate", "--path", str(cfg)]).output)
+
+        assert "azure: Set AZURE_OPENAI_ENDPOINT" in output
+        assert "Set AZURE_OPENAI_API_KEY" not in output
+        assert "Set OPENAI_API_KEY" not in output
+
     def test_validate_warns_for_missing_vertexai_claude_env(
         self,
         tmp_path: Path,
@@ -3131,6 +3155,21 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" in result.output
         assert "2 warnings" in result.output
+
+    def test_model_with_own_api_key_does_not_need_provider_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor does not warn about a shared key that every model of the provider replaces."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG.replace("id: claude-sonnet-5\n", "id: claude-sonnet-5\n    api_key: sk-config\n"))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        assert result.exit_code == 0
+        assert "ANTHROPIC_API_KEY not set" not in result.output
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""

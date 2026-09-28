@@ -382,11 +382,11 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
 def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
     """Return the provider service a configured model needs a key for when none resolves, else None.
 
-    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``
-    (or a provider's alternative credential such as Anthropic's ``auth_token``), then the
-    per-model dashboard key, then the shared provider key (including its env-var-named
-    twin). Only providers that authenticate with one API key are checked, and unknown
-    model names are left to config validation.
+    Mirrors the key lookup in ``get_model_instance``: a key in config (``api_key`` or
+    ``extra_kwargs.api_key``, or a provider's alternative credential such as Anthropic's
+    ``auth_token``), then the per-model dashboard key, then the shared provider key
+    (including its env-var-named twin). Only providers that authenticate with one API key
+    are checked, and unknown model names are left to config validation.
     """
     model_config = config.models.get(model_name)
     if model_config is None:
@@ -397,7 +397,9 @@ def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, 
     if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
         return None
     extra_kwargs = model_config.extra_kwargs or {}
-    if any(extra_kwargs.get(name) for name in ("api_key", *_ALTERNATIVE_AUTH_KWARGS.get(provider, ()))):
+    if model_config.configured_api_key() or any(
+        extra_kwargs.get(name) for name in _ALTERNATIVE_AUTH_KWARGS.get(provider, ())
+    ):
         return None
     if _model_credential_api_key(model_name, runtime_paths):
         return None
@@ -423,6 +425,8 @@ def get_model_instance(
     model_id = model_config.id
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
+    if configured_api_key := model_config.configured_api_key():
+        extra_kwargs["api_key"] = configured_api_key
 
     model_api_key = _model_credential_api_key(model_name, runtime_paths)
     if model_api_key:

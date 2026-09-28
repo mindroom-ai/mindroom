@@ -522,8 +522,15 @@ def _check_single_provider(
 
     api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
-        console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, 1
+        # Models that set their own key in config never read the shared one.
+        needs_shared_key = any(
+            not model.configured_api_key()
+            for model in config.models.values()
+            if env_key_for_provider(model.provider) == env_key
+        )
+        if needs_shared_key:
+            console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
+        return 0, 0, int(needs_shared_key)
 
     base_url = _get_custom_base_url(config, provider)
     valid, detail = _validate_provider_key(provider, api_key, base_url)

@@ -15,8 +15,9 @@ from pydantic import ValidationError
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.model_loading import get_model_instance
+from mindroom.model_loading import get_model_instance, missing_model_api_key_provider
 from mindroom.openai_models import (
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
@@ -127,6 +128,78 @@ def test_model_api_rejects_invalid_values_and_unsupported_providers(provider: st
     """A transport selection must not be silently ignored or misspelled."""
     with pytest.raises(ValidationError):
         ModelConfig.model_validate({"provider": provider, "id": "test-model", "api": api})
+
+
+@pytest.mark.parametrize(
+    ("model_fields", "dashboard_key", "expected_key"),
+    [
+        ({}, None, "sk-shared"),
+        ({"api_key": " sk-config "}, None, "sk-config"),
+        ({"extra_kwargs": {"api_key": " sk-config "}}, None, "sk-config"),
+        ({"api_key": "  ", "extra_kwargs": {"api_key": ""}}, None, "sk-shared"),
+        ({"api_key": "sk-config"}, "sk-dashboard", "sk-dashboard"),
+    ],
+    ids=["shared", "api-key", "extra-kwargs-api-key", "blank-is-unset", "dashboard-key-wins"],
+)
+def test_model_api_key_precedence(
+    tmp_path: Path,
+    model_fields: dict[str, object],
+    dashboard_key: str | None,
+    expected_key: str,
+) -> None:
+    """The dashboard model key beats a configured key, which beats the provider's shared key."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials.save_credentials("openai", {"api_key": "sk-shared"})
+    if dashboard_key is not None:
+        credentials.save_credentials("model:target", {"api_key": dashboard_key})
+    config = Config(models={"target": ModelConfig(provider="openai", id="gpt-6-astra", **model_fields)})
+
+    model = get_model_instance(bind_runtime_paths(config, runtime_paths), runtime_paths, "target")
+
+    assert model.api_key == expected_key
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [("openrouter", "z-ai/glm-5.3"), ("zai", "glm-5.3"), ("ollama", "qwen3.8:27b"), ("llama_cpp", "qwen")],
+)
+def test_configured_api_key_reaches_providers_with_own_key_handling(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Provider branches that resolve or skip the shared key still send the configured one."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(provider, {"api_key": "sk-shared"})
+    config = Config(models={"target": ModelConfig(provider=provider, id=model_id, api_key="sk-config")})
+
+    model = get_model_instance(bind_runtime_paths(config, runtime_paths), runtime_paths, "target")
+
+    assert model.api_key == "sk-config"
+
+
+def test_missing_model_api_key_provider_honors_configured_key(tmp_path: Path) -> None:
+    """First-run provider setup must not ask for a shared key a model does not use."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        models={
+            "keyed": ModelConfig(provider="openai", id="gpt-6-astra", api_key="sk-config"),
+            "unkeyed": ModelConfig(provider="openai", id="gpt-6-astra"),
+        },
+    )
+
+    assert missing_model_api_key_provider(config, runtime_paths, "keyed") is None
+    assert missing_model_api_key_provider(config, runtime_paths, "unkeyed") == "openai"
+
+
+def test_model_config_rejects_api_key_in_both_fields_without_echoing_keys() -> None:
+    """Two configured keys would leave one unused, and the error must not print either."""
+    model = {"provider": "openai", "id": "model", "api_key": "sk-secret1", "extra_kwargs": {"api_key": "sk-secret2"}}
+    with pytest.raises(ValidationError, match=r"either api_key or extra_kwargs\.api_key") as exc_info:
+        Config.model_validate({"models": {"default": model}})
+
+    assert "sk-secret" not in str(exc_info.value)
 
 
 def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:

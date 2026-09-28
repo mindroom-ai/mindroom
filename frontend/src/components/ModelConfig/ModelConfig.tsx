@@ -817,6 +817,11 @@ export function ModelConfig() {
       delete nextExtraKwargs.base_url;
       delete nextModelConfig.api;
     }
+    if (rowDraft.provider !== originalModelConfig.provider) {
+      // A config.yaml key belongs to the old provider; never send it to the new one.
+      delete nextModelConfig.api_key;
+      delete nextExtraKwargs.api_key;
+    }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
     } else {
