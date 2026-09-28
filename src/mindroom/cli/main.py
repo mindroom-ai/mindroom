@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import socket
 import sys
 from contextlib import nullcontext
@@ -37,6 +38,7 @@ from .trigger import trigger_app
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from types import FrameType
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -620,6 +622,11 @@ def connect(
         "--force",
         help="Pair again even when this machine is already connected.",
     ),
+    graceful_cancel: bool = typer.Option(
+        False,
+        "--graceful-cancel",
+        help="Cancel on SIGTERM while waiting; finish an in-flight approval or save (used by the macOS app).",
+    ),
 ) -> None:
     """Connect this local MindRoom to your MindRoom Chat account by approving a link.
 
@@ -646,20 +653,38 @@ def connect(
                     console.print("Run `mindroom connect --force` to pair again.")
                     raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
                 typer.confirm("Pair again?", abort=True)
-        cli_connect.pair_local_install(
-            runtime_paths,
-            console=console,
-            provisioning_url=provisioning_url,
-            client_name=client_name,
-            persist_env=persist_env,
-            open_browser=open_browser,
-            renew_expired=False,
-            confirm_approver=_approver_confirmation(),
-        )
+        cancelled = False
+
+        def request_cancel(_signum: int, _frame: FrameType | None) -> None:
+            nonlocal cancelled
+            cancelled = True
+
+        def stop_waiting() -> bool:
+            if cancelled:
+                console.print("Connection cancelled. Nothing was saved.")
+                raise typer.Exit(130)
+            return False
+
+        previous_handler = signal.signal(signal.SIGTERM, request_cancel) if graceful_cancel else None
+        try:
+            cli_connect.pair_local_install(
+                runtime_paths,
+                console=console,
+                provisioning_url=provisioning_url,
+                client_name=client_name,
+                persist_env=persist_env,
+                open_browser=open_browser,
+                renew_expired=False,
+                stop_waiting=stop_waiting if graceful_cancel else None,
+                confirm_approver=_approver_confirmation(),
+            )
+            console.print("\nNext step:\n  mindroom run")
+        finally:
+            if previous_handler is not None:
+                signal.signal(signal.SIGTERM, previous_handler)
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
-    console.print("\nNext step:\n  mindroom run")
 
 
 def _stdin_is_interactive() -> bool:

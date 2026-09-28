@@ -32,7 +32,7 @@ final class MindRoomCommandRunner: ObservableObject {
     @Published var needsReconnectConfirmation = false
     @Published private(set) var pairingApproval: LocalAgentPairingApproval?
     @Published private(set) var isPairing = false
-    @Published private(set) var pairingCancelled = false
+    @Published var pairingCancelled = false
 
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
@@ -154,7 +154,10 @@ final class MindRoomCommandRunner: ObservableObject {
                 self.activeProcess = nil
                 self.isPairing = false
                 self.pairingApproval = nil
-                self.pairingCancelled = pairing && process.isCancelled && !completedResult.isSuccess
+                // A cooperative CLI may finish saving, or report a save error, after Cancel was pressed.
+                let stoppedWhileWaiting = completedResult.exitCode == 130
+                    || (completedResult.exitCode == SIGTERM && !completedResult.output.contains("Connected."))
+                self.pairingCancelled = pairing && process.isCancelled && stoppedWhileWaiting
                 self.lastOutput = self.pairingCancelled ? "" : completedResult.output
                 // An already-connected Mac is a question for the user, not a failed action.
                 let alreadyConnected = action == .pairHosted && completedResult.exitCode == MindRoomCommand.alreadyConnectedExitCode

@@ -8,6 +8,9 @@ final class LocalAgentPairingTests: XCTestCase {
         let approval = LocalAgentPairingApproval.parse(output)
         XCTAssertEqual(approval?.url.absoluteString, "https://chat.mindroom.chat/connect?code=ABCD-EFGH")
         XCTAssertEqual(approval?.code, "ABCD-EFGH")
+        for url in ["https://custom.example.org/approve?code=ABCD-EFGH", "http://localhost:8000/pair?code=ABCD-EFGH"] {
+            XCTAssertEqual(LocalAgentPairingApproval.parse(url + "\n")?.url.absoluteString, url)
+        }
         XCTAssertNil(LocalAgentPairingApproval.parse("  https://chat.mindroom.chat/connect?code=ABCD-EFGH"))
         for line in ["https://chat.mindroom.chat", "https://chat.mindroom.chat/connect?code=ABCD-", "file:///connect?code=ABCD-EFGH", "https://user:password@chat.mindroom.chat/connect?code=ABCD-EFGH"] {
             XCTAssertNil(LocalAgentPairingApproval.parse(line + "\n"), line)
@@ -55,6 +58,43 @@ final class LocalAgentPairingTests: XCTestCase {
         ))
         XCTAssertFalse(result.isSuccess)
         XCTAssertEqual(result.output, "")
+    }
+
+    @MainActor
+    func testOlderRuntimeRefusesPairingWithoutOpeningChat() async {
+        let finished = expectation(description: "Unsupported runtime reported")
+        var sections: [AppSection] = []
+        let runner = MindRoomCommandRunner(processRunner: { _, _ in
+            CommandResult(exitCode: 2, output: "No such option: --graceful-cancel")
+        }, showSection: { sections.append($0) })
+        runner.onCommandFinished = { _, _ in finished.fulfill() }
+        runner.run(.pairHosted)
+        await fulfillment(of: [finished], timeout: 3)
+        XCTAssertEqual(runner.feedback?.result.exitCode, 2)
+        XCTAssertTrue(runner.lastOutput.contains("No such option: --graceful-cancel"))
+        XCTAssertNil(runner.pairingApproval)
+        XCTAssertEqual(sections, [.localAgents])
+    }
+
+    @MainActor
+    func testLateCancelKeepsCompletedPairingAndSaveFailureVisible() async {
+        for exitCode: Int32 in [0, 1, SIGTERM] {
+            let finished = expectation(description: "Approved pairing finished with \(exitCode)")
+            let output = "Connected.\n\(exitCode == 0 ? "Saved credentials" : "Could not save credentials; recovery exports")"
+            let runner = MindRoomCommandRunner(processRunner: { invocation, process in
+                guard invocation.arguments.contains("connect") else {
+                    return CommandResult(exitCode: 0, output: "MindRoom service: running")
+                }
+                process.cancel()
+                return CommandResult(exitCode: exitCode, output: output)
+            }, showSection: { _ in })
+            runner.onCommandFinished = { _, _ in finished.fulfill() }
+            runner.run(.pairHosted)
+            await fulfillment(of: [finished], timeout: 3)
+            XCTAssertFalse(runner.pairingCancelled)
+            XCTAssertEqual(runner.feedback?.result.exitCode, exitCode)
+            XCTAssertEqual(runner.lastOutput, output)
+        }
     }
 
     @MainActor

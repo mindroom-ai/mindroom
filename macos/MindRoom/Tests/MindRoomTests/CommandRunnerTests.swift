@@ -204,7 +204,7 @@ final class CommandRunnerTests: XCTestCase {
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
-        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect"]))
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel"]))
         XCTAssertEqual(runner.feedback?.title, "Pair Chat Account")
         XCTAssertFalse(runner.needsReconnectConfirmation)
     }
@@ -236,7 +236,7 @@ final class CommandRunnerTests: XCTestCase {
         runner.onCommandFinished = { _, _ in completed.fulfill() }
         runner.run(.reconnectHosted)
         await fulfillment(of: [completed], timeout: 3)
-        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--force"]))
+        XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel", "--force"]))
         XCTAssertEqual(runner.feedback?.title, "Reconnect Chat Account")
         XCTAssertEqual(runner.feedback?.result.isSuccess, true)
         XCTAssertFalse(runner.needsReconnectConfirmation)

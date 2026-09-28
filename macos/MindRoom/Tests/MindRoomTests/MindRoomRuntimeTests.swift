@@ -85,8 +85,8 @@ final class MindRoomRuntimeTests: XCTestCase {
             environment: ["PATH": "/usr/bin:/bin"]
         )
 
-        XCTAssertEqual(runtime.command(for: .pairHosted).arguments, ["mindroom", "connect"])
-        XCTAssertEqual(runtime.command(for: .reconnectHosted).arguments, ["mindroom", "connect", "--force"])
+        XCTAssertEqual(runtime.command(for: .pairHosted).arguments, ["mindroom", "connect", "--graceful-cancel"])
+        XCTAssertEqual(runtime.command(for: .reconnectHosted).arguments, ["mindroom", "connect", "--graceful-cancel", "--force"])
         XCTAssertEqual(runtime.command(for: .reconnectHosted).environment["MINDROOM_CONFIG_PATH"], "/Users/example/.mindroom/config.yaml")
     }
 

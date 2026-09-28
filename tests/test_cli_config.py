@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import agno.models.vertexai.claude as vertexai_claude_module
 import httpx
@@ -22,6 +23,7 @@ from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
+import mindroom.cli.connect as cli_connect
 import mindroom.constants as constants_module
 import mindroom.google_adc as google_adc_module
 from mindroom.agents import ensure_default_agent_workspaces
@@ -59,6 +61,8 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
 
 runner = CliRunner()
@@ -3770,6 +3774,87 @@ class TestDoctor:
 
 class TestConnect:
     """Tests for `mindroom connect` pairing command."""
+
+    @pytest.mark.parametrize("cancel_at", ["waiting", "claiming", "saving", "config", "save_error"])
+    def test_graceful_cancel_stops_waiting_but_finishes_claimed_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cancel_at: str,
+    ) -> None:
+        """A cancellation before a claim saves nothing; one during a claim or save preserves its outcome."""
+        cfg = tmp_path / "config.yaml"
+        config_text = f"agents: {{}}\nowner: {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+        cfg.write_text(config_text)
+        env = tmp_path / ".env"
+        env.write_text("EXISTING=value\n")
+        handlers: list[Callable[[int, object], None] | signal.Handlers] = [signal.SIG_DFL]
+
+        def install_handler(
+            signum: int,
+            handler: Callable[[int, object], None] | signal.Handlers,
+        ) -> Callable[[int, object], None] | signal.Handlers:
+            assert signum == signal.SIGTERM
+            previous = handlers[-1]
+            handlers.append(handler)
+            return previous
+
+        def cancel() -> None:
+            handler = handlers[-1]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+        responses = self._device_flow_responses()
+
+        def post(_url: str, **_kwargs: object) -> httpx.Response:
+            if len(responses) == 1 and cancel_at == "claiming":
+                cancel()
+            return responses.pop(0)
+
+        persist = cli_connect.persist_local_provisioning_env
+        replace = cli_connect.replace_owner_placeholders_in_config
+
+        def save(**_kwargs: object) -> object:
+            if cancel_at in {"saving", "save_error"}:
+                cancel()
+            if cancel_at == "save_error":
+                msg = "test write failure"
+                raise OSError(msg)
+            return DEFAULT
+
+        def replace_owner(**_kwargs: object) -> object:
+            if cancel_at == "config":
+                cancel()
+            return DEFAULT
+
+        monkeypatch.setattr(signal, "signal", install_handler)
+        monkeypatch.setattr(cli_connect, "_httpx_post", post)
+        monkeypatch.setattr(cli_connect.time, "sleep", lambda _seconds: cancel() if cancel_at == "waiting" else None)
+        monkeypatch.setattr(cli_connect, "persist_local_provisioning_env", Mock(wraps=persist, side_effect=save))
+        monkeypatch.setattr(
+            cli_connect,
+            "replace_owner_placeholders_in_config",
+            Mock(wraps=replace, side_effect=replace_owner),
+        )
+        result = _invoke_with_runtime(
+            ["connect", "--graceful-cancel", "--provisioning-url", "https://provisioning.example"],
+            cfg,
+        )
+        assert handlers[-1] == signal.SIG_DFL
+
+        expected_exit = {"waiting": 130, "save_error": 1}.get(cancel_at, 0)
+        assert result.exit_code == expected_exit, result.output
+        saved = expected_exit == 0
+        assert "EXISTING=value" in env.read_text()
+        assert ("MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env.read_text()) == saved
+        assert yaml.safe_load(cfg.read_text()) == {
+            "agents": {},
+            "owner": "@alice:mindroom.chat" if saved else OWNER_MATRIX_USER_ID_PLACEHOLDER,
+        }
+        assert saved or cfg.read_text() == config_text
+        assert saved or env.read_text() == "EXISTING=value\n"
+        assert ("MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output) == (cancel_at == "save_error")
+        assert len(responses) == (1 if cancel_at == "waiting" else 0)
 
     @staticmethod
     def _device_flow_responses() -> list[httpx.Response]:

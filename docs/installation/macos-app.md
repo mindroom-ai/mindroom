@@ -35,7 +35,7 @@ Your browser's sign-in session is separate.
 For a self-hosted chat client, change **Chat website** in **Settings**.
 The default is `https://chat.mindroom.chat`.
 Use **Open in Browser** if you prefer your existing browser session or a sign-in provider requires a browser.
-**Reload** returns to your configured Chat website.
+**Reload** returns to your configured Chat website, or reloads the approval page while connecting local agents.
 
 ## Set Up Local Agents
 
@@ -53,6 +53,8 @@ The app detects the command-line runtime separately from the background service:
    Compare the code above Chat with the code on the approval page, check the signed-in account, then click **Approve**.
    If needed, sign in there or use the secondary **Open in Browser** option.
    **Cancel** stops the waiting connection without saving new credentials and returns to **Connect Account**.
+   If approval is already being collected or saved, the app finishes connecting and shows the result.
+   If the installed runtime is too old for safe cancellation, the app asks you to use **Update MindRoom Runtime** in **Settings** before connecting.
    On success, the app shows the connection result and refreshes service status.
    An unapproved code expires after 10 minutes.
    If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.

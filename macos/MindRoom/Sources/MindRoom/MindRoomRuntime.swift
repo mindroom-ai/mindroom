@@ -113,9 +113,9 @@ struct MindRoomRuntime {
         case .initializeSelfHostedConfig:
             return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "self-hosted", "--no-input"])
         case .pairHosted:
-            return mindroomCommand(arguments: ["connect"])
+            return mindroomCommand(arguments: ["connect", "--graceful-cancel"])
         case .reconnectHosted:
-            return mindroomCommand(arguments: ["connect", "--force"])
+            return mindroomCommand(arguments: ["connect", "--graceful-cancel", "--force"])
         }
     }
 
