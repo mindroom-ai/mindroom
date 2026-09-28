@@ -390,6 +390,7 @@ square_root(144)
 ### Notes
 
 - Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
+- `factorial()` accepts `n` up to 1558, the largest factorial whose digits Python prints under its default integer-to-string limit, and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error payload immediately, so one call cannot hold the process shared by every agent.
 - Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
 ## [`reasoning`]
@@ -563,7 +564,8 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, at most 300, and then returns a confirmation string.
+Negative durations and durations above 300 seconds return an error message without waiting.
 `sleep` defaults to primary execution.
 
 ### Configuration
@@ -588,7 +590,7 @@ sleep(5)
 
 ### Notes
 
-- `sleep` is useful for deliberate polling loops or staged workflows, but it still ties up the runtime that executes it while the delay is in progress.
+- `sleep` is useful for deliberate polling loops or staged workflows; the wait runs on the event loop, so it holds no thread while the delay is in progress, but the agent's response stays open until it returns.
 - If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
 
 ## Related Docs

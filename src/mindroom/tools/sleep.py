@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.sleep import SleepTools
+    from mindroom.custom_tools.sleep import SleepTools
 
 
 @register_tool_with_metadata(
@@ -43,6 +43,6 @@ if TYPE_CHECKING:
 )
 def sleep_tools() -> type[SleepTools]:
     """Return sleep tools for introducing delays and pauses in execution."""
-    from agno.tools.sleep import SleepTools
+    from mindroom.custom_tools.sleep import SleepTools
 
     return SleepTools
