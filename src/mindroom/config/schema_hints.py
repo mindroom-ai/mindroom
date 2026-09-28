@@ -122,11 +122,8 @@ def _redact_mapping_for_display(
             redacted[key] = _redact_for_display(item, entry_schema, defs)
         else:
             # In a free-form map, the key name is the only hint that an entry holds a credential.
-            redacted.update(
-                cast(
-                    "dict[object, object]", redact_sensitive_data({key: _redact_for_display(item, entry_schema, defs)})
-                ),
-            )
+            entry = redact_sensitive_data({key: _redact_for_display(item, entry_schema, defs)})
+            redacted.update(cast("dict[object, object]", entry))
     return redacted
 
 
