@@ -209,6 +209,7 @@ The primary runtime creates worker Deployments and Services on demand and routes
 Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
+Worker pods can reach the primary API over the pod network, so the charts also give the primary a generated `MINDROOM_API_KEY` in this mode unless Supabase authentication or an explicit opt-out is configured; worker pods never receive that key.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
