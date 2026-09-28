@@ -243,7 +243,6 @@ class TestGetOwnConfig:
         assert "Invalid configuration" in result
         assert "Could not load configuration" in result
 
-
     @pytest.mark.parametrize("requester_id", ["@member:example.org", None])
     def test_get_own_config_requires_platform_administrator(self, requester_id: str | None) -> None:
         """Reading the agent's own config follows the same administrator rule as every config read."""
