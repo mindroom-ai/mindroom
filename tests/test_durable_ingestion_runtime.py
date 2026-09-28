@@ -426,30 +426,6 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
 
 
 @pytest.mark.asyncio
-async def test_invite_completion_keeps_a_replacement_pending_inviter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Finishing one welcome must not erase a later invitation's durable work."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
-    bot._room_lifecycle.deps = replace(
-        bot._room_lifecycle.deps,
-        change_membership=AgentBot.change_local_membership.__get__(bot),
-    )
-    replacement = "@replacement:localhost"
-
-    async def welcome(_room_id: str, _sender: str) -> None:
-        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement)
-
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
-    async with _owned_session(bot) as session:
-        bot.client.invited_rooms[room.room_id] = room
-        session._transport.request = AsyncMock(return_value=b"{}")
-        await _handle_invite(bot, room, event)
-        assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room.room_id: replacement}
-
-
-@pytest.mark.asyncio
 async def test_malformed_message_does_not_block_following_valid_message(tmp_path: Path) -> None:
     """An ordinary malformed payload must not poison durable batch replay."""
     bot = _agent_bot(tmp_path)

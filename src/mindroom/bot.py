@@ -2509,9 +2509,10 @@ class AgentBot:
     ) -> None:
         """Act on one invite without journalling it.
 
-        An invite has no Matrix event ID to key durable work on.
-        Persist its room and inviter before network work moves to the
-        background so policy changes and process restarts can reconcile it.
+        An invite has no Matrix event ID to key durable work on. Nio's durable
+        store keeps the invite and its inviter, so policy changes and process
+        restarts reconcile it from the client after network work moves to the
+        background.
         """
         if (
             not isinstance(event, nio.InviteMemberEvent)
@@ -2519,9 +2520,8 @@ class AgentBot:
             or event.membership != "invite"
         ):
             return
-        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
-            self._room_lifecycle.handle_recorded_invite(room, event.sender),
+            self._room_lifecycle.handle_invite(room, event.sender),
             owner=self._runtime_view,
         )
 

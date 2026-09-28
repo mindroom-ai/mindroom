@@ -28,7 +28,7 @@ def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
 
 
 def pending_room_invites_path(storage_root: Path, agent_name: str) -> Path:
-    """Return the storage path for one agent's outstanding room invites."""
+    """Return the storage path for one agent's accepted invites awaiting local completion."""
     return agent_state_root_path(storage_root, agent_name) / "pending_room_invites.json"
 
 
@@ -60,7 +60,7 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
 
 
 def load_pending_room_invites(path: Path) -> dict[str, str]:
-    """Load outstanding room IDs and their inviters from durable state."""
+    """Load accepted room IDs and their inviters from durable state."""
     if not path.exists():
         return {}
 
@@ -80,7 +80,7 @@ def load_pending_room_invites(path: Path) -> dict[str, str]:
 
 
 def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
-    """Atomically replace one agent's outstanding room invites."""
+    """Atomically replace one agent's accepted invites awaiting local completion."""
     return _save_json(path, dict(sorted(pending_invites.items())))
 
 
