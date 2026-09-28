@@ -6,15 +6,12 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.tools import Toolkit
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
 from mindroom.logging_config import get_logger
-from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 
 if TYPE_CHECKING:
@@ -38,25 +35,13 @@ def _normalize_document_id(value: str) -> str:
     return match.group(1) if match else document_id
 
 
-def _google_docs_http_error_result(operation: str, exc: HttpError) -> str:
-    status = exc.resp.status
-    logger.warning(
-        "google_docs_request_failed",
-        operation=operation,
-        error_type=type(exc).__name__,
-        status=status,
-    )
-    message = "Google Docs request failed"
-    if not isinstance(status, bool) and isinstance(status, int):
-        message = f"{message} (HTTP {status})"
-    return json.dumps({"error": message})
-
-
-class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+class GoogleDocsTools(GoogleApiToolkit):
     """Create, inspect, and edit Google Docs with scoped Google credentials."""
 
     _oauth_provider = google_docs_oauth_provider()
     _oauth_tool_name = "google_docs"
+    _google_api_name = "docs"
+    _google_api_version = "v1"
 
     def __init__(
         self,
@@ -70,30 +55,6 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         edit_document: bool = True,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
-        provided_creds = kwargs.pop("creds", None)
-        if credentials_manager is None:
-            msg = "GoogleDocsTools requires an explicit credentials_manager"
-            raise RuntimeError(msg)
-
-        self._runtime_paths = runtime_paths
-        self._creds_manager = credentials_manager
-        defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
-        self.service_account_path = cast("str | None", kwargs.pop("service_account_path", None))
-        self.delegated_user = cast("str | None", kwargs.pop("delegated_user", None))
-        if kwargs:
-            unexpected = ", ".join(sorted(kwargs))
-            msg = f"Google Docs received unsupported constructor arguments: {unexpected}"
-            raise TypeError(msg)
-
-        creds = self._initialize_oauth_client(
-            worker_target=worker_target,
-            config=runtime_config,
-            provided_creds=provided_creds,
-            logger=logger,
-            defer_to_original_auth=defer_to_original_auth,
-        )
-        self.creds = creds
-
         tools = []
         if create_document:
             tools.append(self.google_docs_create_document)
@@ -106,42 +67,18 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                     self.google_docs_replace_text,
                 ],
             )
-        super().__init__(name="google_docs", tools=tools)
-        self._set_original_auth(GoogleDocsTools._service_account_auth)
-        self._wrap_oauth_function_entrypoints()
-
-    def _should_fallback_to_original_auth(self) -> bool:
-        return google_service_account_configured(self.service_account_path, self._runtime_paths)
-
-    def _service_account_auth(self) -> Any:  # noqa: ANN401
-        """Return Google credentials built from the configured service-account file."""
-        from google.oauth2 import service_account  # noqa: PLC0415
-
-        if not self.service_account_path:
-            msg = "Google Docs service-account authentication requires GOOGLE_SERVICE_ACCOUNT_FILE"
-            raise RuntimeError(msg)
-        creds = service_account.Credentials.from_service_account_file(
-            self.service_account_path,
-            scopes=self._oauth_provider.scopes,
+        super().__init__(
+            name="google_docs",
+            tools=tools,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            **kwargs,
         )
-        if self.delegated_user:
-            creds = creds.with_subject(self.delegated_user)
-        return creds
-
-    def _docs_service(self) -> Any:  # noqa: ANN401
-        """Return the per-thread authenticated Google Docs service."""
-        self._authenticate()
-        if self.service is None:
-            self.service = build(
-                "docs",
-                "v1",
-                http=self._google_authorized_http(self.creds),
-                cache_discovery=False,
-            )
-        return self.service
 
     def _batch_update(self, document_id: str, requests: list[dict[str, object]]) -> dict[str, object]:
-        service = self._docs_service()
+        service = self._google_api_service()
         return cast(
             "dict[str, object]",
             service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute(),
@@ -161,7 +98,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         if not title.strip():
             return json.dumps({"error": "Google Docs title must not be empty"})
         try:
-            service = self._docs_service()
+            service = self._google_api_service()
             document = cast(
                 "dict[str, object]",
                 service.documents().create(body={"title": title}).execute(),
@@ -203,7 +140,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                     )
             return json.dumps(result)
         except HttpError as exc:
-            return _google_docs_http_error_result("create_document", exc)
+            return google_http_error_result("Google Docs", "create_document", exc)
 
     def google_docs_get_document(self, document_id: str) -> str:
         """Read a Google Doc's full tab-aware structure and content.
@@ -219,7 +156,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         if not document_id:
             return json.dumps({"error": "Google Docs document_id must not be empty"})
         try:
-            service = self._docs_service()
+            service = self._google_api_service()
             document = cast(
                 "dict[str, object]",
                 service.documents().get(documentId=document_id, includeTabsContent=True).execute(),
@@ -231,7 +168,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return _google_docs_http_error_result("get_document", exc)
+            return google_http_error_result("Google Docs", "get_document", exc)
 
     def google_docs_insert_text(
         self,
@@ -281,7 +218,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return _google_docs_http_error_result("insert_text", exc)
+            return google_http_error_result("Google Docs", "insert_text", exc)
 
     def google_docs_replace_text(
         self,
@@ -330,4 +267,4 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return _google_docs_http_error_result("replace_text", exc)
+            return google_http_error_result("Google Docs", "replace_text", exc)

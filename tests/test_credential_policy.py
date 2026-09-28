@@ -79,6 +79,7 @@ def test_agent_scoped_service_policy(service: str, worker_scope: str | None, exp
         "google_drive_oauth",
         "google_gmail_oauth",
         "google_sheets_oauth",
+        "google_tasks_oauth",
     ],
 )
 def test_worker_grantable_policy_rejects_google_oauth_token_services(service: str) -> None:

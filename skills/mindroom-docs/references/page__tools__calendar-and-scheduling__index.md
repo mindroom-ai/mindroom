@@ -1,27 +1,28 @@
 # Calendar & Scheduling
 
-Use these tools to read external calendars, manage bookings, and schedule future agent work inside MindRoom.
+Use these tools to read external calendars, manage to-do lists and bookings, and schedule future agent work inside MindRoom.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `calendar-and-scheduling` group.
-Use these tools when you need Google Calendar access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
+Use these tools when you need Google Calendar or Google Tasks access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
 
 ## Tools On This Page
 
 - [`google_calendar`] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
+- [`google_tasks`] - List, create, update, complete, and delete Google Tasks through Google OAuth.
 - [`cal_com`] - Query Cal.com availability and manage bookings through the Cal.com API.
 - [`scheduler`] - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
 
 ## Common Setup Notes
 
-`google_calendar` is a per-service Google OAuth integration.
-It uses the `google_calendar` OAuth provider instead of an API key form.
-It supports shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
-Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
+`google_calendar` and `google_tasks` are per-service Google OAuth integrations.
+They use the `google_calendar` and `google_tasks` OAuth providers instead of an API key form.
+They support shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
+Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling either tool.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
-Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
+Unlike the Google and Cal.com API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
 MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## [`google_calendar`]
@@ -72,6 +73,53 @@ create_event(
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
 - If the Google Calendar connection is missing any required Calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
+
+## [`google_tasks`]
+
+`google_tasks` is the native Google Tasks API toolkit for the connected user's task lists.
+
+### What It Does
+
+`google_tasks_list_task_lists()` returns up to 1,000 task lists with their IDs and titles.
+`google_tasks_list_tasks()` returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat spaces, and returns a `nextPageToken` when more tasks remain.
+Completed tasks are omitted unless `show_completed=True`, which also includes tasks completed in Google's own apps.
+`google_tasks_create_task()` creates a task with optional notes, due date, and parent task.
+`google_tasks_update_task()` changes only the fields you pass: title, notes, due date, or completion state.
+`google_tasks_delete_task()` deletes one task.
+Deleting a task assigned from Google Docs or Chat also deletes the original assignment there.
+Every operation defaults to the user's default list, `@default`, when no `task_list_id` is given.
+Due dates use `YYYY-MM-DD`, because Google Tasks stores a due day without a time.
+Pass an empty string as `notes` or `due` to `google_tasks_update_task()` to remove that field.
+
+### Configuration
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_list_task_lists()` and `google_tasks_list_tasks()`. |
+| `manage_tasks` | `boolean` | `no` | `true` | Expose task creation, updates, completion, and deletion. |
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - google_tasks:
+          read_tasks: true
+          manage_tasks: true
+```
+
+```python
+google_tasks_list_tasks()
+google_tasks_create_task("Renew passport", notes="Bring two photos", due="2026-10-15")
+google_tasks_update_task("dGFzay0x", completed=True)
+```
+
+### Notes
+
+- `google_tasks` uses its own `google_tasks` OAuth provider and `google_tasks_oauth` token service, which request only the Tasks scope plus Google identity scopes.
+- `google_tasks` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
+- Enable the Google Tasks API in the Google Cloud project that owns a custom OAuth client before connecting.
 
 ## [`cal_com`]
 

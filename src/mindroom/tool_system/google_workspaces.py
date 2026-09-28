@@ -17,6 +17,7 @@ from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
+from mindroom.oauth.google_tasks import google_tasks_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
@@ -31,13 +32,14 @@ if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.declarations import ToolMetadata
 
-_GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets"]
+_GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"]
 _PROVIDERS = {
     "gmail": google_gmail_oauth_provider,
     "google_calendar": google_calendar_oauth_provider,
     "google_drive": google_drive_oauth_provider,
     "google_docs": google_docs_oauth_provider,
     "google_sheets": google_sheets_oauth_provider,
+    "google_tasks": google_tasks_oauth_provider,
 }
 
 
@@ -50,7 +52,14 @@ class GoogleWorkspaceConfig(BaseModel):
     display_name: str = Field(min_length=1)
     client_config_service: str = Field(pattern=r"^[a-z][a-z0-9_]*_oauth_client$")
     allowed_hosted_domains: tuple[str, ...] = Field(min_length=1)
-    services: tuple[_GoogleService, ...] = ("gmail", "google_calendar", "google_drive", "google_docs", "google_sheets")
+    services: tuple[_GoogleService, ...] = (
+        "gmail",
+        "google_calendar",
+        "google_drive",
+        "google_docs",
+        "google_sheets",
+        "google_tasks",
+    )
 
     @field_validator("services")
     @classmethod
