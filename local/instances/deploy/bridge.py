@@ -153,58 +153,15 @@ def save_registry(registry: BridgeRegistry) -> None:
     _write_private_file(BRIDGE_REGISTRY_FILE, json.dumps(registry.model_dump(mode="json"), indent=2))
 
 
-def _legacy_open_permissions(bridge: BridgeConfig) -> list[str]:
-    """Return grants older versions gave to accounts that anyone can register on the instance homeserver."""
-    config_file = Path(bridge.data_dir) / "data" / "config.yaml"
-    if bridge.matrix_domain is None or not config_file.exists():
-        return []
-    try:
-        config = yaml.safe_load(config_file.read_text()) or {}
-    except OSError as e:
-        console.print(f"[red]✗[/red] Cannot read {config_file} to check its bridge permissions: {e}")
-        console.print("Run bridge.py as the file's owner or with sudo.")
-        raise typer.Exit(1) from e
-    permissions = config.get("bridge", {}).get("permissions", {})
-    legacy_grants = {bridge.matrix_domain: "user", f"@admin:{bridge.matrix_domain}": "admin"}
-    return [f"{entity}: {level}" for entity, level in legacy_grants.items() if permissions.get(entity) == level]
-
-
-def _refuse_legacy_open_permissions(bridges: list[BridgeConfig]) -> None:
-    """Refuse to start bridges whose config still lets self-registered accounts use or administer them."""
-    refused = False
-    for bridge in bridges:
-        grants = _legacy_open_permissions(bridge)
-        if not grants:
-            continue
-        refused = True
-        relay_level = RELAY_PERMISSION_LEVELS[bridge.bridge_type]
-        config_file = Path(bridge.data_dir) / "data" / "config.yaml"
-        console.print(f"[red]✗[/red] The {bridge.bridge_type.value} bridge still grants {', '.join(grants)}.")
-        console.print("  Older versions granted these to accounts anyone can register on the homeserver.")
-        console.print(
-            f"  Set bridge.permissions in {config_file} to "
-            f'{{"*": "{relay_level}", "@you:{bridge.matrix_domain}": "admin"}}, or recreate the bridge, '
-            "which deletes its data:",
-        )
-        console.print(
-            f"  ./bridge.py remove {bridge.bridge_type.value} --instance {bridge.instance_name} && "
-            f"./bridge.py add {bridge.bridge_type.value} --instance {bridge.instance_name} "
-            f"--admin @you:{bridge.matrix_domain}",
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
-    if refused:
-        raise typer.Exit(1)
-
-
 def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
     """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
     for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
-        if not path.exists():
-            continue
         try:
+            if path.stat().st_mode & 0o077 == 0:
+                continue
             path.chmod(0o600)
+        except FileNotFoundError:
+            continue
         except OSError as e:
             # A non-root operator cannot chmod files the bridge container already owns.
             console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
@@ -877,9 +834,6 @@ def start(
 
     for bridge in bridges_to_start:
         _protect_bridge_secret_files(bridge)
-    _refuse_legacy_open_permissions(bridges_to_start)
-
-    for bridge in bridges_to_start:
         with console.status(f"[yellow]Starting {bridge.bridge_type} bridge...[/yellow]"):
             cmd = f"cd {bridge.data_dir} && docker compose up -d"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)

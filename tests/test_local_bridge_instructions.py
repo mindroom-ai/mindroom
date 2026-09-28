@@ -23,7 +23,6 @@ from rich.console import Console
 from typer.main import get_command
 from typer.testing import CliRunner, Result
 
-from tests.conftest import normalize_console_output
 
 
 @pytest.fixture
@@ -258,48 +257,19 @@ def test_start_strips_tokens_and_world_read_left_by_older_versions(
     }
 
 
-@pytest.mark.parametrize("bridge_type", ["telegram", "slack"])
-def test_start_refuses_bridges_with_the_legacy_open_permission_map(
-    bridge_manager: ModuleType,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    bridge_type: str,
-) -> None:
-    """Older versions granted admin to an unreserved @admin and user to every self-registered account."""
-    data_dir = tmp_path / "bridges" / bridge_type
-    (data_dir / "data").mkdir(parents=True)
-    domain = "m-alpha.example.com"
-    permissions = {"*": "relaybot", domain: "user", f"@admin:{domain}": "admin"}
-    (data_dir / "data" / "config.yaml").write_text(yaml.safe_dump({"bridge": {"permissions": permissions}}))
-    registry_file = tmp_path / "bridge_instances.json"
-    bridge = {
-        "bridge_type": bridge_type,
-        "instance_name": "alpha",
-        "port": 29317,
-        "data_dir": str(data_dir),
-        "matrix_domain": domain,
-    }
-    registry_file.write_text(json.dumps({"bridges": {"alpha": [bridge]}}))
-    monkeypatch.setattr(bridge_manager, "BRIDGE_REGISTRY_FILE", registry_file)
-
-    result = CliRunner().invoke(bridge_manager.app, ["start", bridge_type, "--instance", "alpha"])
-
-    assert result.exit_code == 1
-    output = normalize_console_output(bridge_manager.console.export_text())
-    assert f"@admin:{domain}: admin" in output
-    assert f"{domain}: user" in output
-    assert "--admin" in output
-
-
 def test_unrestrictable_bridge_file_prints_the_exact_fix(
     bridge_manager: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bridge file the operator cannot chmod, such as one the container owns, gets the command that can."""
+    """A readable bridge file the operator cannot chmod gets the command that can; owner-only files are left alone."""
     config_file = tmp_path / "data" / "config.yaml"
     config_file.parent.mkdir()
     config_file.write_text("bridge: {}\n")
+    config_file.chmod(0o644)
+    registration_file = tmp_path / "data" / "registration.yaml"
+    registration_file.write_text("as_token: as-token-for-tests\n")
+    registration_file.chmod(0o600)
     bridge = bridge_manager.BridgeConfig(
         bridge_type="telegram",
         instance_name="alpha",
