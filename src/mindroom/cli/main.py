@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
+from contextlib import nullcontext
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
@@ -173,15 +174,18 @@ def run(
     try:
         if local_pairing_required(runtime_paths):
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
+            from mindroom.cli.pairing_probes import serve_pairing_probes  # noqa: PLC0415
 
-            cli_connect.pair_local_install(
-                runtime_paths,
-                console=console,
-                # `mindroom connect` or the macOS app may pair this machine while the run waits.
-                stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
-                confirm_approver=_approver_confirmation(),
-            )
-    except (TypeError, ValueError) as exc:
+            # Container health probes must see a live process while the run waits for a human to approve it.
+            with serve_pairing_probes(api_host, api_port) if api else nullcontext():
+                cli_connect.pair_local_install(
+                    runtime_paths,
+                    console=console,
+                    # `mindroom connect` or the macOS app may pair this machine while the run waits.
+                    stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
+                    confirm_approver=_approver_confirmation(),
+                )
+    except (OSError, TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
 

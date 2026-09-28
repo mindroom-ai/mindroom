@@ -2043,7 +2043,7 @@ class TestRunFirstRunSetup:
             patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
             patch("mindroom.cli.main._run", side_effect=fake_run),
         ):
-            result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)
+            result = _invoke_with_runtime(["run", "--no-api", *args], config_path, input=answers, env=env)
         return result, paired, started
 
     def test_prompts_writes_hosted_config_with_hidden_key_then_pairs_and_starts(self, tmp_path: Path) -> None:

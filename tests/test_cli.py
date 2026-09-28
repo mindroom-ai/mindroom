@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import re
+import socket
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,8 +16,10 @@ from typer.testing import CliRunner
 
 from mindroom import constants as constants_mod
 from mindroom.cli import main as main_module
+from mindroom.cli import pairing_probes
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
+from mindroom.cli.pairing_probes import serve_pairing_probes
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
@@ -523,11 +528,185 @@ def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", side_effect=fake_run),
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert pair_called, "pair_local_install should have been called"
     assert seen_credentials == [("test_id", "test_secret")]
+
+
+def _unused_local_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_run_answers_health_probes_while_waiting_for_pairing(tmp_path: Path) -> None:
+    """An unpaired run binds the API address first: liveness passes, readiness waits for pairing, then startup proceeds."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    port = _unused_local_port()
+    probes: dict[str, httpx.Response] = {}
+    started_ports: list[int] = []
+
+    def fake_pair_local_install(_runtime_paths: object, **_kwargs: object) -> None:
+        for name in ("health", "ready"):
+            probes[name] = httpx.get(f"http://127.0.0.1:{port}/api/{name}", trust_env=False)
+        with env_path.open("a", encoding="utf-8") as env_file:
+            env_file.write("MINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n")
+
+    async def fake_run(*, api_host: str, api_port: int, **_kwargs: object) -> None:
+        # The real API server binds the same address, with SO_REUSEADDR like Uvicorn, once pairing has finished.
+        with socket.socket() as api_socket:
+            api_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            api_socket.bind((api_host, api_port))
+        started_ports.append(api_port)
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            ["run", "--config", str(config_path), "--api-host", "127.0.0.1", "--api-port", str(port)],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert probes["health"].status_code == 200
+    assert probes["health"].json() == {"status": "healthy"}
+    assert probes["ready"].status_code == 503
+    assert probes["ready"].json() == {"status": "starting", "detail": "Waiting for local pairing approval"}
+    assert started_ports == [port]
+
+
+def _require_ipv6_loopback() -> None:
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback is unavailable")
+
+
+def _probe_status(host: str, port: int) -> int:
+    return httpx.get(f"http://{host}:{port}/api/health", trust_env=False).status_code
+
+
+def test_pairing_probes_answer_on_every_localhost_address() -> None:
+    """Like the real API server, `localhost` probes answer on both loopbacks, and a taken IPv4 loopback fails early."""
+    _require_ipv6_loopback()
+    families = {info[0] for info in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)}
+    if families != {socket.AF_INET, socket.AF_INET6}:
+        pytest.skip("localhost does not resolve to both loopbacks")
+    port = _unused_local_port()
+
+    with serve_pairing_probes("localhost", port):
+        assert _probe_status("127.0.0.1", port) == 200
+        assert _probe_status("[::1]", port) == 200
+
+    # Taking the second resolved loopback makes the failure come after the first listener is already bound.
+    resolved = list(
+        dict.fromkeys(
+            (info[0], info[4])
+            for info in socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+        ),
+    )
+    (first_family, first_address), (second_family, second_address) = resolved[:2]
+    # Probe connections leave TIME_WAIT entries, which SO_REUSEADDR skips just as the real API server does.
+    with socket.socket(second_family) as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(second_address)
+        occupied.listen()
+        with (
+            pytest.raises(OSError, match=re.escape(f"localhost:{port} (Address already in use)")),
+            serve_pairing_probes("localhost", port),
+        ):
+            pass
+    # The first listener is released again after the failure.
+    with socket.socket(first_family) as released:
+        released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        released.bind(first_address)
+        released.listen()
+
+
+def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like the real API server, a `::1` that IPv6-disabled hosts cannot bind is skipped while IPv4 still answers."""
+    port = _unused_local_port()
+    resolved = {
+        "dual-stack.test": [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ],
+        "ipv6-only.test": [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))],
+    }
+    real_getaddrinfo = socket.getaddrinfo
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: resolved.get(host) or real_getaddrinfo(host, *args, **kwargs),
+    )
+    real_server_bind = pairing_probes._ProbeServer.server_bind
+
+    def server_bind(server: pairing_probes._ProbeServer) -> None:
+        if server.address_family == socket.AF_INET6:
+            raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+        real_server_bind(server)
+
+    monkeypatch.setattr(pairing_probes._ProbeServer, "server_bind", server_bind)
+
+    with serve_pairing_probes("dual-stack.test", port):
+        assert _probe_status("127.0.0.1", port) == 200
+
+    with (
+        pytest.raises(OSError, match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)")),
+        serve_pairing_probes("ipv6-only.test", port),
+    ):
+        pass
+
+
+def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
+    """Like the real API server, `::` binds IPv6 only, so an IPv4 listener on the same port does not block pairing."""
+    _require_ipv6_loopback()
+    port = _unused_local_port()
+
+    with serve_pairing_probes("::", port):
+        assert _probe_status("[::1]", port) == 200
+        with pytest.raises(httpx.ConnectError):
+            _probe_status("127.0.0.1", port)
+
+    with socket.socket() as ipv4_listener:
+        ipv4_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ipv4_listener.bind(("0.0.0.0", port))  # noqa: S104
+        ipv4_listener.listen()
+        with serve_pairing_probes("::", port):
+            assert _probe_status("[::1]", port) == 200
+
+
+def test_run_fails_before_pairing_when_the_api_address_is_taken(tmp_path: Path) -> None:
+    """A run that cannot bind its API address stops before asking anyone to approve pairing."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+
+    with (
+        socket.socket() as occupied,
+        patch("mindroom.cli.connect.pair_local_install") as mock_pair,
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        result = runner.invoke(
+            app,
+            ["run", "--config", str(config_path), "--api-host", "127.0.0.1", "--api-port", str(port)],
+        )
+
+    assert result.exit_code == 1
+    assert "Cannot listen on the API address" in result.output
+    assert f"127.0.0.1:{port}" in result.output
+    mock_pair.assert_not_called()
+    mock_run.assert_not_called()
 
 
 def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
@@ -553,7 +732,7 @@ def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert observed == [False, False, False, True]
@@ -593,7 +772,7 @@ def test_run_exits_with_printed_credentials_when_env_is_read_only(
     monkeypatch.setattr("mindroom.cli.connect.upsert_env_values", read_only)
 
     with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 1
     assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
@@ -621,7 +800,7 @@ def test_run_confirms_the_approving_account_only_in_a_terminal(
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", new_callable=AsyncMock),
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert (confirmers[0] is not None) is interactive
@@ -660,7 +839,7 @@ def test_run_stops_when_the_approving_account_is_declined(tmp_path: Path, monkey
     monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
     with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
-        result = runner.invoke(app, ["run", "--config", str(config_path)], input="n\n")
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)], input="n\n")
 
     assert result.exit_code == 1
     assert "Approved by @mallory:mindroom.chat." in result.output
@@ -681,7 +860,7 @@ def test_run_warns_about_missing_model_keys_before_pairing(tmp_path: Path) -> No
         patch("mindroom.cli.connect.pair_local_install", side_effect=lambda *_a, **_kw: events.append("pair")),
         patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert events == ["keys", "pair"]
