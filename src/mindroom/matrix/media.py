@@ -40,6 +40,7 @@ _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+_HEADER_DIMENSION_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -229,11 +230,12 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
     from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
 
     try:
-        with Image.open(io.BytesIO(media_bytes)) as image:
+        # Some formats, such as ICO, decode the whole raster while opening, so only header-parsing formats are opened.
+        with Image.open(io.BytesIO(media_bytes), formats=_HEADER_DIMENSION_IMAGE_FORMATS) as image:
             width, height = image.size
-            # Pillow's PNG getexif() decodes the whole raster to look for an eXIf chunk after the image data.
-            header_exif_only = image.format != "PNG" or "exif" in image.info
-            orientation = image.getexif().get(_EXIF_ORIENTATION_TAG) if header_exif_only else None
+            # The base getexif() reads EXIF parsed with the header; the PNG override decodes the whole raster
+            # to look for an eXIf chunk after the image data.
+            orientation = Image.Image.getexif(image).get(_EXIF_ORIENTATION_TAG)
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return {}
     if orientation in _EXIF_ROTATED_ORIENTATIONS:

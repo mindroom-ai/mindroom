@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
-from PIL import Image, PngImagePlugin
+from PIL import IcoImagePlugin, Image, PngImagePlugin
 
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
@@ -141,6 +141,29 @@ class TestUploadFileAsMxc:
 
         assert payload is not None
         assert (payload["info"]["w"], payload["info"]["h"]) == expected
+
+    @pytest.mark.asyncio
+    async def test_formats_that_decode_while_opening_upload_without_dimensions(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An ICO decodes its embedded image while opening, so its metadata is skipped instead of decoded."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        file = tmp_path / "icon.png"
+        Image.new("RGBA", (64, 64)).save(file, format="ICO")
+
+        def refuse_decode(_image: IcoImagePlugin.IcoImageFile) -> None:
+            msg = "ICO pixel data must not be decoded for upload metadata"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(IcoImagePlugin.IcoImageFile, "load", refuse_decode)
+
+        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+
+        assert payload is not None
+        assert payload["info"] == {"size": file.stat().st_size, "mimetype": "image/png"}
 
     @pytest.mark.asyncio
     async def test_undecodable_image_upload_omits_dimensions(self, tmp_path: Path) -> None:
