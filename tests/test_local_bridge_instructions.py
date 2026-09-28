@@ -1,4 +1,4 @@
-"""Check that printed registration instructions preserve their executable payloads."""
+"""Check the bridge manager's printed registration instructions and generated bridge access."""
 
 from __future__ import annotations
 
@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING
 
 import dotenv
 import pytest
+import yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
 from rich.console import Console
 from typer.main import get_command
+from typer.testing import CliRunner, Result
 
 
 @pytest.fixture
@@ -103,3 +105,73 @@ def test_tuwunel_start_hint_parses_for_selected_instance(bridge_manager: ModuleT
     with command.make_context("start", shlex.split(start_line)[2:]) as context:
         assert context.params["bridge_type"] == bridge_manager.BridgeType.TELEGRAM
         assert context.params["instance"] == "alpha"
+
+
+_BRIDGE_ADMIN = "@alice:m-alpha.example.com"
+_BRIDGE_CREDENTIAL_ARGS = {
+    "telegram": ["--api-id", "12345", "--api-hash", "telegram-hash-for-tests", "--bot-token", "telegram-token-for-tests"],
+    "slack": ["--app-token", "slack-app-for-tests", "--bot-token", "slack-bot-for-tests", "--team-id", "T0TEST"],
+}
+
+
+def _add_bridge(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *args: str,
+) -> Result:
+    monkeypatch.setattr(bridge_manager, "BRIDGE_REGISTRY_FILE", tmp_path / "bridge_instances.json")
+    monkeypatch.setattr(
+        bridge_manager,
+        "load_instances",
+        lambda: {"alpha": {"matrix_type": "synapse", "domain": "alpha.example.com", "data_dir": str(tmp_path)}},
+    )
+    monkeypatch.setattr(bridge_manager, "_find_next_port", lambda *_args: 29317)
+    return CliRunner().invoke(bridge_manager.app, ["add", *args, "--instance", "alpha"])
+
+
+@pytest.mark.parametrize("bridge_type", ["telegram", "slack"])
+def test_added_bridge_grants_admin_only_to_the_designated_operator(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bridge_type: str,
+) -> None:
+    """Self-registered homeserver accounts, including an unreserved @admin, must get only relay access."""
+    credential_args = _BRIDGE_CREDENTIAL_ARGS[bridge_type]
+    result = _add_bridge(
+        bridge_manager,
+        tmp_path,
+        monkeypatch,
+        bridge_type,
+        *credential_args,
+        "--admin",
+        _BRIDGE_ADMIN,
+    )
+
+    assert result.exit_code == 0, result.output
+    config = yaml.safe_load((tmp_path / "bridges" / bridge_type / "data" / "config.yaml").read_text())
+    assert config["bridge"]["permissions"] == {"*": "relaybot", _BRIDGE_ADMIN: "admin"}
+    registry = (tmp_path / "bridge_instances.json").read_text()
+    assert all(value not in registry for value in credential_args[1::2])
+
+
+def test_bridge_add_rejects_an_admin_that_is_not_a_matrix_user_id(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare localpart would silently grant nobody, or whoever later registers a matching account."""
+    result = _add_bridge(
+        bridge_manager,
+        tmp_path,
+        monkeypatch,
+        "telegram",
+        *_BRIDGE_CREDENTIAL_ARGS["telegram"],
+        "--admin",
+        "admin",
+    )
+
+    assert result.exit_code == 1
+    assert not (tmp_path / "bridges").exists()
+    assert not (tmp_path / "bridge_instances.json").exists()

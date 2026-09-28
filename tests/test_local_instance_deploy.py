@@ -527,13 +527,14 @@ def test_telegram_bridge_compose_renders_configured_image(
 
     assert telegram_template["image"] == expected_image
 
-    compose_path = bridge_manager._create_bridge_docker_compose(bridge, telegram_template)
+    compose_path = bridge_manager._create_bridge_docker_compose(bridge, telegram_template, {})
     compose = yaml.safe_load(compose_path.read_text())
     assert compose["services"]["telegram"]["image"] == expected_image
 
     compose_path = bridge_manager._create_bridge_docker_compose(
         bridge,
         {"image": "registry.example/telegram:compatible"},
+        {},
     )
 
     overridden_compose = yaml.safe_load(compose_path.read_text())
