@@ -49,7 +49,6 @@ class CliWorkerLaunch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol_version: int
     worker_key: str = Field(min_length=1, max_length=1024)
-    state_scope_worker_key: str = Field(min_length=1, max_length=1024)
     private_agent_names: list[str] = Field(max_length=128)
     turn_id: str = Field(min_length=1, max_length=1024)
     generation: str = Field(min_length=1, max_length=1024)

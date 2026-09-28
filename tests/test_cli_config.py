@@ -36,6 +36,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -48,7 +49,7 @@ from mindroom.model_defaults import (
     OLLAMA_GEMMA,
     OLLAMA_QWEN,
     OPENAI_GPT_LUNA,
-    OPENAI_GPT_TERRA,
+    OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
 from mindroom.model_loading import missing_model_api_key_provider
@@ -629,7 +630,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -923,7 +924,7 @@ class TestConfigInit:
         assert "Default model provider" in output
         assert "llama.cpp" in output
         assert "llama_cpp" not in output
-        assert "openai_terra" not in output
+        assert "openai_sol" not in output
         assert "openai_luna" not in output
         assert "Use with --matrix-server" not in output
         assert "--profile" not in output
@@ -1236,12 +1237,12 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
         assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["openai"].context_window
-        assert "openai_terra" not in config["models"]
+        assert "openai_sol" not in config["models"]
         assert "openai_luna" not in config["models"]
 
         config_text = target.read_text(encoding="utf-8")
-        assert "# openai_terra:" in config_text
-        assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
+        assert "# openai_sol:" in config_text
+        assert f"#   id: {OPENAI_GPT_SOL}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
         assert "access_model" not in config
@@ -1260,7 +1261,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
@@ -1274,7 +1275,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openrouter"
-        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-5.5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
     def test_init_azure_preset_uses_azure_openai_models(self, tmp_path: Path) -> None:
@@ -1308,14 +1309,14 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "bedrock_claude"
-        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         config_text = target.read_text(encoding="utf-8")
         assert "# fable:" in config_text
         assert "#   id: anthropic.claude-fable-5-1" in config_text
         assert "# sonnet:" in config_text
-        assert "#   id: anthropic.claude-sonnet-5" in config_text
+        assert "#   id: anthropic.claude-sonnet-5-5" in config_text
         assert "# haiku:" in config_text
         assert "#   id: anthropic.claude-haiku-4-5" in config_text
 
@@ -1409,7 +1410,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
@@ -1426,7 +1427,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-5"
+        assert config["models"]["default"]["id"] == "claude-sonnet-5-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
@@ -1802,6 +1803,38 @@ class TestConfigValidate:
 
         assert result.exit_code == 0
         assert "Missing environment variables" not in result.output
+
+    @pytest.mark.parametrize("key_source", ["config", "dashboard"])
+    def test_validate_skips_shared_key_for_models_with_their_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
+    ) -> None:
+        """Config validate does not ask for a shared key that every model of the provider replaces."""
+        cfg = tmp_path / "config.yaml"
+        storage = tmp_path / "storage"
+        own_key = "    api_key: sk-config\n" if key_source == "config" else ""
+        cfg.write_text(
+            "models:\n"
+            f"  default:\n    provider: openai\n    id: gpt-6-astra\n{own_key}"
+            f"  azure:\n    provider: azure\n    id: deployment\n{own_key}"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        if key_source == "dashboard":
+            _save_dashboard_model_key(cfg, storage, "default")
+            _save_dashboard_model_key(cfg, storage, "azure")
+        for env_key in ("OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
+            monkeypatch.delenv(env_key, raising=False)
+            monkeypatch.delenv(f"{env_key}_FILE", raising=False)
+
+        result = _invoke_with_runtime(["config", "validate", "--path", str(cfg)], cfg, storage_path=storage)
+        output = normalize_console_output(result.output)
+
+        assert "azure: Set AZURE_OPENAI_ENDPOINT" in output
+        assert "Set AZURE_OPENAI_API_KEY" not in output
+        assert "Set OPENAI_API_KEY" not in output
 
     def test_validate_warns_for_missing_vertexai_claude_env(
         self,
@@ -2932,6 +2965,29 @@ _VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
 )
 
 
+def _save_dashboard_model_key(cfg: Path, storage: Path, model_name: str) -> None:
+    """Save a model's own key the way the dashboard Models editor does."""
+    runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage.resolve())
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        f"model:{model_name}",
+        {"api_key": "sk-dashboard"},
+    )
+
+
+def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
+    """Make every doctor HTTP probe succeed and record its URL and headers."""
+    requests: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.httpx.get",
+        lambda url, headers=None, **_kw: requests.append((str(url), headers or {})) or httpx.Response(200, json={}),
+    )
+    return requests
+
+
 def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch httpx.get to simulate a reachable homeserver."""
     resp = httpx.Response(200, json={"versions": ["v1.1"]})
@@ -3131,6 +3187,65 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" in result.output
         assert "2 warnings" in result.output
+
+    @pytest.mark.parametrize("key_source", ["config", "dashboard"])
+    def test_model_with_own_api_key_does_not_need_provider_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
+    ) -> None:
+        """Doctor does not warn about a shared key that every model of the provider replaces."""
+        cfg = tmp_path / "config.yaml"
+        storage = tmp_path / "storage"
+        if key_source == "config":
+            cfg.write_text(
+                _VALID_CONFIG.replace("id: claude-sonnet-5\n", "id: claude-sonnet-5\n    api_key: sk-config\n"),
+            )
+        else:
+            cfg.write_text(_VALID_CONFIG)
+            _save_dashboard_model_key(cfg, storage, "default")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        assert result.exit_code == 0
+        assert "ANTHROPIC_API_KEY not set" not in result.output
+
+    @pytest.mark.parametrize("key_source", ["config", "dashboard", "unreadable-store"])
+    def test_shared_key_is_never_sent_to_endpoint_of_model_with_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key_source: str,
+    ) -> None:
+        """Doctor sends the shared key only to endpoints of models that use it, and to the default one when unsure."""
+        cfg = tmp_path / "config.yaml"
+        storage = tmp_path / "storage"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: m\n"
+            "  together:\n    provider: openai\n    id: m\n"
+            + ("    api_key: tg-own\n" if key_source == "config" else "")
+            + "    extra_kwargs:\n      base_url: https://api.together.xyz/v1\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        if key_source == "dashboard":
+            _save_dashboard_model_key(cfg, storage, "together")
+        if key_source == "unreadable-store":
+
+            def _unreadable_store(*_args: object) -> None:
+                msg = "credential store unreadable"
+                raise OSError(msg)
+
+            monkeypatch.setattr("mindroom.model_loading.get_runtime_shared_credentials_manager", _unreadable_store)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
+
+        _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
+        assert shared_key_urls == ["https://api.openai.com/v1/models"]
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""
@@ -3614,6 +3729,46 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+
+    def test_memory_llm_explicit_key_is_validated_without_env_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates the explicit memory LLM key Mem0 uses instead of asking for the shared one."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            _VALID_CONFIG
+            + "memory:\n  llm:\n    provider: openai\n    config:\n      model: m\n      api_key: sk-mem\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        requests = _record_doctor_requests(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert "Memory LLM: openai/m API key valid" in result.output
+        assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
+
+    def test_memory_llm_host_is_not_the_endpoint_for_non_ollama_providers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The runtime drops host for non-Ollama memory LLMs, so doctor validates their default endpoint."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            _VALID_CONFIG
+            + "memory:\n  llm:\n    provider: openai\n    config:\n      model: m\n      host: https://gateway.example/v1\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
+
+        _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
+        assert shared_key_urls == ["https://api.openai.com/v1/models"]
 
     def test_memory_llm_openai_base_url_used_when_host_absent(
         self,

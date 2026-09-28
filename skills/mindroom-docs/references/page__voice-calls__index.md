@@ -111,7 +111,7 @@ The voice model uses its own named OpenAI credential service, independently of t
 models:
   chat:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
 
 agents:
   assistant:
@@ -149,7 +149,7 @@ The override changes only the calls-enabled agent's LLM selection, while STT, TT
 models:
   chat:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
   call_fast:
     provider: anthropic
     id: claude-haiku-4-5

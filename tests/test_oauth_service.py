@@ -90,6 +90,7 @@ class _FakeOAuthProvider:
     requester_scoped_credentials = False
     scopes: tuple[str, ...] = ()
     claim_validator = None
+    token_url = "https://oauth.example.test/token"  # noqa: S105
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh
@@ -119,12 +120,15 @@ class _FakeOAuthProvider:
         _code: str,
         _runtime_paths: RuntimePaths,
         *,
+        token_url: str,
         code_verifier: str | None = None,
     ) -> OAuthTokenResult:
         assert code_verifier is None
+        assert token_url == self.token_url
         return OAuthTokenResult(
             token_data={
                 "token": "callback-access",
+                "token_uri": token_url,
                 "client_id": "public-client",
                 "scopes": [],
             },
@@ -177,6 +181,7 @@ def _credentials(token: str, refresh_token: str, *, expires_at: float) -> dict[s
     return {
         "token": token,
         "refresh_token": refresh_token,
+        "token_uri": _FakeOAuthProvider.token_url,
         "client_id": "public-client",
         "scopes": [],
         "expires_at": expires_at,
@@ -559,6 +564,7 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
             alice,
             "code",
             None,
+            token_url=alice.provider.token_url,
             expected_connection_generation=connection_generation,
         ),
     )
@@ -686,6 +692,7 @@ async def test_reset_deletes_unreadable_sqlite_credentials_and_allows_reconnect(
         context,
         "replacement-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=_connection_generation(context),
     )
     assert reconnected["token"] == "callback-access"  # noqa: S105
@@ -750,6 +757,7 @@ async def test_completed_reset_operation_cannot_delete_later_callback_credential
         context,
         "replacement-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=_connection_generation(context),
     )
 
@@ -775,6 +783,7 @@ async def test_completed_browser_reset_replay_skips_mcp_retirement(
         context,
         "replacement-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=_connection_generation(context),
     )
     retirement_entered = False
@@ -813,6 +822,7 @@ async def test_stale_approved_reset_cannot_delete_reconnected_credentials(tmp_pa
         context,
         "replacement-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=approved_generation,
     )
 
@@ -883,6 +893,7 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
             context,
             "code",
             None,
+            token_url=context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         ),
     )
@@ -941,6 +952,7 @@ async def test_callback_advances_connection_generation_and_rejects_second_callba
         context,
         "first-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=issued_connection_generation,
     )
 
@@ -951,6 +963,7 @@ async def test_callback_advances_connection_generation_and_rejects_second_callba
             context,
             "second-code",
             None,
+            token_url=context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         )
 
@@ -1162,6 +1175,7 @@ async def test_reset_generation_rejects_a_callback_that_was_issued_before_reset(
             context,
             "stale-code",
             None,
+            token_url=context.provider.token_url,
             expected_connection_generation=stale_generation,
         )
 
@@ -1543,6 +1557,7 @@ async def test_sync_refresh_rejects_changed_connection_generation_before_adapter
         context,
         "account-b-code",
         None,
+        token_url=context.provider.token_url,
         expected_connection_generation=account_a_generation,
     )
     adapter_called = False
