@@ -251,7 +251,14 @@ def daytona_tools() -> type[DaytonaTools]:
                 organization_id=organization_id,
                 timeout=timeout,
                 auto_create_sandbox=auto_create_sandbox,
-                # Upstream disables certificate checks process-wide for any falsy value, so only an explicit False may.
+                # AGNO_COMPAT: Daytona disables TLS verification process-wide for any falsy verify_ssl.
+                # Reason: Agno 3.0.9 treats None like False and then patches daytona_api_client.Configuration.__init__
+                # for the whole process until it restarts, so one such toolkit disables checks for every Daytona client.
+                # Upstream issue: Tracking gap; no matching issue has been verified for either behavior.
+                # Upstream PR: No matching fix identified.
+                # Remove when: Agno disables verification only for an explicit False and scopes it to its own client
+                # configuration; keep MindRoom's true default for unset and null values.
+                # Coverage: tests/test_tool_config_sync.py::test_daytona_verifies_tls_certificates_unless_explicitly_disabled.
                 verify_ssl=verify_ssl is not False,
                 persistent=persistent,
                 instructions=instructions,

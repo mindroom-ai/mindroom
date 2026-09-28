@@ -244,7 +244,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify Daytona TLS certificates. Setting `false` monkey-patches the Daytona client for the whole process to disable certificate checks and their warnings. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify Daytona TLS certificates. Setting `false` monkey-patches the Daytona client for the whole process, until it restarts, to disable certificate checks and their warnings. |
 | `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across calls in the current agent session; use `sandbox_id` for cross-session reuse. |
 | `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
 | `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
@@ -274,7 +274,7 @@ create_file("main.py", "print('ok')")
 ### Notes
 
 - `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
-- `verify_ssl: false` is not a cosmetic flag here, because the upstream toolkit patches the Daytona client to skip certificate verification for every Daytona tool in the process, exposing the API key and sandbox traffic to anyone who can intercept the connection; set it only for a self-hosted Daytona API with a certificate you cannot otherwise trust.
+- `verify_ssl: false` is not a cosmetic flag here, because the upstream toolkit patches the Daytona client to skip certificate verification for every Daytona tool in the process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection; set it only for a self-hosted Daytona API with a certificate you cannot otherwise trust.
 - The dashboard used to save `verify_ssl: false` with every Daytona setup because that was the default, so the first start after upgrading drops a saved `false` once and logs a warning; save it again only if you need it.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 
