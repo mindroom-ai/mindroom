@@ -41,7 +41,7 @@ MindRoom currently ships three worker backend shapes:
 
 Worker code runs in the runner process, so a runner never receives the primary's config file, the directory around it, its `.env`, or a ConfigMap holding it.
 The runtime and instance charts mount none of them into the `static_runner` sidecar, and the Kubernetes worker manager mounts none of them into dedicated workers.
-Runners keep the primary's config path in `MINDROOM_CONFIG_PATH` only so config-relative paths resolve the same way; nothing is mounted there.
+Chart sidecars and Kubernetes workers keep the primary's config path in `MINDROOM_CONFIG_PATH` only so config-relative paths resolve the same way; nothing is mounted there.
 With the `static_runner` and `kubernetes` backends, the primary instead sends the part of its live config that runners resolve with every execute, attachment-save, file-view, and background-script launch request.
 The snapshot is built by allowlist.
 It keeps each agent's display name, tool names, `include_default_tools`, `memory_backend`, `knowledge_bases`, `worker_scope`, `file_access`, `delegate_to`, and `private` scope, root, template, and knowledge path.
