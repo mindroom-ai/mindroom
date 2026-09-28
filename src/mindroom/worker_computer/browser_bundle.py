@@ -9,3 +9,5 @@ _BUNDLE_ROOT = "/opt/mindroom-browser-mcp"
 COMPUTER_BROWSER_EXECUTABLE = f"{_BUNDLE_ROOT}/chromium"
 COMPUTER_BROWSER_MCP_SERVER = f"{_BUNDLE_ROOT}/node_modules/@playwright/mcp/cli.js"
 COMPUTER_BROWSER_GUARD = f"{_BUNDLE_ROOT}/browser_guard.cjs"
+# Must stay valid JSON: Playwright MCP silently reads an unparsable config file as INI.
+COMPUTER_BROWSER_MCP_CONFIG = f"{_BUNDLE_ROOT}/browser_mcp_config.json"

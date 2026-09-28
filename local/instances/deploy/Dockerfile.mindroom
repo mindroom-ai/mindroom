@@ -12,6 +12,7 @@ COPY local/instances/deploy/browser-mcp/package-browser.cjs ./package-browser.cj
 RUN node node_modules/playwright/cli.js install chromium --no-shell \
     && node package-browser.cjs
 COPY src/mindroom/worker_computer/browser_guard.cjs ./browser_guard.cjs
+COPY src/mindroom/worker_computer/browser_mcp_config.json ./browser_mcp_config.json
 
 # Builder stage with uv for dependencies
 FROM mirror.gcr.io/library/python:3.13-slim AS builder

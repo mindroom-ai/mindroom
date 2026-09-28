@@ -21,6 +21,7 @@ from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_EXECUTABLE,
     COMPUTER_BROWSER_GUARD,
+    COMPUTER_BROWSER_MCP_CONFIG,
     COMPUTER_BROWSER_MCP_SERVER,
 )
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
@@ -106,6 +107,9 @@ class WorkerBrowserMCP:
                 "stdout",
                 "--init-page",
                 COMPUTER_BROWSER_GUARD,
+                # Its launch options keep WebRTC from sending UDP around the relay.
+                "--config",
+                COMPUTER_BROWSER_MCP_CONFIG,
             ],
             env=env,
             cwd=str(self._workspace),

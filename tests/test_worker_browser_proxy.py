@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import json
 import os
 import shutil
 import socket
@@ -17,7 +18,12 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.worker_computer import browser_proxy, mcp_provider
-from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy
+from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_MCP_CONFIG
+from mindroom.worker_computer.browser_proxy import (
+    PROXIED_WEBRTC_ONLY_ARG,
+    BrowserDestinationProxy,
+    browser_upstream_proxy,
+)
 from tests.browser_lifecycle_helpers import LifecycleBrowser
 from tests.browser_socks_helpers import socks5_connect
 
@@ -234,6 +240,19 @@ async def test_computer_binding_uses_worker_local_browser_proxy(
         assert bypass == (f"<-loopback>,{_LOOPBACK_RULES}")
     finally:
         await toolkit.aclose()
+
+
+def test_computer_mcp_browser_launches_with_proxied_webrtc_only(tmp_path: Path) -> None:
+    """The pinned Playwright MCP reads Chromium launch arguments from a bundled, valid JSON config."""
+    config = json.loads(Path(mcp_provider.__file__).with_name("browser_mcp_config.json").read_text(encoding="utf-8"))
+    assert config == {"browser": {"launchOptions": {"args": [PROXIED_WEBRTC_ONLY_ARG]}}}
+    dockerfile = (Path(__file__).parents[1] / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
+    assert f"COPY src/mindroom/worker_computer/browser_mcp_config.json ./{Path(COMPUTER_BROWSER_MCP_CONFIG).name}" in (
+        dockerfile
+    )
+    browser = mcp_provider.WorkerBrowserMCP(display=":99", workspace=tmp_path / "workspace", storage_root=tmp_path)
+    args = browser._server_parameters().args
+    assert args[args.index("--config") + 1] == COMPUTER_BROWSER_MCP_CONFIG
 
 
 @pytest.mark.asyncio
@@ -561,6 +580,9 @@ async def test_pinned_browser_redirect_destinations(tmp_path: Path, monkeypatch:
         result.args += ["--headless"]
         result.args[result.args.index("--init-page") + 1] = str(
             Path(mcp_provider.__file__).with_name("browser_guard.cjs"),
+        )
+        result.args[result.args.index("--config") + 1] = str(
+            Path(mcp_provider.__file__).with_name("browser_mcp_config.json"),
         )
         return result
 

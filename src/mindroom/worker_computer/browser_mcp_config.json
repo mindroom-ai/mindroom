@@ -1,0 +1,9 @@
+{
+  "browser": {
+    "launchOptions": {
+      "args": [
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp"
+      ]
+    }
+  }
+}
