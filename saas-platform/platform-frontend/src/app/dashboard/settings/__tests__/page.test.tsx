@@ -174,6 +174,7 @@ describe('SettingsPage', () => {
 
       expect(screen.getByText('Are you absolutely sure?')).toBeInTheDocument()
       expect(screen.getByText(/schedules your account for deletion/i)).toBeInTheDocument()
+      expect(screen.getByText(/Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion\. Your data is removed after 7 days\./)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /yes, delete my account/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
     })
@@ -208,7 +209,8 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(api.requestAccountDeletion).toHaveBeenCalledWith(true)
         expect(screen.getByText(/account deletion scheduled/i)).toBeInTheDocument()
-        expect(screen.getByText(/While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
+        expect(screen.getByText(/Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion\. Your data is removed after 7 days\./)).toBeInTheDocument()
+        expect(screen.getByText(/Within those 7 days, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
       })
 
       // Should sign out and redirect after 3 seconds
@@ -460,11 +462,11 @@ describe('SettingsPage', () => {
       expect(screen.getByText(/Personal data:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/scheduled application-database cleanup attempts deletion when enabled; completion is not guaranteed/)).toBeInTheDocument()
       expect(screen.getByText(/Payment records:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/They are not removed by account cleanup and can prevent deletion/)).toBeInTheDocument()
+      expect(screen.getByText(/Payment records and Stripe webhook event records are kept for accounting after account deletion, without their link to your account/)).toBeInTheDocument()
       expect(screen.getByText(/Deletion audit record:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/After successful account deletion, a deletion audit record retains your account UUID/)).toBeInTheDocument()
       expect(screen.getByText(/External data:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes/)).toBeInTheDocument()
+      expect(screen.getByText(/Account cleanup removes your hosted instances with their Matrix data and persistent volumes, but does not delete the authentication user/)).toBeInTheDocument()
     })
   })
 
