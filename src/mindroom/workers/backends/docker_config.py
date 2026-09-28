@@ -95,6 +95,7 @@ _DOCKER_RESERVED_LABEL_NAMES = frozenset(
         "mindroom.ai/worker-key",
         "mindroom.ai/launch-config-hash",
         "mindroom.ai/runtime-namespace",
+        "mindroom.ai/storage-layout",
     },
 )
 

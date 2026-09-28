@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
@@ -29,6 +29,9 @@ _TOP_LEVEL_KEYS = frozenset(
         "browser",
     },
 )
+_EXTENDED_KEYS = _TOP_LEVEL_KEYS | {"files", "shell"}
+_MAX_ROOTS = 32
+_MAX_ROOT_LENGTH = 4_096
 
 
 class NativeConfigError(ValueError):
@@ -59,6 +62,20 @@ class NativeBrowserConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeFilesConfig:
+    """Locally selected, canonical read-only folder roots."""
+
+    roots: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NativeShellConfig:
+    """Account-level local shell capability."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class NativeDesktopConfig:
     """Complete non-secret configuration for one helper."""
 
@@ -70,13 +87,15 @@ class NativeDesktopConfig:
     allowed_app_ids: tuple[str, ...]
     capture: NativeCaptureConfig
     browser: NativeBrowserConfig
+    files: NativeFilesConfig = field(default_factory=NativeFilesConfig)
+    shell: NativeShellConfig = field(default_factory=NativeShellConfig)
 
     @classmethod
     def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
-        """Parse a strict version-one configuration."""
+        """Parse a strict version-one configuration without checking saved root availability."""
         payload = _mapping(raw, "configuration")
         version = payload.get("v")
-        if set(payload) != _TOP_LEVEL_KEYS or type(version) is not int or version != 1:
+        if set(payload) not in {_TOP_LEVEL_KEYS, _EXTENDED_KEYS} or type(version) is not int or version != 1:
             raise NativeConfigError(
                 "invalid_request",
                 "Native desktop configuration has unsupported fields or version.",
@@ -129,6 +148,7 @@ class NativeDesktopConfig:
             raise NativeConfigError("invalid_request", "Native desktop browser executable_path must be a file.")
         if validate_browser_paths and browser.user_data_dir is not None and not browser.user_data_dir.is_dir():
             raise NativeConfigError("invalid_request", "Native desktop browser user_data_dir must be a directory.")
+        files, shell = _local_access_from_payload(payload)
         return cls(
             revision=revision,
             enabled=enabled,
@@ -138,11 +158,39 @@ class NativeDesktopConfig:
             allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application", allow_empty=True),
             capture=capture,
             browser=browser,
+            files=files,
+            shell=shell,
         )
 
     def with_allowed_apps(self, raw: object) -> NativeDesktopConfig:
         """Validate an app-only edit without revalidating unrelated browser paths."""
         return replace(self, allowed_app_ids=_text_tuple(raw, "allowed application", allow_empty=True))
+
+    def with_local_access(self, files_raw: object, shell_raw: object) -> NativeDesktopConfig:
+        """Validate a folder and shell edit without revalidating unrelated settings."""
+        payload = self.to_payload()
+        payload["files"] = files_raw
+        payload["shell"] = shell_raw
+        updated = self.from_payload(payload, validate_browser_paths=False)
+        return updated.with_canonical_new_roots(self.files.roots)
+
+    def with_canonical_new_roots(self, saved_roots: tuple[Path, ...]) -> NativeDesktopConfig:
+        """Canonicalize newly selected roots; saved roots may have disappeared since they were chosen."""
+        roots: list[Path] = []
+        for root in self.files.roots:
+            if root in saved_roots:
+                roots.append(root)
+                continue
+            try:
+                canonical: Path | None = root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                canonical = None
+            if canonical is None or not canonical.is_dir():
+                raise NativeConfigError("invalid_request", "Native desktop root must be an existing directory.")
+            roots.append(canonical)
+        if len(set(roots)) != len(roots):
+            raise NativeConfigError("invalid_request", "Native desktop roots must be unique canonical paths.")
+        return replace(self, files=NativeFilesConfig(tuple(roots)))
 
     def to_payload(self) -> dict[str, object]:
         """Serialize the complete non-secret configuration."""
@@ -168,6 +216,8 @@ class NativeDesktopConfig:
                 "user_data_dir": str(self.browser.user_data_dir) if self.browser.user_data_dir else None,
                 "timeout_seconds": self.browser.timeout_seconds,
             },
+            "files": {"roots": [str(root) for root in self.files.roots]},
+            "shell": {"enabled": self.shell.enabled},
         }
 
 
@@ -298,11 +348,42 @@ def _optional_absolute_path(raw: object, label: str) -> Path | None:
     return value
 
 
+def _local_access_from_payload(payload: dict[str, object]) -> tuple[NativeFilesConfig, NativeShellConfig]:
+    if "files" not in payload:
+        return NativeFilesConfig(), NativeShellConfig()
+    files_raw = _mapping(payload["files"], "files")
+    shell_raw = _mapping(payload["shell"], "shell")
+    if set(files_raw) != {"roots"} or set(shell_raw) != {"enabled"}:
+        raise NativeConfigError("invalid_request", "Native desktop local access has unsupported fields.")
+    roots_raw = files_raw["roots"]
+    if not isinstance(roots_raw, list) or len(roots_raw) > _MAX_ROOTS:
+        raise NativeConfigError("invalid_request", "Native desktop roots must be a list of at most 32 paths.")
+    roots: list[Path] = []
+    for raw_root in roots_raw:
+        if (
+            not isinstance(raw_root, str)
+            or not raw_root
+            or len(raw_root) > _MAX_ROOT_LENGTH
+            or "\x00" in raw_root
+            or not Path(raw_root).is_absolute()
+            or ".." in Path(raw_root).parts
+        ):
+            raise NativeConfigError("invalid_request", "Native desktop roots must be canonical absolute paths.")
+        roots.append(Path(raw_root))
+    if len(set(roots)) != len(roots):
+        raise NativeConfigError("invalid_request", "Native desktop roots must be unique canonical paths.")
+    if not isinstance(shell_raw["enabled"], bool):
+        raise NativeConfigError("invalid_request", "Native desktop shell enabled must be a boolean.")
+    return NativeFilesConfig(tuple(roots)), NativeShellConfig(enabled=shell_raw["enabled"])
+
+
 __all__ = [
     "NativeBrowserConfig",
     "NativeCaptureConfig",
     "NativeConfigError",
     "NativeDesktopConfig",
+    "NativeFilesConfig",
+    "NativeShellConfig",
     "load_native_config",
     "native_config_path",
     "save_native_config",

@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import httpx
@@ -25,6 +26,7 @@ from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CliShellSettings, CliWorkerLaunch
 from mindroom.api import sandbox_runner_cli
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -39,6 +41,9 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec, is_cli_worker_key, process_worker_key
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_docker_worker_backend import _backend
+
+if TYPE_CHECKING:
+    from mindroom.agent_policy import ResolvedAgentPolicy
 
 KEY = "v1:default:user_agent:~alice:!agent-turn-00000000000000000000000000000001:code"
 BASE = "v1:default:user_agent:alice:code"
@@ -811,16 +816,21 @@ def test_workspace_accepts_exact_visible_user_root_and_rejects_other_roots(
     app, workspace = _app(tmp_path, monkeypatch)
     launch = CliWorkerLaunch.model_validate(_launch(workspace) | {"state_scope_worker_key": "v1:default:user:alice"})
     runtime = sandbox_runner_cli.app_runtime_paths(app)
-    assert sandbox_runner_cli._workspace(launch, runtime, frozenset({"code"})) == workspace
+
+    def policies(agent_name: str) -> dict[str, ResolvedAgentPolicy]:
+        return Config(agents={agent_name: AgentConfig(display_name="Agent", worker_scope="user")}).get_agent_policies()
+
+    assert sandbox_runner_cli._workspace(launch, runtime, policies("code")) == workspace
 
     with pytest.raises(HTTPException):
-        sandbox_runner_cli._workspace(launch, runtime, frozenset({"other"}))
-    with pytest.raises(HTTPException):
-        sandbox_runner_cli._workspace(
-            launch.model_copy(update={"shell": _shell(str(tmp_path / "other"))}),
-            runtime,
-            frozenset({"code"}),
-        )
+        sandbox_runner_cli._workspace(launch, runtime, policies("other"))
+    for outside in (tmp_path / "other", workspace.parent, workspace.parent / "sessions"):
+        with pytest.raises(HTTPException):
+            sandbox_runner_cli._workspace(
+                launch.model_copy(update={"shell": _shell(str(outside))}),
+                runtime,
+                policies("code"),
+            )
 
 
 @pytest.mark.asyncio

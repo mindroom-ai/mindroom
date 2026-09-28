@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         _ = AppUpdater.shared
         StatusMenuController.shared.start()
+        DesktopApprovalWindowController.shared.start()
         MindRoomCommandRunner.shared.refreshStatus()
         DesktopControlStore.shared.refresh()
         if AppLaunchPolicy.shouldShowWindow(launchEvent: NSAppleEventManager.shared().currentAppleEvent) {
@@ -18,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         StatusMenuController.shared.stop()
+        DesktopApprovalWindowController.shared.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

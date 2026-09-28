@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 from contextlib import suppress
 from typing import TYPE_CHECKING
+
+from mindroom.path_confinement import write_file_within_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,19 +68,24 @@ fi
 """
 
 
-def write_callback_script(callbacks_dir: Path, *, callback_id: str, script_text: str) -> Path:
-    """Create one mode-0700 callback script in a gitignored directory."""
-    callbacks_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    gitignore_path = callbacks_dir / ".gitignore"
-    if not gitignore_path.exists():
-        gitignore_path.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
+def write_callback_script(workspace_root: Path, callbacks_dir: Path, *, callback_id: str, script_text: str) -> Path:
+    """Create one mode-0700 callback script in a gitignored directory of one workspace."""
     script_path = callbacks_dir / f"{callback_id}.sh"
-    descriptor = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as script_file:
-            script_file.write(script_text)
-    except (OSError, UnicodeError):
-        with suppress(OSError):
-            script_path.unlink(missing_ok=True)
-        raise
-    return script_path
+    with suppress(FileExistsError):
+        write_file_within_root(
+            workspace_root,
+            callbacks_dir / ".gitignore",
+            _GITIGNORE_CONTENT.encode("utf-8"),
+            file_mode=0o644,
+            dir_mode=0o700,
+            exclusive=True,
+        )
+    write_file_within_root(
+        workspace_root,
+        script_path,
+        script_text.encode("utf-8"),
+        file_mode=0o700,
+        dir_mode=0o700,
+        exclusive=True,
+    )
+    return workspace_root / script_path

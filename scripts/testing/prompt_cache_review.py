@@ -31,10 +31,10 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mindroom.claude_prompt_cache import (  # noqa: E402
-    _MESSAGE_RUNG_COUNT,
-    _mark_message_cache_rungs,
-    _prompt_cache_control,
+    MESSAGE_RUNG_COUNT,
     install_claude_prompt_cache_hook,
+    mark_message_cache_rungs,
+    prompt_cache_control,
 )
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
 
@@ -633,7 +633,7 @@ def build_provider_message_blobs_from_messages(
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
             if cache_control is not None:
-                chat_messages, _ = _mark_message_cache_rungs(chat_messages, cache_control, _MESSAGE_RUNG_COUNT)
+                chat_messages, _ = mark_message_cache_rungs(chat_messages, cache_control, MESSAGE_RUNG_COUNT)
         raw_blobs = tuple(stable_json(message) for message in chat_messages)
         normalized_blobs = tuple(stable_json(strip_cache_control(message)) for message in chat_messages)
         return raw_blobs, normalized_blobs, preview
@@ -672,7 +672,7 @@ def ladder_cache_control(model_params: object) -> dict[str, str] | None:
     model_params_dict = object_dict(model_params)
     if model_params_dict is None or model_params_dict.get("cache_system_prompt") is not True:
         return None
-    return _prompt_cache_control(extended_cache_time=model_params_dict.get("extended_cache_time") is True)
+    return prompt_cache_control(extended_cache_time=model_params_dict.get("extended_cache_time") is True)
 
 
 def is_claude_request(model_id: str) -> bool:

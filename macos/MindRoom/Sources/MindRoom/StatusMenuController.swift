@@ -6,6 +6,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     static let shared = StatusMenuController()
 
     var showWindow: (AppSection?) -> Void = { AppWindowController.shared.show(section: $0) }
+    var showShellApproval: () -> Void = { DesktopApprovalWindowController.shared.showPending() }
 
     private let runner: MindRoomCommandRunner
     private let desktop: DesktopControlStore
@@ -31,11 +32,12 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         item.button?.setAccessibilityLabel("MindRoom")
         statusItem = item
         runner.objectWillChange.merge(with: desktop.objectWillChange)
-            .receive(on: RunLoop.main)
+            // Defer until the published value is assigned, including while menus/panels are open.
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &subscriptions)
         let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runner.refreshStatus() }
+            Task { @MainActor in self?.runner.refreshStatus(queueIfBusy: false) }
         }
         RunLoop.main.add(timer, forMode: .common)
         statusRefreshTimer = timer
@@ -51,7 +53,13 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func refresh() {
-        statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
+        var toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
+        if let shell = desktop.status.shellApprovalState.label { toolTip += "\n\(shell)" }
+        statusItem?.button?.toolTip = toolTip
+        // Keep a dismissed approval discoverable without reopening its popup on every status update.
+        let commandWaiting = desktop.status.shellApprovalState.isPending
+        statusItem?.button?.title = commandWaiting ? "Command waiting" : ""
+        statusItem?.button?.imagePosition = commandWaiting ? .imageLeading : .imageOnly
         menuNeedsUpdate(menu)
     }
 
@@ -60,6 +68,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(.sectionHeader(title: "MindRoom"))
         menu.addItem(actionItem("Open MindRoom…", symbol: "macwindow", action: #selector(openWindow)))
         menu.addItem(actionItem("Open Chat", symbol: "bubble.left.and.bubble.right", action: #selector(openChat)))
+        let dashboardItem = actionItem("Open Dashboard", symbol: "square.grid.2x2", action: #selector(openDashboard))
+        dashboardItem.isEnabled = runner.serviceStatus.state.canOpenDashboard
+        menu.addItem(dashboardItem)
         menu.addItem(.separator())
         menu.addItem(actionItem(
             "Local agents: \(runner.serviceStatus.state.shortTitle)…",
@@ -82,8 +93,18 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             "Computer access: \(desktop.connectionStatusLabel)…",
             symbol: "desktopcomputer", action: #selector(openComputerAccess)
         ))
+        let shellState = desktop.status.shellApprovalState
+        if shellState.isPending {
+            menu.addItem(disabledItem("Shell command waiting for approval"))
+            menu.addItem(actionItem("Review Command…", symbol: "terminal", action: #selector(reviewCommand)))
+        } else if shellState != .askEachTime, let label = shellState.label {
+            menu.addItem(disabledItem(label))
+        }
         if desktop.status.authority.controlAvailable {
             menu.addItem(actionItem("Revoke Computer Control", symbol: "hand.raised", action: #selector(revokeComputerControl)))
+        }
+        if desktop.status.isBridgeOnline, desktop.status.shell.hasRevocableWork {
+            menu.addItem(actionItem("Revoke Shell Access", symbol: "hand.raised", action: #selector(revokeShellAccess)))
         }
         if desktop.status.canStopBridge {
             menu.addItem(actionItem("Stop Computer Access", symbol: "stop.circle", action: #selector(stopComputerAccess)))
@@ -113,10 +134,13 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func openWindow() { showWindow(nil) }
     @objc private func openLocalAgents() { showWindow(.localAgents) }
     @objc private func openComputerAccess() { showWindow(.computerAccess) }
+    @objc private func reviewCommand() { showShellApproval() }
     @objc private func openSettings() { showWindow(.settings) }
     @objc private func openChat() { runner.run(.openHostedChat) }
+    @objc private func openDashboard() { runner.run(.openDashboard) }
     @objc private func refreshStatus() { runner.refreshStatus() }
     @objc private func revokeComputerControl() { desktop.revokeControl() }
+    @objc private func revokeShellAccess() { desktop.revokeShell() }
     @objc private func stopComputerAccess() { desktop.stop() }
     @objc private func toggleLocalAgents() {
         guard !runner.serviceStatus.state.needsSetup, let action = runner.serviceStatus.state.primaryAction else { return }

@@ -19,9 +19,11 @@ MAX_NATIVE_OUTPUT_BYTES = 262_144
 NATIVE_ACTIONS = frozenset(
     {
         "status",
+        "dashboard_configuration",
         "configure",
         "set_allowed_apps",
         "set_browser_config",
+        "set_local_access",
         "finish_setup",
         "import_setup",
         "login",
@@ -31,6 +33,10 @@ NATIVE_ACTIONS = frozenset(
         "grant_control",
         "revoke_control",
         "reset_emergency_stop",
+        "decide_shell",
+        "grant_shell",
+        "revoke_shell",
+        "kill_shell_handle",
         "request_permission",
         "browser_connect",
         "browser_disconnect",

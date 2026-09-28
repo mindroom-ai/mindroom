@@ -22,6 +22,7 @@ export type Instances = SuccessJson<'/my/instances', 'get'>
 export type Instance = Instances['instances'][number]
 export type Provision = SuccessJson<'/my/instances/provision', 'post'>
 export type PricingConfig = SuccessJson<'/pricing/config', 'get'>
+export type InstanceLifecycle = SuccessJson<'/admin/instance-lifecycle', 'get'>
 
 export async function apiCall(
   endpoint: string,

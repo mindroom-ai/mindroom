@@ -3129,7 +3129,7 @@ async def team_response(  # noqa: C901, PLR0915
                 )
         except Exception as e:
             logger.exception("team_response_failed", agents=agent_list)
-            error_text = get_user_friendly_error_message(e, team_name)
+            error_text = get_user_friendly_error_message(e, team_name, runtime_paths=orchestrator.runtime_paths)
             return ExcludedAttempt(RunStatus.error, error_text, run_id=attempt_run_id)
 
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
@@ -3183,6 +3183,7 @@ async def team_response(  # noqa: C901, PLR0915
                 response_text = get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown team error")),
                     team_name,
+                    runtime_paths=orchestrator.runtime_paths,
                 )
             elif original_status is not RunStatus.cancelled:
                 response_text = _format_terminal_team_response(
@@ -3306,7 +3307,11 @@ async def team_response(  # noqa: C901, PLR0915
         release_attempt_entity=_release_team_attempt_members,
         close_runtime_dbs=_close_team_attempt_dbs,
         finalize_attempt=_finalize_team_attempt,
-        unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
+        unexpected_error_text=lambda e: get_user_friendly_error_message(
+            e,
+            team_name,
+            runtime_paths=orchestrator.runtime_paths,
+        ),
         discard_empty_run=discard_team_empty_run,
     )
     return await run_blocking_response_turn(
@@ -3725,7 +3730,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     if run_metadata_collector is not None and event_metadata_content is not None:
                         run_metadata_collector.update(event_metadata_content)
                     _record_interrupted_team_turn()
-                    yield get_user_friendly_error_message(Exception(error_text), team_label)
+                    yield get_user_friendly_error_message(
+                        Exception(error_text),
+                        team_label,
+                        runtime_paths=orchestrator.runtime_paths,
+                    )
                     yield AttemptResolved(HandledAttempt())
                     return
 
@@ -3811,7 +3820,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         ),
                     )
                 _record_interrupted_team_turn()
-                yield get_user_friendly_error_message(Exception(error_text), team_label)
+                yield get_user_friendly_error_message(
+                    Exception(error_text),
+                    team_label,
+                    runtime_paths=orchestrator.runtime_paths,
+                )
                 yield AttemptResolved(HandledAttempt())
                 return
 
@@ -4037,7 +4050,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
         close_runtime_dbs=_close_team_attempt_dbs,
         finalize_attempt=_finalize_team_stream_attempt,
         make_text_chunk=lambda text: text,
-        unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_label),
+        unexpected_error_text=lambda e: get_user_friendly_error_message(
+            e,
+            team_label,
+            runtime_paths=orchestrator.runtime_paths,
+        ),
         discard_empty_run=discard_team_empty_run,
     )
     response_stream = stream_response_turn(

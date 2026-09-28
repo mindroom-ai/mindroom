@@ -88,6 +88,12 @@ Changing those later sections does not invalidate the shared instruction prefix;
 The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
 Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
+The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5` and `~anthropic/claude-sonnet-latest`.
+MindRoom sends them as OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching) on message text parts and the last tool definition.
+Other OpenRouter model families, such as OpenAI, DeepSeek, Z.ai, and Gemini, cache implicitly and keep their unmarked request format.
+Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
+Compaction summaries through OpenRouter Claude skip cache writes because their prompts are not reused.
+
 ## OpenAI Responses Prompt Caching
 
 The `openai` Responses API and `codex` providers send shared agent instructions as an initial developer message, followed by a separate developer message containing the current date and session context.
@@ -98,7 +104,7 @@ See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guide
 Codex, older models, and custom OpenAI-compatible endpoints receive the same split without the explicit breakpoint field.
 The Codex backend currently rejects that field, so cache reuse there still depends on provider-managed caching; splitting messages alone does not guarantee cross-conversation cache hits.
 Set `extra_kwargs.cache_system_prompt: false` to preserve the original unsplit system message.
-This option applies to Responses models; Chat Completions providers keep their existing request format.
+This option applies to Responses models; Chat Completions providers keep their existing request format, except the OpenRouter Claude routes described above.
 
 ## Configuration Examples
 

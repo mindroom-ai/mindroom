@@ -26,6 +26,14 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
+### TLS Trust
+
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: OpenSSL's default CA file and directory plus certifi's roots.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default location, and setting either one stops MindRoom from adding certifi's roots.
+A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
+Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
+Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+
 ## Agent Users
 
 Each agent, team, and router has its own Matrix user.
@@ -251,7 +259,7 @@ matrix_space:
   name: MindRoom       # Display name for the Space
 ```
 
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets, falling back to the stock `mind-logo` image.
 The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
@@ -310,7 +318,7 @@ teams:
 
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
-When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and managed avatars are resolved from workspace overrides or bundled defaults if available.
+When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and it receives a managed avatar (see [Managed Avatars](https://docs.mindroom.chat/configuration/#managed-avatars)).
 
 ## Model Selection Protocol
 

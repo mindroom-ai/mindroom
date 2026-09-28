@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,10 +17,13 @@ import pytest
 
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
+import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.media_delivery as media_delivery_module
+import mindroom.tools.file as file_tool_module
+import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments import load_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -212,8 +216,8 @@ _PROBES = (
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
-    # `file` and `coding` run in a worker by default, where worker code shares their trust,
-    # so they are held to the confinement contract but not to the link-swap contract.
+    # `file` and `coding` resolve paths themselves and read through descriptors pinned
+    # from their base directory; their own link-swap test is below.
     _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),
     _ToolProbe("coding", "read_file", _read_with_coding_tool, None, "doc.txt"),
 )
@@ -319,3 +323,110 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
     monkeypatch.setattr(probe.resolver_module, "resolve_agent_file", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe", "resolver_module"),
+    [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
+    ids=["file:read_file", "coding:read_file"],
+)
+async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+    probe: _ToolProbe,
+    resolver_module: ModuleType,
+) -> None:
+    """A file `file` or `coding` checked by resolution and then swapped for a link is never followed."""
+    resolve = resolver_module.resolve_base_dir_path
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> Path:
+        resolved = resolve(*args, **kwargs)
+        checked = workspace / probe.filename
+        checked.unlink()
+        checked.symlink_to(outside / probe.filename)
+        return resolved
+
+    monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
+
+    assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", _PROBES[-2:], ids=["file:read_file", "coding:read_file"])
+async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    probe: _ToolProbe,
+) -> None:
+    """A huge or sparse workspace file is refused instead of being read whole into the primary."""
+    with (workspace / probe.filename).open("r+b") as doc:
+        doc.truncate(65 << 20)
+
+    assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])
+def test_worker_path_tool_writes_replace_the_entry_instead_of_the_linked_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    interrupted: bool,
+) -> None:
+    """A workspace file hard-linked to a primary file is replaced, never written through, and never left partial."""
+    outside = tmp_path / "primary-owned.db"
+    outside.write_text("primary-only state", encoding="utf-8")
+    target = workspace / "notes.md"
+    os.link(outside, target)
+    if interrupted:
+
+        def fail_rename(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", fail_rename)
+        with pytest.raises(OSError, match="No space"):
+            path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+        assert target.read_text(encoding="utf-8") == "primary-only state"
+    else:
+        path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+        assert target.read_text(encoding="utf-8") == "new notes"
+    assert outside.read_text(encoding="utf-8") == "primary-only state"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [None, PermissionError(1, "Operation not permitted"), OSError(22, "Invalid argument")],
+    ids=["owner-kept", "owner-refused", "owner-unmapped"],
+)
+def test_worker_path_tool_writes_keep_the_replaced_files_owner_where_permitted(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    refusal: OSError | None,
+) -> None:
+    """A replacement keeps the worker's owner, or at least its group, and is still published when both are refused.
+
+    An owner the primary cannot map (user namespaces, NFSv4 idmap) is refused with EINVAL rather than EPERM.
+    """
+    permitted = refusal is None
+    target = workspace / "notes.md"
+    target.write_text("old notes", encoding="utf-8")
+    target.chmod(0o640)
+    original = target.stat()
+    chowned: list[tuple[int, int, int]] = []
+
+    def record_fchown(fd: int, uid: int, gid: int) -> None:
+        chowned.append((os.fstat(fd).st_ino, uid, gid))
+        if refusal is not None:
+            raise refusal
+
+    monkeypatch.setattr(os, "fchown", record_fchown)
+    path_safety_module.write_resolved_file(workspace, target.resolve(), b"new notes")
+
+    replaced = target.stat()
+    assert target.read_text(encoding="utf-8") == "new notes"
+    assert replaced.st_mode & 0o777 == 0o640
+    kept_owner = (replaced.st_ino, original.st_uid, original.st_gid)
+    assert chowned == ([kept_owner] if permitted else [kept_owner, (replaced.st_ino, -1, original.st_gid)])

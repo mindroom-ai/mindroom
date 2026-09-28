@@ -301,8 +301,14 @@ class _SpyTurnPolicy:
     inner: TurnPolicy
     plan_turn_calls: int = 0
 
-    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
-        return self.inner.can_reply_to_sender_in_room(sender_id, room_id)
+    def can_reply_to_sender_in_room(
+        self,
+        sender_id: str,
+        room_id: str,
+        *,
+        observed_room: nio.MatrixRoom | None = None,
+    ) -> bool:
+        return self.inner.can_reply_to_sender_in_room(sender_id, room_id, observed_room=observed_room)
 
     def responder_availability(self) -> ResponderAvailability:
         return self.inner.responder_availability()
@@ -2307,6 +2313,7 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
         room_id=room.room_id,
     )
     await memberships.refresh(config, runtime_paths_for(config), client)
+    room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
 
     await harness.deliver(room, event)
 
@@ -2362,6 +2369,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     assert await validator.precheck_event(room, event, is_edit=kind == "edit") == _SENDER
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
     await memberships.refresh(config, runtime_paths_for(config), client)
+    room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
     dispatcher.start()
     try:
         async with asyncio.timeout(5):
@@ -2370,6 +2378,69 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     finally:
         await dispatcher.stop()
     assert await dispatcher.store.pending() == ()
+    assert harness.turn_store.is_handled(event.event_id)
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_first_message_after_joining_waits_for_the_router_to_apply_the_join(tmp_path: Path) -> None:
+    """A newcomer's first message must not be dropped because the router's sync is behind this agent's."""
+    config = _membership_single_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")  # this agent's sync already shows the join
+    event = _text_event("hello", event_id="$first")
+    memberships = harness.controller.deps.runtime.agent_reply_memberships
+    client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
+    await memberships.refresh(config, runtime_paths_for(config), client)
+    validator = harness.controller.deps.ingress
+
+    with pytest.raises(ReplyMembershipPendingError):
+        await validator.precheck_event(room, event)
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+
+    join = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$join",
+            "sender": _SENDER,
+            "state_key": _SENDER,
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+        },
+    )
+    assert isinstance(join, nio.RoomMemberEvent)
+    router_id = _entity_user_id(config, ROUTER_AGENT_NAME)
+    memberships.apply_member_event(config, runtime_paths_for(config), room.room_id, join, control_user_id=router_id)
+
+    assert await validator.precheck_event(room, event) == _SENDER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_departed_sender_is_denied_once_this_agent_sees_the_leave(tmp_path: Path) -> None:
+    """When the router applies a leave first, this agent's stale roster only delays the denial."""
+    config = _membership_single_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")  # this agent has not seen the leave yet
+    event = _text_event("sent before leaving", event_id="$late")
+    memberships = harness.controller.deps.runtime.agent_reply_memberships
+    client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
+    await memberships.refresh(config, runtime_paths_for(config), client)
+    validator = harness.controller.deps.ingress
+
+    with pytest.raises(ReplyMembershipPendingError):
+        await validator.precheck_event(room, event)
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    assert harness.runner.requests == []
+
+    room.remove_member(_SENDER)  # this agent's sync delivers the leave
+
+    assert await validator.precheck_event(room, event) is None
     assert harness.turn_store.is_handled(event.event_id)
     assert harness.runner.requests == []
 
@@ -4572,6 +4643,8 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
             room_id=room.room_id,
         )
         await memberships.refresh(config, runtime_paths_for(config), client)
+        if not recover_as_member:
+            room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
         if cold:
             dispatcher.release_turn_replay()
             dispatcher.start()

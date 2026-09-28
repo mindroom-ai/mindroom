@@ -24,9 +24,12 @@ Conversation OAuth links use an additional opaque, time-limited, single-use conn
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
-MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
-For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
+MindRoom rechecks the conversation link requester's authority at authorization and callback, and rejects a link if its credential generation changed after issuance.
+A requester-owned connection, one stored in the requester's user or user-agent credential scope as requester-scoped providers always are, needs only room-independent access to the agent, as on the Connections portal and the dashboard.
+That access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply because a browser request has no current room or team.
+A shared-scope connection on a non-private agent requires an administrator or configured credential manager.
 The requester-private-agent exception still applies to its isolated connection.
+Agent-issued reset links apply the same rule.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.

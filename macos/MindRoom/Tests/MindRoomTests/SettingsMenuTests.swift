@@ -5,6 +5,19 @@ import XCTest
 
 @MainActor
 final class SettingsMenuTests: XCTestCase {
+    func testDashboardMenuRequiresRunningService() async throws {
+        for (output, enabled) in [("Service: running", true), ("Service installed but not running", false)] {
+            let runner = MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: output) })
+            let refreshed = expectation(description: "Status refreshed")
+            let subscription = runner.$serviceStatus.dropFirst().prefix(1).sink { _ in refreshed.fulfill() }
+            runner.refreshStatus()
+            await fulfillment(of: [refreshed], timeout: 3)
+            let menu = NSMenu()
+            StatusMenuController(runner: runner, desktop: DesktopControlStore()).menuNeedsUpdate(menu)
+            XCTAssertEqual(menu.items.first { $0.title == "Open Dashboard" }?.isEnabled, enabled)
+            withExtendedLifetime(subscription) {}
+        }
+    }
     func testServiceControlsRequireCompletedSetup() async {
         let toggle = NSSelectorFromString("toggleLocalAgents")
         for (output, hasToggle) in [
@@ -41,6 +54,85 @@ final class SettingsMenuTests: XCTestCase {
             XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
             XCTAssertEqual(selected, expected)
         }
+    }
+
+    func testPendingShellCommandOffersReviewThatOpensApprovalPanelWithoutApproving() async throws {
+        var actions: [String] = []
+        let helper = DesktopBridgeProcess()
+        let desktop = DesktopControlStore(helper: helper, request: { action, _, _ in
+            actions.append(action)
+            return [:]
+        })
+        let request = DesktopShellRequest(
+            requestID: "shell-1", requesterID: "@person:example.org", agentName: "assistant",
+            command: "ls", cwd: "/Users/test", expiresAtMilliseconds: 1_900_000_000_000
+        )
+        try await publish(shell: DesktopShellStatus(enabled: true, pending: request), through: helper, to: desktop)
+        let controller = StatusMenuController(runner: idleRunner(), desktop: desktop)
+        let approval = DesktopApprovalWindowController(store: desktop)
+        defer { approval.stop() }
+        controller.showShellApproval = { approval.showPending() }
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let status = try XCTUnwrap(menu.items.first { $0.title == "Shell command waiting for approval" })
+        XCTAssertFalse(status.isEnabled)
+        let review = try XCTUnwrap(menu.items.first { $0.title == "Review Command…" })
+        XCTAssertTrue(review.isEnabled)
+        XCTAssertFalse(menu.items.contains { $0.title.contains("Approve") || $0.title == "Revoke Shell Access" })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(review.action), to: review.target, from: review))
+        XCTAssertTrue(approval.window?.isVisible == true)
+        XCTAssertTrue(actions.isEmpty, "Reviewing from the menu never answers the request")
+    }
+
+    func testShellAutoApprovalOffersRevokeFromTheMenu() async throws {
+        var actions: [String] = []
+        let helper = DesktopBridgeProcess()
+        let desktop = DesktopControlStore(helper: helper, request: { action, _, _ in
+            actions.append(action)
+            return [:]
+        })
+        try await publish(shell: DesktopShellStatus(enabled: true, autoApproveUntilRevoked: true), through: helper, to: desktop)
+        let controller = StatusMenuController(runner: idleRunner(), desktop: desktop)
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        XCTAssertNotNil(menu.items.first { $0.title == "Shell auto-approval until you stop it" })
+        XCTAssertFalse(menu.items.contains { $0.title == "Review Command…" })
+        let revoke = try XCTUnwrap(menu.items.first { $0.title == "Revoke Shell Access" })
+        XCTAssertTrue(revoke.isEnabled)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(revoke.action), to: revoke.target, from: revoke))
+        for _ in 0 ..< 10 where actions.isEmpty { await Task.yield() }
+        XCTAssertEqual(actions, ["revoke_shell"])
+    }
+
+    private func idleRunner() -> MindRoomCommandRunner {
+        MindRoomCommandRunner(processRunner: { _ in CommandResult(exitCode: 0, output: "") })
+    }
+
+    private func publish(
+        shell: DesktopShellStatus, through helper: DesktopBridgeProcess, to desktop: DesktopControlStore
+    ) async throws {
+        let base = DesktopStatus.stopped
+        let status = DesktopStatus(
+            config: DesktopConfigStatus(
+                state: "ready", revision: 1, enabled: true, controllerUserID: "@controller:example.org",
+                controllerDeviceID: "DEVICE", allowedRequesterIDs: ["@person:example.org"],
+                allowedAgentNames: ["assistant"], allowedAppIDs: [], shellEnabled: true
+            ),
+            pairing: base.pairing, helper: DesktopHelperStatus(state: "running", version: "test"),
+            bridge: DesktopRuntimeStatus(state: "observe_only", activeAction: nil, lastError: nil),
+            authority: base.authority, permissions: base.permissions, browser: base.browser,
+            apps: [], capabilities: [], shell: shell
+        )
+        let received = expectation(description: "shell status received")
+        let subscription = desktop.$status.filter { $0 == status }.prefix(1).sink { _ in received.fulfill() }
+        let json = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
+        _ = helper.decode(Data("{\"v\":1,\"type\":\"status\",\"sequence\":1,\"status\":\(json)}".utf8))
+        await fulfillment(of: [received], timeout: 2)
+        withExtendedLifetime(subscription) {}
     }
 
     func testSettingsMenuRoutesToAppSettings() {

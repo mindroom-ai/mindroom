@@ -25,6 +25,30 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
 
+Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
+Which workspaces a worker mounts follows its scope.
+Only private workspaces separate requesters: a non-private agent's workspace, `agents/<agent>/workspace`, is the same directory in every requester's worker that mounts it.
+
+- A `shared` or unscoped worker mounts only its agent's workspace.
+- A `user_agent` worker runs per requester and agent and mounts one agent's workspace: for a non-private agent that shared directory, and for a private agent only that requester's private workspace.
+- A `user` worker runs per requester, not per agent: it mounts the workspace of every non-private agent whose worker scope is `user` and that requester's private workspace of every `private.per: user` agent, so code working in one of them can read and write the others.
+A workspace is mounted only when it is a real directory reached from the storage root without links.
+Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
+The primary treats everything inside a mounted workspace as worker-controlled.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or create them exclusively; the few files appended to in place, call transcripts, delegation event logs, and lock files, are refused when another hard link shares their inode, so a hard link an older worker planted never redirects a write.
+Reads through those descriptors are capped per surface.
+
+| Surface | Cap | Above the cap |
+|---|---|---|
+| Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning |
+| Call transcripts sent to Mem0 | 64 MiB | Truncated |
+| Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
+| Delegation event logs | 4 MiB per event, 256 MiB per log | An event that would exceed either cap is refused before it is written, other events stop 1 MiB short of the log cap so the terminal event still fits, and a planted log above them makes the record unreadable; values above 64 KiB already move to artifacts |
+| Todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
+
+Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment so programs named in workspace Git config never run.
+
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
 
@@ -42,7 +66,7 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
-| Worker path tools | `file`, `coding` | Follow the agent's `file_access` with lexical path checks only; they run in a worker by default, and the known gap below covers routing them to the primary process |
+| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
 
@@ -59,8 +83,9 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- `file` and `coding` confine paths lexically but do not open through no-follow descriptors, so when an operator routes them to the primary process while worker code shares the workspace, a link swapped into the workspace can redirect them; they run in a worker by default, where worker code already shares their trust.
-- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` are explicitly exempt from the link-swap scenarios until they read through descriptors.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) resolve links and refuse paths that lead outside the workspace, but then walk and read by path. This matters only when an operator routes these tools to the primary process while worker code writes the same workspace: code that swaps a checked directory or file for a link between that check and the walk can make them list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search. They run in a worker by default, where they see only what the worker already mounts.
+- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
+- Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
@@ -79,7 +104,10 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
+- A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
+- After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
+- Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 
 ## Reviewing security findings
 

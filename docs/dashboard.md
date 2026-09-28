@@ -20,6 +20,16 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 
+## Connect Your AI Provider
+
+When the router, an agent, or a team uses a model whose provider has no API key, every dashboard page shows a **Connect your AI provider** banner.
+The check uses the same key lookup as the runtime, so keys in `.env`, keys saved per model on the **Models** page, and provider keys saved under their environment variable name (for example `OPENROUTER_API_KEY`) all count.
+Select **Connect provider**, choose OpenRouter, Anthropic, or OpenAI, and paste a key.
+MindRoom checks the key with the provider through a read-only request that does not use credits, and saves it as the `openrouter`, `anthropic`, or `openai` credential only when the provider accepts it.
+OpenRouter is recommended for the hosted default setup, where one key covers chat, memory, and voice.
+If you connect Anthropic or OpenAI while your models still use OpenRouter, the dialog lists the affected models so you can switch them on the **Models** page.
+When an agent cannot reply because no provider key is set, it answers in chat with a pointer to this setup step instead of the raw provider error, including the dashboard address when `MINDROOM_PUBLIC_URL` is set.
+
 ## Dashboard Tabs
 
 ### Home and Browse Workspace
@@ -154,6 +164,7 @@ Manage service credentials directly from the dashboard:
 - **List configured credential services** from `CredentialsManager`
 - **Create/select service names** (for example `github_private` or `model:sonnet`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
+- **Save provider keys under their env var name**: a new service named after a provider key env var (for example `ANTHROPIC_API_KEY`) is stored under the canonical provider service (`anthropic`), which the Models page and runtime read, while an existing env-var-named service keeps receiving writes because config may reference it by exact name
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name

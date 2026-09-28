@@ -22,7 +22,7 @@ in
     matrixHomeserver = lib.mkOption {
       type = lib.types.str;
       default = "https://mindroom.chat";
-      description = "Matrix homeserver used for /account/whoami token verification.";
+      description = "Matrix homeserver used for OpenID userinfo token verification and agent account registration.";
     };
 
     matrixServerName = lib.mkOption {
@@ -34,6 +34,12 @@ in
     matrixRegistrationTokenFile = lib.mkOption {
       type = lib.types.str;
       description = "File containing the Matrix registration token.";
+    };
+
+    approveUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Chat UI page that approves device pairing links; null uses the service default (https://chat.mindroom.chat/connect).";
     };
 
     googleOAuthClientId = lib.mkOption {
@@ -113,6 +119,8 @@ in
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
       } // lib.optionalAttrs (cfg.matrixServerName != null) {
         MATRIX_SERVER_NAME = cfg.matrixServerName;
+      } // lib.optionalAttrs (cfg.approveUrl != null) {
+        MINDROOM_PROVISIONING_APPROVE_URL = cfg.approveUrl;
       } // lib.optionalAttrs (cfg.googleOAuthClientId != null) {
         MINDROOM_GOOGLE_OAUTH_CLIENT_ID = cfg.googleOAuthClientId;
         MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE = cfg.googleOAuthClientSecretFile;

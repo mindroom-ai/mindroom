@@ -180,6 +180,80 @@ describe("Credentials", () => {
     });
   });
 
+  it("follows the canonical service when the backend renames a provider key", async () => {
+    (global.fetch as any).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (url === "/api/credentials/list") {
+          return { ok: true, json: async () => [] };
+        }
+        if (url === "/api/credentials/ANTHROPIC_API_KEY") {
+          if (init?.method === "POST") {
+            return {
+              ok: true,
+              json: async () => ({ status: "success", service: "anthropic" }),
+            };
+          }
+          return {
+            ok: true,
+            json: async () => ({
+              service: "ANTHROPIC_API_KEY",
+              credentials: {},
+            }),
+          };
+        }
+        if (url === "/api/credentials/anthropic/status") {
+          return {
+            ok: true,
+            json: async () => ({
+              service: "anthropic",
+              has_credentials: true,
+              key_names: ["api_key"],
+            }),
+          };
+        }
+        if (url === "/api/credentials/anthropic") {
+          return {
+            ok: true,
+            json: async () => ({
+              service: "anthropic",
+              credentials: { api_key: "sk-ant-dashboard" },
+            }),
+          };
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      },
+    );
+
+    render(<Credentials />);
+
+    await waitFor(() => {
+      expect((global.fetch as any).mock.calls).toHaveLength(1);
+    });
+    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
+      target: { value: "ANTHROPIC_API_KEY" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
+      target: { value: '{"api_key":"sk-ant-dashboard"}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Credentials saved",
+        description:
+          "Saved as 'anthropic', the service MindRoom reads for 'ANTHROPIC_API_KEY'.",
+      });
+      expect(screen.getByText("Keys: api_key")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("anthropic").length).toBeGreaterThan(0);
+    expect(screen.queryByText("ANTHROPIC_API_KEY")).toBeNull();
+    const requestedUrls = (global.fetch as any).mock.calls.map(
+      ([url]: [string]) => url,
+    );
+    expect(requestedUrls).toContain("/api/credentials/anthropic");
+  });
+
   it("shows error and does not save when JSON is invalid", async () => {
     (global.fetch as any)
       .mockResolvedValueOnce({

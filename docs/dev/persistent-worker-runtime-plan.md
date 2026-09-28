@@ -29,7 +29,7 @@ Support requester-isolated and shared runtime execution without building one ful
 - `context_files` must resolve inside the agent's canonical workspace.
 - File-backed agent memory must use the canonical workspace root rather than a separate per-agent subdirectory model.
 - `worker_scope` does not change which files are authoritative.
-- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only be able to see agent A's canonical state root plus their own worker runtime root.
+- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only be able to see agent A's canonical workspace plus their own worker runtime root.
 - `user` is different.
 - If `user` remains supported for filesystem-capable worker tools, it is explicitly a per-requester multi-agent workstation mode rather than an agent-isolated mode.
 - `base_dir`, current working directory, and other tool init hints are convenience defaults rather than security boundaries.
@@ -109,7 +109,7 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 - Unscoped dedicated execution still uses the same canonical state root for the addressed agent.
 - `shared`, `user`, `user_agent`, and unscoped dedicated execution differ in runtime isolation and reuse.
 - They do not change which files are authoritative for the agent.
-- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only expose agent A's canonical state root plus the runtime's own worker root.
+- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only expose agent A's canonical workspace plus the runtime's own worker root.
 - `user` is therefore a trust-sharing mode rather than an agent-level filesystem isolation boundary for filesystem-capable worker tools.
 - Multiple agents may run inside that runtime.
 - Those agents may access each other's mounted files inside that runtime.
@@ -341,8 +341,8 @@ The local provider should support introspection of active workers and cleanup of
 The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
 The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
 The current implementation already provisions dedicated worker Deployments and Services and routes them through the canonical agent-state model.
-For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes backend now mounts only the addressed agent root plus the worker runtime root.
-`user` intentionally remains broader as a multi-agent workstation mode, but only mounts the roots of non-private `worker_scope: user` agents plus the requester's private-instance namespace.
+For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes backend now mounts only the addressed agent workspace plus the worker runtime root.
+`user` intentionally remains broader as a multi-agent workstation mode, but only mounts the workspaces of non-private `worker_scope: user` agents plus the requester's own private workspaces.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
 Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical state roots it executes against, as well as an authenticated internal endpoint.

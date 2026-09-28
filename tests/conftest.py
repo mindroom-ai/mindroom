@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 import pytest_asyncio
@@ -46,6 +47,7 @@ import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
+import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -2160,6 +2162,18 @@ def write_config_yaml(config: Config, config_path: Path) -> None:
     safe_replace(tmp_path, path)
 
 
+def plant_workspace_entry(path: Path, kind: str, victim: Path | None = None) -> None:
+    """Put what worker code could plant at ``path``: a ``link`` to ``victim`` or a ``fifo``."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        assert victim is not None
+        path.symlink_to(victim, target_is_directory=victim.is_dir())
+
+
 def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -2839,6 +2853,21 @@ def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     including the ones that cover the auto-build itself -- are unaffected.
     """
     monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
+
+
+@pytest.fixture(autouse=True)
+def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep bot startup and room creation from fetching stock avatars over the network.
+
+    Tests behave like an offline machine, which leaves entities without a stock avatar.
+    `tests/test_managed_avatars.py` installs its own downloader to cover the real behavior.
+    """
+
+    async def offline(url: str) -> bytes:
+        message = "network disabled in tests"
+        raise httpx.ConnectError(message, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
 
 
 @pytest.fixture(autouse=True)

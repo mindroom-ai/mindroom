@@ -73,7 +73,7 @@ class _MemoryEmbedderConfig(BaseModel):
 class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
-    provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
+    provider: str = Field(default="ollama", description="LLM provider (ollama, openai, openrouter, anthropic)")
     config: dict[str, Any] = Field(
         default_factory=dict,
         description="Provider-specific LLM config; may include credentials",

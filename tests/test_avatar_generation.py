@@ -17,6 +17,7 @@ from openai.types.images_response import ImagesResponse
 
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
+from mindroom import managed_avatars
 from mindroom.matrix import avatar as avatar_module
 from mindroom.prompts import (
     AVATAR_AGENT_SYSTEM_PROMPT,
@@ -70,16 +71,17 @@ def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
             runtime_paths,
         ),
     )
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, runtime_paths: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            runtime_paths,
-        ),
-    )
+    for module in (generate_avatars, managed_avatars):
+        monkeypatch.setattr(
+            module,
+            "resolve_avatar_path",
+            lambda entity_type, entity_name, runtime_paths: _workspace_avatar_path(
+                tmp_path,
+                entity_type,
+                entity_name,
+                runtime_paths,
+            ),
+        )
     return avatars_path
 
 
@@ -866,7 +868,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Matrix avatar sync should cover team-only rooms and the managed root space."""
+    """Matrix avatar sync covers team-only rooms and the root space, and retries recently failed stock downloads."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
@@ -922,12 +924,75 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
 
-    await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
+    failure_marker = runtime_paths.storage_root / "avatars" / "stock" / "commit-mind.failed"
+    failure_marker.parent.mkdir(parents=True)
+    failure_marker.touch()
+
+    await generate_avatars.set_room_avatars_in_matrix(runtime_paths)
 
     synced_targets = {(call.args[1], call.args[2].name) for call in set_room_avatar_from_file.await_args_list}
     assert ("!war:localhost", "war_room.png") in synced_targets
     assert ("!space:localhost", "root_space.png") in synced_targets
+    assert not failure_marker.exists()
     client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_room_avatars_skips_rooms_without_an_available_avatar(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """A room whose stock avatar cannot be downloaded is counted as skipped, not failed."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+        "router": {"model": "default"},
+        "agents": {"general": {"display_name": "General", "model": "default", "rooms": ["war_room"]}},
+    }
+    set_room_avatar_from_file = AsyncMock(return_value=True)
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
+    monkeypatch.setattr(generate_avatars, "get_room_id", lambda _room_name, _runtime_paths: "!war:localhost")
+
+    result = await generate_avatars._sync_configured_room_avatars(
+        AsyncMock(),
+        _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
+        _runtime_paths(workspace_avatar_dir.parent),
+    )
+
+    assert result == (0, 1, [])
+    set_room_avatar_from_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_room_avatars_resolves_defaults_only_for_rooms_without_avatars(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """A room that already has a picture never downloads its stock default unless forced."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+        "router": {"model": "default"},
+        "agents": {"general": {"display_name": "General", "model": "default", "rooms": ["war_room"]}},
+    }
+    resolve = AsyncMock(return_value=workspace_avatar_dir / "stock.png")
+    monkeypatch.setattr(generate_avatars, "room_avatar_path", resolve)
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=True))
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=True))
+    monkeypatch.setattr(generate_avatars, "get_room_id", lambda _room_name, _runtime_paths: "!war:localhost")
+    config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
+
+    assert await generate_avatars._sync_configured_room_avatars(AsyncMock(), config, runtime_paths) == (0, 1, [])
+    resolve.assert_not_awaited()
+
+    assert await generate_avatars._sync_configured_room_avatars(
+        AsyncMock(),
+        config,
+        runtime_paths,
+        force=True,
+    ) == (1, 0, [])
+    resolve.assert_awaited_once()
 
 
 @pytest.mark.asyncio
