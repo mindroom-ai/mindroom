@@ -1214,6 +1214,42 @@ async def _wait_for_finished_handle(bridge: DesktopBridge, handle: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_offset_polls_leave_later_output_of_a_running_command_intact(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded offset read never moves where the still-running command's next output is written."""
+    upload = AsyncMock(return_value=replace(MEDIA, mime_type="text/plain"))
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    first, second = b"a" * 50_000 + b"\n", b"b" * 50_000 + b"\n"
+    (tmp_path / "first").write_bytes(first)
+    (tmp_path / "second").write_bytes(second)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = "cat first; while [ ! -f release ]; do sleep 0.05; done; cat second"
+    await _handle(bridge, _event(_run_shell(command, tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=0)))
+        polled = _response(transport).result
+        if polled["output_bytes"] == len(first):
+            break
+        await asyncio.sleep(0.01)
+    assert (polled["output_bytes"], polled["next_offset"] < len(first)) == (len(first), True)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=700, offset=0)))
+    completed = _response(transport).result
+    assert (completed["state"], completed["output_bytes"]) == ("completed", len(first) + len(second))
+    assert upload.await_args.args[1] == first + second
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_check_shell_offset_polls_every_byte_once_without_splitting_characters(
     transport: AsyncMock,
     tmp_path: Path,

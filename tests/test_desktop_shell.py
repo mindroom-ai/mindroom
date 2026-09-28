@@ -523,6 +523,22 @@ async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path:
     await shell.close()
 
 
+@pytest.mark.asyncio
+async def test_killed_handle_keeps_the_exit_code_its_process_returned(tmp_path: Path) -> None:
+    """A command that traps TERM and exits cleanly still finishes as killed, with the code it chose."""
+    shell = local_shell()
+    shell.grant(60)
+    command = "trap 'exit 0' TERM; printf ready > ready; while :; do sleep 0.05; done"
+    running = await shell.execute(request(command, tmp_path, timeout=1))
+    assert running.handle is not None
+    await wait_for_file(tmp_path / "ready")
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = await check_until_finished(shell, running.handle)
+    assert (killed.state, killed.exit_code) == ("killed", 0)
+    killed.output.release()
+    await shell.close()
+
+
 @pytest.mark.parametrize("first_kill", ["local", "kill_shell"])
 @pytest.mark.asyncio
 async def test_kill_shell_after_an_earlier_kill_still_replies_killed(tmp_path: Path, first_kill: str) -> None:
