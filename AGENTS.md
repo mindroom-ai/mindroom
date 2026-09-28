@@ -283,13 +283,13 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
 | `tool_jobs/agno_compat_resources.py` | SDK toolkit connection and cleanup lifetime bindings |
 | `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
-| `tool_jobs/agno_execution.py` | Approved SDK call execution and result capture |
+| `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
 | `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
 | `tool_jobs/execution_scope.py` | Response execution envelopes |
 | `tool_jobs/resources.py` | Retained resource cleanup ownership |
-| `tool_jobs/authorization.py` | Current local grants using shared construction and knowledge policy |
+| `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/execution_authority.py` | Application-entry authority checks |
-| `tool_jobs/provenance.py` | Exact callable and MCP provenance |
+| `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
 | `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata, validation, and saved per-call wait modes |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
