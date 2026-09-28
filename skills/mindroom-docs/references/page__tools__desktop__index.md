@@ -189,6 +189,7 @@ Passing the last `next_offset` as the `check_shell` offset returns only newer ou
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
 The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.
+A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with exit code -9 instead of an unknown handle.
 A finished `check_shell` hands its output over once and then forgets the handle.
 If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
 The bridge retains at most 16 handles.

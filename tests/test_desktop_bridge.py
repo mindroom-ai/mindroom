@@ -1244,6 +1244,22 @@ async def test_other_callers_cannot_check_or_kill_a_handle(transport: AsyncMock,
     bridge.close()
 
 
+@pytest.mark.asyncio
+async def test_local_handle_kill_reaches_the_agent_as_killed(transport: AsyncMock, tmp_path: Path) -> None:
+    """After the person at the computer kills a handle, the agent's next check reports killed, not unknown."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("printf before; sleep 30", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    assert [entry["handle"] for entry in bridge.kill_local_shell_handle(handle)["shell"]["handles"]] == [handle]
+    killed, _ = await _check_until_finished(bridge, transport, handle, first_sequence=2)
+    assert (killed["state"], killed["exit_code"], killed["output"]) == ("killed", -signal.SIGKILL, "before")
+    await bridge.stop()
+    bridge.close()
+
+
 @pytest.mark.parametrize("stop", ["revoke", "stop"])
 @pytest.mark.asyncio
 async def test_revoke_and_bridge_stop_kill_running_handles(transport: AsyncMock, tmp_path: Path, stop: str) -> None:

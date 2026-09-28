@@ -482,7 +482,7 @@ class DesktopBridge:
         return self.local_status()
 
     def kill_local_shell_handle(self, handle: str) -> dict[str, object]:
-        """Kill any caller's handle from the local management channel."""
+        """Kill any caller's handle from the local management channel; its owner's check reports it killed."""
         self._enabled_shell().kill_handle(handle)
         return self.local_status()
 

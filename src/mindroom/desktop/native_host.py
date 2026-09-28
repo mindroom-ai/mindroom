@@ -751,7 +751,7 @@ class NativeBridgeRuntime:
         return self._required_bridge().revoke_local_shell()
 
     def kill_shell_handle(self, handle: str) -> dict[str, object]:
-        """Kill one handle from any caller."""
+        """Kill one handle from any caller; its owner's next check reports it killed."""
         return self._required_bridge().kill_local_shell_handle(handle)
 
     async def connect_browser(self) -> None:

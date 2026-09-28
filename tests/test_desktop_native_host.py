@@ -824,7 +824,7 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
         assert caught.value.code == "shell_denied"
 
         killed = await host.handle(_request("kill_shell_handle", handle=handle))
-        assert killed["status"]["shell"]["handles"] == []
+        assert [entry["handle"] for entry in killed["status"]["shell"]["handles"]] == [handle]
         leader = int(pid_file.read_text())
         for _ in range(400):
             try:
@@ -834,6 +834,13 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
             await asyncio.sleep(0.005)
         else:
             pytest.fail("locally killed handle kept running")
+        # The handle stays, so the agent's next check learns the person at the computer killed it.
+        for _ in range(400):
+            [entry] = host.status()["shell"]["handles"]
+            if entry["state"] != "running":
+                break
+            await asyncio.sleep(0.005)
+        assert entry["state"] == "killed"
     finally:
         if pid_file.exists() and pid_file.read_text().strip():
             with suppress(ProcessLookupError):

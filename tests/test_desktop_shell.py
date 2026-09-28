@@ -482,10 +482,10 @@ async def test_invalid_output_offset_is_rejected_before_a_completed_handle_is_ha
     await shell.close()
 
 
-@pytest.mark.parametrize("stop", ["revoke", "close", "local_kill"])
+@pytest.mark.parametrize("stop", ["revoke", "close"])
 @pytest.mark.asyncio
-async def test_revoke_close_and_local_kill_stop_handles(tmp_path: Path, pids: Path, stop: str) -> None:
-    """Every local stop control kills handle process groups and forgets them."""
+async def test_revoke_and_close_kill_and_forget_handles(tmp_path: Path, pids: Path, stop: str) -> None:
+    """Revoking or closing the shell kills every handle process group and forgets the handles."""
     shell = local_shell()
     shell.grant(60)
     running = await shell.execute(request(f"echo $$ > {pids / 'leader.pid'}; sleep 30", tmp_path, timeout=1))
@@ -493,16 +493,33 @@ async def test_revoke_close_and_local_kill_stop_handles(tmp_path: Path, pids: Pa
     leader = int(await wait_for_file(pids / "leader.pid"))
     if stop == "revoke":
         shell.revoke()
-    elif stop == "close":
-        await asyncio.wait_for(shell.close(), timeout=2)
     else:
-        shell.kill_handle(running.handle)
-        with pytest.raises(DesktopShellError, match="Unknown shell handle"):
-            shell.kill_handle(running.handle)
+        await asyncio.wait_for(shell.close(), timeout=2)
     await wait_until_gone(leader)
     assert shell.status()["handles"] == []
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.check(REQUESTER, AGENT, running.handle)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path: Path, pids: Path) -> None:
+    """The Mac app's per-handle Kill stops the process group, and the owner's next check reports it killed."""
+    shell = local_shell()
+    shell.grant(60)
+    command = f"printf before; echo $$ > {pids / 'leader.pid'}; sleep 30"
+    running = await shell.execute(request(command, tmp_path, timeout=1))
+    assert running.handle is not None
+    leader = int(await wait_for_file(pids / "leader.pid"))
+    shell.kill_handle(running.handle)
+    shell.kill_handle(running.handle)
+    await wait_until_gone(leader)
+    assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
+    killed = shell.check(REQUESTER, AGENT, running.handle)
+    assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGKILL, b"before")
+    killed.output.release()
+    with pytest.raises(DesktopShellError, match="Unknown shell handle"):
+        shell.kill_handle(running.handle)
     await shell.close()
 
 

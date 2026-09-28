@@ -468,19 +468,21 @@ class DesktopShell:
         force: bool = False,
     ) -> Literal["killed", "completed"]:
         """Signal the caller's own running handle, keeping its output for a later check that reports it killed."""
-        record = self._caller_record(requester_id, agent_name, handle)
+        return self._signal(self._caller_record(requester_id, agent_name, handle), handle, force=force)
+
+    def kill_handle(self, handle: str) -> None:
+        """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""
+        self._prune()
+        if handle not in self._handles:
+            raise DesktopShellError(_UNKNOWN_HANDLE)
+        self._signal(self._records[handle], handle, force=True)
+
+    def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
         if record.process.returncode is not None:
             return "completed"
         kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
         self._handles[handle] = replace(self._handles[handle], killed=True)
         return "killed"
-
-    def kill_handle(self, handle: str) -> None:
-        """Kill and forget any handle from the local management channel."""
-        self._prune()
-        if handle not in self._handles:
-            raise DesktopShellError(_UNKNOWN_HANDLE)
-        self._discard(handle)
 
     def _caller_record(self, requester_id: str, agent_name: str, handle: str) -> ProcessRecord:
         self._prune()
