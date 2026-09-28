@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy_url
 
 if TYPE_CHECKING:
     from agno.tools.crawl4ai import Crawl4aiTools
-    from playwright.async_api import Page
+    from playwright.async_api import BrowserContext, Page
 
 
 @register_tool_with_metadata(
@@ -109,16 +111,28 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
             validated_urls = [validate_server_fetch_url(single_url) for single_url in url]
             return super().crawl(validated_urls, search_query)
 
-        async def _guard_page_context(self, page: Page, **_kwargs: object) -> None:
-            await page.route("**/*", continue_or_abort_browser_fetch)
+        async def _guard_page_context(self, page: Page, *, context: BrowserContext, **_kwargs: object) -> None:
+            # Guard the context rather than the page so popups and other pages it opens are routed too.
+            # Playwright passes (route, request) to a handler that declares more than one parameter.
+            del page
+            await context.route("**/*", lambda route: continue_or_abort_browser_fetch(route))
 
         async def _async_crawl(self, url: str, search_query: str | None = None) -> str:
-            """Crawl one validated URL with server-fetch guards on Playwright requests."""
+            """Crawl one validated URL with connect-time destination checks on every browser connection."""
+            destination_proxy: BrowserDestinationProxy | None = None
             try:
+                # Chromium inherits this environment, so an operator egress proxy stays its only route.
+                proxy_server = browser_upstream_proxy_url({}, os.environ)
+                if proxy_server is None:
+                    # Page routes see neither WebSockets, service-worker fetches, nor the address Chromium
+                    # resolves for itself, so every TCP connection dials an address validated at connect time.
+                    destination_proxy = BrowserDestinationProxy()
+                    await destination_proxy.start()
+                    proxy_server = destination_proxy.endpoint
                 browser_config = agno_crawl4ai.BrowserConfig(
                     headless=self.headless,
                     verbose=False,
-                    **self.proxy_config,
+                    proxy_config={"server": proxy_server},
                 )
 
                 async with agno_crawl4ai.AsyncWebCrawler(config=browser_config) as crawler:
@@ -130,25 +144,13 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
                     if not result:
                         return "Error: No content found"
 
-                    content = ""
-                    if result.fit_markdown:
-                        content = result.fit_markdown
-                        log_debug("Using fit_markdown")
-                    elif result.markdown:
-                        if isinstance(result.markdown, str):
-                            content = result.markdown
-                            log_debug("Using str(markdown)")
-                        else:
-                            content = result.markdown.raw_markdown
-                            log_debug("Using markdown.raw_markdown")
-                    elif result.text:
-                        content = result.text
-                        log_debug("Using text attribute")
-                    elif result.html:
-                        log_warning("Only HTML available, no markdown extracted")
-                        return "Error: Could not extract markdown from page"
-
+                    # Crawl4AI 0.8 exposes filtered and raw text only through the markdown result.
+                    markdown = result.markdown
+                    content = (markdown.fit_markdown or str(markdown)) if markdown is not None else ""
                     if not content:
+                        if result.html:
+                            log_warning("Only HTML available, no markdown extracted")
+                            return "Error: Could not extract markdown from page"
                         log_warning(f"No content extracted. Result type: {type(result)}")
                         return "Error: No readable content extracted"
 
@@ -159,5 +161,8 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
             except Exception as exc:
                 log_warning(f"Exception during crawl: {exc}")
                 return f"Error crawling {url}: {exc}"
+            finally:
+                if destination_proxy is not None:
+                    await destination_proxy.close()
 
     return MindRoomCrawl4aiTools

@@ -7066,7 +7066,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"

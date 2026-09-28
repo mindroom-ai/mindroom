@@ -1,9 +1,12 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
+import asyncio
 import contextlib
 import gc
 import inspect
 import json
+import os
+import shutil
 import sys
 import threading
 import weakref
@@ -14,10 +17,15 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Never
 from unittest.mock import AsyncMock
+from urllib.parse import urlsplit
 
 import agno.tools.crawl4ai as agno_crawl4ai
 import pytest
 from agno.tools import Toolkit
+from aiohttp import web
+from crawl4ai.models import CrawlResult, MarkdownGenerationResult
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 import mindroom.tool_system.metadata as metadata_module
 
@@ -64,6 +72,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
+from tests.test_worker_browser_proxy import _connect as _socks_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
@@ -347,10 +356,107 @@ def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.Monk
     assert exc_info.value.reason == "private_address"
 
 
+def _crawl_result(raw_markdown: str, *, fit_markdown: str | None = None) -> CrawlResult:
+    return CrawlResult(
+        url="https://example.com",
+        html=f"<p>{raw_markdown}</p>",
+        success=True,
+        markdown=MarkdownGenerationResult(
+            raw_markdown=raw_markdown,
+            markdown_with_citations=raw_markdown,
+            references_markdown="",
+            fit_markdown=fit_markdown,
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Crawl4AI should install a Playwright route guard before crawling."""
+@pytest.mark.parametrize(("fit_markdown", "expected"), [("filtered text", "filtered text"), (None, "raw text")])
+async def test_crawl4ai_returns_filtered_markdown_before_raw_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+    fit_markdown: str | None,
+    expected: str,
+) -> None:
+    """Crawl4AI results expose page text only through their markdown result."""
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            del config
+            self.crawler_strategy = SimpleNamespace(set_hook=lambda *_args: None)
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del url, config
+            return _crawl_result("raw text", fit_markdown=fit_markdown)
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+
+    assert await crawl4ai_tools()()._async_crawl("https://example.com") == expected
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_context_guard_runs_under_playwright_route_dispatch() -> None:
+    """Playwright's own dispatch reaches the guard, which blocks loopback pages throughout the context."""
+    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
+    if executable is None:
+        pytest.skip("Chromium required for Playwright route dispatch")
+    hits: list[str] = []
+
+    async def serve(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        return web.Response(text="<title>Internal service</title>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", serve)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    tool = crawl4ai_tools()()
+    try:
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(executable_path=executable)
+            try:
+                context = await browser.new_context()
+                page = await context.new_page()
+                await tool._guard_page_context(page, context=context, config=None)
+                popup = await context.new_page()
+                for target in (page, popup):
+                    with pytest.raises(PlaywrightError, match="ERR_BLOCKED_BY_CLIENT"):
+                        await target.goto(f"http://127.0.0.1:{port}/", timeout=10_000)
+            finally:
+                await browser.close()
+    finally:
+        await runner.cleanup()
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every Crawl4AI browser connection passes the connect-time relay, and every context page the route guard."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     installed_hook = None
+    endpoints: list[str] = []
+    loopback_connections = 0
+
+    async def loopback_service(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal loopback_connections
+        loopback_connections += 1
+        writer.close()
+
+    service = await asyncio.start_server(loopback_service, "127.0.0.1", 0)
+    service_port = service.sockets[0].getsockname()[1]
 
     class FakeCrawlerStrategy:
         def set_hook(self, name: str, hook: object) -> None:
@@ -360,7 +466,7 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
 
     class FakeAsyncWebCrawler:
         def __init__(self, *, config: object) -> None:
-            del config
+            self.config = config
             self.crawler_strategy = FakeCrawlerStrategy()
 
         async def __aenter__(self) -> object:
@@ -372,10 +478,22 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
         async def arun(self, *, url: str, config: object) -> object:
             del config
             assert url == "https://example.com"
+            proxy_config = self.config.proxy_config
+            assert proxy_config is not None
+            endpoints.append(proxy_config.server)
+            relay = SimpleNamespace(endpoint=proxy_config.server)
+            for host, port in (("127.0.0.1", service_port), ("169.254.169.254", 80)):
+                _reader, writer, status = await _socks_connect(relay, host, port, literal=True)
+                writer.close()
+                await writer.wait_closed()
+                assert status != 0
             assert installed_hook is not None
             page = SimpleNamespace(route=AsyncMock())
-            await installed_hook(page)
-            route_handler = page.route.await_args.args[1]
+            context = SimpleNamespace(route=AsyncMock())
+            await installed_hook(page, context=context, config=None)
+            page.route.assert_not_called()
+            route_pattern, route_handler = context.route.await_args.args
+            assert route_pattern == "**/*"
             unsafe_route = SimpleNamespace(
                 request=SimpleNamespace(url="http://127.0.0.1/admin"),
                 abort=AsyncMock(),
@@ -384,14 +502,54 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
             await route_handler(unsafe_route)
             unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
             unsafe_route.continue_.assert_not_called()
-            return SimpleNamespace(fit_markdown="", markdown="", text="public content", html="", success=True)
+            return _crawl_result("public content")
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
     tool = crawl4ai_tools()()
 
-    result = await tool._async_crawl("https://example.com")
+    try:
+        result = await tool._async_crawl("https://example.com")
+    finally:
+        service.close()
+        await service.wait_closed()
 
     assert result == "public content"
+    assert loopback_connections == 0
+    assert len(endpoints) == 1
+    endpoint = urlsplit(endpoints[0])
+    assert (endpoint.scheme, endpoint.hostname) == ("socks5", "127.0.0.1")
+    with pytest.raises(ConnectionRefusedError):
+        await asyncio.open_connection(endpoint.hostname, endpoint.port)
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_browser_keeps_configured_upstream_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator egress proxy stays Crawl4AI's only browser route."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:3128")
+    servers: list[str] = []
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            servers.append(config.proxy_config.server)
+            self.crawler_strategy = SimpleNamespace(set_hook=lambda *_args: None)
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del url, config
+            return _crawl_result("public content")
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+
+    assert await crawl4ai_tools()()._async_crawl("https://example.com") == "public content"
+    assert servers == ["http://127.0.0.1:3128"]
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
