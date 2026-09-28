@@ -705,6 +705,9 @@ async def test_approval_waits_until_events_of_the_last_agent_input_have_arrived(
     for _ in range(10):
         await asyncio.sleep(0.01)
         assert shell.status()["pending"] is None
+        # Input arriving during the settle would restart it indefinitely, so it is refused too.
+        with pytest.raises(DesktopShellError, match="waiting for local approval"), shell.agent_input():
+            pytest.fail("agent input ran while a request was held back")
     await wait_pending(shell)
     shell.decide("r1", approved=True)
     assert completed_output(await task) == "done"

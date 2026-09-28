@@ -174,6 +174,8 @@ class DesktopShell:
         self._monotonic_clock = monotonic_clock
         self._lease_until = 0.0
         self._pending: DesktopShellRequest | None = None
+        # True from the moment a request needs a decision, including while it is held back behind agent input.
+        self._awaiting_decision = False
         self._decision: asyncio.Future[str] | None = None
         self._active_request_id: str | None = None
         self._active_owner: tuple[str, str] | None = None
@@ -333,7 +335,7 @@ class DesktopShell:
         Synthetic pointer and keyboard input could otherwise press an approval card's buttons or answer
         the terminal prompt.
         """
-        if self._pending is not None:
+        if self._awaiting_decision:
             raise DesktopShellError(_INPUT_WHILE_PENDING)
         self._agent_inputs += 1
         self._agent_input_idle.clear()
@@ -345,34 +347,28 @@ class DesktopShell:
                 self._agent_input_ended_at = time.monotonic()
                 self._agent_input_idle.set()
 
-    async def _agent_input_settled(self) -> None:
-        """Return once no agent input runs and the events of the last one have had time to arrive."""
-        # Another input can start between a wake-up and this task running, so recheck after every wait.
-        while True:
-            if not self._agent_input_idle.is_set():
-                await self._agent_input_idle.wait()
-                continue
-            remaining = self._agent_input_ended_at + _AGENT_INPUT_SETTLE_SECONDS - time.monotonic()
-            if remaining <= 0:
-                return
-            await asyncio.sleep(remaining)
-
     async def _await_approval(self, request: DesktopShellRequest, deadline: float) -> str:
-        await self._agent_input_settled()
-        if self._cancel_event.is_set():
-            return "cancelled"
-        if self._monotonic_clock() >= deadline:
-            message = "Shell approval expired."
-            raise DesktopShellError(message)
-        self._pending = request
-        self._pending_deadline = deadline
-        self._decision = asyncio.get_running_loop().create_future()
+        # New agent input is refused from here on; input already in flight finishes and its events get time to
+        # reach their target before anyone can see, and answer, this request.
+        self._awaiting_decision = True
         try:
+            await self._agent_input_idle.wait()
+            settle = self._agent_input_ended_at + _AGENT_INPUT_SETTLE_SECONDS - time.monotonic()
+            await asyncio.sleep(max(0.0, settle))
+            if self._cancel_event.is_set():
+                return "cancelled"
+            if self._monotonic_clock() >= deadline:
+                message = "Shell approval expired."
+                raise DesktopShellError(message)
+            self._pending = request
+            self._pending_deadline = deadline
+            self._decision = asyncio.get_running_loop().create_future()
             return await asyncio.wait_for(self._decision, max(0, deadline - self._monotonic_clock()))
         except TimeoutError as exc:
             message = "Shell approval expired."
             raise DesktopShellError(message) from exc
         finally:
+            self._awaiting_decision = False
             self._pending = None
             self._decision = None
 
