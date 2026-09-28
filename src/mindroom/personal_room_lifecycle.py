@@ -57,6 +57,38 @@ def _next_backoff(previous: _CandidateBackoff | None, error: Exception) -> _Cand
     return _CandidateBackoff(failures, delay, monotonic() + delay, type(error))
 
 
+def _log_candidate_failure(
+    candidate: tuple[str, str],
+    error: Exception,
+    previous: _CandidateBackoff | None,
+    backoff: _CandidateBackoff,
+) -> None:
+    """Report one failed attempt with its retry schedule, with a traceback only for a new kind of failure."""
+    user_id, room_id = candidate
+    retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
+    if isinstance(error, PersonalRoomRosterMismatchError):
+        # Expected until a person changes the room, so no traceback.
+        logger.warning(
+            "Personal-room imported roster has unattested members",
+            user_id=user_id,
+            room_id=room_id,
+            personal_room_id=error.room_id,
+            unexpected_user_ids=error.unexpected_user_ids,
+            **retry,
+        )
+    elif previous is None or previous.error_type is not type(error):
+        logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
+    else:
+        logger.warning(
+            "Personal-room reconciliation failed",
+            user_id=user_id,
+            room_id=room_id,
+            error_type=type(error).__name__,
+            error=str(error),
+            **retry,
+        )
+
+
 @dataclass(frozen=True)
 class PersonalRoomTarget:
     """A connected owner's service and its separate startup readiness projection."""
@@ -167,6 +199,35 @@ class PersonalRoomLifecycle:
             reinvite_departed_owner=reinvite_departed_owner,
         )
 
+    async def _onboard_live(
+        self,
+        user_id: str,
+        source_room_id: str,
+        *,
+        reinvite_departed_owner: bool = False,
+    ) -> None:
+        """Serve one lobby trigger without letting a single requester hold the lobby's event lane.
+
+        Once the requester's intent is durably recorded, reconciliation owns
+        retrying a failed attempt, so the member or message event settles and
+        later lobby events keep flowing. A failure before that record exists,
+        such as an unreadable lobby membership, stays with the journal lane,
+        which is the only owner that could retry it.
+        """
+        try:
+            await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)
+        except Exception as error:
+            settings = self.runtime.config.personal_rooms
+            if settings is None or not personal_room_record_path(self.runtime_paths, settings.agent, user_id).is_file():
+                raise
+            candidate = (user_id, source_room_id)
+            previous = self._candidate_backoff.get(candidate)
+            backoff = _next_backoff(previous, error)
+            self._candidate_backoff[candidate] = backoff
+            self._completed_candidates.discard(candidate)
+            self._reconciled = False
+            _log_candidate_failure(candidate, error, previous, backoff)
+
     async def handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
         """Recognize exact self-onboarding commands through trusted requester resolution."""
         settings = self.runtime.config.personal_rooms
@@ -187,7 +248,7 @@ class PersonalRoomLifecycle:
             self.runtime.config,
             self.runtime_paths,
         ):
-            await self._onboard(event.sender, room.room_id)
+            await self._onboard_live(event.sender, room.room_id)
         return True
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
@@ -198,7 +259,7 @@ class PersonalRoomLifecycle:
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
         if self.observes_onboarding_joins and event.prev_membership is not None:
-            await self._onboard(
+            await self._onboard_live(
                 event.state_key,
                 room.room_id,
                 reinvite_departed_owner=event.prev_membership == "leave",
@@ -207,7 +268,7 @@ class PersonalRoomLifecycle:
     async def baseline_join(self, join: RoomMemberJoin) -> None:
         """Onboard unknown prior membership only after the existing durable baseline gate."""
         if join.prev_membership is None:
-            await self._onboard(join.user_id, join.room_id)
+            await self._onboard_live(join.user_id, join.room_id)
 
     def _recorded_candidates(self, agent_name: str) -> tuple[set[tuple[str, str]], bool]:
         """Read each retained intent independently; keep damaged files retryable."""
@@ -283,28 +344,7 @@ class PersonalRoomLifecycle:
             backoff = _next_backoff(previous, error)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
-            if isinstance(error, PersonalRoomRosterMismatchError):
-                # Expected until a person changes the room, so no traceback.
-                logger.warning(
-                    "Personal-room imported roster has unattested members",
-                    user_id=user_id,
-                    room_id=room_id,
-                    personal_room_id=error.room_id,
-                    unexpected_user_ids=error.unexpected_user_ids,
-                    **retry,
-                )
-            elif previous is None or previous.error_type is not type(error):
-                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
-            else:
-                logger.warning(
-                    "Personal-room reconciliation failed",
-                    user_id=user_id,
-                    room_id=room_id,
-                    error_type=type(error).__name__,
-                    error=str(error),
-                    **retry,
-                )
+            _log_candidate_failure(candidate, error, previous, backoff)
             return False
         if revision == self._config_revision:
             self._completed_candidates.add(candidate)

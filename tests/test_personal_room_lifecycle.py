@@ -742,3 +742,75 @@ async def test_disabled_provisioning_retains_only_recorded_ids_for_rejoin(coordi
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()
+
+
+def _lobby_member_events() -> tuple[nio.RoomMemberEvent, RoomMemberJoin]:
+    """Return a live leave-to-join event and a baseline join for alice in the lobby."""
+    rejoin = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$rejoin",
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    return rejoin, join
+
+
+@pytest.mark.asyncio
+async def test_recorded_requester_failure_leaves_lobby_lane_to_reconciliation(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """One requester's broken personal room settles lobby events and retries through reconciliation."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    lifecycle._reconciled = True
+    coordination.owner.ensure.side_effect = RuntimeError("Personal-room ownership or membership does not match")
+    room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
+    rejoin, join = _lobby_member_events()
+    with capture_logs() as logs:
+        assert await lifecycle.handle_command(room, command())
+        await lifecycle.member_event(room, rejoin)
+        await lifecycle.baseline_join(join)
+    assert coordination.owner.ensure.await_count == 3
+    assert [entry["event"] for entry in logs if entry["log_level"] in {"warning", "error"}] == [
+        "Personal-room reconciliation failed",
+    ] * 3
+    assert not lifecycle._reconciled
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 3
+    coordination.owner.ensure.side_effect = None
+    clock.now += 3600
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 4
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_requester_failure_stays_with_the_journal_lane(coordination: Coordination) -> None:
+    """Before any durable intent exists, only the journal can retry a failed lobby trigger."""
+    lifecycle = coordination.lifecycle
+    coordination.owner.ensure.side_effect = RuntimeError("Personal-room onboarding membership unavailable")
+    room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
+    rejoin, join = _lobby_member_events()
+    with pytest.raises(RuntimeError, match="membership unavailable"):
+        await lifecycle.handle_command(room, command())
+    with pytest.raises(RuntimeError, match="membership unavailable"):
+        await lifecycle.member_event(room, rejoin)
+    with pytest.raises(RuntimeError, match="membership unavailable"):
+        await lifecycle.baseline_join(join)
+
+
+@pytest.mark.asyncio
+async def test_live_trigger_cancellation_is_not_deferred(coordination: Coordination) -> None:
+    """Shutdown cancellation of a lobby trigger still reaches the journal lane."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    coordination.owner.ensure.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await lifecycle.handle_command(nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost"), command())
