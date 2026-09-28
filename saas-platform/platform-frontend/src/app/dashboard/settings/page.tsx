@@ -141,7 +141,7 @@ export default function SettingsPage() {
       if (result.status === 'deletion_scheduled') {
         setMessage({
           type: 'info',
-          text: `Account deletion scheduled. Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion. Your data is removed after ${result.grace_period_days} days. Within those ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings to keep your account and subscription. Signing in alone does not cancel deletion.`
+          text: `Account deletion scheduled. Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion. After ${result.grace_period_days} days, scheduled cleanup removes your hosted instances and account data when enabled. Within those ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings to keep your account, and your subscription if its period has not ended. Signing in alone does not cancel deletion.`
         })
         setIsDeletionPending(true)
 
@@ -266,7 +266,7 @@ export default function SettingsPage() {
               <p className="text-red-700 dark:text-red-200 text-sm mb-4">
                 Your account is scheduled for deletion with a 7-day recovery period, and its hosted instances are stopped.
                 Paid subscriptions end at the end of their current billing period unless you cancel the deletion.
-                After the 7 days, cleanup removes your hosted instances and account data, subject to the retention limits below.
+                After the 7 days, scheduled cleanup removes your hosted instances and account data when enabled, subject to the retention limits below.
                 Within those 7 days, select Cancel Deletion Request to cancel it; signing in alone does not cancel deletion.
               </p>
               <button
@@ -357,7 +357,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
-                <strong>Payment records:</strong> Payment records and Stripe webhook event records are kept for accounting after account deletion, without their link to your account.
+                <strong>Payment records:</strong> Payment records and Stripe webhook event records are kept for accounting after account deletion. Only their account link is cleared; they keep Stripe identifiers and event payloads that can include your account ID and invoice contact details.
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -385,7 +385,7 @@ export default function SettingsPage() {
             <h3 className="font-semibold text-red-900 dark:text-red-100 mb-4">Delete Account</h3>
             <p className="text-red-700 dark:text-red-200 text-sm mb-4">
               Requesting deletion stops your hosted instances now and starts a 7-day recovery period. After that, scheduled
-              cleanup removes your hosted instances and account data, subject to the retention limits above. Completed deletion cannot be undone.
+              cleanup removes your hosted instances and account data when enabled, subject to the retention limits above. Completed deletion cannot be undone.
             </p>
 
             {showDeleteConfirm ? (
@@ -394,7 +394,7 @@ export default function SettingsPage() {
                   Are you absolutely sure?
                 </p>
                 <p className="text-red-700 dark:text-red-300 text-sm mb-4">
-                  This schedules your account for deletion. Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion. Your data is removed after 7 days. Within those 7 days, sign in and select Cancel Deletion Request in Settings to keep your account and subscription. Signing in alone does not cancel deletion.
+                  This schedules your account for deletion. Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion. After 7 days, scheduled cleanup removes your hosted instances and account data when enabled. Within those 7 days, sign in and select Cancel Deletion Request in Settings to keep your account, and your subscription if its period has not ended. Signing in alone does not cancel deletion.
                 </p>
                 <div className="flex gap-3">
                   <button
