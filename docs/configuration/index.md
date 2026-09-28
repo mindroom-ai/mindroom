@@ -379,7 +379,9 @@ Clients show approval or revocation as submitted until a backend card edit ackno
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
 Approval cards hide a field entirely when its name marks it as secret, such as `password`, `credentials`, or an `Authorization` header, and the card still shows the field name.
 Inside text, approval cards hide only credentials in known token formats with realistic lengths, such as `sk-…`, `ghp_…`, `github_pat_…`, `xoxb-…`, `AIza…`, and JSON Web Tokens, and show the rest of the text exactly as written.
-Each distinct token becomes a numbered placeholder such as `⟦secret-1⟧`, so equal tokens look equal and different tokens look different.
+Each distinct token becomes a numbered placeholder such as `⟦secret-1⟧`, numbered within one card, so equal tokens look equal and different tokens look different.
+A placeholder for a token that contains `--`, which starts a comment in SQL, reads `⟦secret-1 --⟧`, and a literal `⟦` in the arguments is shown as `⟦=` so it cannot pass for a placeholder.
+Floating-point numbers and integers beyond 2^53 are shown as text and unpaired surrogates as `�`, because Matrix events cannot carry them.
 Other secrets written inline, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, are shown on the card, so keep secrets in credentials or secret-named fields.
 Deny the call when a hidden field, or a placeholder where a command, host, path, or delimiter belongs, could change what runs.
 A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.

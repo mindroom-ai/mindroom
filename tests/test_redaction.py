@@ -1072,11 +1072,71 @@ def test_review_copy_hides_known_token_formats(token: str) -> None:
     assert placeholders == {token: "⟦secret-1⟧"}
 
 
-def test_review_copy_keeps_comment_syntax_visible() -> None:
-    """A token-shaped match that contains `--` stays visible, because `--` starts a comment in SQL."""
-    command = "DELETE FROM users WHERE pk--abcdefghijklmnop AND id = 42"
+def test_review_copy_marks_hidden_comment_syntax() -> None:
+    """A token that contains `--` is still hidden, and its placeholder says so, because `--` starts an SQL comment."""
+    token = _fake_token("sk-", 8) + "--" + _fake_token("", 12)
 
+    redacted, _ = _review_copy({"command": f"DELETE FROM users WHERE {token} AND id = 42"})  # noqa: S608
+
+    assert redacted == {"command": "DELETE FROM users WHERE ⟦secret-1 --⟧ AND id = 42"}
+
+
+def test_review_copy_hides_a_token_that_ends_a_sentence() -> None:
+    """A dot ends a sentence, not the token, unless a file name or host continues after it."""
+    token = _fake_token("sk-", 24)
+
+    redacted, _ = _review_copy({"body": f"Your key is {token}. Keep it safe."})
+
+    assert redacted == {"body": "Your key is ⟦secret-1⟧. Keep it safe."}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl delete pod sk-build-runner-arm-worker",
+        "docker pull pk-registry-mirror-service:latest",
+        "ssh deploy@sk-production-bastion-host",
+        "git checkout sk-feature-review-copy-redaction",
+    ],
+)
+def test_review_copy_keeps_names_that_are_not_credentials_visible(command: str) -> None:
+    """Kebab-case names shaped like token prefixes lack a generated run and stay visible."""
     assert _review_copy({"command": command}) == ({"command": command}, {})
+
+
+def test_review_copy_escapes_literal_placeholder_text() -> None:
+    """Text that looks like a placeholder is shown escaped, so it cannot pass for a hidden token."""
+    redacted, _ = _review_copy({"command": "echo T ⟦secret-1⟧"})
+
+    assert redacted == {"command": "echo T ⟦=secret-1⟧"}
+
+
+def test_review_copy_shows_numbers_matrix_cannot_carry_as_text() -> None:
+    """Matrix canonical JSON rejects floats and integers beyond 2**53, so review copies carry them as text."""
+    redacted, _ = _review_copy({"timeout": 1.5, "big": 2**60, "small": 42, "flag": True})
+
+    assert redacted == {"timeout": "1.5", "big": str(2**60), "small": 42, "flag": True}
+
+
+def test_review_copy_keeps_keys_encodable_and_distinct() -> None:
+    """Keys that differ only in lone surrogates stay distinct after the surrogates are replaced."""
+    first, second = "a\ud800", "a\udc00"
+    redacted, _ = _review_copy({first: 1, second: 2})
+
+    assert redacted == {"a\ufffd": 1, "a\ufffd\ufffd": 2}
+    json.dumps(redacted, ensure_ascii=False).encode("utf-8")
+
+
+def test_review_copy_never_cuts_a_placeholder_in_half() -> None:
+    """Shortening backs off to before a placeholder rather than showing part of one."""
+    placeholders: dict[str, str] = {}
+    redacted = redact_sensitive_data(
+        {"command": "x" * 2_030 + " " + _fake_token("sk-", 24) + " " + "y" * 20},
+        max_string_length=2_048,
+        token_placeholders=placeholders,
+    )
+
+    assert redacted == {"command": "x" * 2_030 + " ... [truncated]"}
 
 
 def test_review_copy_hides_secret_fields_whole() -> None:
@@ -1132,6 +1192,10 @@ def test_review_copy_is_the_original_with_tokens_renamed() -> None:
         "_",
         "--",
         "\ud83d",
+        "⟦",
+        "⟧",
+        "⟦secret-1⟧",
+        "⟦=",
     ]
     generator = random.Random(2360)  # noqa: S311 - deterministic test input, not cryptography
     for _ in range(5_000):
@@ -1142,9 +1206,9 @@ def test_review_copy_is_the_original_with_tokens_renamed() -> None:
         assert len(set(placeholders.values())) == len(placeholders)
         for token, placeholder in placeholders.items():
             assert re.fullmatch(r"[A-Za-z0-9._-]+", token), token
-            assert "--" not in token
+            assert placeholder.endswith(" --⟧") == ("--" in token)
             text = text.replace(placeholder, token)
-        assert text == value.replace("\ud83d", "�"), (value, redacted)
+        assert text.replace("⟦=", "⟦") == value.replace("\ud83d", "\ufffd"), (value, redacted)
 
 
 def test_review_copy_stays_linear_on_long_token_like_runs() -> None:

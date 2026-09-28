@@ -23,6 +23,7 @@ __all__ = [
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
+    "truncate_review_text",
 ]
 _TRUNCATED = "... [truncated]"
 _MAX_TEXT_INPUT_LENGTH = 64 * 1024
@@ -93,8 +94,9 @@ _TOKEN_LIKE_MARKERS = (
     "AIza",
 )
 # Reviewer-facing copies hide only credentials in known token formats with realistic lengths, so hosts,
-# paths, and short names such as `sk-deploy.sh` stay visible. Every hidden span is letters, digits, and
-# `._-`; possessive quantifiers and the lookbehind keep matching linear on long runs of token characters.
+# paths, and short names such as `sk-deploy.sh` stay visible; a token may end a sentence but not a file
+# name or host. Every hidden span is letters, digits, and `._-`; possessive quantifiers and the lookbehind
+# keep matching linear on long runs of token characters.
 _REVIEW_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(?P<token>"
     r"(?:sk|pk)-[A-Za-z0-9_-]{16,}+"
@@ -104,10 +106,17 @@ _REVIEW_TOKEN_PATTERN = re.compile(
     r"|github_pat_[A-Za-z0-9_]{30,}+"
     r"|AIza[0-9A-Za-z_-]{30,}+"
     r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
-    r")(?![A-Za-z0-9_.-])",
+    r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])",
 )
+# Generated credentials contain a long run mixing letters and digits; kebab-case names such as pod,
+# image, or branch names do not, so they stay visible.
+_RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
+_PLACEHOLDER_OPEN = "\u27e6"
+_PLACEHOLDER_CLOSE = "\u27e7"
+# Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
+_MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
@@ -538,34 +547,57 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
+def _looks_generated(token: str) -> bool:
+    return any(not run.isalpha() and not run.isdigit() for run in _RANDOM_RUN_PATTERN.findall(token))
+
+
+def truncate_review_text(value: str, max_length: int | None) -> str:
+    """Shorten reviewer-facing text without cutting a placeholder in half."""
+    if max_length is None or len(value) <= max_length:
+        return value
+    head = value[: max_length - len(_TRUNCATED)]
+    opening = head.rfind(_PLACEHOLDER_OPEN)
+    if opening > head.rfind(_PLACEHOLDER_CLOSE):
+        head = head[:opening]
+    return head + _TRUNCATED
+
+
 def _redact_review_tokens(value: str, *, max_length: int | None, placeholders: dict[str, str]) -> str:
     """Replace each distinct credential in a known token format with its own numbered placeholder.
 
-    Equal tokens share a placeholder and different tokens get different ones, so the copy keeps
-    the structure of the original text and loses only the characters of each hidden token.
+    Equal tokens share a placeholder and different tokens get different ones, so the copy is
+    the original text with tokens renamed and loses only the characters of each hidden token.
+    A literal placeholder opening in the text is shown as ``\u27e6=``, so it cannot pass for a
+    placeholder, and a token that contains ``--``, which starts a comment in SQL, says so.
     Tokens are replaced before shortening, so a shortened copy never numbers a cut-off token.
     """
 
     def placeholder(match: re.Match[str]) -> str:
         token = match.group("token")
-        if "--" in token:
-            # `--` starts a comment in SQL, Lua, and Haskell, so hiding it could change how the line reads.
+        if not _looks_generated(token):
             return token
-        return placeholders.setdefault(token, f"\u27e6secret-{len(placeholders) + 1}\u27e7")
+        if token not in placeholders:
+            comment = " --" if "--" in token else ""
+            placeholders[token] = f"{_PLACEHOLDER_OPEN}secret-{len(placeholders) + 1}{comment}{_PLACEHOLDER_CLOSE}"
+        return placeholders[token]
 
-    redacted = _REVIEW_TOKEN_PATTERN.sub(placeholder, _LONE_SURROGATE_PATTERN.sub("\ufffd", value))
-    return _truncate_text(redacted, max_length)
+    text = _LONE_SURROGATE_PATTERN.sub("\ufffd", value).replace(_PLACEHOLDER_OPEN, f"{_PLACEHOLDER_OPEN}=")
+    return truncate_review_text(_REVIEW_TOKEN_PATTERN.sub(placeholder, text), max_length)
 
 
-def nests_beyond_redaction_depth(value: object, depth: int = 0) -> bool:
-    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
+def _nests_beyond_depth(value: object, depth: int) -> bool:
     if depth >= _MAX_DEPTH:
         return True
     if isinstance(value, Mapping):
-        return any(nests_beyond_redaction_depth(item, depth + 1) for item in value.values())
+        return any(_nests_beyond_depth(item, depth + 1) for item in value.values())
     if isinstance(value, list | tuple | set | frozenset):
-        return any(nests_beyond_redaction_depth(item, depth + 1) for item in value)
+        return any(_nests_beyond_depth(item, depth + 1) for item in value)
     return False
+
+
+def nests_beyond_redaction_depth(value: object) -> bool:
+    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
+    return _nests_beyond_depth(value, 0)
 
 
 def _normalized_structured_value(value: object) -> object:
@@ -625,6 +657,11 @@ def _redact_mapping(
             while redacted_key in reserved_keys or redacted_key in redacted:
                 label_index += 1
                 redacted_key = f"<redacted structured key {label_index}>"
+        elif token_placeholders is not None:
+            # Reviewer-facing keys must encode as UTF-8; keys that differ only in lone surrogates stay distinct.
+            redacted_key = _LONE_SURROGATE_PATTERN.sub("\ufffd", key_text)
+            while redacted_key in redacted:
+                redacted_key += "\ufffd"
         else:
             redacted_key = key_text
         redacted[redacted_key] = _redact_sensitive_data(
@@ -675,6 +712,22 @@ def _redact_sequence(
     return redacted_items
 
 
+def _review_scalar_value(value: object, *, max_length: int | None, placeholders: dict[str, str]) -> _RedactedValue:
+    """Return a reviewer-facing copy of one scalar that Matrix can deliver unchanged."""
+    if isinstance(value, bytes):
+        return "<bytes>"
+    if isinstance(value, str | Path):
+        return _redact_review_tokens(str(value), max_length=max_length, placeholders=placeholders)
+    if isinstance(value, float):
+        # Matrix events cannot carry floats, so a reviewer-facing copy shows every float as text.
+        return str(value)
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _MAX_CANONICAL_JSON_INTEGER else value
+    return _redact_review_tokens(_safe_repr(value), max_length=max_length, placeholders=placeholders)
+
+
 def _redact_scalar_value(
     value: object,
     *,
@@ -684,29 +737,22 @@ def _redact_scalar_value(
     token_placeholders: dict[str, str] | None,
 ) -> _RedactedValue:
     if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
-        redacted: _RedactedValue = REDACTED
-    elif isinstance(value, bytes):
-        redacted = "<bytes>"
+        return REDACTED
+    if token_placeholders is not None:
+        return _review_scalar_value(value, max_length=max_string_length, placeholders=token_placeholders)
+    if isinstance(value, bytes):
+        redacted: _RedactedValue = "<bytes>"
     elif isinstance(value, Path):
         redacted = str(value)
-    elif isinstance(value, str) and token_placeholders is not None:
-        redacted = _redact_review_tokens(value, max_length=max_string_length, placeholders=token_placeholders)
     elif isinstance(value, str):
         if _is_query_container(parent_key):
             redacted = _redact_query_fragment(value, max_length=max_string_length)
         else:
             redacted = _redact_sensitive_text_fail_closed(value, max_length=max_string_length)
     elif isinstance(value, float):
-        # JSON cannot carry infinities or NaN; a reviewer-facing copy names them instead of showing null.
-        redacted = value if math.isfinite(value) else (str(value) if token_placeholders is not None else None)
+        redacted = value if math.isfinite(value) else None
     elif value is None or isinstance(value, bool | int):
         redacted = value
-    elif token_placeholders is not None:
-        redacted = _redact_review_tokens(
-            _safe_repr(value),
-            max_length=max_string_length,
-            placeholders=token_placeholders,
-        )
     else:
         redacted = _redact_sensitive_text_fail_closed(_safe_repr(value), max_length=max_string_length)
     return redacted

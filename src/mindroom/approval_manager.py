@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
-from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data
+from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
@@ -63,7 +63,6 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
-_SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
 
@@ -111,8 +110,7 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     # The value is already redacted; redacting its JSON text again could hide text the first pass kept.
     if _json_preview_length(value) <= max_length:
         return value
-    text = _compact_preview_text(value)
-    return text[: max_length - len(_SANITIZER_TRUNCATION_MARKER)] + _SANITIZER_TRUNCATION_MARKER
+    return truncate_review_text(_compact_preview_text(value), max_length)
 
 
 def _build_event_arguments_preview(arguments: dict[str, Any], placeholders: dict[str, str]) -> dict[str, Any]:
