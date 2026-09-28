@@ -22,7 +22,7 @@ in
     matrixHomeserver = lib.mkOption {
       type = lib.types.str;
       default = "https://mindroom.chat";
-      description = "Matrix homeserver used for /account/whoami token verification.";
+      description = "Matrix homeserver used for OpenID userinfo token verification and agent account registration.";
     };
 
     matrixServerName = lib.mkOption {

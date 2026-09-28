@@ -11,7 +11,11 @@ from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
-from mindroom.matrix.provisioning_env import local_pairing_required, local_provisioning_client_credentials_from_env
+from mindroom.matrix.provisioning_env import (
+    local_client_headers,
+    local_pairing_required,
+    local_provisioning_client_credentials_from_env,
+)
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -47,10 +51,17 @@ _CONNECTION_REVOKED_DETAIL = "Connection revoked"
 _NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
 
 
+def local_client_credentials_rejected(response: httpx.Response) -> bool:
+    """Return whether the provisioning service rejected this install's credentials as invalid or revoked."""
+    return response.status_code == 401 or (
+        response.status_code == 403 and error_detail_from_response(response) == _CONNECTION_REVOKED_DETAIL
+    )
+
+
 def _raise_for_register_agent_error(response: httpx.Response, *, username: str) -> NoReturn:
     """Raise the appropriate error for a failed register-agent response."""
     detail = error_detail_from_response(response)
-    if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
+    if local_client_credentials_rejected(response):
         msg = f"Provisioning credentials are invalid or revoked (server said: {detail}). Run `mindroom connect` again."
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 403:
@@ -91,10 +102,7 @@ async def register_user_via_provisioning_service(
 ) -> _ProvisioningRegisterResult:
     """Register an agent account via provisioning service server-side flow."""
     url = f"{provisioning_url}/v1/local-mindroom/register-agent"
-    headers = {
-        "X-Local-MindRoom-Client-Id": client_id,
-        "X-Local-MindRoom-Client-Secret": client_secret,
-    }
+    headers = local_client_headers(client_id, client_secret)
     payload = {
         "homeserver": homeserver.rstrip("/"),
         "username": username,

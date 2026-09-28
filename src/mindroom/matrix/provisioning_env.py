@@ -1,4 +1,4 @@
-"""Environment readers that decide how hosted installs register Matrix accounts.
+"""Environment readers that decide how hosted installs register Matrix accounts, and their client-credential headers.
 
 This module stays free of Matrix and HTTP client imports because `mindroom service status` checks pairing on every poll.
 """
@@ -64,6 +64,14 @@ def local_provisioning_client_credentials_from_env(
         )
         raise _permanent_startup_error(msg)
     return client_id, client_secret
+
+
+def local_client_headers(client_id: str, client_secret: str) -> dict[str, str]:
+    """Return the headers that authenticate a paired install to the provisioning service."""
+    return {
+        "X-Local-MindRoom-Client-Id": client_id,
+        "X-Local-MindRoom-Client-Secret": client_secret,
+    }
 
 
 def local_pairing_required(runtime_paths: RuntimePaths) -> bool:

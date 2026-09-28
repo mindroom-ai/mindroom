@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import io
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -98,6 +99,7 @@ def test_stock_avatar_names_match_the_assets_repository() -> None:
         "helper",
         "home",
         "mind",
+        "mind-logo",
         "news",
         "phone",
         "planner",
@@ -177,7 +179,7 @@ async def test_unknown_entities_get_stable_non_identity_picks(
 
     assert first == second
     assert first is not None
-    assert set(downloads.names) <= set(managed_avatars._STOCK_AVATAR_NAMES) - {"mind", "router"}
+    assert set(downloads.names) <= set(managed_avatars._STOCK_AVATAR_NAMES) - {"mind", "mind-logo", "router"}
     assert len(set(downloads.names)) > 10
 
 
@@ -498,20 +500,24 @@ async def test_room_with_avatar_is_kept_without_resolving(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_root_space_avatar_requires_the_bundled_file(
+async def test_root_space_avatar_prefers_bundled_then_falls_back_to_stock(
     runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The bundled root-space file is used when present; without it no Space avatar is set."""
+    """The bundled root-space file is used when present; without it the stock mind-logo is downloaded."""
     bundled = tmp_path / "bundled" / "spaces" / "root_space.png"
     bundled.parent.mkdir(parents=True)
     bundled.write_bytes(_image_bytes())
     assert await managed_avatars.root_space_avatar_path(runtime_paths) == bundled
+    assert downloads.urls == []
 
     monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: tmp_path / "missing")
 
-    assert await managed_avatars.root_space_avatar_path(runtime_paths) is None
+    fallback = await managed_avatars.root_space_avatar_path(runtime_paths)
+    assert fallback == _cache_path(runtime_paths, "mind-logo")
+    assert downloads.names == ["mind-logo"]
 
 
 @pytest.mark.parametrize("data", [b"not an image", _image_bytes()[:64]], ids=["garbage", "truncated"])
@@ -519,3 +525,92 @@ def test_undecodable_images_raise_value_error(data: bytes) -> None:
     """Pillow decode failures surface as ValueError so the event loop never imports Pillow."""
     with pytest.raises(ValueError, match="stock avatar"):
         managed_avatars._normalized_png(data)
+
+
+def _failure_marker(runtime_paths: constants_mod.RuntimePaths, name: str) -> Path:
+    return _cache_path(runtime_paths, name).with_suffix(".failed")
+
+
+def _record_failure(runtime_paths: constants_mod.RuntimePaths, name: str, *, age_seconds: float = 0) -> Path:
+    marker = _failure_marker(runtime_paths, name)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    mtime = marker.stat().st_mtime - age_seconds
+    os.utime(marker, (mtime, mtime))
+    return marker
+
+
+@pytest.mark.asyncio
+async def test_failed_download_creates_failure_marker(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """A failed download warns once and records a marker that skips retries for 24 hours."""
+    downloads.payload = httpx.ConnectError("offline")
+
+    with capture_logs() as logs:
+        path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+
+    assert path is None
+    assert _failure_marker(runtime_paths, "code").is_file()
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_recent_failure_skips_download_quietly(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """A download that failed recently is not retried and does not warn again on later starts."""
+    _record_failure(runtime_paths, "code")
+
+    with capture_logs() as logs:
+        first = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+        second = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+
+    assert first is None
+    assert second is None
+    assert downloads.urls == []
+    assert [log for log in logs if log["log_level"] == "warning"] == []
+    assert [log["event"] for log in logs] == ["stock_avatar_unavailable_cached"] * 2
+
+
+@pytest.mark.asyncio
+async def test_expired_failure_retries_the_download(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """After 24 hours a failed download is retried once, and another failure warns again and restarts the window."""
+    marker = _record_failure(runtime_paths, "code", age_seconds=25 * 60 * 60)
+    downloads.payload = httpx.ConnectError("still offline")
+
+    with capture_logs() as logs:
+        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
+        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
+
+    assert downloads.names == ["code"]
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
+    assert managed_avatars._download_failed_recently(marker)
+
+    os.utime(marker, (marker.stat().st_mtime - 25 * 60 * 60,) * 2)
+    downloads.payload = _image_bytes()
+
+    path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+
+    assert path == _cache_path(runtime_paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_clearing_failures_retries_the_download_immediately(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """An explicit avatar sync clears recent failures so the next resolution downloads again."""
+    _record_failure(runtime_paths, "code")
+
+    managed_avatars.clear_failed_stock_downloads(runtime_paths)
+
+    path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+
+    assert path == _cache_path(runtime_paths, "code")
+    assert downloads.names == ["code"]

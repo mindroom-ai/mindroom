@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
+import aiohttp
 import certifi
 import nio
 
@@ -65,6 +66,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
     _process_shutdown_transport_fenced = False
+    _transport_failure_logged = False
 
     @property
     def process_shutdown_transport_fenced(self) -> bool:
@@ -80,7 +82,25 @@ class MindRoomAsyncClient(nio.AsyncClient):
             await headers.prepare()
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
-        return await super().send(*args, **kwargs)
+        # nio retries connection errors while logging only "Timed out", so name the real cause here.
+        try:
+            response = await super().send(*args, **kwargs)
+        except (aiohttp.ClientConnectionError, TimeoutError) as exc:
+            self._log_transport_failure(exc)
+            raise
+        self._transport_failure_logged = False
+        return response
+
+    def _log_transport_failure(self, error: BaseException) -> None:
+        """Warn once per outage with the real cause; repeats stay at debug until the homeserver answers."""
+        log = logger.debug if self._transport_failure_logged else logger.warning
+        self._transport_failure_logged = True
+        log(
+            "matrix_request_transport_failed",
+            homeserver=self.homeserver,
+            error_type=type(error).__name__,
+            error=str(error) or type(error).__name__,
+        )
 
     def begin_process_shutdown_transport_fence(self) -> None:
         """Permanently refuse new requests before owned work is drained."""

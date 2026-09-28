@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
 
@@ -324,6 +326,113 @@ def test_paired_client_fetches_google_oauth_client(tmp_path: Path, monkeypatch: 
         "client_id": "google-client-id",
         "client_secret": "google-client-secret",
     }
+
+
+def _post_heartbeat(client: TestClient, client_id: str, client_secret: str) -> httpx.Response:
+    return client.post(
+        "/v1/local-mindroom/heartbeat",
+        headers={
+            "X-Local-MindRoom-Client-Id": client_id,
+            "X-Local-MindRoom-Client-Secret": client_secret,
+        },
+    )
+
+
+def _listed_last_seen(client: TestClient) -> datetime:
+    listed = client.get("/v1/local-mindroom/connections", headers={"Authorization": "Bearer token-alice"})
+    assert listed.status_code == 200
+    [connection] = listed.json()["connections"]
+    return datetime.fromisoformat(connection["last_seen_at"])
+
+
+def test_heartbeat_requires_paired_client_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Heartbeats authenticate exactly like register-agent."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        missing = client.post("/v1/local-mindroom/heartbeat")
+        wrong_secret = _post_heartbeat(client, complete["client_id"], "wrong-secret")
+        unknown_client = _post_heartbeat(client, "unknown-client", complete["client_secret"])
+        accepted = _post_heartbeat(client, complete["client_id"], complete["client_secret"])
+
+    assert missing.status_code == 401
+    assert wrong_secret.status_code == 401
+    assert unknown_client.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "ok"}
+
+
+def test_heartbeat_rejects_revoked_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revoked install learns that its connection was revoked."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        client.delete(
+            f"/v1/local-mindroom/connections/{complete['client_id']}",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        response = _post_heartbeat(client, complete["client_id"], complete["client_secret"])
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == provisioning.CONNECTION_REVOKED_DETAIL
+
+
+def test_heartbeat_updates_last_seen_with_throttled_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeats refresh the listed last-seen time but rewrite the state file at most every ten minutes."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    app = provisioning.create_app(_service_config(state_path))
+    persisted: list[datetime] = []
+    real_persist = provisioning._persist_state_unlocked
+
+    def _counting_persist(state: provisioning.ProvisioningState, path: Path) -> None:
+        persisted.append(state.connections[complete["client_id"]].last_seen_at)
+        real_persist(state, path)
+
+    paired_at = provisioning._now_utc()
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        monkeypatch.setattr(provisioning, "_persist_state_unlocked", _counting_persist)
+
+        first = paired_at + provisioning.timedelta(minutes=11)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: first)
+        assert _post_heartbeat(client, complete["client_id"], complete["client_secret"]).status_code == 200
+        assert _listed_last_seen(client) == first
+
+        soon_after = first + provisioning.timedelta(minutes=5)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: soon_after)
+        assert _post_heartbeat(client, complete["client_id"], complete["client_secret"]).status_code == 200
+        assert _listed_last_seen(client) == first
+
+        later = first + provisioning.timedelta(minutes=10)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+        assert _post_heartbeat(client, complete["client_id"], complete["client_secret"]).status_code == 200
+        assert _listed_last_seen(client) == later
+
+    assert persisted == [first, later]
+    [stored] = json.loads(state_path.read_text(encoding="utf-8"))["connections"]
+    assert stored["last_seen_at"] == provisioning._as_utc_iso(later)
+
+
+def test_heartbeat_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misbehaving install cannot hammer the heartbeat endpoint."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        statuses = [
+            _post_heartbeat(client, complete["client_id"], complete["client_secret"]).status_code for _ in range(11)
+        ]
+
+    assert statuses == [200] * 10 + [429]
 
 
 def test_google_oauth_client_endpoint_requires_server_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -759,7 +868,7 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
 
 
 def test_client_error_detail_constants_match_service() -> None:
-    """The runtime client classifies register-agent 403s by these exact strings."""
+    """The runtime client classifies register-agent and heartbeat 403s by these exact strings."""
     assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
     assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL
 
@@ -1030,6 +1139,164 @@ def test_device_start_is_rate_limited_per_client(tmp_path: Path, monkeypatch: py
         assert response.status_code == 429
 
 
+def _count_homeserver_lookups(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    lookups: list[str] = []
+
+    async def _fake_openid_userinfo(config: provisioning.ServiceConfig, openid_token: str) -> str:
+        del config
+        lookups.append(openid_token)
+        raise HTTPException(status_code=401, detail="Invalid Matrix OpenID token")
+
+    async def _fake_whoami(config: provisioning.ServiceConfig, access_token: str) -> str:
+        del config
+        lookups.append(access_token)
+        raise HTTPException(status_code=401, detail="Invalid Matrix access token")
+
+    monkeypatch.setattr(provisioning, "_matrix_openid_userinfo", _fake_openid_userinfo)
+    monkeypatch.setattr(provisioning, "_matrix_whoami", _fake_whoami)
+    return lookups
+
+
+def _garbage_browser_request(client: TestClient, endpoint: str, headers: dict[str, str]) -> httpx.Response:
+    if endpoint == "connections-list":
+        return client.get("/v1/local-mindroom/connections", headers=headers)
+    if endpoint == "connections-revoke":
+        return client.delete("/v1/local-mindroom/connections/some-connection", headers=headers)
+    return client.post(f"/v1/local-mindroom/pair/device/{endpoint}", json={"pair_code": "AAAA-BBBB"}, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "headers"),
+    [
+        ("inspect", {OPENID_TOKEN_HEADER: "garbage"}),
+        ("approve", {OPENID_TOKEN_HEADER: "garbage"}),
+        ("connections-list", {OPENID_TOKEN_HEADER: "garbage"}),
+        ("connections-revoke", {OPENID_TOKEN_HEADER: "garbage"}),
+        ("connections-list", {"Authorization": "Bearer garbage"}),
+    ],
+    ids=["inspect", "approve", "connections-list", "connections-revoke", "connections-list-legacy-token"],
+)
+def test_homeserver_token_lookups_are_rate_limited_per_client_before_the_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    headers: dict[str, str],
+) -> None:
+    """Unauthenticated callers cannot make the service call the homeserver more than the per-address limit."""
+    lookups = _count_homeserver_lookups(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
+
+    with TestClient(app) as client:
+        statuses = [_garbage_browser_request(client, endpoint, headers).status_code for _ in range(limit + 1)]
+    with TestClient(app, client=("203.0.113.9", 50000)) as other_client:
+        other_status = _garbage_browser_request(other_client, endpoint, headers).status_code
+
+    assert statuses == [401] * limit + [429]
+    assert other_status == 401
+    assert len(lookups) == limit + 1
+
+
+def test_homeserver_token_lookup_limit_is_shared_across_browser_endpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One address shares a single lookup budget across every browser-authenticated endpoint."""
+    lookups = _count_homeserver_lookups(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    headers = {OPENID_TOKEN_HEADER: "garbage"}
+    limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
+    endpoints = ("inspect", "approve", "connections-list")
+
+    with TestClient(app) as client:
+        for index in range(limit):
+            assert _garbage_browser_request(client, endpoints[index % len(endpoints)], headers).status_code == 401
+        assert _garbage_browser_request(client, "connections-revoke", headers).status_code == 429
+
+    assert len(lookups) == limit
+
+
+def test_verified_users_behind_one_address_reach_their_own_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-address lookup limit leaves room for several users behind one NAT to reach their per-user limits."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        statuses = {
+            user: [client.get("/v1/local-mindroom/connections", headers=headers).status_code for _ in range(61)]
+            for user, headers in (("alice", ALICE_OPENID_HEADERS), ("bob", BOB_OPENID_HEADERS))
+        }
+        pair_statuses = [
+            client.get(
+                "/v1/local-mindroom/pair/status",
+                headers={**ALICE_OPENID_HEADERS, provisioning.PAIR_STATUS_SESSION_HEADER: "unknown"},
+            ).status_code
+            for _ in range(61)
+        ]
+
+    assert statuses == {"alice": [200] * 60 + [429], "bob": [200] * 60 + [429]}
+    assert pair_statuses == [404] * 60 + [429]
+
+
+def test_device_poll_is_rate_limited_per_device_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One polling client cannot use up the budget of other clients behind the same address."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    per_secret = provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE
+    per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
+
+    def _poll(device_secret: object) -> httpx.Response:
+        return client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": device_secret})
+
+    with TestClient(app) as client:
+        greedy = _start_device_pairing(client, "greedy")
+        polite = _start_device_pairing(client, "polite")
+        greedy_statuses = [_poll(greedy["device_secret"]).status_code for _ in range(per_address)]
+        polite_poll = _poll(polite["device_secret"])
+        # Polls rejected by the device limit leave the shared address budget untouched.
+        remaining = per_address - per_secret - 1
+        other_statuses = [_poll(f"secret-{index}").status_code for index in range(remaining + 1)]
+
+    assert greedy_statuses == [200] * per_secret + [429] * (per_address - per_secret)
+    assert polite_poll.status_code == 200
+    assert polite_poll.json()["status"] == "pending"
+    assert other_statuses == [404] * remaining + [429]
+
+
+def test_device_poll_allows_many_clients_behind_one_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-address poll limit leaves room for many CLIs polling every few seconds behind one NAT."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        statuses = [
+            client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": f"secret-{index}"}).status_code
+            for index in range(301)
+        ]
+
+    assert statuses == [404] * 300 + [429]
+
+
+def test_unknown_device_secrets_do_not_grow_rate_limit_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flood of random device secrets from one address only ever touches that address's bucket."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
+
+    with TestClient(app) as client:
+        statuses = [
+            client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": f"random-{index}"}).status_code
+            for index in range(2000)
+        ]
+        buckets = set(app.state.runtime_state.rate_limit_buckets)
+
+    assert statuses == [404] * per_address + [429] * (2000 - per_address)
+    assert buckets == {"pair:device:poll:testclient"}
+
+
 def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An approval persisted before a restart can still be claimed after it."""
     _patch_openid_auth(monkeypatch)
@@ -1063,6 +1330,49 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
         monkeypatch.delenv(name, raising=False)
 
     assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
+
+
+def _throttled_polls(monkeypatch: pytest.MonkeyPatch, interval_seconds: int) -> int:
+    """Count polls the per-device limit rejects for one client polling at a fixed interval for two minutes."""
+    state = provisioning._new_runtime_state()
+    now = [1000.0]
+    monkeypatch.setattr(provisioning, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    throttled = 0
+    for _ in range(120 // interval_seconds + 1):
+        try:
+            provisioning._enforce_rate_limit_unlocked(
+                state,
+                key="pair:device:poll:secret:hash",
+                limit=provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+                window_seconds=60,
+            )
+        except HTTPException:
+            throttled += 1
+        now[0] += interval_seconds
+    return throttled
+
+
+def test_minimum_poll_interval_stays_within_device_poll_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clients polling at the shortest allowed interval are never throttled; one second less would be."""
+    minimum = provisioning.MIN_PAIR_POLL_INTERVAL_SECONDS
+    assert minimum <= provisioning.DEFAULT_PAIR_POLL_INTERVAL_SECONDS
+    assert _throttled_polls(monkeypatch, minimum) == 0
+    assert _throttled_polls(monkeypatch, minimum - 1) > 0
+
+
+def test_service_config_rejects_poll_interval_below_device_poll_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service refuses to start when it would advertise a poll interval its own device limit throttles."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    minimum = provisioning.MIN_PAIR_POLL_INTERVAL_SECONDS
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS", str(minimum))
+    assert provisioning._load_service_config_from_env().pair_poll_interval_seconds == minimum
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS", str(minimum - 1))
+    with pytest.raises(ValueError, match=f"MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS must be >= {minimum}"):
+        provisioning._load_service_config_from_env()
 
 
 def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1146,6 +1456,55 @@ def test_recently_expired_device_code_still_reports_expired_after_another_start(
         assert inspect.status_code == 404
         poll = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": old["device_secret"]})
         assert poll.status_code == 404
+
+
+def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claimed sessions keep answering 410 for one code lifetime, then disappear while their connections stay."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    app = provisioning.create_app(_service_config(state_path))
+    started_at = provisioning._now_utc()
+
+    with TestClient(app) as client:
+        browser = client.post("/v1/local-mindroom/pair/start", headers=ALICE_OPENID_HEADERS).json()
+        browser_complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={"pair_code": browser["pair_code"], "client_name": "browser", "client_pubkey_or_fingerprint": "x"},
+        ).json()
+        device = _start_device_pairing(client, "device")
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": device["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        device_complete = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": device["device_secret"]},
+        ).json()
+        assert device_complete["status"] == "connected"
+
+        within_retention = started_at + provisioning.timedelta(seconds=599)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: within_retention)
+        _start_device_pairing(client, "renewed")
+        replay = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": device["device_secret"]})
+        assert replay.status_code == 410
+        assert replay.json()["detail"] == provisioning.PAIR_SESSION_ALREADY_CLAIMED_DETAIL
+
+        past_retention = provisioning._now_utc() + provisioning.timedelta(seconds=2 * 600 + 1)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: past_retention)
+        _start_device_pairing(client, "latest")
+        replay = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": device["device_secret"]})
+        assert replay.status_code == 404
+        listed = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert [session["client_name"] for session in persisted["pair_sessions"]] == ["latest"]
+    connection_ids = {browser_complete["client_id"], device_complete["client_id"]}
+    assert {connection["id"] for connection in persisted["connections"]} == connection_ids
+    assert {connection["id"] for connection in listed["connections"]} == connection_ids
 
 
 def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1576,8 +1576,13 @@ Set the API key for each provider you use in `config.yaml`:
 For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
 A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
-All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
+**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`), read only when the plain variable is unset or empty; see [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
+Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
+When a stored value is first imported or changes, MindRoom logs one notice naming the service, the variable that supplied it, and whether it came from the process environment, `.env`, or the process environment overriding `.env`.
+Values are never logged, and unchanged values are neither announced nor rewritten.
+To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env` (for a seed, remove that service's entry from each declaration that lists it), then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Environment sync never overwrites credentials saved through the dashboard (`_source=ui`) or legacy credentials without a source marker.
 
 ### Codex CLI Subscription Auth
 
@@ -1596,7 +1601,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline, except that a certificate verification failure stops startup immediately without retrying (see [Matrix TLS trust](https://docs.mindroom.chat/architecture/matrix/#tls-trust)) | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
@@ -2112,6 +2117,8 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
+To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
 ## Credential Storage Encryption
 
@@ -2199,11 +2206,15 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
+The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png` when present, then the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images, and otherwise the stock `mind-logo` image, which wheel installs (`uvx`) use because they lack bundled files.
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
-Machines without internet access simply get no stock avatar.
+When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
+Agent, team, and root Space avatars are retried the next time MindRoom starts after that window.
+Managed room avatars are only chosen when a room is created, so run `mindroom avatars sync` to fill them in.
+`mindroom avatars sync` also clears recent failures, so it retries immediately and lets the next start retry agent and team avatars.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
-To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
+To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 
 MindRoom can also generate custom avatars for agents, teams, rooms, and the optional root Matrix Space.
 Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.
@@ -20226,6 +20237,14 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
+### TLS Trust
+
+The startup readiness probe trusts the same certificates as the `mindroom-nio` Matrix clients: OpenSSL's default CA file and directory plus certifi's roots.
+Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default location, and setting either one stops MindRoom from adding certifi's roots.
+A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
+Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
+Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+
 ## Agent Users
 
 Each agent, team, and router has its own Matrix user.
@@ -20451,7 +20470,7 @@ matrix_space:
   name: MindRoom       # Display name for the Space
 ```
 
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets, falling back to the stock `mind-logo` image.
 The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
@@ -22040,6 +22059,11 @@ They can only call provisioning-service endpoints that accept local client crede
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
+That page shows when each paired install was last seen.
+A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
+Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
+The service records these reports with ten-minute resolution.
+If the service rejects the credentials as invalid or revoked, the install logs a warning asking you to run `mindroom connect` again and stops reporting.
 The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
 Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
 Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.

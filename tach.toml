@@ -2456,6 +2456,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.provisioning_heartbeat"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.provisioning",
+    "mindroom.matrix.provisioning_env",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.matrix.provisioning_env"
 depends_on = [
     "mindroom.constants",
@@ -2601,6 +2611,7 @@ depends_on = [
     "mindroom.knowledge.watch",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.provisioning_heartbeat",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.stale_stream_cleanup",
@@ -5635,7 +5646,12 @@ expose = [
     "require_runtime_paths_arg",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing", "mindroom.desktop.session"]
+visibility = [
+    "mindroom.matrix._owned_session",
+    "mindroom.matrix.typing",
+    "mindroom.desktop.session",
+    "mindroom.orchestration.runtime",
+]
 
 [[interfaces]]
 expose = [
