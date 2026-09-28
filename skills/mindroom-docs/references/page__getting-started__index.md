@@ -12,7 +12,40 @@ Watch the 2-minute setup video:
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Initialize local config
+### 1. Run MindRoom
+
+```bash
+uvx mindroom run
+```
+
+When no config exists yet and MindRoom runs in a terminal, it asks a few setup questions first:
+
+1. Choose a model provider preset (default `openai`).
+2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden and never printed.
+   Press Enter to skip and add the key later to `~/.mindroom/.env` or through the dashboard's provider setup.
+   MindRoom does not ask when the key is already set in your environment.
+   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env`.
+
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
+Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`.
+
+On first run, MindRoom automatically initiates pairing.
+It prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+After pairing completes, MindRoom starts the runtime and dashboard.
+
+Notes:
+
+- Pair codes are short-lived (10 minutes).
+- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
+- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
+- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
+
+### 2. Optional: set up explicitly with `config init`
+
+Use `config init` to create or review the files before starting, to pick a preset non-interactively, or to use a self-hosted homeserver:
 
 ```bash
 uvx mindroom config init
@@ -62,7 +95,7 @@ These local provider configs run entirely locally and do not require real cloud 
 
 Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
 
-### 2. Add remote-provider credentials when needed
+Then add remote-provider credentials when needed:
 
 ```bash
 $EDITOR ~/.mindroom/.env
@@ -79,27 +112,9 @@ For hosted providers, set the credentials for the provider you selected:
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
-### 3. Run MindRoom
+Then run `uvx mindroom run`.
 
-```bash
-uvx mindroom run
-```
-
-On first run, MindRoom automatically initiates pairing.
-It prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
-Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-
-After pairing completes, MindRoom starts the runtime and dashboard.
-
-Notes:
-
-- Pair codes are short-lived (10 minutes).
-- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
-- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
-- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
-
-### 4. Verify
+### 3. Verify
 
 **In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 

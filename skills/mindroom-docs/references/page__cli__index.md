@@ -28,8 +28,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  AI agents that live in Matrix and work everywhere via bridges.
 
  Quick start:
- mindroom config init   Create a starter config
- mindroom run           Start the system
+ mindroom run           Set up on first run, pair, and start
+ mindroom config init   Create a starter config without starting
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion            Install completion for the current shell.              │
@@ -143,6 +143,14 @@ Show the current MindRoom version.
 
 Start MindRoom with your configuration.
 
+When no config file exists at the selected path and both stdin and stdout are a terminal, `mindroom run` first creates the hosted starter config that `mindroom config init` would create for `mindroom.chat`.
+It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, for the API key with hidden input.
+Pressing Enter skips the key; add it later to the `.env` next to `config.yaml` or through the dashboard's provider setup.
+It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
+The same process then pairs with MindRoom Chat and starts.
+Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
+An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
+
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
@@ -161,6 +169,7 @@ Start MindRoom with your configuration.
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
+ - Creates a hosted starter config on first run in a terminal
  - Pairs hosted installs with your MindRoom Chat account on first run
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
@@ -1161,6 +1170,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 ### config init
 
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
+For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so `config init` is the explicit path for choosing presets up front, self-hosted Matrix, or creating files without starting.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
 Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.

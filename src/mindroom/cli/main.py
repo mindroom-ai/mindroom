@@ -16,6 +16,7 @@ from .config import (
     check_env_keys,
     config_app,
     console,
+    create_first_run_config,
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
@@ -41,8 +42,8 @@ _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
 
 [bold]Quick start:[/bold]
-  [cyan]mindroom config init[/cyan]   Create a starter config
-  [cyan]mindroom run[/cyan]           Start the system\
+  [cyan]mindroom run[/cyan]           Set up on first run, pair, and start
+  [cyan]mindroom config init[/cyan]   Create a starter config without starting\
 """
 _CONFIG_INIT_PROVIDER_CHOICES = (
     "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
@@ -136,6 +137,7 @@ def run(
     """Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
+    - Creates a hosted starter config on first run in a terminal
     - Pairs hosted installs with your MindRoom Chat account on first run
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
@@ -148,11 +150,24 @@ def run(
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
 
+    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    first_run = not ensure_writable_config_path(runtime_paths=runtime_paths) and _terminal_is_interactive()
+    if first_run:
+        try:
+            create_first_run_config(runtime_paths)
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
+        # Pick up the new config and .env before pairing and startup.
+        runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     # Report a broken config or missing model keys before any pairing waits for a human.
-    check_env_keys(_load_active_config_or_exit(runtime_paths), runtime_paths=runtime_paths)
+    config = _load_active_config_or_exit(runtime_paths)
+    if not first_run:
+        # First-run setup has already said which provider credentials are still missing.
+        check_env_keys(config, runtime_paths=runtime_paths)
     try:
         if local_pairing_required(runtime_paths):
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
@@ -646,6 +661,11 @@ def _stdin_is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
+def _terminal_is_interactive() -> bool:
+    """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 app.command("local-stack-setup")(local_stack_setup)
 
 
@@ -663,7 +683,10 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
         f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
         soft_wrap=True,
     )
-    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
+    console.print(
+        "  [cyan]mindroom run[/cyan]            In an interactive terminal: create a hosted starter config, pair, and start\n",
+        soft_wrap=True,
+    )
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

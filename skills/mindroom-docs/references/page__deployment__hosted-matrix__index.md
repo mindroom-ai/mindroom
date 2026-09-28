@@ -25,6 +25,8 @@ Watch the 2-minute setup video:
 - A Matrix account that can sign in to `chat.mindroom.chat`
 - At least one AI provider API key, or a local Codex CLI ChatGPT login
 
+Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, and starts in one command; the steps below are the explicit path.
+
 ## 1. Initialize Local Config
 
 ```bash

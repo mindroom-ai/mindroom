@@ -32,17 +32,14 @@ Watch the 2-minute setup video:
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
-# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
-uvx mindroom config init
-
-# Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
-$EDITOR ~/.mindroom/.env
-
-# Start MindRoom (pairing happens automatically on first run)
 uvx mindroom run
-# Open the printed link or scan the QR code to approve pairing,
+# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
+# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
+# then prints a link and QR code: approve it with your MindRoom Chat account,
 # or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
+
+To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
 
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
 
