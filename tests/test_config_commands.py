@@ -751,6 +751,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     change_info = {
         "config_path": "defaults.markdown",
         "new_value": False,
+        "new_value_withheld": False,
     }
     with (
         patch(
@@ -777,6 +778,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         thread_id=None,
         config_path="defaults.markdown",
         new_value=False,
+        new_value_withheld=False,
         requester="@alice:example.org",
     )
     context.record_handled_turn.assert_called_once_with(
@@ -820,6 +822,7 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
     change_info = {
         "config_path": "defaults.markdown",
         "new_value": False,
+        "new_value_withheld": False,
     }
 
     with (
@@ -1395,6 +1398,7 @@ async def test_config_preview_recovery_preserves_committed_decision(
             thread_id=None,
             config_path="defaults.markdown",
             new_value=True,
+            new_value_withheld=False,
             requester="@other:example.org",
         )
 
@@ -1651,11 +1655,12 @@ async def test_handle_config_command_masks_schema_secret_fields(tmp_path: Path, 
     assert "sentinel" not in response
 
 
-def _write_config_with_secrets(tmp_path: Path) -> Path:
+def _write_config_with_secrets(tmp_path: Path, **extra_sections: object) -> Path:
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
         yaml.safe_dump(
             {
+                **extra_sections,
                 "models": {
                     "default": {
                         "provider": "openai",
@@ -1671,12 +1676,109 @@ def _write_config_with_secrets(tmp_path: Path) -> Path:
                         "command": "mcp-home",
                         "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
                     },
+                    "remote": {
+                        "transport": "streamable-http",
+                        "url": "https://mcp.example.test/mcp",
+                        "auth": {
+                            "type": "oauth",
+                            "discovery": "manual",
+                            "authorization_url": "https://auth.example.test/authorize",
+                            "token_url": "https://auth.example.test/token",
+                        },
+                    },
+                },
+                "knowledge_bases": {
+                    "docs": {
+                        "path": str(tmp_path / "docs"),
+                        "git": {"repo_url": "https://github.com/example/docs.git"},
+                    },
                 },
             },
         ),
         encoding="utf-8",
     )
     return config_path
+
+
+def _empty_pending_state_client() -> AsyncMock:
+    """Return a Matrix client whose room state starts empty and accepts every write."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+    return client
+
+
+def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
+    return [call.kwargs["content"] for call in client.room_put_state.await_args_list]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "path", "withheld"),
+    [
+        ("set authorization.config_command_enabled false", "authorization.config_command_enabled", False),
+        (
+            'set authorization.aliases \'{"@alice:example.org": ["@telegram_alice:example.org"]}\'',
+            "authorization.aliases",
+            False,
+        ),
+        ("set defaults.worker_grantable_credentials [github]", "defaults.worker_grantable_credentials", False),
+        (
+            "set mcp_servers.remote.auth.authorization_url https://auth.example.test/v2/authorize",
+            "mcp_servers.remote.auth.authorization_url",
+            False,
+        ),
+        (
+            "set mcp_servers.remote.auth.authorization_server https://auth.example.test",
+            "mcp_servers.remote.auth.authorization_server",
+            False,
+        ),
+        (
+            "set models.default.extra_kwargs {base_url: 'http://localhost:9292/v1', temperature: 0.2}",
+            "models.default.extra_kwargs",
+            True,
+        ),
+        (
+            "set knowledge_bases.docs.git.repo_url https://github.com/example/handbook.git",
+            "knowledge_bases.docs.git.repo_url",
+            True,
+        ),
+        (
+            "set mcp_servers.home.env '{HOMEASSISTANT_TOKEN: \"${HOMEASSISTANT_TOKEN}\"}'",
+            "mcp_servers.home.env",
+            True,
+        ),
+        (
+            "set mcp_servers.remote.headers '{X-Api-Version: \"${API_VERSION}\"}'",
+            "mcp_servers.remote.headers",
+            True,
+        ),
+        ('set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"', "agents.assistant.role", True),
+    ],
+)
+async def test_handle_config_command_set_previews_and_applies_ordinary_values(
+    tmp_path: Path,
+    command: str,
+    path: str,
+    withheld: bool,
+) -> None:
+    """Every valid value previews and applies; only values redaction masks are withheld from room state."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+
+    response, change_info = await handle_config_command(command, runtime_paths)
+
+    assert change_info is not None, response
+    assert "Configuration Change Preview" in response
+    assert "sentinel" not in response
+    assert change_info["new_value_withheld"] is withheld
+    applied = await apply_config_change(path, change_info["new_value"], runtime_paths)
+    assert "Configuration updated successfully" in applied
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    for key in path.split("."):
+        saved = saved[key]
+    assert saved == change_info["new_value"]
 
 
 @pytest.mark.asyncio
@@ -1688,16 +1790,101 @@ def _write_config_with_secrets(tmp_path: Path) -> Path:
         "set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}",
     ],
 )
-async def test_handle_config_command_set_refuses_credential_values(tmp_path: Path, command: str) -> None:
-    """A pending set lives in readable room state, so credential values are refused before any preview."""
+async def test_config_set_secret_value_never_reaches_room_state(tmp_path: Path, command: str) -> None:
+    """A credential value is shown masked, kept only in memory, and applied from memory on confirmation."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+    response, change_info = await handle_config_command(command, runtime_paths)
+    assert change_info is not None
+    assert change_info["new_value_withheld"] is True
+    assert "sentinel" not in response
+
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=runtime_paths,
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            new_value_withheld=change_info["new_value_withheld"],
+            requester="@admin:example.org",
+        )
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+
+    written = _written_pending_states(client)
+    assert written[0]["new_value_withheld"] is True
+    assert all("new_value" not in content for content in written)
+    assert "sentinel" not in json.dumps(written)
+    assert "sentinel" in config_path.read_text(encoding="utf-8")
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "Configuration updated successfully" in response_text
+
+
+@pytest.mark.asyncio
+async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_path: Path) -> None:
+    """A restored withheld change has no value to apply, so its confirmation says so and clears the state."""
     config_path = _write_config_with_secrets(tmp_path)
     original = config_path.read_text(encoding="utf-8")
+    withheld = config_confirmation._PendingConfigChange(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="models.default.api_key",
+        new_value="sk-new-config-sentinel",
+        requester="@admin:example.org",
+        new_value_withheld=True,
+    )
+    restored = config_confirmation._PendingConfigChange.from_dict(withheld.to_dict())
+    assert restored.new_value is None
+    assert restored.new_value_lost is True
 
-    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=_runtime_paths_for_config(config_path),
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {"$preview": restored}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
+    ):
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+        assert config_confirmation._get_pending_change("$preview") is None
 
-    assert change_info is None
-    assert "holds credentials" in response
-    assert "sentinel" not in response
+    apply_change.assert_not_awaited()
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "lost when MindRoom restarted" in response_text
+    assert "!config set" in response_text
+    assert _written_pending_states(client)[-1] == {}
     assert config_path.read_text(encoding="utf-8") == original
 
 
@@ -1712,10 +1899,7 @@ async def test_config_set_pending_state_carries_no_current_secret(tmp_path: Path
     assert change_info is not None
     assert "sentinel" not in response
 
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = "@router:example.org"
-    client.room_get_state_event.return_value = nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
-    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+    client = _empty_pending_state_client()
     with (
         patch.object(config_confirmation, "_pending_changes", {}),
         patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
@@ -1728,6 +1912,7 @@ async def test_config_set_pending_state_carries_no_current_secret(tmp_path: Path
             thread_id=None,
             config_path=change_info["config_path"],
             new_value=change_info["new_value"],
+            new_value_withheld=change_info["new_value_withheld"],
             requester="@admin:example.org",
         )
 
@@ -1735,6 +1920,30 @@ async def test_config_set_pending_state_carries_no_current_secret(tmp_path: Path
     assert persisted["new_value"] == {}
     assert "old_value" not in persisted
     assert "sentinel" not in json.dumps(persisted)
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_get_shows_typed_fields_with_credential_like_names(tmp_path: Path) -> None:
+    """Typed fields the schema does not mark secret keep their values, whatever their names suggest."""
+    config_path = _write_config_with_secrets(
+        tmp_path,
+        authorization={"config_command_enabled": True},
+        defaults={"worker_grantable_credentials": ["github"]},
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["mcp_servers"]["remote"]["auth"]["authorization_server"] = "https://issuer.example.test"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    authorization, _ = await handle_config_command("get authorization", runtime_paths)
+    grantable, _ = await handle_config_command("get defaults.worker_grantable_credentials", runtime_paths)
+    oauth, _ = await handle_config_command("get mcp_servers.remote.auth", runtime_paths)
+
+    assert "config_command_enabled: true" in authorization
+    assert "- github" in grantable
+    assert "authorization_url: https://auth.example.test/authorize" in oauth
+    assert "authorization_server: https://issuer.example.test" in oauth
+    assert "***redacted***" not in authorization + grantable + oauth
 
 
 @pytest.mark.asyncio

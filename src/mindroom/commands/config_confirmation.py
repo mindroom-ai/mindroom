@@ -36,6 +36,11 @@ _PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
 # Maximum age for pending confirmations (24 hours)
 _MAX_PENDING_AGE_HOURS = 24
 
+_WITHHELD_VALUE_LOST_MESSAGE = (
+    "⚠️ This pending change was lost when MindRoom restarted: its new value is kept out of room state, "
+    "so it cannot outlive the process. Run `!config set` again."
+)
+
 
 @dataclass(frozen=True)
 class ConfigConfirmationContext:
@@ -68,10 +73,13 @@ class _PendingConfigChange:
     room_id: str
     thread_id: str | None
     config_path: str
-    # Persisted in room state that every member can read, so it never holds a credential;
-    # handle_config_command refuses credential-bearing values before a preview exists.
     new_value: Any
     requester: str  # User who requested the change
+    # Room state is readable by every member and never end-to-end encrypted, so a new value
+    # that display redaction would mask is withheld from it and kept only in this process.
+    new_value_withheld: bool = False
+    # A withheld change restored from room state after a restart, whose new value is gone.
+    new_value_lost: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     decision_event_id: str | None = None
     decision_key: str | None = None
@@ -87,11 +95,14 @@ class _PendingConfigChange:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for Matrix state storage."""
+        value_content: dict[str, Any] = (
+            {"new_value_withheld": True} if self.new_value_withheld else {"new_value": self.new_value}
+        )
         return {
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "config_path": self.config_path,
-            "new_value": self.new_value,
+            **value_content,
             "requester": self.requester,
             "created_at": self.created_at.isoformat(),
             "decision_event_id": self.decision_event_id,
@@ -105,13 +116,16 @@ class _PendingConfigChange:
         """Create from dictionary retrieved from Matrix state."""
         # Parse the ISO format datetime
         created_at = datetime.fromisoformat(data["created_at"])
+        withheld = data.get("new_value_withheld") is True
 
         return cls(
             room_id=data["room_id"],
             thread_id=data.get("thread_id"),
             config_path=data["config_path"],
-            new_value=data["new_value"],
+            new_value=None if withheld else data["new_value"],
             requester=data["requester"],
+            new_value_withheld=withheld,
+            new_value_lost=withheld,
             created_at=created_at,
             decision_event_id=data.get("decision_event_id"),
             decision_key=data.get("decision_key"),
@@ -511,6 +525,7 @@ async def ensure_pending_change(
     thread_id: str | None,
     config_path: str,
     new_value: Any,  # noqa: ANN401
+    new_value_withheld: bool,
     requester: str,
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
@@ -529,6 +544,7 @@ async def ensure_pending_change(
             config_path=config_path,
             new_value=new_value,
             requester=requester,
+            new_value_withheld=new_value_withheld,
         )
         await _commit_checkpoint(client, event_id, pending_change)
         await _add_confirmation_reactions(client, room_id, event_id)
@@ -605,6 +621,13 @@ async def _response_for_checkpointed_decision(
             replace(pending_change, decision_response_text=response_text),
         )
         return checkpoint, response_text
+    if pending_change.new_value_lost:
+        checkpoint = await _commit_checkpoint(
+            context.client,
+            preview_event_id,
+            replace(pending_change, decision_response_text=_WITHHELD_VALUE_LOST_MESSAGE),
+        )
+        return checkpoint, _WITHHELD_VALUE_LOST_MESSAGE
 
     started_checkpoint = await _commit_checkpoint(
         context.client,

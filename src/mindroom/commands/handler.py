@@ -478,6 +478,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     thread_id=effective_thread_id,
                     config_path=change_info["config_path"],
                     new_value=change_info["new_value"],
+                    new_value_withheld=change_info["new_value_withheld"],
                     requester=resolved_requester_user_id,
                 )
 

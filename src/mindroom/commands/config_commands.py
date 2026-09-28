@@ -181,7 +181,6 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
     """
     operation, args = _parse_config_args(args_text)
-    path = runtime_paths.config_path
     load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
     # Config loading and validation execute plugin modules and walk the
@@ -252,15 +251,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
-            # The pending change, including this value, is stored in room state
-            # that every member can read, so a credential must never reach it.
+            # Redact the exact payload that confirmation applies, not a normalized model of it.
             redacted_value = _get_nested_value(redact_authored_config(test_config_dict), config_path_str)
-            if redacted_value != value:
-                return (
-                    f"❌ The value for `{config_path_str}` holds credentials, and a pending change is stored "
-                    "in room state that every room member can read. Edit the configuration file or use the "
-                    f"dashboard instead.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
-                ), None
             formatted_old = "Not set" if old_value is None else _format_value(old_value)
             formatted_new = _format_value(redacted_value)
 
@@ -276,7 +268,9 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             change_info = {
                 "config_path": config_path_str,
                 "new_value": value,
-                "path": str(path),
+                # The pending change is stored in room state that every member can read,
+                # so a value that redaction masks stays out of it.
+                "new_value_withheld": redacted_value != value,
             }
 
             return preview_msg, change_info
