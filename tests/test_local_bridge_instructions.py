@@ -24,7 +24,6 @@ from typer.main import get_command
 from typer.testing import CliRunner, Result
 
 
-
 @pytest.fixture
 def bridge_manager(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Import the local helper without credentials, network, or subprocess access."""
