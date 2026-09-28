@@ -2518,7 +2518,7 @@ class AgentBot:
             or event.membership != "invite"
         ):
             return
-        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(room, event.sender),
             owner=self._runtime_view,

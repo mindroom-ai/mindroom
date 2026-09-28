@@ -27,7 +27,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource, RoomMembershipPosition
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
-from mindroom.matrix import client_room_admin
+from mindroom.matrix import client_room_admin, invited_rooms_store
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
@@ -136,7 +136,7 @@ def _cache_current_invite(bot: AgentBot, room_id: str, sender: str) -> nio.Matri
 
 async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
     current_room = _cache_current_invite(bot, room.room_id, event.sender)
-    bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+    await bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
     await bot._room_lifecycle.handle_recorded_invite(current_room, event.sender)
 
 
@@ -350,7 +350,7 @@ async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
     try:
         assert await asyncio.to_thread(fence_started.wait, 2)
         room.inviter = replacement_sender
-        bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement_sender)
+        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement_sender)
     finally:
         release_fence.set()
 
@@ -404,6 +404,78 @@ async def test_authoritative_departure_revokes_current_invite_before_join(
         assert room.room_id not in client.invited_rooms
     finally:
         release_invite_fence.set()
+
+
+@pytest.mark.asyncio
+async def test_denied_invites_leave_no_pending_ledger_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An inviter the current policy refuses cannot grow the durable pending-invite ledger."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path, sender_id="@outsider:localhost")
+    config.router.accept_invites = ["@owner:localhost"]
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+
+    for index in range(20):
+        room = nio.MatrixInvitedRoom(f"!flood-{index}:localhost", bot.agent_user.user_id)
+        await _handle_invite(bot, room, MagicMock(sender="@outsider:localhost"))
+
+    join_room.assert_not_awaited()
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert bot._room_lifecycle._pending_room_invites == {}
+
+
+@pytest.mark.asyncio
+async def test_one_failing_pending_invite_does_not_stop_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A room whose join keeps failing stays pending while later rooms are still reconciled."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    bot.client.invited_rooms = {}
+    failing, joinable = "!a-failing:localhost", "!b-joinable:localhost"
+    for room_id in (failing, joinable):
+        _cache_current_invite(bot, room_id, "@owner:localhost")
+
+    async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
+        return RoomJoinOutcome.RETRYABLE_FAILURE if room_id == failing else RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=join_room))
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert bot._room_lifecycle.invited_rooms == {joinable}
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {failing: "@owner:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_pending_invite_ledger_writes_run_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recording invites and reconciling cached ones never rewrite the ledger on the event loop."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    bot.client.invited_rooms = {}
+    for index in range(5):
+        _cache_current_invite(bot, f"!cached-{index}:localhost", "@owner:localhost")
+    loop_thread = threading.current_thread()
+    save = invited_rooms_store.save_pending_room_invites
+    saves_on_loop: list[bool] = []
+
+    def observed_save(path: Path, pending_invites: dict[str, str]) -> bool:
+        saves_on_loop.append(threading.current_thread() is loop_thread)
+        return save(path, pending_invites)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_pending_room_invites", observed_save)
+    monkeypatch.setattr(bot._room_lifecycle, "_handle_invite", AsyncMock())
+
+    await bot._room_lifecycle.record_pending_room_invite("!live:localhost", "@owner:localhost")
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert saves_on_loop == [False, False]
+    assert len(_pending_room_invites(config, ROUTER_AGENT_NAME)) == 6
 
 
 @pytest.fixture
@@ -942,7 +1014,7 @@ async def test_recovered_invite_waits_for_current_matrix_evidence(
         lambda *_args, **_kwargs: True,
     )
     room_id = "!revoked-invite:localhost"
-    bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+    await bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
 
     await bot._room_lifecycle.reconcile_pending_invites()
     await bot._room_lifecycle.reconcile_pending_invites()
