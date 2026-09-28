@@ -271,6 +271,7 @@ create_file("main.py", "print('ok')")
 
 - `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
 - `verify_ssl: false` is not a cosmetic flag here, because the upstream toolkit patches the Daytona client to skip certificate verification for every Daytona tool in the process, exposing the API key and sandbox traffic to anyone who can intercept the connection; set it only for a self-hosted Daytona API with a certificate you cannot otherwise trust.
+- The dashboard used to save `verify_ssl: false` with every Daytona setup because that was the default, so the first start after upgrading drops a saved `false` once and logs a warning; save it again only if you need it.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 
 ## [`composio`]

@@ -38,6 +38,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -77,6 +79,7 @@ __all__ = [
     "save_scoped_credentials",
     "scoped_credentials_path",
     "sync_shared_credentials_to_worker",
+    "update_stored_service_credentials",
     "validate_service_name",
 ]
 
@@ -742,6 +745,32 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
             )
             _credentials_managers[key] = manager
         return manager
+
+
+def update_stored_service_credentials(
+    runtime_paths: RuntimePaths,
+    service: str,
+    update: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> int:
+    """Rewrite one service's document in the primary store and every existing worker store.
+
+    ``update`` returns the replacement document, or None to leave that store unchanged.
+    Worker directories are read and written through the same no-follow reads, encryption
+    policy, and atomic replacement as every other operation. Returns how many were rewritten.
+    """
+    manager = get_runtime_credentials_manager(runtime_paths)
+    normalized_service = validate_service_name(service)
+    rewritten = 0
+    for directory in (manager.base_path, *_existing_worker_credential_paths(manager.storage_root)):
+        credentials_path = directory / f"{normalized_service}{_CREDENTIALS_FILE_SUFFIX}"
+        credentials = manager._load_credentials_file(normalized_service, credentials_path)
+        if credentials is None:
+            continue
+        updated = update(credentials)
+        if updated is not None:
+            manager._save_credentials_file(normalized_service, credentials_path, updated)
+            rewritten += 1
+    return rewritten
 
 
 def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
