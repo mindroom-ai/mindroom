@@ -104,6 +104,8 @@ Use `worker_scope: user_agent` when each requester should get separate per-agent
 `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
 They can only call provisioning-service endpoints that accept local client credentials, including agent registration and retrieval of the Google desktop app client configuration.
+Agent registration never sends your agents' passwords to the provisioning service.
+The service creates each new agent account with a one-time password and returns it once, and the local process immediately changes it to a password only the local process knows.
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.

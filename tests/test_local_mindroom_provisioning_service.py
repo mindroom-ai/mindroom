@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
 from mindroom.cli import connect as cli_connect
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import provisioning as matrix_provisioning
 from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
@@ -906,6 +907,46 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
     provisioning.DevicePairPollRequest.model_validate(poll_payload)
     provisioning.DevicePairStartResponse.model_validate(_START)
     provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
+
+
+@pytest.mark.asyncio
+async def test_cli_register_agent_messages_match_service_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's register-agent request sends no password and reads the service's one-time password."""
+    service_response = {"status": "created", "user_id": "@mindroom_code:mindroom.chat", "password": "one-time-pass"}
+    requests: list[httpx.Request] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=service_response)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        matrix_provisioning.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(transport=httpx.MockTransport(_handle), **kwargs),
+    )
+
+    result = await matrix_provisioning.register_user_via_provisioning_service(
+        provisioning_url="https://provisioning.example",
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        homeserver="https://mindroom.chat",
+        username="mindroom_code",
+        display_name="CodeAgent",
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+    )
+
+    (request,) = requests
+    service_paths = {route.path for route in provisioning.create_app(_service_config(tmp_path / "state.json")).routes}
+    assert request.url.path in service_paths
+    payload = json.loads(request.content)
+    assert "password" not in payload
+    provisioning.RegisterAgentRequest.model_validate(payload)
+    assert provisioning.RegisterAgentResponse.model_validate(service_response).model_dump() == service_response
+    assert result.password == service_response["password"]
 
 
 def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

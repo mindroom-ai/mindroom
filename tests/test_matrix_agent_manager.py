@@ -693,12 +693,23 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
+    @staticmethod
+    def _one_time_password_client(change_response: nio.Response) -> AsyncMock:
+        client = AsyncMock()
+        client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:localhost",
+            device_id="ONE_TIME_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        client.change_password.return_value = change_response
+        return client
+
     @pytest.mark.asyncio
     async def test_register_user_uses_provisioning_service_register_agent_when_configured(
         self,
         tmp_path: Path,
     ) -> None:
-        """When provisioning client creds are set, use register-agent provisioning flow."""
+        """A provisioned account's one-time password is replaced with the install's own password."""
         test_pass = "test_pass"  # noqa: S105
         client_secret = "secret-123"  # noqa: S105
         runtime_paths = _runtime_paths(
@@ -707,23 +718,24 @@ class TestMatrixRegistration:
             MINDROOM_LOCAL_CLIENT_ID="client-123",
             MINDROOM_LOCAL_CLIENT_SECRET=client_secret,
         )
+        http_client = self._one_time_password_client(nio.ChangePasswordResponse())
 
         with (
             patch(
                 "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
+                return_value=provisioning._ProvisioningRegisterResult(
+                    status="created",
+                    user_id="@test_user:localhost",
+                    password="one-time-pass",  # noqa: S106
+                ),
             ) as mock_register,
-            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client) as mock_http_client,
             patch(
                 "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
-            mock_register.return_value = MagicMock(
-                status="created",
-                user_id="@test_user:localhost",
-            )
-
             user_id = await _register_user(
                 "http://localhost:8008",
                 "test_user",
@@ -732,18 +744,69 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-            assert user_id == "@test_user:localhost"
-            mock_register.assert_called_once_with(
-                provisioning_url="https://provisioning.example",
-                client_id="client-123",
-                client_secret=client_secret,
-                homeserver="http://localhost:8008",
-                username="test_user",
-                password=test_pass,
-                display_name="Test User",
+        assert user_id == "@test_user:localhost"
+        mock_register.assert_called_once_with(
+            provisioning_url="https://provisioning.example",
+            client_id="client-123",
+            client_secret=client_secret,
+            homeserver="http://localhost:8008",
+            username="test_user",
+            display_name="Test User",
+            runtime_paths=runtime_paths,
+        )
+        mock_http_client.assert_called_once_with("http://localhost:8008", runtime_paths, "@test_user:localhost")
+        http_client.login.assert_awaited_once_with("one-time-pass")
+        http_client.change_password.assert_awaited_once_with(
+            {
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "@test_user:localhost"},
+                "password": "one-time-pass",
+            },
+            test_pass,
+        )
+        http_client.logout.assert_awaited_once_with()
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_register_user_fails_startup_when_one_time_password_is_not_replaced(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A provisioned account whose one-time password cannot be replaced is a permanent startup error."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MINDROOM_LOCAL_CLIENT_ID="client-123",
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
+        )
+        http_client = self._one_time_password_client(nio.ChangePasswordError("Password change is disabled"))
+
+        with (
+            patch(
+                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
+                new_callable=AsyncMock,
+                return_value=provisioning._ProvisioningRegisterResult(
+                    status="created",
+                    user_id="@test_user:localhost",
+                    password="one-time-pass",  # noqa: S106
+                ),
+            ),
+            patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client),
+            patch(
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
+                return_value=None,
+            ),
+            pytest.raises(PermanentMatrixStartupError, match="replacing its one-time password failed"),
+        ):
+            await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                "test_pass",
+                "Test User",
                 runtime_paths=runtime_paths,
             )
-            mock_matrix_client.assert_not_called()
+
+        http_client.close.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_register_user_provisioning_user_in_use_logs_in_and_syncs_display(
@@ -964,7 +1027,6 @@ class TestMatrixRegistration:
                 client_secret="secret-123",  # noqa: S106
                 homeserver="http://localhost:8008",
                 username="mindroom_test_user_otherns",
-                password="test_pass",  # noqa: S106
                 display_name="Test User",
                 runtime_paths=runtime_paths,
             )
@@ -1086,6 +1148,18 @@ class TestMatrixRegistration:
             await self._register_via_provisioning_with_response(
                 tmp_path,
                 httpx.Response(200, content=b"not json"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_created_without_password_is_permanent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A created account is unusable without its one-time password, so an outdated service stops startup."""
+        with pytest.raises(PermanentMatrixStartupError, match="did not return a one-time password"):
+            await self._register_via_provisioning_with_response(
+                tmp_path,
+                httpx.Response(200, json={"status": "created", "user_id": "@mindroom_test_user_otherns:localhost"}),
             )
 
     @pytest.mark.asyncio

@@ -890,7 +890,6 @@ async def _register_user_via_provisioning_if_configured(
         client_secret=client_secret,
         homeserver=homeserver,
         username=username,
-        password=password,
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
@@ -899,6 +898,14 @@ async def _register_user_via_provisioning_if_configured(
         source="Provisioning service",
     )
     if provisioning_result.status == "created":
+        assert provisioning_result.password is not None
+        await _replace_one_time_password(
+            homeserver=homeserver,
+            user_id=provisioning_user_id,
+            one_time_password=provisioning_result.password,
+            password=password,
+            runtime_paths=runtime_paths,
+        )
         logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_user_id)
         return provisioning_user_id
 
@@ -910,6 +917,33 @@ async def _register_user_via_provisioning_if_configured(
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
+
+
+async def _replace_one_time_password(
+    *,
+    homeserver: str,
+    user_id: str,
+    one_time_password: str,
+    password: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Change a provisioned account's one-time password to this install's own password."""
+    client = create_matrix_http_client(homeserver, runtime_paths, user_id)
+    try:
+        response = await client.login(one_time_password)
+        if isinstance(response, nio.LoginResponse):
+            auth = {
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": user_id},
+                "password": one_time_password,
+            }
+            response = await client.change_password(auth, password)
+        if not isinstance(response, nio.ChangePasswordResponse):
+            msg = f"Matrix account {user_id} was created, but replacing its one-time password failed: {response}"
+            raise matrix_startup_error(msg, permanent=True)
+        await client.logout()
+    finally:
+        await client.close()
 
 
 async def _register_user_without_token(

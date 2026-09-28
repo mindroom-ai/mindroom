@@ -42,6 +42,8 @@ class _ProvisioningRegisterResult:
 
     status: Literal["created", "user_in_use"]
     user_id: str
+    # One-time password the service registered a created account with; the caller replaces it immediately.
+    password: str | None
 
 
 # Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract
@@ -96,7 +98,6 @@ async def register_user_via_provisioning_service(
     client_secret: str,
     homeserver: str,
     username: str,
-    password: str,
     display_name: str,
     runtime_paths: RuntimePaths,
 ) -> _ProvisioningRegisterResult:
@@ -106,7 +107,6 @@ async def register_user_via_provisioning_service(
     payload = {
         "homeserver": homeserver.rstrip("/"),
         "username": username,
-        "password": password,
         "display_name": display_name,
     }
     try:
@@ -146,4 +146,12 @@ async def register_user_via_provisioning_service(
         msg = "Provisioning service response returned invalid user_id for register-agent."
         raise matrix_startup_error(msg, permanent=True) from exc
 
-    return _ProvisioningRegisterResult(status=status, user_id=parsed_user_id)
+    password = body.get("password") if status == "created" else None
+    if status == "created" and (not isinstance(password, str) or not password):
+        msg = (
+            "Provisioning service did not return a one-time password for the created agent account. "
+            "Deploy the latest local provisioning service."
+        )
+        raise matrix_startup_error(msg, permanent=True)
+
+    return _ProvisioningRegisterResult(status=status, user_id=parsed_user_id, password=password)
