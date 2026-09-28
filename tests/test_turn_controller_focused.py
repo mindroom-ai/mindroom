@@ -301,8 +301,14 @@ class _SpyTurnPolicy:
     inner: TurnPolicy
     plan_turn_calls: int = 0
 
-    def can_reply_to_sender_in_room(self, sender_id: str, room: nio.MatrixRoom) -> bool:
-        return self.inner.can_reply_to_sender_in_room(sender_id, room)
+    def can_reply_to_sender_in_room(
+        self,
+        sender_id: str,
+        room_id: str,
+        *,
+        observed_room: nio.MatrixRoom | None = None,
+    ) -> bool:
+        return self.inner.can_reply_to_sender_in_room(sender_id, room_id, observed_room=observed_room)
 
     def responder_availability(self) -> ResponderAvailability:
         return self.inner.responder_availability()
@@ -2300,7 +2306,7 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
     )
     memberships = harness.controller.deps.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
-    assert harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+    assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
 
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember(responder_user_id, None, None)],
@@ -2311,7 +2317,7 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
 
     await harness.deliver(room, event)
 
-    assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+    assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
     assert harness.runner.requests == []
     assert harness.turn_store.is_handled(event.event_id)
 
@@ -4709,7 +4715,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         nonlocal first
         if first:
             first = False
-            assert harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+            assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
             reached.set()
             await release.wait()
         return False
@@ -4723,14 +4729,13 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
             memberships.invalidate(config, reason="uncertain_sync_response")
             if race == "pending":
                 with pytest.raises(ReplyMembershipPendingError):
-                    harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+                    harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
             else:
-                assert harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+                assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
         elif race == "denied":
             client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
             await memberships.refresh(config, runtime_paths_for(config), client)
-            room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
-            assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room)
+            assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
         release.set()
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
