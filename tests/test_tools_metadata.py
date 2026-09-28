@@ -2,6 +2,7 @@
 
 import contextlib
 import gc
+import gzip
 import inspect
 import json
 import sys
@@ -257,6 +258,18 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
     assert exc_info.value.reason == reason
 
 
+class _TrackedStream(httpx.SyncByteStream):
+    """A response body that records whether anything read it."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        self.read = True
+        yield self.body
+
+
 def _install_custom_api_transport(
     monkeypatch: pytest.MonkeyPatch,
     respond: Callable[[httpx.Request], httpx.Response],
@@ -266,7 +279,13 @@ def _install_custom_api_transport(
 
     def handle(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        return respond(request)
+        response = respond(request)
+        if isinstance(response.stream, httpx.ByteStream):
+            # Responses built from bytes are preloaded; a network transport streams its body instead.
+            return httpx.Response(
+                response.status_code, headers=response.headers, stream=_TrackedStream(response.content)
+            )
+        return response
 
     monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
     monkeypatch.setattr(custom_api_module, "ServerFetchHTTPTransport", lambda **_kwargs: httpx.MockTransport(handle))
@@ -376,58 +395,35 @@ def test_custom_api_tool_without_credentials_follows_redirects_anywhere_public(m
 
 def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Custom API output should keep safe response headers without exposing credentials."""
+    response_headers = {
+        "content-type": "application/json",
+        "x-request-id": "req-123",
+        "set-cookie": "session=secret",
+        "authorization": "Bearer secret",
+        "proxy-authorization": "Basic secret",
+        "cookie": "session=secret",
+        "www-authenticate": "Bearer challenge",
+        "authentication-info": "nextnonce=secret",
+        "x-api-key": "secret",
+        "x-auth-token": "secret",
+        "x-api-token": "secret",
+        "api-token": "secret",
+        "x-token": "secret",
+        "token": "secret",
+        "x-amz-security-token": "secret",
+        "x_api_token": "secret",
+        "x-ratelimit-remaining-tokens": "99",
+        "x-total-tokens": "100",
+    }
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers=response_headers, content=b'{"ok": "true"}'),
+    )
 
-    class FakeResponse:
-        status_code = 200
-        text = "{}"
-        is_success = True
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
 
-        def __init__(self) -> None:
-            self.headers = {
-                "content-type": "application/json",
-                "x-request-id": "req-123",
-                "set-cookie": "session=secret",
-                "authorization": "Bearer secret",
-                "proxy-authorization": "Basic secret",
-                "cookie": "session=secret",
-                "www-authenticate": "Bearer challenge",
-                "authentication-info": "nextnonce=secret",
-                "x-api-key": "secret",
-                "x-auth-token": "secret",
-                "x-api-token": "secret",
-                "api-token": "secret",
-                "x-token": "secret",
-                "token": "secret",
-                "x-amz-security-token": "secret",
-                "x_api_token": "secret",
-                "x-ratelimit-remaining-tokens": "99",
-                "x-total-tokens": "100",
-            }
-
-        def json(self) -> dict[str, str]:
-            return {"ok": "true"}
-
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def __enter__(self) -> object:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def request(self, **_kwargs: object) -> FakeResponse:
-            return FakeResponse()
-
-    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
-    monkeypatch.setattr(custom_api_module.httpx, "Client", FakeClient)
-
-    tool = custom_api_tools()()
-
-    payload = json.loads(tool.make_request("https://example.com/data"))
-
-    assert payload["headers"] == {
+    assert payload["data"] == {"ok": "true"}
+    assert {name: value for name, value in payload["headers"].items() if name != "content-length"} == {
         "content-type": "application/json",
         "x-request-id": "req-123",
         "set-cookie": REDACTED,
@@ -447,6 +443,83 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
         "x-ratelimit-remaining-tokens": "99",
         "x-total-tokens": "100",
     }
+
+
+def test_custom_api_tool_drops_a_model_host_header_from_credentialed_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The base_url alone picks the virtual host that receives configured credentials, in any header casing."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(base_url="https://api.example.com", api_key="sk-operator")
+
+    tool.make_request("data", headers={"Host": "internal.example", "hOST": "admin.example"})
+
+    assert sent[0].headers.get_list("Host") == ["api.example.com"]
+    assert sent[0].headers["Authorization"] == "Bearer sk-operator"
+
+
+_GZIP_BOMB = gzip.compress(b"\0" * (32 * 1024 * 1024))
+
+
+def test_custom_api_tool_never_inflates_a_compressed_final_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity is requested even over a model header, and a server that compresses anyway gets an error, not an inflate."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=_GZIP_BOMB),
+    )
+
+    payload = json.loads(
+        custom_api_tools()().make_request("https://example.com/data", headers={"accept-encoding": "br"}),
+    )
+
+    assert sent[0].headers.get_list("Accept-Encoding") == ["identity"]
+    assert payload["status_code"] == 200
+    assert "Content-Encoding gzip" in payload["error"]
+    assert "data" not in payload
+
+
+def test_custom_api_tool_follows_redirects_without_reading_their_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compressed redirect body is closed unread, and only the final body is collected."""
+    redirect_body = _TrackedStream(_GZIP_BOMB)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://example.com/final", "Content-Encoding": "gzip"},
+                stream=redirect_body,
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/start"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.path for request in sent] == ["/start", "/final"]
+    assert redirect_body.read is False
+
+
+def test_custom_api_tool_caps_the_final_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An identity body over the cap is reported as an error instead of being buffered whole."""
+    monkeypatch.setattr(custom_api_module, "_MAX_RESPONSE_BYTES", 1024)
+    _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, content=b"x" * 4096))
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/large"))
+
+    assert payload["error"] == "Response body exceeds 1024 bytes"
+    assert "data" not in payload
+
+
+def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A redirect loop stops after the hop limit."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(302, headers={"Location": "https://example.com/loop"}),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/loop"))
+
+    assert payload["error"] == "Request failed: more than 10 redirects"
+    assert len(sent) == 11
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:

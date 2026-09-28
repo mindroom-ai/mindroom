@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
@@ -21,6 +22,9 @@ _CREDENTIALS_NEED_BASE_URL = (
     "custom_api sends its configured api_key, username and password, and headers only to base_url; "
     "set base_url to call this API with them, or remove them to call arbitrary URLs"
 )
+# Bodies are read undecoded and capped, so neither a large nor a compressed response can exhaust memory.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_REDIRECTS = 10
 
 
 def _keeps_credentials(base: httpx.URL, url: httpx.URL) -> bool:
@@ -42,6 +46,41 @@ def _credential_header_guard(base_url: str, header_names: frozenset[str]) -> Cal
                 request.headers.pop(name, None)
 
     return strip_credentials_off_origin
+
+
+def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
+    """Follow redirects without reading their bodies, then report the final response within the byte cap."""
+    for _ in range(_MAX_REDIRECTS):
+        next_request = response.next_request
+        if next_request is None:
+            break
+        response.close()
+        response = client.send(next_request, stream=True)
+    try:
+        if response.next_request is not None:
+            return json.dumps({"error": f"Request failed: more than {_MAX_REDIRECTS} redirects"}, indent=2)
+        result: dict[str, object] = {
+            "status_code": response.status_code,
+            "headers": cast("dict[str, str]", redact_sensitive_data(dict(response.headers))),
+        }
+        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+        if encoding != "identity":
+            result["error"] = f"Response used Content-Encoding {encoding} although identity was requested"
+            return json.dumps(result, indent=2)
+        try:
+            body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_RESPONSE_BYTES)
+        except ByteLimitExceededError:
+            result["error"] = f"Response body exceeds {_MAX_RESPONSE_BYTES} bytes"
+            return json.dumps(result, indent=2)
+    finally:
+        response.close()
+    try:
+        result["data"] = json.loads(body)
+    except ValueError:
+        result["data"] = {"text": body.decode(response.encoding or "utf-8", errors="replace")}
+    if not response.is_success:
+        result["error"] = "Request failed"
+    return json.dumps(result, indent=2)
 
 
 @register_tool_with_metadata(
@@ -147,40 +186,29 @@ def custom_api_tools() -> type[CustomApiTools]:
             url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
             url = validate_server_fetch_url(url)
             event_hooks = None
+            request_headers = httpx.Headers(self._get_headers(headers))
             if has_credentials and self.base_url:
                 # HTTPX already strips Authorization on these hops; configured headers need the same treatment.
                 credential_headers = frozenset({"Authorization", *self.default_headers})
                 event_hooks = {"request": [_credential_header_guard(self.base_url, credential_headers)]}
+                # The URL alone chooses the virtual host that receives the credentials.
+                request_headers.pop("Host", None)
+            request_headers["Accept-Encoding"] = "identity"
             try:
                 with httpx.Client(
                     transport=ServerFetchHTTPTransport(verify=self.verify_ssl),
-                    follow_redirects=True,
                     event_hooks=event_hooks,
                 ) as client:
-                    response = client.request(
+                    request = client.build_request(
                         method=method,
                         url=url,
                         params=params,
                         data=data,
                         json=json_data,
-                        headers=self._get_headers(headers),
-                        auth=auth,
+                        headers=request_headers,
                         timeout=self.timeout,
                     )
-
-                try:
-                    response_data: object = response.json()
-                except ValueError:
-                    response_data = {"text": response.text}
-
-                result: dict[str, object] = {
-                    "status_code": response.status_code,
-                    "headers": cast("dict[str, str]", redact_sensitive_data(dict(response.headers))),
-                    "data": response_data,
-                }
-                if not response.is_success:
-                    result["error"] = "Request failed"
-                return json.dumps(result, indent=2)
+                    return _read_final_response(client, client.send(request, auth=auth, stream=True))
             except httpx.RequestError as e:
                 return json.dumps({"error": f"Request failed: {e}"}, indent=2)
 
