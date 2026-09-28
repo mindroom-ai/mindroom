@@ -70,12 +70,12 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
     assert "exit 1" in steps[-1]["run"]
 
 
-def test_security_scan_installs_only_pinned_tools() -> None:
-    """A scan job must not pull whatever a PyPI name currently points to."""
+def test_security_scan_pins_the_tools_it_installs() -> None:
+    """The scan tool itself is pinned, so a new release cannot change it silently; its dependencies still float."""
     steps = _load_workflow("security-scan.yml")["jobs"]["scan"]["steps"]
     installs = [step["run"] for step in steps if step.get("run", "").startswith("pip install")]
 
-    assert installs == ["pip install pip-audit==2.10.0"]
+    assert installs == ["pip install pip-audit==2.10.1"]
 
 
 def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
