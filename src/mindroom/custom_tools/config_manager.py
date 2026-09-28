@@ -34,7 +34,6 @@ from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
-from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -52,7 +51,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 _PLATFORM_ADMIN_REQUIRED_MESSAGE = (
-    "Error: Full configuration changes require an active platform administrator requester."
+    "Error: Reading or changing the full configuration requires an active platform administrator requester."
 )
 _AgentScope = Literal["current_room", "all"]
 _VALID_AGENT_SCOPES = {"current_room", "all"}
@@ -492,7 +491,8 @@ class ConfigManagerTools(Toolkit):
     ) -> str:
         """Inspect or patch any authored MindRoom configuration field.
 
-        This is full-configuration control. Both operations address the authored
+        This is full-configuration control and requires a platform administrator
+        requester for both operations. Both operations address the authored
         document written to ``config.yaml``: unset defaults and runtime overlays
         are not present. Paths use RFC 6901 JSON Pointer syntax; the empty string
         addresses the document root. Inspection output is always redacted, at any
@@ -535,10 +535,12 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
+        authorization_error = self._platform_administrator_error(config)
+        if authorization_error is not None:
+            return authorization_error
 
         try:
-            redacted_document = redact_sensitive_data(config.authored_model_dump())
-            value = _resolve_json_pointer(redacted_document, path)
+            value = _resolve_json_pointer(config.redacted_authored_model_dump(), path)
             rendered = safe_dump(
                 value,
                 default_flow_style=False,
@@ -591,9 +593,9 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-        authorization_error = self._configuration_mutation_authorization_error(config)
+        authorization_error = self._platform_administrator_error(config)
         if authorization_error is not None:
-            return authorization_error
+            return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         if config.uses_includes:
             return (
                 "Error: configuration is composed from multiple files via !include; "
@@ -658,7 +660,8 @@ class ConfigManagerTools(Toolkit):
                 - "teams": List all configured teams
                 - "available_tools": List all available tools by category
                 - "tool_details": Get details about a specific tool (requires name)
-                - "agent_config": Get configuration for a specific agent (requires name)
+                - "agent_config": Get redacted configuration for a specific agent (requires name and a
+                  platform administrator requester)
                 - "agent_template": Generate template for agent type (requires name as type)
             name: Optional name/identifier for specific queries (tool name, agent name, or template type)
             agent_scope: Agent listing scope. Use "current_room" to show current room agents or
@@ -749,9 +752,9 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert config is not None
         assert tool_metadata is not None
-        authorization_error = self._configuration_mutation_authorization_error(config)
+        authorization_error = self._platform_administrator_error(config)
         if authorization_error is not None:
-            return authorization_error
+            return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 
         if operation == "update":
             return self._update_agent_config(
@@ -814,9 +817,9 @@ class ConfigManagerTools(Toolkit):
         if load_error is not None:
             return load_error
         assert config is not None
-        authorization_error = self._configuration_mutation_authorization_error(config)
+        authorization_error = self._platform_administrator_error(config)
         if authorization_error is not None:
-            return authorization_error
+            return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         return self._create_team_config(team_name, display_name, role, agents, mode, config=config)
 
     # ===== Internal helper methods (not exposed as tools) =====
@@ -852,8 +855,8 @@ class ConfigManagerTools(Toolkit):
         )
 
     @staticmethod
-    def _configuration_mutation_authorization_error(config: Config) -> str | None:
-        """Deny full configuration writes without a current platform administrator."""
+    def _platform_administrator_error(config: Config) -> str | None:
+        """Deny full configuration reads and writes without a current platform administrator."""
         runtime_context = get_tool_runtime_context()
         if runtime_context is not None and is_platform_administrator(
             runtime_context.requester_id,
@@ -861,7 +864,7 @@ class ConfigManagerTools(Toolkit):
             runtime_context.runtime_paths,
         ):
             return None
-        return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+        return _PLATFORM_ADMIN_REQUIRED_MESSAGE
 
     def _load_config_and_tool_metadata_or_error(
         self,
@@ -1455,17 +1458,18 @@ class ConfigManagerTools(Toolkit):
         return "\n".join(output)
 
     def _get_agent_config(self, agent_name: str) -> str:
-        """Get the full configuration for a specific agent."""
+        """Get the redacted authored configuration for a specific agent."""
         config, load_error = self._load_config_or_error()
         if load_error:
             return load_error
         assert config is not None
+        authorization_error = self._platform_administrator_error(config)
+        if authorization_error is not None:
+            return authorization_error
 
-        if agent_name not in config.agents:
+        agent_dict = config.redacted_authored_model_dump().get("agents", {}).get(agent_name)
+        if agent_dict is None:
             return f"Error: Agent '{agent_name}' not found."
-
-        agent = config.agents[agent_name]
-        agent_dict = agent.authored_model_dump()
 
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{agent_name}':\n\n```yaml\n{yaml_str}```"
