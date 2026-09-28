@@ -155,7 +155,7 @@ final class MindRoomCommandRunner: ObservableObject {
                 self.isPairing = false
                 self.pairingApproval = nil
                 // A cooperative CLI may finish saving, or report a save error, after Cancel was pressed.
-                let stoppedWhileWaiting = completedResult.exitCode == 130
+                let stoppedWhileWaiting = completedResult.exitCode == MindRoomCommand.pairingCancelledExitCode
                     || (completedResult.exitCode == SIGTERM && !completedResult.output.contains("Connected."))
                 self.pairingCancelled = pairing && process.isCancelled && stoppedWhileWaiting
                 self.lastOutput = self.pairingCancelled ? "" : completedResult.output

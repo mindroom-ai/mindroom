@@ -28,7 +28,7 @@ final class MindRoomCommandProcess: @unchecked Sendable {
         lock.lock()
         guard !cancelled else {
             lock.unlock()
-            return CommandResult(exitCode: 130, output: "")
+            return CommandResult(exitCode: MindRoomCommand.pairingCancelledExitCode, output: "")
         }
         process.executableURL = invocation.executableURL
         process.arguments = invocation.arguments

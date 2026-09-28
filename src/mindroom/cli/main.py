@@ -57,6 +57,8 @@ _CONFIG_INIT_PROVIDER_CHOICES = (
 # Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
 # The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
 _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
+# Matches `MindRoomCommand.pairingCancelledExitCode` in the macOS app.
+_CONNECT_CANCELLED_EXIT_CODE = 130
 
 app = typer.Typer(
     help=_HELP,
@@ -632,6 +634,7 @@ def connect(
 
     When this machine is already connected, a terminal asks before pairing again.
     Without a terminal it exits with code 3 unless --force is given.
+    With --graceful-cancel, SIGTERM while waiting exits with code 130 without saving.
     """
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
@@ -662,7 +665,7 @@ def connect(
         def stop_waiting() -> bool:
             if cancelled:
                 console.print("Connection cancelled. Nothing was saved.")
-                raise typer.Exit(130)
+                raise typer.Exit(_CONNECT_CANCELLED_EXIT_CODE)
             return False
 
         previous_handler = signal.signal(signal.SIGTERM, request_cancel) if graceful_cancel else None
@@ -680,6 +683,7 @@ def connect(
             )
             console.print("\nNext step:\n  mindroom run")
         finally:
+            # None denotes a non-Python handler, which signal.signal cannot restore.
             if previous_handler is not None:
                 signal.signal(signal.SIGTERM, previous_handler)
     except (TypeError, ValueError) as exc:
