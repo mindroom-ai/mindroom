@@ -24,13 +24,17 @@ if TYPE_CHECKING:
 
 AUTH_CACHE_MAX_ENTRIES = 100
 AUTH_CACHE_MAX_TTL_SECONDS = 300
+ACTIVE_ACCOUNT_STATUS = "active"
+# Status the soft-delete RPC sets; such accounts keep GDPR self-service access until cleanup removes them.
+PENDING_DELETION_ACCOUNT_STATUS = "deleted"
 
 
 @dataclass(frozen=True)
 class AuthCacheEntry:
-    """Cached auth result bounded by the JWT expiration."""
+    """Cached auth result of an active account, bounded by the JWT expiration."""
 
     expires_at: datetime
+    account_id: str
     user_data: dict[str, Any]
 
 
@@ -79,10 +83,31 @@ def _store_auth_cache(token: str, user_data: dict[str, Any], now: datetime) -> N
         return
 
     cache_key = _auth_cache_key(token)
-    _auth_cache[cache_key] = AuthCacheEntry(expires_at=expires_at, user_data=deepcopy(user_data))
+    _auth_cache[cache_key] = AuthCacheEntry(
+        expires_at=expires_at, account_id=str(user_data["account_id"]), user_data=deepcopy(user_data)
+    )
     _auth_cache.move_to_end(cache_key)
     while len(_auth_cache) > AUTH_CACHE_MAX_ENTRIES:
         _auth_cache.popitem(last=False)
+
+
+def invalidate_account_auth_cache(account_id: str) -> None:
+    """Drop cached auth for one account so a status or role change applies to its next request."""
+    for cache_key in [key for key, entry in _auth_cache.items() if entry.account_id == account_id]:
+        del _auth_cache[cache_key]
+
+
+def _account_is_active(account: dict[str, Any]) -> bool:
+    return account.get("status") == ACTIVE_ACCOUNT_STATUS and account.get("deleted_at") is None
+
+
+def _require_account_access(account: dict[str, Any], *, allow_pending_deletion: bool) -> None:
+    """Reject suspended, unverified, and deleted accounts; optionally admit accounts awaiting deletion."""
+    if _account_is_active(account):
+        return
+    if allow_pending_deletion and account.get("status") in {ACTIVE_ACCOUNT_STATUS, PENDING_DELETION_ACCOUNT_STATUS}:
+        return
+    raise HTTPException(status_code=403, detail="Account is not active")
 
 
 def client_ip_from_request(request: Request) -> str:
@@ -144,11 +169,12 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return parts[1]
 
 
-async def verify_user(authorization: str = Header(None), request: Request = None) -> dict:  # noqa: C901, PLR0912
-    """Verify regular user via Supabase JWT.
+async def _authenticate_user(authorization: str | None, request: Request | None) -> dict:  # noqa: C901, PLR0912
+    """Authenticate a Supabase JWT and load its account row.
 
     With the current schema, `account.id == auth.user.id`.
     Ensures the `accounts` row exists, creating it if necessary.
+    Only active accounts are cached, so a restored account is re-read on its next request.
     """
     # Get client IP for monitoring
     client_ip = client_ip_from_request(request) if request is not None else "unknown"
@@ -195,6 +221,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
             if not result.data:
                 msg = "No data"
                 raise ValueError(msg)  # noqa: TRY301
+            account = result.data
         except Exception:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
@@ -214,7 +241,8 @@ async def verify_user(authorization: str = Header(None), request: Request = None
                     )
                     .execute()
                 )
-                result = create_result
+                # Inserts return the list of created rows, including column defaults such as `status`.
+                account = create_result.data[0]
             except Exception:
                 logger.exception("Failed to create account")
                 # Try to fetch again in case it was a race condition
@@ -222,16 +250,18 @@ async def verify_user(authorization: str = Header(None), request: Request = None
                 if not result.data:
                     msg = "Account creation failed. Please contact support."
                     raise HTTPException(status_code=404, detail=msg) from None
+                account = result.data
 
         # Prepare response data
         user_data = {
             "user_id": user.user.id,
             "email": user.user.email,
             "account_id": account_id,
-            "account": result.data,
+            "account": account,
         }
 
-        _store_auth_cache(token, user_data, now)
+        if _account_is_active(account):
+            _store_auth_cache(token, user_data, now)
 
         # Log the time taken for database auth
         db_time = time.perf_counter() - start
@@ -250,18 +280,26 @@ async def verify_user(authorization: str = Header(None), request: Request = None
     return user_data
 
 
-async def verify_user_optional(authorization: str = Header(None)) -> dict | None:
-    """Optional user verification for public endpoints."""
-    if not authorization:
-        return None
-    try:
-        return await verify_user(authorization)
-    except HTTPException:
-        return None
+async def verify_user(authorization: str = Header(None), request: Request = None) -> dict:
+    """Verify a user via Supabase JWT whose account is active."""
+    user_data = await _authenticate_user(authorization, request)
+    _require_account_access(user_data["account"], allow_pending_deletion=False)
+    return user_data
+
+
+async def verify_user_allow_deleted(authorization: str = Header(None), request: Request = None) -> dict:
+    """Verify a user whose account is active or awaiting deletion.
+
+    Only GDPR self-service routes use this, so an account pending deletion can read itself, export its data,
+    and cancel the deletion; suspended and unverified accounts are still rejected.
+    """
+    user_data = await _authenticate_user(authorization, request)
+    _require_account_access(user_data["account"], allow_pending_deletion=True)
+    return user_data
 
 
 async def verify_admin(authorization: str = Header(None)) -> dict:
-    """Verify admin access via Supabase auth."""
+    """Verify admin access via Supabase auth for an active admin account."""
     try:
         token = _extract_bearer_token(authorization)
     except HTTPException as exc:
@@ -279,8 +317,8 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
             record_admin_verification("unauthorized")
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
-        result = sb.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
-        if not result.data or not result.data.get("is_admin"):
+        result = sb.table("accounts").select("is_admin,status,deleted_at").eq("id", user.user.id).single().execute()
+        if not result.data or not result.data.get("is_admin") or not _account_is_active(result.data):
             msg = "Admin access required"
             record_admin_verification("forbidden")
             raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
-from backend.deps import ensure_supabase, limiter, verify_admin
+from backend.deps import ensure_supabase, invalidate_account_auth_cache, limiter, verify_admin
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -294,6 +294,7 @@ async def update_account_status(
 
         if not result.data:
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
+        invalidate_account_auth_cache(account_id)
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -537,6 +538,8 @@ async def admin_update(
     try:
         data.pop("id", None)
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
+        if resource == "accounts":
+            invalidate_account_auth_cache(resource_id)
 
         # Log admin update
         audit_log_entry(
@@ -607,6 +610,7 @@ async def admin_delete_account_complete(
     # 4. Delete the account (cascade deletion will handle related records)
     try:
         sb.table("accounts").delete().eq("id", account_id).execute()
+        invalidate_account_auth_cache(account_id)
 
         # Log the complete deletion
         audit_log_entry(

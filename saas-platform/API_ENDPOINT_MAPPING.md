@@ -78,7 +78,7 @@ These operations are for provisioner clients and have no direct platform fronten
 | DELETE | `/system/instances/{instance_id}/uninstall` | `provisioner.py` | Uninstall an instance |
 | POST | `/system/sync-instances` | `provisioner.py` | Synchronize Kubernetes and database state |
 
-Admin lifecycle routes verify the Supabase user and `accounts.is_admin` through `verify_admin`, call `backend/services/provisioner_service.py` directly, and record the action in the audit log.
+Admin lifecycle routes verify the Supabase user, `accounts.is_admin`, and an active account through `verify_admin`, call `backend/services/provisioner_service.py` directly, and record the action in the audit log.
 System routes separately validate the provisioner bearer key before calling that same service.
 There is no admin-to-system HTTP proxy hop.
 The shared service owns the Kubernetes and Helm lifecycle work.
@@ -96,6 +96,9 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 | POST | `/my/gdpr/request-deletion` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: request account deletion |
 | POST | `/my/gdpr/cancel-deletion` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: cancel deletion |
 | POST | `/my/gdpr/consent` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: consent preferences |
+
+User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
+`GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion can still see, export, and cancel it; suspended and unverified accounts stay rejected there too.
 
 ## SSO and Matrix OIDC
 

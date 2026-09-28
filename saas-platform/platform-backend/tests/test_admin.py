@@ -1,6 +1,6 @@
 """Comprehensive HTTP API tests for admin endpoints."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -327,6 +327,44 @@ class TestAdminEndpoints:
         assert data["status"] == "success"
         assert data["account_id"] == "acc_123"
         assert data["new_status"] == "suspended"
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("PUT", "/admin/accounts/acc_123/status", {"status": "suspended"}),
+            ("PUT", "/admin/accounts/acc_123", {"status": "suspended"}),
+            ("DELETE", "/admin/accounts/acc_123/complete", None),
+        ],
+    )
+    def test_admin_account_changes_drop_cached_auth(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_verify_admin: Mock,
+        method: str,
+        path: str,
+        body: dict | None,
+    ):
+        """Admin account changes must take effect on the account's next request, not after the auth cache TTL."""
+        from backend.deps import AuthCacheEntry, _auth_cache  # noqa: PLC0415
+
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "acc_123", "status": "suspended"}])
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": "acc_123", "email": "u@x.test"}])
+        _auth_cache.clear()
+        expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        for account_id in ("acc_123", "acc_other"):
+            _auth_cache[account_id] = AuthCacheEntry(
+                expires_at=expires_at,
+                account_id=account_id,
+                user_data={"user_id": account_id, "account_id": account_id, "account": {"status": "active"}},
+            )
+
+        with patch("backend.routes.admin.instances_data.get_instances_for_account", return_value=[]):
+            response = client.request(method, path, json=body)
+
+        assert response.status_code == 200
+        assert set(_auth_cache) == {"acc_other"}
+        _auth_cache.clear()
 
     def test_admin_logout(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin logout."""

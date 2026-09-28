@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from backend.deps import verify_user
+from backend.deps import verify_user, verify_user_allow_deleted
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
@@ -61,6 +61,7 @@ class TestAccountsEndpoints:
             return {"account_id": "acc_test_123", "email": "test@example.com"}
 
         app.dependency_overrides[verify_user] = override_verify_user
+        app.dependency_overrides[verify_user_allow_deleted] = override_verify_user
         yield
         app.dependency_overrides.clear()
 
@@ -115,7 +116,7 @@ class TestAccountsEndpoints:
         def override_verify_user():
             raise HTTPException(status_code=401, detail="Unauthorized")
 
-        app.dependency_overrides[verify_user] = override_verify_user
+        app.dependency_overrides[verify_user_allow_deleted] = override_verify_user
         try:
             response = client.get("/my/account")
             assert response.status_code == 401

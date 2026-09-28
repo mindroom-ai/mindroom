@@ -7,8 +7,18 @@ from unittest.mock import MagicMock, Mock, patch
 import jwt
 import pytest
 from fastapi import HTTPException
+from fastapi.routing import APIRoute
 
+from backend import auth_monitor
+from backend.deps import (
+    _auth_cache,
+    invalidate_account_auth_cache,
+    verify_admin,
+    verify_user,
+    verify_user_allow_deleted,
+)
 from backend.metrics import get_admin_metric, reset_security_metrics
+from main import app
 
 
 def _jwt_with_exp(expires_at: datetime) -> str:
@@ -56,7 +66,7 @@ class TestDeps:
 
         # Setup mock account
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+            data={"id": "user_123", "email": "test@example.com", "status": "active", "deleted_at": None}
         )
 
         # Test
@@ -99,14 +109,13 @@ class TestDeps:
         mock_user.user.user_metadata = {"full_name": "New User"}
         mock_auth_client.auth.get_user.return_value = mock_user
 
-        # First select returns no data (account doesn't exist)
-        mock_supabase.table().select().eq().single().execute.side_effect = [
-            Exception("Not found"),  # First check fails
-            Mock(data={"id": "new_user_123", "email": "new@example.com"}),  # After insert
-        ]
+        # The select finds no account, so verify_user inserts one
+        mock_supabase.table().select().eq().single().execute.side_effect = Exception("Not found")
 
-        # Mock insert
-        mock_supabase.table().insert().execute.return_value = Mock(data={"id": "new_user_123"})
+        # Inserts return the created rows, including column defaults
+        mock_supabase.table().insert().execute.return_value = Mock(
+            data=[{"id": "new_user_123", "email": "new@example.com", "status": "active", "deleted_at": None}]
+        )
 
         # Test
         result = await verify_user(f"Bearer {token}")
@@ -114,6 +123,7 @@ class TestDeps:
         # Verify
         assert result["user_id"] == "new_user_123"
         assert result["account_id"] == "new_user_123"
+        assert result["account"]["status"] == "active"
 
         # Verify insert was called
         insert_call = mock_supabase.table().insert.call_args[0][0]
@@ -131,10 +141,12 @@ class TestDeps:
         token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
         _auth_cache[sha256(token.encode()).hexdigest()] = AuthCacheEntry(
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            account_id="cached_user",
             user_data={
                 "user_id": "cached_user",
                 "account_id": "cached_user",
                 "email": "cached@example.com",
+                "account": {"id": "cached_user", "status": "active", "deleted_at": None},
             },
         )
 
@@ -163,7 +175,7 @@ class TestDeps:
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+            data={"id": "user_123", "email": "test@example.com", "status": "active", "deleted_at": None}
         )
 
         await verify_user(f"Bearer {token}")
@@ -188,7 +200,7 @@ class TestDeps:
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+            data={"id": "user_123", "email": "test@example.com", "status": "active", "deleted_at": None}
         )
 
         await verify_user(f"Bearer {token}")
@@ -213,7 +225,7 @@ class TestDeps:
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+            data={"id": "user_123", "email": "test@example.com", "status": "active", "deleted_at": None}
         )
 
         result = await verify_user(f"Bearer {token}")
@@ -238,10 +250,12 @@ class TestDeps:
         cache_key = sha256(token.encode()).hexdigest()
         _auth_cache[cache_key] = AuthCacheEntry(
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            account_id="cached_user",
             user_data={
                 "user_id": "cached_user",
                 "account_id": "cached_user",
                 "email": "cached@example.com",
+                "account": {"id": "cached_user", "status": "active", "deleted_at": None},
             },
         )
         mock_auth_client.auth.get_user.return_value = None
@@ -295,7 +309,13 @@ class TestDeps:
 
         # Setup mock account with is_admin=True
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "admin_123", "email": "admin@example.com", "is_admin": True}
+            data={
+                "id": "admin_123",
+                "email": "admin@example.com",
+                "is_admin": True,
+                "status": "active",
+                "deleted_at": None,
+            }
         )
 
         # Test
@@ -373,3 +393,177 @@ class TestDeps:
         assert limiter is not None
         # Limiter should be a Limiter instance
         assert hasattr(limiter, "limit")
+
+
+def _auth_user(user_id: str = "user_123", email: str = "user@example.test") -> Mock:
+    auth_user = Mock()
+    auth_user.user.id = user_id
+    auth_user.user.email = email
+    auth_user.user.user_metadata = {}
+    return auth_user
+
+
+def _account_row(**overrides: object) -> dict[str, object]:
+    return {
+        "id": "user_123",
+        "email": "user@example.test",
+        "is_admin": False,
+        "status": "active",
+        "deleted_at": None,
+    } | overrides
+
+
+@pytest.fixture
+def auth_backend():
+    """Patch the Supabase auth and database clients used by the auth dependencies."""
+    _auth_cache.clear()
+    with (
+        patch.dict(auth_monitor.failed_attempts, clear=True),
+        patch.dict(auth_monitor.blocked_ips, clear=True),
+        patch("backend.deps._ensure_auth_client") as ensure_auth_client,
+        patch("backend.deps.ensure_supabase") as ensure_supabase,
+    ):
+        auth_client = MagicMock()
+        auth_client.auth.get_user.return_value = _auth_user()
+        ensure_auth_client.return_value = auth_client
+        sb = MagicMock()
+        ensure_supabase.return_value = sb
+        yield auth_client, sb.table().select().eq().single().execute
+    _auth_cache.clear()
+
+
+INACTIVE_ACCOUNTS = [
+    pytest.param(_account_row(status="suspended"), id="suspended"),
+    pytest.param(_account_row(status="pending_verification"), id="pending-verification"),
+    pytest.param(_account_row(status="deleted", deleted_at="2026-09-01T00:00:00Z"), id="soft-deleted"),
+    pytest.param(_account_row(deleted_at="2026-09-01T00:00:00Z"), id="active-with-deleted-at"),
+    pytest.param(_account_row(status=None), id="missing-status"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account", INACTIVE_ACCOUNTS)
+async def test_verify_user_rejects_inactive_accounts(auth_backend, account: dict[str, object]) -> None:
+    """Suspended, unverified, and deleted accounts must not pass the regular user gate."""
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=account)
+    token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_user(f"Bearer {token}")
+
+    assert exc_info.value.status_code == 403
+    assert not _auth_cache
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "account",
+    [
+        pytest.param(_account_row(), id="active"),
+        pytest.param(_account_row(status="deleted", deleted_at="2026-09-01T00:00:00Z"), id="soft-deleted"),
+        pytest.param(_account_row(deleted_at="2026-09-01T00:00:00Z"), id="active-with-deleted-at"),
+    ],
+)
+async def test_verify_user_allow_deleted_admits_accounts_pending_deletion(
+    auth_backend, account: dict[str, object]
+) -> None:
+    """Accounts awaiting deletion can still reach the GDPR self-service routes."""
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=account)
+
+    result = await verify_user_allow_deleted("Bearer token")
+
+    assert result["account_id"] == "user_123"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "account",
+    [
+        pytest.param(_account_row(status="suspended"), id="suspended"),
+        pytest.param(_account_row(status="suspended", deleted_at="2026-09-01T00:00:00Z"), id="suspended-and-deleted"),
+        pytest.param(_account_row(status="pending_verification"), id="pending-verification"),
+    ],
+)
+async def test_verify_user_allow_deleted_still_rejects_blocked_accounts(
+    auth_backend, account: dict[str, object]
+) -> None:
+    """A suspended account cannot use the deletion allowance, for example to restore itself."""
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=account)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_user_allow_deleted("Bearer token")
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_account_status_change_takes_effect_on_the_next_cached_request(auth_backend) -> None:
+    """Invalidating an account drops its cached auth so a suspension applies immediately."""
+    auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=_account_row())
+    token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+    await verify_user(f"Bearer {token}")
+
+    account_query.return_value = Mock(data=_account_row(status="suspended"))
+    invalidate_account_auth_cache("user_123")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_user(f"Bearer {token}")
+    assert exc_info.value.status_code == 403
+    assert auth_client.auth.get_user.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_restored_account_is_admitted_without_waiting_for_the_cache(auth_backend) -> None:
+    """Non-active snapshots are never cached, so cancelling deletion restores access at once."""
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=_account_row(status="deleted", deleted_at="2026-09-01T00:00:00Z"))
+    token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+    await verify_user_allow_deleted(f"Bearer {token}")
+
+    account_query.return_value = Mock(data=_account_row())
+
+    result = await verify_user(f"Bearer {token}")
+    assert result["account"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account", INACTIVE_ACCOUNTS)
+async def test_verify_admin_rejects_inactive_admin_accounts(auth_backend, account: dict[str, object]) -> None:
+    """A suspended or deleted administrator loses admin access."""
+    reset_security_metrics()
+    _auth_client, account_query = auth_backend
+    account_query.return_value = Mock(data=account | {"is_admin": True})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_admin("Bearer admin-token")
+
+    assert exc_info.value.status_code == 403
+    assert get_admin_metric("forbidden") == 1
+
+
+def _route_auth_dependencies() -> dict[tuple[str, str], set[object]]:
+
+    auth_dependencies = {verify_user, verify_user_allow_deleted, verify_admin}
+    routes: dict[tuple[str, str], set[object]] = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        calls = {dependency.call for dependency in route.dependant.dependencies} & auth_dependencies
+        for method in route.methods:
+            routes[(method, route.path)] = calls
+    return routes
+
+
+def test_only_gdpr_self_service_routes_admit_accounts_pending_deletion() -> None:
+    """The deletion allowance is limited to reading the account, exporting data, and cancelling deletion."""
+    allowed = {route for route, calls in _route_auth_dependencies().items() if verify_user_allow_deleted in calls}
+
+    assert allowed == {
+        ("GET", "/my/account"),
+        ("GET", "/my/gdpr/export-data"),
+        ("POST", "/my/gdpr/cancel-deletion"),
+    }

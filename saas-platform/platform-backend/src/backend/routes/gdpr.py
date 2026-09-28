@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from backend.deps import ensure_supabase, verify_user
+from backend.deps import ensure_supabase, verify_user, verify_user_allow_deleted
 from backend.models import (
     GdprCancelDeletionResponse,
     GdprConsentResponse,
@@ -35,7 +35,7 @@ class DeletionRequest(BaseModel):
 
 
 @router.get("/my/gdpr/export-data", response_model=GdprExportResponse)
-async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def export_user_data(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Export all user data for GDPR compliance.
     Returns all personal data in machine-readable format.
@@ -232,7 +232,7 @@ async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: C
 
 
 @router.post("/my/gdpr/cancel-deletion", response_model=GdprCancelDeletionResponse)
-async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Cancel a pending account deletion request.
     Only works if account is still in soft-delete state.
