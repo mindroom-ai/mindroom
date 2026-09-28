@@ -1508,13 +1508,14 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
-    """Older instances gain runtime secrets before Compose runs, while their datastores keep their credentials."""
+    """Older instances gain runtime secrets and an owner-only homeserver.yaml, keeping their datastore credentials."""
     instance, _users_file, commands, console = authelia_launch
     instance.auth_type = None
     instance.matrix_type = deploy.MatrixType.SYNAPSE
     homeserver = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
     homeserver.parent.mkdir(parents=True)
     homeserver.write_text("database:\n  args:\n    password: synapse_password\n")
+    homeserver.chmod(0o644)
     env_file = _write_older_env_file(instance)
     older_env = env_file.read_text()
     env_at_launch: dict[str, str] = {}
@@ -1534,6 +1535,7 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     assert env_at_launch["POSTGRES_PASSWORD"] == "synapse_password"  # noqa: S105
     assert "REDIS_PASSWORD" not in env_at_launch
     assert homeserver.read_text() == "database:\n  args:\n    password: synapse_password\n"
+    assert _mode(homeserver) == 0o600
     assert set(_launched_services(commands)) >= _SANDBOX_SERVICES
     text = normalize_console_output(console.export_text())
     assert "Added MINDROOM_API_KEY, MINDROOM_SANDBOX_PROXY_TOKEN to" in text

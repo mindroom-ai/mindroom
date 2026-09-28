@@ -213,6 +213,13 @@ def _write_private_file(path: Path, content: str) -> None:
         f.write(content)
 
 
+def _protect_synapse_config(config_path: Path) -> None:
+    """Keep homeserver.yaml, which holds datastore passwords and the macaroon key, readable only by Synapse's user."""
+    with contextlib.suppress(OSError):
+        config_path.chmod(0o600)
+        os.chown(config_path, CONTAINER_UID, CONTAINER_GID)
+
+
 def _prepare_matrix_config(
     instance: Instance,
     matrix_type: MatrixType,
@@ -251,12 +258,9 @@ def _prepare_matrix_config(
                 matrix_server_name=matrix_server_name,
             )
 
-        # The rendered config holds datastore passwords and signing secrets, so it is owner-only and owned by
-        # the homeserver container's user, which otherwise could not read it.
         config_path = target_dir / config_file_name
         _write_private_file(config_path, content)
-        with contextlib.suppress(OSError):
-            os.chown(config_path, CONTAINER_UID, CONTAINER_GID)
+        _protect_synapse_config(config_path)
 
     # Copy other files (like signing.key, log.config, etc.)
     for file in template_dir.glob("*"):
@@ -822,6 +826,10 @@ def _bring_up_instance(
     generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if generated_secrets:
         console.print(f"[yellow]i[/yellow] Added {', '.join(generated_secrets)} to {env_file}")
+    synapse_config = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
+    if instance.matrix_type == MatrixType.SYNAPSE and synapse_config.exists():
+        # Older versions wrote it at the umask.
+        _protect_synapse_config(synapse_config)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
