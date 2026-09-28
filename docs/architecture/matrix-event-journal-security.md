@@ -150,6 +150,7 @@ Membership fencing deliberately does not sweep up pending redactions along with 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
 When no turn has recorded a room for the target yet, the turn ledger tombstones it only if the journal admitted that event from the redaction's room; a target that arrives later is still retired by the projection's room-scoped tombstone.
 A homeserver also passes along redactions whose sender had no right to redact the target, so persisted session history and archives are removed for a redaction only after the homeserver serves the target redacted; otherwise the tombstone stays and the history is kept.
+That proof protects only persisted history: such a redaction delivered in the target's own room still records its tombstone, so the turn is not answered or replayed, and still deletes the target's local `visible_messages` and `interactive_questions` rows here, which is an accepted residual.
 
 ## Membership
 
