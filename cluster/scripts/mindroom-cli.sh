@@ -81,9 +81,11 @@ case "$1" in
         # Use a test UUID for account_id
         TEST_ACCOUNT_ID="00000000-0000-0000-0000-000000000001"
         API_BASE="${API_URL:-https://api.${PLATFORM_DOMAIN:-staging.mindroom.chat}}"
-        curl -k -X POST "$API_BASE/system/provision" \
+        # The key is read from stdin so it never appears in process arguments.
+        printf 'Authorization: Bearer %s\n' "$PROVISIONER_API_KEY" |
+            curl -X POST "$API_BASE/system/provision" \
+            -H @- \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
             -d "{
                 \"account_id\": \"$TEST_ACCOUNT_ID\",
                 \"subscription_id\": \"sub-$2\",
@@ -99,8 +101,8 @@ case "$1" in
         fi
         echo "Deprovisioning instance for: $2"
         API_BASE="${API_URL:-https://api.${PLATFORM_DOMAIN:-staging.mindroom.chat}}"
-        curl -k -X DELETE "$API_BASE/system/instances/$2/uninstall" \
-            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" | jq
+        printf 'Authorization: Bearer %s\n' "$PROVISIONER_API_KEY" |
+            curl -X DELETE "$API_BASE/system/instances/$2/uninstall" -H @- | jq
         ;;
 
     upgrade)
