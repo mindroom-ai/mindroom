@@ -68,8 +68,16 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      # Bun occasionally fails to extract a package tarball the registry cut short ("Fail extracting tarball for
+      # next"); a retry with a clean cache downloads it whole.
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            bun install --frozen-lockfile && exit 0
+            echo "::warning::bun install failed on attempt $attempt; retrying with a clean cache"
+            bun pm cache rm
+          done
+          exit 1
 
       - name: Run tests
         run: bun run test
