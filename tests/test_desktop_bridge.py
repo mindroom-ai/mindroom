@@ -561,7 +561,8 @@ async def test_remote_status_file_roots_is_bounded_while_local_status_keeps_ever
     )
     await _handle(bridge, _event(command))
     response = _response(transport)
-    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    # The bridge fits the reply before adding its metrics, which the budget's headroom covers.
+    assert replace(response, result=_without_metrics(response.result)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     file_roots = response.result["bridge"]["file_roots"]
     assert isinstance(file_roots, list)
     assert response.result["bridge"]["file_roots_truncated"] is True
@@ -1977,7 +1978,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
 
     await _handle(bridge, _event(_command("status", request_id="request-2", sequence=2)))
     assert _response(transport).result["bridge"] == {
-        "mode": "control",
+        "gui_mode": "control",
         "control_available": True,
         "emergency_stop_latched": False,
         "allowed_app_count": 1,
@@ -1997,6 +1998,22 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "observation_modes": ["tree", "screenshot", "both"],
         "durable_commands": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_status_names_gui_mode_so_shell_access_never_reads_as_read_only(transport: AsyncMock) -> None:
+    """Observe-only describes only app control; live shell auto-approval is reported beside it."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_command("status")))
+    for status in (_response(transport).result["bridge"], bridge.local_status()):
+        assert "mode" not in status
+        assert status["gui_mode"] == "observe_only"
+        assert status["shell"]["auto_approve_remaining_seconds"] > 0
+    await bridge.stop()
+    assert bridge.local_status()["gui_mode"] == "stopped"
+    bridge.close()
 
 
 @pytest.mark.asyncio

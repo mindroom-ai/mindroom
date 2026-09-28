@@ -232,6 +232,7 @@ The tool tells the agent to query `request_status` with the original `request_id
 The local journal keeps each reply as a durable receipt, and a command interrupted by a helper crash is reported with an unknown outcome and never run again.
 
 `status` reports which of applications, folders, and shell commands are enabled, whether a shell command is waiting for approval, the remaining auto-approval time, and only the caller's own handles.
+Its `bridge.gui_mode`, `observe_only` or `control`, describes only application control, so an observe-only bridge can still read selected folders and run approved shell commands.
 Remote status never includes a waiting command's text; only the person at the computer sees it.
 A remote status reply also fits one encrypted message, so with many selected folders it can trim the folder list and set `file_roots_truncated: true`; the local status a person at the computer sees always lists every folder.
 File contents and command output become model input after MindRoom decrypts them in the cloud process, so your model provider receives them.

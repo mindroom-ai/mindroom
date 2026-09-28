@@ -152,8 +152,10 @@ class NativeDesktopHost:
         config = self._config
         session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
-        mode = str(runtime_status.get("mode", "stopped"))
-        bridge_state = mode if mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
+        gui_mode = str(runtime_status.get("gui_mode", "stopped"))
+        bridge_state = (
+            gui_mode if gui_mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
+        )
         if self._helper_state == "stopping":
             bridge_state = "stopping"
         browser_configured = bool(config and config.browser.enabled)
@@ -694,7 +696,7 @@ class NativeBridgeRuntime:
         """Return current local bridge authority."""
         if self._fault is not None:
             return {
-                "mode": "faulted",
+                "gui_mode": "faulted",
                 "control_available": False,
                 "lease_remaining_seconds": 0,
                 "lease_expires_at_ms": None,
@@ -709,7 +711,7 @@ class NativeBridgeRuntime:
                 "browser_connected": False,
             }
         if self._bridge is None:
-            return {"mode": "stopped", "control_available": False, "browser_connected": False}
+            return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
         return {**self._bridge.local_status(), "browser_connected": self._browser_connected}
 
     def grant_control(self, duration_seconds: int) -> dict[str, object]:

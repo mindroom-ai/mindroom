@@ -208,7 +208,8 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
 }
 _DESKTOP_DESCRIPTION = (
     "Operate the requester's paired local computer through encrypted Matrix messages. status reports which of "
-    "these the user enabled locally: allowlisted apps, read-only folders, and shell commands. "
+    "these the user enabled locally: allowlisted apps, read-only folders, and shell commands. Its gui_mode "
+    "(observe_only or control) covers only app control; folders and shell access are reported separately. "
     "Apps: start with list_apps; if the chosen app is not running, use launch_app, then get_app_state. "
     "Use observation=tree for semantic work without screenshot transfer. Prefer click_element, set_value, "
     "scroll_element, or perform_action over pixel and keyboard fallbacks. Every element index belongs "

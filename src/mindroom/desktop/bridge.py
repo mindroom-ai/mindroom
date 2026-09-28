@@ -421,7 +421,7 @@ class DesktopBridge:
         return {
             **self._bridge_status(),
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
+            "gui_mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
@@ -1286,10 +1286,13 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
 
     def _bridge_status(self) -> dict[str, object]:
-        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not)."""
+        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not).
+
+        ``gui_mode`` describes only application control; folders and shell access are reported separately.
+        """
         control_available = self._control_available()
         status: dict[str, object] = {
-            "mode": "control" if control_available else "observe_only",
+            "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
             "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),

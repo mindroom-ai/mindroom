@@ -100,7 +100,7 @@ class FakeRuntime:
 
     def status(self) -> dict[str, object]:
         return {
-            "mode": "observe_only" if self.running else "stopped",
+            "gui_mode": "observe_only" if self.running else "stopped",
             "control_available": False,
             "lease_remaining_seconds": 0,
             "lease_expires_at_ms": None,
@@ -1060,7 +1060,7 @@ async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
     assert offline_runtime_session.client.to_device_callbacks == []
     with pytest.raises(DesktopFilesystemError, match="closed"):
         filesystem.list_folders()
-    assert runtime.status()["mode"] == "stopped"
+    assert runtime.status()["gui_mode"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1090,7 @@ async def test_runtime_start_failure_releases_pinned_folders(
     with pytest.raises(DesktopFilesystemError, match="closed"):
         opened[0].list_folders()
     assert offline_runtime_session.closed is True
-    assert runtime.status()["mode"] == "stopped"
+    assert runtime.status()["gui_mode"] == "stopped"
 
 
 async def _native(
