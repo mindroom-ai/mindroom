@@ -106,6 +106,25 @@ def _best_text_candidate(candidates: list[Tag], *, min_chars: int = 40) -> str |
     return max(scored, key=lambda item: item[0])[1]
 
 
+def _extract_main_content_in_place(soup: BeautifulSoup) -> str:
+    """Extract the best available page body text, removing page chrome from the soup."""
+    _remove_unwanted_elements(soup)
+
+    for selector in _PREFERRED_CONTENT_SELECTORS:
+        candidates = [element for element in soup.select(selector) if isinstance(element, Tag)]
+        best_text = _best_text_candidate(candidates)
+        if best_text is not None:
+            return best_text
+
+    sections = [element for element in soup.find_all("section") if isinstance(element, Tag)]
+    best_section = _best_text_candidate(sections)
+    if best_section is not None:
+        return best_section
+
+    body = soup.body if isinstance(soup.body, Tag) else soup
+    return _normalize_text(body.get_text(" ", strip=True))
+
+
 def _safe_url_for_log(url: str) -> str:
     """Return a URL safe for logs by dropping credentials, query, and fragment data."""
     try:
@@ -324,13 +343,12 @@ class _MindRoomWebsiteReader(WebsiteReader):
         crawl_host: str,
         crawler_result: dict[str, str],
     ) -> bool:
-        """Extract content from a response and queue crawl links from the original soup."""
+        """Queue crawl links from the unmodified page, then extract its content from the same parse."""
         soup = BeautifulSoup(response.content, "html.parser")
-        main_content = self._extract_main_content(soup)
+        self._queue_links(soup, current_url, current_depth, crawl_host)
+        main_content = _extract_main_content_in_place(soup)
         if main_content:
             crawler_result[current_url] = main_content
-
-        self._queue_links(soup, current_url, current_depth, crawl_host)
         return bool(main_content)
 
     def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
@@ -372,23 +390,8 @@ class _MindRoomWebsiteReader(WebsiteReader):
             raise
 
     def _extract_main_content(self, soup: BeautifulSoup) -> str:
-        """Extract the best available page body text."""
-        content_soup = BeautifulSoup(str(soup), "html.parser")
-        _remove_unwanted_elements(content_soup)
-
-        for selector in _PREFERRED_CONTENT_SELECTORS:
-            candidates = [element for element in content_soup.select(selector) if isinstance(element, Tag)]
-            best_text = _best_text_candidate(candidates)
-            if best_text is not None:
-                return best_text
-
-        sections = [element for element in content_soup.find_all("section") if isinstance(element, Tag)]
-        best_section = _best_text_candidate(sections)
-        if best_section is not None:
-            return best_section
-
-        body = content_soup.body if isinstance(content_soup.body, Tag) else content_soup
-        return _normalize_text(body.get_text(" ", strip=True))
+        """Extract the best available page body text without modifying the caller's soup."""
+        return _extract_main_content_in_place(BeautifulSoup(str(soup), "html.parser"))
 
 
 class WebsiteTools(Toolkit):

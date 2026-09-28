@@ -33,11 +33,7 @@ async def test_sleep_rejects_durations_outside_the_cap(monkeypatch: pytest.Monke
     monkeypatch.setattr(time, "sleep", _refuse_thread_sleep)
     tools = sleep_tools()()
 
-    result = tools.sleep(seconds)
-    if inspect.isawaitable(result):
-        result = await result
-
-    assert result == "Sleep duration must be between 0 and 300 seconds."
+    assert await tools.sleep(seconds) == "Sleep duration must be between 0 and 300 seconds."
 
 
 def test_sleep_config_fields_select_the_function() -> None:
