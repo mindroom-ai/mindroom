@@ -530,11 +530,11 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     "unreadable",
     [
         '{"schema_version": 4, "job_id": "retired"}',
-        '{"schema_version": 6, "job_id": "trunc',
-        '{"schema_version": 6, "job_id": "another"}',
+        '{"schema_version": 7, "job_id": "trunc',
+        '{"schema_version": 7, "job_id": "another"}',
         pytest.param(
             json.dumps(
-                {"schema_version": 6, **asdict(replace(_job(), job_id="retired")), "source_event_id": ["$saved"]},
+                {"schema_version": 7, **asdict(replace(_job(), job_id="retired")), "source_event_id": ["$saved"]},
             ),
             id="non-string-source",
         ),
@@ -556,7 +556,7 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
         status="completed",
         payload_generation=0,
     )
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 6, **asdict(saved)}))
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 7, **asdict(saved)}))
     # Payload files are not job metadata, so parking neither reads nor warns about them.
     (directory / "saved.g0.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)

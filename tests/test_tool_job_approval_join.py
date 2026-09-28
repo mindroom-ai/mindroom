@@ -272,6 +272,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                             ["Leader"],
                             show_tool_calls=True,
                         ).to_state(),
+                        progress=None,
                     )
                 return response.response_text
 

@@ -279,7 +279,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
         dedent("""\
         from pathlib import Path
         from agno.tools import Toolkit
-        from mindroom.tool_system.declarations import ToolCategory
+        from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
         from mindroom.tool_system.registration import register_tool_with_metadata
 
         class NativeTools(Toolkit):
@@ -295,7 +295,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                     output.write("status\\n")
                 return "status"
 
-        @register_tool_with_metadata(name="native_plugin", display_name="Native", description="Native execution", category=ToolCategory.DEVELOPMENT)
+        @register_tool_with_metadata(name="native_plugin", display_name="Native", description="Native execution", category=ToolCategory.DEVELOPMENT, file_access=ToolFileAccess.NONE)
         def native_tools():
             return NativeTools
     """),

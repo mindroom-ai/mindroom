@@ -117,6 +117,7 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
             denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     assert cleanup_order == ["finalize", "agent", "storage"]
@@ -180,6 +181,7 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
             denial_reasons={},
             refresh_scheduler=None,
             history_scope=scope.scope,
+            progress=None,
         )
 
     assert cleanup_order == ["finalize", "team", "scope"]

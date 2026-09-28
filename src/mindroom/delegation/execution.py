@@ -708,82 +708,84 @@ async def _background_child_outcome(
     fresh: bool,
     output_request: ToolOutputFileRequest | None = None,
 ) -> BackgroundOutcome:
-    """Keep child execution and settlement owned by its background job."""
-    primary_error: Exception | None = None
-    try:
-        outcome = await _run_child(
-            child,
-            run_child=run_child,
-            config=config,
-            runtime_paths=runtime_paths,
-            caller_identity=owner,
-            refresh_scheduler=refresh_scheduler,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-            approval_calls=approval_calls,
-            fresh=fresh,
-        )
-        if outcome.response.status == RunStatus.paused:
-            return BackgroundOutcome(
-                status="awaiting_approval",
-                approval_state={
-                    "response": outcome.response.to_dict(),
-                    "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
-                },
-            )
-    except asyncio.CancelledError:
-        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
-        raise
-    except Exception as error:
-        primary_error = error
+    """Keep child execution, liveness and settlement owned by its background job."""
+    # Settlement stays inside this claim, so recovery cannot take a child that failed before its terminal state.
+    async with subagent_liveness(child, runtime_paths):
+        primary_error: Exception | None = None
         try:
-            await interrupt_child(
+            outcome = await _run_child(
                 child,
+                run_child=run_child,
                 config=config,
                 runtime_paths=runtime_paths,
-                reason=str(error),
-                status="failed",
+                caller_identity=owner,
+                refresh_scheduler=refresh_scheduler,
+                decisions=decisions,
+                denial_reasons=denial_reasons,
+                approval_calls=approval_calls,
+                fresh=fresh,
             )
-        except Exception as cleanup_error:
+            if outcome.response.status == RunStatus.paused:
+                return BackgroundOutcome(
+                    status="awaiting_approval",
+                    approval_state={
+                        "response": outcome.response.to_dict(),
+                        "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
+                    },
+                )
+        except asyncio.CancelledError:
+            await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
+            raise
+        except Exception as error:
+            primary_error = error
+            try:
+                await interrupt_child(
+                    child,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    reason=str(error),
+                    status="failed",
+                )
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Native delegation cleanup failed after execution failure",
+                    delegation_id=child.delegation_id,
+                    error=str(cleanup_error),
+                    exc_info=True,
+                )
+                return delegation_outcome(
+                    "failed",
+                    _finalize_delegation_output(
+                        f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
+                        output_request,
+                    ),
+                )
+        try:
+            receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+        except Exception as settlement_error:
+            if primary_error is None:
+                raise
             logger.warning(
-                "Native delegation cleanup failed after execution failure",
+                "Native delegation settlement failed after execution failure",
                 delegation_id=child.delegation_id,
-                error=str(cleanup_error),
+                error=str(settlement_error),
                 exc_info=True,
             )
             return delegation_outcome(
                 "failed",
                 _finalize_delegation_output(
-                    f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
+                    f"{primary_error}\n\n"
+                    f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
                     output_request,
                 ),
             )
-    try:
-        receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
-    except Exception as settlement_error:
-        if primary_error is None:
-            raise
-        logger.warning(
-            "Native delegation settlement failed after execution failure",
-            delegation_id=child.delegation_id,
-            error=str(settlement_error),
-            exc_info=True,
-        )
+        status = child.status
+        assert status != "running"
+        assert status != "paused"
         return delegation_outcome(
-            "failed",
-            _finalize_delegation_output(
-                f"{primary_error}\n\n"
-                f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
-                output_request,
-            ),
+            status,
+            _finalize_delegation_output(_child_result_text(child, receipt), output_request),
         )
-    status = child.status
-    assert status != "running"
-    assert status != "paused"
-    return delegation_outcome(
-        status,
-        _finalize_delegation_output(_child_result_text(child, receipt), output_request),
-    )
 
 
 async def _resolve_delegation_target(

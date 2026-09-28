@@ -178,7 +178,7 @@ def _write_registered_plugin(plugin_root: Path) -> None:
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class StableTools(Toolkit):\n"
@@ -193,6 +193,7 @@ def _write_registered_plugin(plugin_root: Path) -> None:
         "    display_name='Stable Plugin',\n"
         "    description='Plugin identity regression fixture',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         ")\n"
         "def stable_plugin_tools():\n"
         "    return StableTools\n",
