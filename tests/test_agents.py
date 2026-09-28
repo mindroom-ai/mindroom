@@ -1955,6 +1955,21 @@ def test_workspace_knowledge_links_never_follow_a_swapped_knowledge_directory(
     assert list(victim_knowledge.iterdir()) == []
 
 
+def test_workspace_knowledge_links_never_follow_a_replaced_workspace(tmp_path: Path) -> None:
+    """A workspace replaced by a link after runtime resolution never receives the primary's knowledge links."""
+    workspace = tmp_path / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True)
+    victim = tmp_path / "credentials"
+    (victim / "research").mkdir(parents=True)
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        workspaces_module.ensure_workspace_knowledge_links(workspace, knowledge_paths={"research": victim / "research"})
+
+    assert sorted(entry.name for entry in victim.iterdir()) == ["research"]
+
+
 def test_resolve_agent_runtime_removes_stale_workspace_knowledge_links(tmp_path: Path) -> None:
     """Removing a bound knowledge base should remove its canonical workspace alias."""
     runtime_paths = _runtime_paths(tmp_path)

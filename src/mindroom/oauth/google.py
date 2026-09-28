@@ -234,7 +234,6 @@ def _google_token_parser(
 
     token_data: dict[str, Any] = {
         "token": access_token,
-        "token_uri": provider.token_url,
         "client_id": client_config.client_id,
         "_source": "oauth",
         "_oauth_provider": provider.id,

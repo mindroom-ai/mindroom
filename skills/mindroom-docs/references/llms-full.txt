@@ -342,7 +342,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI ChatGPT authentication: run `codex login`.
 - For Kimi Code CLI authentication: run `kimi` and `/login`.
-- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
+- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5.5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 Then run `uvx mindroom run`.
@@ -1738,11 +1738,12 @@ agents:
 models:
   default:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5          # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5          # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
+    api_key: null                  # Optional: Model-specific API key used instead of the provider's shared key
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -1822,7 +1823,7 @@ defaults:
 
 # defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
 # Set it to null to use provider defaults.
-# GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
 # room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
 #
 # A thread's first trusted automatic summary call is summary-only.
@@ -3282,7 +3283,7 @@ The optional `minimal_instructions` list defaults to `[]` and supplies concise g
 # Model Configuration
 
 Models define the AI providers and model IDs used by agents.
-Examples were checked on September 10, 2026 against the [OpenAI catalog](https://developers.openai.com/api/docs/models), [Claude catalog](https://platform.claude.com/docs/en/models/overview), [Gemini catalog](https://ai.google.dev/gemini-api/docs/models), and [OpenRouter catalog](https://openrouter.ai/api/v1/models).
+Examples were checked on September 28, 2026 against the [OpenAI catalog](https://developers.openai.com/api/docs/models), [Claude catalog](https://platform.claude.com/docs/en/models/overview), [Gemini catalog](https://ai.google.dev/gemini-api/docs/models), and [OpenRouter catalog](https://openrouter.ai/api/v1/models).
 Provider-specific IDs can differ for the same model.
 
 ## Supported Providers
@@ -3316,11 +3317,16 @@ Each model configuration supports the following fields:
 | `icon` | No | `null` | Image path relative to the config file's directory, or a Matrix `mxc://` URI |
 | `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
+| `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
-Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
+Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
+A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
+MindRoom never passes the shared key to a model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`), although Agno may still read `ANTHROPIC_API_KEY` or `AZURE_OPENAI_API_KEY` from the process environment.
+Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
+`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Presentation metadata is optional:
 
@@ -3369,7 +3375,7 @@ Changing those later sections does not invalidate the shared instruction prefix;
 The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
 Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
-The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5` and `~anthropic/claude-sonnet-latest`.
+The `openrouter` provider applies the same cache boundaries and options to model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`.
 MindRoom sends them as OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching) on message text parts and the last tool definition.
 Other OpenRouter model families, such as OpenAI, DeepSeek, Z.ai, and Gemini, cache implicitly and keep their unmarked request format.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
@@ -3394,7 +3400,7 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     context_window: 1000000
 
   fable:
@@ -3404,7 +3410,7 @@ models:
 
   opus:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
     context_window: 1000000
 
   haiku:
@@ -3415,7 +3421,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-5
+    id: anthropic.claude-opus-5-5
     context_window: 1000000
 
   # OpenAI
@@ -3450,7 +3456,7 @@ models:
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     extra_kwargs:
       project_id: your-gcp-project
       region: global
@@ -3465,7 +3471,7 @@ models:
   # OpenRouter (access to many model providers)
   openrouter:
     provider: openrouter
-    id: anthropic/claude-sonnet-5
+    id: anthropic/claude-sonnet-5.5
 
   # Groq (fast inference; Qwen3.8 is a preview model)
   groq:
@@ -3502,7 +3508,10 @@ models:
 ```
 
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
-Its [tool-choice rules](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) allow `auto` and `none`; forcing `any` or a named tool returns an error.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Their [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide) match Fable 5.1's: `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
+Both reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
+On Fable 5.1, Opus 5.5, and Sonnet 5.5 with adaptive thinking, longer notes the model writes between tool calls arrive as `thinking` blocks that are empty by default, so MindRoom responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro.
@@ -3557,14 +3566,14 @@ models:
       reasoning_effort: high
 ```
 
-[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model).
+[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Sol and Luna support function calling in Chat Completions only with `reasoning_effort: none`.
 Responses continuation works independently of the model ID, including custom aliases.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 `extra_kwargs.store: false` remains respected; selecting Responses does not override it.
 
 When `api` is unset, GPT 5.4 and newer models on the first-party OpenAI endpoint use Responses.
 Other routes, including all custom OpenAI-compatible endpoints, default to Chat Completions.
-If you previously relied on automatic Astra routing through a proxy, add `api: responses` before upgrading.
+If you previously relied on automatic GPT-6 routing through a proxy, add `api: responses` before upgrading, or tool calls on Astra, Sol, and Luna fail at their default reasoning effort.
 Explicit Chat Completions disables native deferred-tool search and keeps MindRoom's dynamic-tool discovery.
 Selecting Responses on a custom endpoint does not enable OpenAI's hosted tool search; only supported first-party OpenAI and Codex routes use it.
 
@@ -3598,14 +3607,13 @@ Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
 Codex is included across ChatGPT plans, including Free and Go, but model access and usage limits depend on the logged-in account and current rollout.
 See the [current Codex model catalog](https://developers.openai.com/codex/models) instead of assuming every account exposes the same slugs.
-MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through unchanged.
+MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs through unchanged.
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
-| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Complex, open-ended work |
-| GPT-5.6 Terra | `gpt-5.6-terra` | Balanced everyday work |
-| GPT-5.6 Luna | `gpt-5.6-luna` | Fast, repeatable, cost-sensitive work |
+| GPT-6 Sol | `gpt-6-sol` | Strong reasoning on demanding tasks |
+| GPT-6 Luna | `gpt-6-luna` | Efficient, repeatable work at scale |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
 The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
@@ -3728,14 +3736,14 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Bedrock lists Fable 5.1 as open access, while Opus 5 access can depend on the AWS account and region.
-The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5.1 or Sonnet 5 instead.
+Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5.5 and comments out a Sonnet 5.5 alternative, so confirm access, or use its `fable` alternative or `id: anthropic.claude-sonnet-5` instead.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-5
+    id: anthropic.claude-opus-5-5
     context_window: 1000000
 ```
 
@@ -3791,7 +3799,7 @@ If needed, that replay plan can reduce raw replay, fall back to summary-only rep
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
     context_window: 1000000  # 1M tokens
 
 defaults:
@@ -3837,11 +3845,12 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
-Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
 MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters); omit these from authored model options.
-Automatic thread summaries omit their temperature override for GPT-6 Astra, including its OpenRouter route.
-For Mem0 memory extraction with `provider: openai`, use GPT-5.6 Luna; the current Mem0 request builder does not support Astra's parameter requirements.
+GPT-6 Sol and Luna reject the same controls unless reasoning effort is `none`.
+Automatic thread summaries omit their temperature override for GPT-6 Astra, Sol, and Luna, including their OpenRouter routes.
+For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 Astra, Sol, and Luna reject.
 
 ## Environment Variables
 
@@ -3887,7 +3896,7 @@ ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
 CLOUD_ML_REGION=global
 ```
 
-For `claude-sonnet-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
+For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 ### File-based Secrets
@@ -8330,7 +8339,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
 | `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
-| `model_id` | `text` | `no` | `eleven_v3` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `eleven_v4` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
 | `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
 | `enable_generate_sound_effect` | `boolean` | `no` | `true` | Enable `generate_sound_effect()`. |
@@ -8344,7 +8353,7 @@ agents:
   audio_fx:
     tools:
       - eleven_labs:
-          model_id: eleven_v3
+          model_id: eleven_v4
           output_format: mp3_44100_64
           target_directory: generated-audio
 ```
@@ -8357,7 +8366,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
-- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
+- The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.
@@ -9290,7 +9299,7 @@ Automatic thread summaries are still implemented in `src/mindroom/thread_summary
 The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite summaries.
+MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
@@ -12573,7 +12582,7 @@ create_workflow(
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-5-5",
                 "tools": ["duckduckgo", "website"],
             },
         ],
@@ -12590,7 +12599,7 @@ create_workflow(
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 8,
-            "models": ["claude-sonnet-5"],
+            "models": ["claude-sonnet-5-5"],
             "tools": ["duckduckgo", "website"],
             "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
         },
@@ -12749,7 +12758,7 @@ manage_config(operation="inspect", path="/authorization")
 manage_config(
     operation="patch",
     changes=[
-        {"op": "replace", "path": "/models/default/id", "value": "claude-sonnet-5"},
+        {"op": "replace", "path": "/models/default/id", "value": "claude-sonnet-5-5"},
         {"op": "add", "path": "/agents/triage/instructions/-", "value": "Escalate anything urgent."},
     ],
 )
@@ -12931,7 +12940,7 @@ agents:
     model: default
     tools:
       - claude_agent:
-          model: claude-sonnet-5
+          model: claude-sonnet-5-5
           cwd: /workspace/project
           permission_mode: acceptEdits
           continue_conversation: true
@@ -12942,7 +12951,7 @@ agents:
 ```json
 {
   "api_key": "sk-ant-or-proxy-key",
-  "model": "claude-sonnet-5",
+  "model": "claude-sonnet-5-5",
   "permission_mode": "default",
   "continue_conversation": true,
   "session_ttl_minutes": 60,
@@ -12999,7 +13008,7 @@ The following complete agent example lets a watcher read a URL and send one inte
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
 
 agents:
   watcher:
@@ -14183,6 +14192,8 @@ The bridge functions let an agent trigger the normal MindRoom OAuth connect flow
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
 When token refresh fails without a terminal credential rejection, the bridge raises an ordinary tool error that says OAuth token refresh failed and asks callers to retry shortly.
 MindRoom retains the credentials and does not return an OAuth-required payload or reconnect link for that temporary failure.
+MindRoom sends the authorization code and later refresh tokens only to the token endpoint that discovery resolved when the connection started.
+If a later discovery resolves a different token endpoint, for example because the server's protected-resource metadata now names another authorization server, the callback fails or the stored credential is deleted, and the user must reconnect.
 Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
@@ -14195,7 +14206,11 @@ If the protected-resource metadata does not advertise an authorization server, M
 The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
 
 If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
-The generated client registration is stored in the generated OAuth client config service and reused for later users.
+The generated client registration is stored in the generated OAuth client config service with the token endpoint it was issued for, and reused for later users.
+When discovery later resolves a different token endpoint, MindRoom registers a new client at the new authorization server and logs `oauth_dynamic_client_reregistered` with both endpoint origins; credentials issued to the previous client must be reconnected.
+MindRoom refuses the flow instead when `dynamic_client_registration` is disabled or the new server offers no registration endpoint.
+MindRoom never re-registers an operator-configured client, so its `client_id` and `client_secret` would go to whatever token endpoint discovery resolves.
+For a confidential operator-configured client, pin `auth.authorization_server` or `auth.token_url` so the MCP server's protected-resource metadata cannot redirect those credentials.
 Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
 Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
 
@@ -16457,6 +16472,16 @@ Automatic discovery first checks protected-resource metadata at the resource ori
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
+Starting a connection resolves the provider's endpoints once, builds the authorization URL from them, and records the resolved token endpoint in the pending OAuth state.
+The callback fails without contacting any token endpoint when the provider now resolves a different one; otherwise the built-in exchange sends the authorization code, PKCE verifier, and client secret to that recorded endpoint.
+Stored credentials record the same endpoint as `token_uri`, including credentials produced by custom token exchangers and parsers.
+Refreshes through the provider contract, used by the dashboard, MCP servers, GitHub, and Atlassian, send the refresh token only when the stored `token_uri` matches the token endpoint the provider currently resolves.
+When it differs, or an older credential has no recorded endpoint, MindRoom deletes the credential without contacting the token endpoint and requires reconnection.
+That rejection is logged as `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and the stored and current endpoint origins, so an authorization-server change is distinguishable from a revoked grant.
+Google tool wrappers instead refresh through google-auth against the stored `token_uri` without re-resolving endpoints, and Google providers always store Google's fixed token endpoint there.
+A reconnect keeps an earlier refresh token that the provider did not replace only when the verified identity, OAuth client, and `token_uri` all match.
+Dynamic client registrations record the token endpoint they were issued for, and discovery registers a new client when the resolved token endpoint changes.
+A code exchange or refresh also refuses a dynamically registered client whose recorded token endpoint differs from the endpoint it is about to use.
 The SQLite store is authoritative on every OAuth credential read.
 Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
@@ -17168,10 +17193,12 @@ memory:
   llm:
     provider: openrouter
     config:
-      model: openai/gpt-5.6-luna
+      model: openai/gpt-6-luna
 ```
 
 Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).
+An explicit `memory.llm.config.api_key` is used instead of the provider key, and a blank one counts as unset.
+When `OPENROUTER_API_KEY` is set in the process environment, Mem0's OpenAI LLM, which serves both the `openai` and `openrouter` providers, sends that key to OpenRouter instead, overriding an explicit `memory.llm.config.api_key`.
 
 ## Backend: `none`
 
@@ -17780,7 +17807,7 @@ The voice model uses its own named OpenAI credential service, independently of t
 models:
   chat:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
 
 agents:
   assistant:
@@ -17818,7 +17845,7 @@ The override changes only the calls-enabled agent's LLM selection, while STT, TT
 models:
   chat:
     provider: anthropic
-    id: claude-opus-5
+    id: claude-opus-5-5
   call_fast:
     provider: anthropic
     id: claude-haiku-4-5
@@ -20377,7 +20404,7 @@ Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-5 | 💼 Code assistant | 🔧 5 tools available").
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-5-5 | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
 - **online** - Agent running and ready
@@ -20970,6 +20997,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
+| [`oauth/providers.py`][oauth-providers], [`api/oauth.py`][api-oauth], and [`oauth/discovery.py`][oauth-discovery] | [MCP OAuth tests][mcp-oauth-tests] cover unbound credential rejection and legacy registration binding; [OAuth API tests][oauth-api-tests] cover rejection of pending state without a bound endpoint. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`history/legacy_compaction_state.py`][legacy-compaction-state] | [Legacy compaction tests][legacy-compaction-state-tests] cover recognition, one-time migration, summary attribution, tombstone pruning, and malformed metadata; [compaction redaction tests][compaction-redaction-tests] cover legacy invalidation. |
@@ -21080,6 +21108,9 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | O4 | Current behavior | [`oauth/credential_store.py`][oauth-store] owns schema, private-file, and scope-binding validation. |
 | O5 | Current behavior | [`oauth/credential_lifecycle.py`][oauth-lifecycle] owns target resolution, generation checks, and reset receipts. |
 | O6 | Current behavior | [`oauth/client.py`][oauth-client] and [`credential_lifecycle.py`][oauth-lifecycle] support active provider dialects and configured original authentication. |
+| O7 | Removed/superseded | [`oauth/providers.py`][oauth-providers] rejects refreshes of credentials without a `token_uri` endpoint binding, which only unstamped plugin exchanger or parser output produced; the lifecycle deletes them and the user reconnects. |
+| O8 | Removed/superseded | [`api/oauth.py`][api-oauth] rejects pending connect state without a bound `token_url`; the state lives 600 seconds, so only connects that straddle an upgrade must restart. |
+| O9 | Tiny retained default | [`oauth/discovery.py`][oauth-discovery] binds a dynamic client registration without a recorded token endpoint to the endpoint resolved at first use, keeping its client and tokens; later endpoint changes re-register. |
 | M1 | Isolated | [`matrix/legacy_state.py`][matrix-legacy-state] backfills domains and asks the current state owner to rewrite noncanonical data. |
 | M2 | Tiny retained default | [`matrix/users.py`][matrix-users] falls back from missing `requested_username` to persisted actual username. |
 | M3 | Removed/superseded | [`thread_tags.py`][thread-tags] reads only one state event per thread-tag pair; the old thread-wide overlay is gone. |
@@ -21154,6 +21185,7 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
+[api-oauth]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/oauth.py
 [approval-execution]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_execution.py
 [approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
 [attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
@@ -21216,9 +21248,11 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [memory-config]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/config.py
 [memory-functions]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/functions.py
 [oauth-client]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/client.py
+[oauth-discovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/discovery.py
 [oauth-legacy-credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/legacy_credentials.py
 [oauth-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_lifecycle.py
 [oauth-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_store.py
+[oauth-providers]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/providers.py
 [plugin-imports]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/plugin_imports.py
 [pre-journal-test]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_upgrade_from_pre_journal_storage.py
 [private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
@@ -21277,7 +21311,9 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
+[mcp-oauth-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_oauth.py
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
+[oauth-api-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/api/test_oauth_api.py
 [oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py
 [openai-model-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_models.py
 [openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py
@@ -21527,6 +21563,11 @@ Reads through those descriptors are capped per surface.
 | Delegation event logs | 4 MiB per event, 256 MiB per log | An event that would exceed either cap is refused before it is written, other events stop 1 MiB short of the log cap so the terminal event still fits, and a planted log above them makes the record unreadable; values above 64 KiB already move to artifacts |
 | Todo templates, scheduled-run receipts, delegation `run.json`, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 
+In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
+`file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.
+No-follow applies to the workspace's final path component only, so a replaced parent such as `agents/<name>` is not refused.
+With the default workspace names that is not exploitable in the hosted layout today, because no primary-only directory there contains an entry named `workspace` for such a link to reach; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
+
 Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment so programs named in workspace Git config never run.
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
@@ -21563,7 +21604,9 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) resolve links and refuse paths that lead outside the workspace, but then walk and read by path. This matters only when an operator routes these tools to the primary process while worker code writes the same workspace: code that swaps a checked directory or file for a link between that check and the walk can make them list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search. They run in a worker by default, where they see only what the worker already mounts.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
+  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search.
+  They run in a worker by default, where they see only what the worker already mounts.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.

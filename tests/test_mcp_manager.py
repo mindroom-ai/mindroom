@@ -479,6 +479,7 @@ def _save_expiring_mcp_oauth_credentials(
         mcp_oauth_provider("demo", _oauth_mcp_config()),
         {
             "token": token,
+            "token_uri": "https://auth.example.test/token",
             "refresh_token": refresh_token,
             "client_id": "public-client",
             "scopes": [],

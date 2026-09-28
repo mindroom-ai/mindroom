@@ -2999,7 +2999,7 @@
         },
         {
           "authored_override": true,
-          "default": "eleven_v3",
+          "default": "eleven_v4",
           "description": null,
           "label": "Model ID",
           "name": "model_id",

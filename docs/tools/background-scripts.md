@@ -17,7 +17,7 @@ The following complete agent example lets a watcher read a URL and send one inte
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
 
 agents:
   watcher:

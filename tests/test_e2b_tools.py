@@ -315,6 +315,24 @@ def test_download_rejects_parent_swapped_to_link_after_resolution(
     assert not (outside / "x.py").exists()
 
 
+@pytest.mark.parametrize("local_path", ["result.csv", "exports/final.csv"])
+def test_download_refuses_workspace_replaced_by_link(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+    outside: Path,
+    tmp_path: Path,
+    local_path: str,
+) -> None:
+    """A workspace that worker code replaced with a link after the toolkit was built never redirects a download."""
+    tool = make_tool(workspace)
+    _files(tool).stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/out/result.csv", local_path))  # noqa: S108
+    assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
+
+
 def test_png_output_path_saves_inside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
