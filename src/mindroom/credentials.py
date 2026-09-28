@@ -68,6 +68,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CredentialsManager",
+    "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
     "delete_scoped_credentials",
     "get_runtime_credentials_manager",
@@ -747,30 +748,51 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
         return manager
 
 
+@dataclass(frozen=True, slots=True)
+class StoredCredentialsUpdate:
+    """How one update across every credential store went."""
+
+    rewritten: int
+    unreadable: int
+
+
 def update_stored_service_credentials(
     runtime_paths: RuntimePaths,
     service: str,
     update: Callable[[dict[str, Any]], dict[str, Any] | None],
-) -> int:
+) -> StoredCredentialsUpdate:
     """Rewrite one service's document in the primary store and every existing worker store.
 
     ``update`` returns the replacement document, or None to leave that store unchanged.
     Worker directories are read and written through the same no-follow reads, encryption
-    policy, and atomic replacement as every other operation. Returns how many were rewritten.
+    policy, and atomic replacement as every other operation. A document that exists but
+    cannot be read, for example under a different encryption key, is counted, not skipped silently.
     """
     manager = get_runtime_credentials_manager(runtime_paths)
     normalized_service = validate_service_name(service)
     rewritten = 0
+    unreadable = 0
     for directory in (manager.base_path, *_existing_worker_credential_paths(manager.storage_root)):
         credentials_path = directory / f"{normalized_service}{_CREDENTIALS_FILE_SUFFIX}"
-        credentials = manager._load_credentials_file(normalized_service, credentials_path)
+        try:
+            payload = _read_credentials_payload(credentials_path)
+            credentials = None if payload is None else manager.decode_credentials(normalized_service, payload)
+        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            logger.warning(
+                "Stored credentials could not be read for an update",
+                service=normalized_service,
+                path=str(credentials_path),
+                error_type=type(exc).__name__,
+            )
+            unreadable += 1
+            continue
         if credentials is None:
             continue
         updated = update(credentials)
         if updated is not None:
             manager._save_credentials_file(normalized_service, credentials_path, updated)
             rewritten += 1
-    return rewritten
+    return StoredCredentialsUpdate(rewritten=rewritten, unreadable=unreadable)
 
 
 def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:

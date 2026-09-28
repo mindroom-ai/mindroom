@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -11,6 +13,7 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import _reset_credentials_manager_cache, get_runtime_credentials_manager
+from mindroom.file_locks import advisory_file_lock
 from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 
@@ -108,3 +111,46 @@ async def test_both_entry_points_clean_up_before_credentials_are_used(
     else:
         with pytest.raises(_CleanupRanError):
             await module.main("ERROR", runtime_paths, api=False)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_documents_keep_the_cleanup_pending(tmp_path: Path) -> None:
+    """A document encrypted under another key is counted, and the receipt waits until it can be cleaned too."""
+    right_key = base64.urlsafe_b64encode(b"r" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"w" * 32).decode()
+    right = _runtime(tmp_path, {CREDENTIALS_ENCRYPTION_KEY_ENV: right_key})
+    get_runtime_credentials_manager(right).save_credentials("daytona", {"api_key": "dt-secret", "verify_ssl": False})
+    stored = get_runtime_credentials_manager(right).get_credentials_path("daytona").read_bytes()
+    receipt = get_runtime_credentials_manager(right).base_path / ".daytona-verify-ssl-default-dropped.json"
+
+    await migrate_tool_credential_defaults(_runtime(tmp_path, {CREDENTIALS_ENCRYPTION_KEY_ENV: wrong_key}))
+
+    assert get_runtime_credentials_manager(right).get_credentials_path("daytona").read_bytes() == stored
+    assert not receipt.exists()
+
+    await migrate_tool_credential_defaults(right)
+
+    assert get_runtime_credentials_manager(right).load_credentials("daytona") == {"api_key": "dt-secret"}
+    assert receipt.exists()
+
+
+def test_a_concurrent_start_rechecks_the_receipt_under_the_lock(tmp_path: Path) -> None:
+    """A start that waited for another one to finish trusts its receipt instead of dropping a newer deliberate false."""
+    runtime_paths = _runtime(tmp_path)
+    primary = get_runtime_credentials_manager(runtime_paths)
+    primary.save_credentials("daytona", {"api_key": "dt-secret", "verify_ssl": False})
+    lock_path = primary.base_path / ".daytona-verify-ssl-default.lock"
+    waiting_start = threading.Thread(target=asyncio.run, args=(migrate_tool_credential_defaults(runtime_paths),))
+
+    with advisory_file_lock(lock_path):
+        waiting_start.start()
+        waiting_start.join(timeout=0.5)
+        assert waiting_start.is_alive(), "the cleanup must wait for the lock"
+        # The other process finishes its cleanup, then the user deliberately disables verification.
+        primary.save_credentials("daytona", {"api_key": "dt-secret"})
+        (primary.base_path / ".daytona-verify-ssl-default-dropped.json").write_text('{"version": 1}', encoding="utf-8")
+        primary.save_credentials("daytona", {"api_key": "dt-secret", "verify_ssl": False})
+    waiting_start.join(timeout=30)
+
+    assert not waiting_start.is_alive()
+    assert primary.load_credentials("daytona") == {"api_key": "dt-secret", "verify_ssl": False}

@@ -6475,6 +6475,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.credentials",
     "mindroom.durable_write",
+    "mindroom.file_locks",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
