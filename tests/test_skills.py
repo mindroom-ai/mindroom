@@ -718,10 +718,10 @@ def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> No
     assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
 
 
-def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path) -> None:
+def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Frontmatter that skill loading parses and then refuses still counts, so refused skills cannot parse for free."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    workspace_skills_module._PARSE_CACHE.clear()
+    monkeypatch.setattr(workspace_skills_module, "_PARSE_CACHE", workspace_skills_module._ParseCache(8 << 20))
     padding = "n" * (workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 200)
     refusals = (
         lambda index: f"name: {'long-' * 20}{index}\ndescription: d\nnote: {padding}",
@@ -754,13 +754,12 @@ def test_the_parse_cache_keeps_a_bounded_number_of_bytes() -> None:
     tracemalloc.start()
     try:
         before = tracemalloc.get_traced_memory()[0]
-        for index in range(200):
+        for index in range(400):
             # One character outside the Basic Multilingual Plane makes Python keep the text at four bytes a character.
             cache.parse("text", f"\U0001f600{index} {'n' * 8000}", str)
         retained = tracemalloc.get_traced_memory()[0] - before
     finally:
         tracemalloc.stop()
-    assert cache.retained_bytes <= 1 << 20
     assert retained < 2 << 20
 
 
@@ -774,6 +773,8 @@ def test_cached_parses_are_returned_as_copies() -> None:
     assert metadata == {"a": {"b": 1}}
     metadata["a"]["b"] = 2
     assert workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s") == {"a": {"b": 1}}
+    # A YAML escape can put a lone surrogate in metadata, which the refusal then quotes.
+    assert workspace_skills_module.parse_skill_metadata("{a: \ud800}", path="s") is None
 
 
 def test_a_full_library_of_ordinary_skills_loads(tmp_path: Path) -> None:
@@ -827,14 +828,18 @@ def test_planted_skill_files_stay_within_the_read_budget(tmp_path: Path) -> None
     assert len(refused) < 20
 
 
-def test_the_read_budget_counts_bytes(tmp_path: Path) -> None:
-    """Characters that take four bytes count four times, so a pass reads no more bytes than its budget."""
+@pytest.mark.parametrize("body", ["four-byte characters", "invalid UTF-8"])
+def test_the_read_budget_counts_bytes(tmp_path: Path, body: str) -> None:
+    """A pass counts the bytes it reads, of characters that take four bytes or of files that are not UTF-8."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    frontmatter = "---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n"
-    body = "\U0001f600" * ((MAX_SKILL_FILE_BYTES - len(frontmatter)) // 4 - 1)
+    frontmatter = ("---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n").encode()
+    if body == "invalid UTF-8":
+        content = frontmatter + b"x" * (MAX_SKILL_FILE_BYTES - len(frontmatter) - 1) + b"\xff"
+    else:
+        content = frontmatter + ("\U0001f600" * ((MAX_SKILL_FILE_BYTES - len(frontmatter)) // 4 - 1)).encode()
     for index in range(20):
         (workspace_skills / f"a-{index:02d}").mkdir()
-        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_text(frontmatter + body, encoding="utf-8")
+        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_bytes(content)
     with capture_logs() as logs:
         _load_agent_skills(tmp_path, storage)
     events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]

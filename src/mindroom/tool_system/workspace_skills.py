@@ -208,11 +208,6 @@ class _ParseCache:
         self._retained = 0
         self._lock = threading.Lock()
 
-    @property
-    def retained_bytes(self) -> int:
-        """Return what the cached entries keep, counting a fixed overhead for each."""
-        return self._retained
-
     def parse(self, kind: str, text: str, parse: Callable[[str], object]) -> Any:  # noqa: ANN401
         """Return a fresh copy of the parse of ``text``, or the error that refused it, parsing only on a miss."""
         # YAML escapes can put lone surrogates in a metadata string, which the digest must still read.
@@ -232,12 +227,6 @@ class _ParseCache:
         # Only this cache pickled the entry, from parser output of built-in types; unpickling returns a fresh copy.
         return entry if isinstance(entry, _ParseError) else pickle.loads(entry)  # noqa: S301
 
-    def clear(self) -> None:
-        """Drop every cached parse."""
-        with self._lock:
-            self._entries.clear()
-            self._retained = 0
-
     def _store(self, key: tuple[str, bytes], entry: bytes | _ParseError) -> None:
         size = _cached_entry_bytes(entry)
         with self._lock:
@@ -251,7 +240,8 @@ class _ParseCache:
 
 
 def _cached_entry_bytes(entry: bytes | _ParseError) -> int:
-    size = len(entry) if isinstance(entry, bytes) else len(entry.message.encode())
+    # An error message can quote a lone surrogate from the text it refused.
+    size = len(entry) if isinstance(entry, bytes) else len(entry.message.encode(errors="surrogatepass"))
     return size + _PARSE_CACHE_ENTRY_OVERHEAD
 
 
@@ -406,28 +396,26 @@ def _measured_skills(skills_root: Path, *, charges: dict[str, int]) -> Iterator[
     so planted skill files, refused or not, cannot make the primary parse more than that per load. ``charges`` receives
     what each parsed directory cost.
     """
-    budget = FrontmatterBudget()
-    read_bytes = 0
+    budget = SkillPassBudget()
 
     def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | _BudgetSpent | None:
-        nonlocal read_bytes
-        content = _read_skill_markdown(skill_fd, skills_root, directory)
+        path = skills_root / directory / SKILL_FILENAME
+        content = _read_skill_markdown(skill_fd, path, budget)
+        if budget.read_spent:
+            return _READ_BUDGET_SPENT
         if content is None:
             return None
-        read_bytes += len(content.encode())
-        if read_bytes > _MAX_WORKSPACE_SKILL_READ_BYTES:
-            return _READ_BUDGET_SPENT
-        size = _checked_frontmatter_bytes(content, skills_root / directory / SKILL_FILENAME)
+        size = _checked_frontmatter_bytes(content, path)
         if size is None:
             return None
         # Spent even when the parse raises or skill loading refuses the skill it parsed.
-        if not budget.spend(size):
+        if not budget.spend_parse(size):
             return _FRONTMATTER_BUDGET_SPENT
         charges[directory] = size
         skill = _read_skill(skill_fd, content, skills_root, directory)
         # Only a loaded skill's JSON5 metadata is parsed later, so only it adds that weight.
         surcharge = metadata_surcharge(skill.metadata) if skill is not None else 0
-        if not budget.spend(surcharge):
+        if not budget.spend_parse(surcharge):
             return _FRONTMATTER_BUDGET_SPENT
         charges[directory] += surcharge
         return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
@@ -450,17 +438,42 @@ def _read_skill(skill_fd: int, content: str, skills_root: Path, directory: str) 
 
 
 @dataclass
-class FrontmatterBudget:
-    """The worker-writable frontmatter one pass over a workspace may parse, charged before each parse."""
+class SkillPassBudget:
+    """What one pass over a workspace may read of its SKILL.md files and parse of their frontmatter.
 
-    remaining: int = MAX_WORKSPACE_FRONTMATTER_BYTES
+    Worker code can write both, so each is charged before the work it pays for.
+    """
 
-    def spend(self, cost: int) -> bool:
-        """Charge ``cost`` when it fits, and return whether it did."""
-        if cost > self.remaining:
+    read_bytes: int = _MAX_WORKSPACE_SKILL_READ_BYTES
+    parse_bytes: int = MAX_WORKSPACE_FRONTMATTER_BYTES
+
+    @property
+    def read_spent(self) -> bool:
+        """Return whether the pass has read past its limit, after which it reads nothing more."""
+        return self.read_bytes < 0
+
+    def spend_parse(self, cost: int) -> bool:
+        """Charge a parse of ``cost`` when it fits, and return whether it did."""
+        if cost > self.parse_bytes:
             return False
-        self.remaining -= cost
+        self.parse_bytes -= cost
         return True
+
+
+def read_skill_markdown(skill_fd: int, budget: SkillPassBudget) -> str | None:
+    """Return a skill's SKILL.md, charging its bytes to ``budget`` before they are decoded or matched.
+
+    Returns None when the file is absent or once the pass has read past its limit; a file that is not UTF-8 is charged
+    before its decoding fails.
+    """
+    if budget.read_spent:
+        return None
+    try:
+        data = read_regular_file_within_root(skill_fd, SKILL_FILENAME, max_bytes=MAX_SKILL_FILE_BYTES)
+    except FileNotFoundError:
+        return None
+    budget.read_bytes -= len(data)
+    return None if budget.read_spent else data.decode("utf-8")
 
 
 def metadata_surcharge(metadata: object) -> int:
@@ -556,10 +569,9 @@ def workspace_skill_name(content: str, directory: str) -> str | None:
     return frontmatter_name(frontmatter, directory)
 
 
-def _read_skill_markdown(skill_fd: int, skills_root: Path, directory: str) -> str | None:
-    path = skills_root / directory / SKILL_FILENAME
+def _read_skill_markdown(skill_fd: int, path: Path, budget: SkillPassBudget) -> str | None:
     try:
-        return read_text_at(skill_fd, SKILL_FILENAME)
+        return read_skill_markdown(skill_fd, budget)
     except (OSError, ValueError) as exc:
         logger.warning("Refused a workspace skill file", path=str(path), error=str(exc))
         return None

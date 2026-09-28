@@ -2844,7 +2844,11 @@ def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("reader", ["catalog", "archival"])
-def test_ownership_reads_stay_within_the_frontmatter_budget(tmp_path: Path, reader: str) -> None:
+def test_ownership_reads_stay_within_the_frontmatter_budget(
+    tmp_path: Path,
+    reader: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Files swapped in after loading measured them cannot make the ownership checks parse more than loading may."""
     root = tmp_path / "skills"
     names = [f"s-{index:03d}" for index in range(64)]
@@ -2855,7 +2859,7 @@ def test_ownership_reads_stay_within_the_frontmatter_budget(tmp_path: Path, read
             name,
             f"---\nname: {name}\ndescription: d\nnote: {'n' * 6000}\nmetadata: '{metadata}'\n---\nb\n",
         )
-    workspace_skills_module._PARSE_CACHE.clear()
+    monkeypatch.setattr(workspace_skills_module, "_PARSE_CACHE", workspace_skills_module._ParseCache(8 << 20))
     parsed: list[int] = []
     real_yaml = workspace_skills_module.yaml_io.safe_load_untrusted
     real_json5 = workspace_skills_module.json5.loads
@@ -2886,6 +2890,39 @@ def test_ownership_reads_stay_within_the_frontmatter_budget(tmp_path: Path, read
                 )
             assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
     assert sum(parsed) <= workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES
+
+
+@pytest.mark.parametrize("reader", ["catalog", "archival"])
+def test_ownership_reads_stay_within_the_read_budget(tmp_path: Path, reader: str) -> None:
+    """Large files swapped in after loading measured them cannot make the ownership checks read more than loading may."""
+    root = tmp_path / "skills"
+    names = [f"s-{index:02d}" for index in range(24)]
+    # A closing fence at the end makes every frontmatter match scan the whole file.
+    large = f"---\nname: s\ndescription: d\nnote: {'n' * (workspace_skills_module.MAX_SKILL_FILE_BYTES - 64)}\n---\n"
+    for name in names:
+        _write_skill(root, name, large)
+    read: list[int] = []
+    real = workspace_skills_module.read_regular_file_within_root
+
+    def counted(directory_fd: int, relative_path: str, **kwargs: Any) -> bytes:  # noqa: ANN401
+        data = real(directory_fd, relative_path, **kwargs)
+        if relative_path == workspace_skills_module.SKILL_FILENAME:
+            read.append(len(data))
+        return data
+
+    measured = workspace_skills_module._WorkspaceSkillBudget(dict.fromkeys(names, 0), {})
+    with (
+        patch.object(workspace_skills_module, "read_regular_file_within_root", counted),
+        patch.object(library, "workspace_skill_budget", return_value=measured),
+    ):
+        if reader == "catalog":
+            library.learned_skill_directories(root, names)
+        else:
+            library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
+    assert (
+        sum(read)
+        <= workspace_skills_module._MAX_WORKSPACE_SKILL_READ_BYTES + workspace_skills_module.MAX_SKILL_FILE_BYTES
+    )
 
 
 def test_an_edit_repairs_a_skill_whose_name_loading_refuses(tmp_path: Path) -> None:

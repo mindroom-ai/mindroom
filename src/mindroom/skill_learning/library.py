@@ -32,8 +32,8 @@ from mindroom.tool_system.workspace_skills import (
     MAX_WORKSPACE_SKILLS,
     MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
-    FrontmatterBudget,
     SkillFrontmatterTooLargeError,
+    SkillPassBudget,
     SkillUsage,
     forget_missing_skill_usage,
     frontmatter_charge,
@@ -46,6 +46,7 @@ from mindroom.tool_system.workspace_skills import (
     open_skills_root,
     parse_skill_markdown,
     parse_skill_metadata,
+    read_skill_markdown,
     read_text_at,
     skill_parse_charge,
     skill_prompt_bytes,
@@ -209,7 +210,7 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     try:
         with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
             usage = load_skill_usage(root_fd).get(name, SkillUsage())
-            return _read_skill_file(skill_fd, name, relative_path, usage, budget=FrontmatterBudget())
+            return _read_skill_file(skill_fd, name, relative_path, usage, budget=SkillPassBudget())
     except FileNotFoundError:
         return None
 
@@ -220,17 +221,20 @@ def _read_skill_file(
     relative_path: str,
     usage: SkillUsage,
     *,
-    budget: FrontmatterBudget,
+    budget: SkillPassBudget,
 ) -> SkillFile | None:
-    """Read one skill file with its skill's ownership, parsing SKILL.md frontmatter only while ``budget`` lasts."""
-    markdown = read_text_at(skill_fd, SKILL_FILENAME)
+    """Read one skill file with its skill's ownership, reading and parsing SKILL.md only while ``budget`` lasts."""
+    markdown = read_skill_markdown(skill_fd, budget)
+    if budget.read_spent:
+        # A pass over many skills leaves SKILL.md files past its read limit unread, and pins it cannot read must hold.
+        return None
     content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
     if content is None:
         return None
     digest = content_digest(content)
     if markdown is None:
         return SkillFile(content=content, digest=digest, learned=_learner_owns({}, usage, path=name), name=name)
-    if not budget.spend(frontmatter_charge(markdown)):
+    if not budget.spend_parse(frontmatter_charge(markdown)):
         # A pass over many skills leaves frontmatter past its budget unparsed, and pins it cannot read must still hold.
         return SkillFile(content=content, digest=digest, learned=False, name=name)
     try:
@@ -244,7 +248,7 @@ def _read_skill_file(
             learned=False,
             name=_edit_name(workspace_skill_name(markdown, name), name),
         )
-    metadata_parsed = budget.spend(metadata_surcharge(frontmatter.get("metadata")))
+    metadata_parsed = budget.spend_parse(metadata_surcharge(frontmatter.get("metadata")))
     return SkillFile(
         content=content,
         digest=digest,
@@ -268,7 +272,7 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
         return frozenset()
     learned: set[str] = set()
     # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
-    budget = FrontmatterBudget()
+    budget = SkillPassBudget()
     try:
         with open_skills_root(skills_root) as root_fd:
             usage = load_skill_usage(root_fd)
@@ -459,7 +463,7 @@ def _require_writable(
 ) -> tuple[SkillFile, SkillFile | None]:
     """Return the skill's SKILL.md and the current target, which must be the version the write is based on."""
     usage = load_skill_usage(root_fd).get(name, SkillUsage())
-    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage, budget=FrontmatterBudget())
+    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage, budget=SkillPassBudget())
     if markdown is None:
         msg = f"Skill {name!r} has no SKILL.md."
         raise SkillEditError(msg)
@@ -469,7 +473,7 @@ def _require_writable(
             "your reply instead of editing it."
         )
         raise SkillEditError(msg)
-    current = _read_skill_file(skill_fd, name, relative_path, usage, budget=FrontmatterBudget())
+    current = _read_skill_file(skill_fd, name, relative_path, usage, budget=SkillPassBudget())
     if current is not None and current.digest != expected_digest:
         loader = (
             "get_skill_instructions" if relative_path == SKILL_FILENAME else "get_skill_reference or get_skill_script"
@@ -525,19 +529,17 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     # Only skills that loading reads can be learned or used, and reading no more bounds what the pass parses.
     loaded = list(workspace_skill_budget(skills_root).prompt_bytes) if archive_after_days > 0 else []
     with open_skills_root(skills_root) as root_fd:
-        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now)
+        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now) if loaded else []
         forget_missing_skill_usage(root_fd)
     return archived
 
 
 def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: int, now: datetime) -> list[str]:
-    if archive_after_days <= 0:
-        return []
     archived: list[str] = []
     first_seen: list[str] = []
     usage = load_skill_usage(root_fd)
     # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
-    budget = FrontmatterBudget()
+    budget = SkillPassBudget()
     for name in loaded:
         try:
             with open_directory_within_root(root_fd, name) as skill_fd:
