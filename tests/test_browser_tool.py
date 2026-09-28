@@ -1897,6 +1897,46 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+async def test_browser_launch_gives_chromium_a_temp_dir_its_singleton_socket_fits_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+) -> None:
+    """Chromium's singleton socket path must fit the 107-byte Unix socket limit."""
+    long_tmpdir = "/state/workers/v1_default_user_agent_@someone_example.org_mind-0123456789abcdef/cache/tmp"
+    monkeypatch.setenv("TMPDIR", long_tmpdir)
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    if managed:
+        browser.bind_worker_display(":99", tmp_path / "workspace")
+    launch, _ = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+
+    await browser._ensure_profile("mindroom")
+
+    assert launch["env"]["TMPDIR"] == "/tmp"  # noqa: S108
+    assert os.environ["TMPDIR"] == long_tmpdir
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_browser_launch_keeps_a_temp_dir_that_already_fits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short inherited TMPDIR is left to Chromium as it is."""
+    monkeypatch.setenv("TMPDIR", "/var/tmp")  # noqa: S108
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    launch, _ = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+
+    await browser._ensure_profile("mindroom")
+
+    assert "env" not in launch
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
 async def test_worker_browser_sandbox_failure_does_not_retry_without_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
