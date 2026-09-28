@@ -988,3 +988,68 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
         )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_precise", "expected_default"),
+    [
+        (
+            "export TOKEN=abc; rm -rf ~/important",
+            f"export TOKEN={REDACTED}; rm -rf ~/important",
+            f"export TOKEN={REDACTED}",
+        ),
+        ("TOKEN=abc rm -rf ~", f"TOKEN={REDACTED} rm -rf ~", f"TOKEN={REDACTED}"),
+        ("TOKEN=abc|sh", f"TOKEN={REDACTED}|sh", f"TOKEN={REDACTED}"),
+        ("TOKEN=abc`rm -rf ~`", f"TOKEN={REDACTED}`rm -rf ~`", f"TOKEN={REDACTED}"),
+        ("rm -rf ~/important # 'token:' ", "rm -rf ~/important # 'token:' ", REDACTION_FAILED),
+        ("echo 'token: '; rm -rf ~", "echo 'token: '; rm -rf ~", REDACTION_FAILED),
+        ('echo "token: "; rm -rf ~; echo "x"', 'echo "token: "; rm -rf ~; echo "x"', f'echo "token: "{REDACTED}"x"'),
+        (
+            "export Authorization=Token; rm -rf ~",
+            f"export Authorization={REDACTED}; rm -rf ~",
+            f"export Authorization={REDACTED}",
+        ),
+        (
+            "Authorization: Token abc123; rm -rf ~",
+            f"Authorization: Token {REDACTED}; rm -rf ~",
+            f"Authorization: {REDACTED}",
+        ),
+    ],
+)
+def test_precise_assignment_redaction_keeps_text_after_the_secret_visible(
+    value: str,
+    expected_precise: str,
+    expected_default: str,
+) -> None:
+    """Approval previews must show commands that follow a secret; default redaction stays unchanged."""
+    assert redact_sensitive_text(value, precise_assignments=True) == expected_precise
+    assert redact_sensitive_text(value) == expected_default
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("password=\n  hunter2\nmode=safe", f"password=\n  {REDACTED}\nmode=safe"),
+        ('config = {"api_key":\n    "sk-live"}\nprint(1)', f'config = {{"api_key":\n    "{REDACTED}"}}\nprint(1)'),
+        (r'{"password": "hun\"ter2", "mode": "safe"}', f'{{"password": "{REDACTED}", "mode": "safe"}}'),
+        ("Authorization: Basic dXNlcjpwYXNz", f"Authorization: Basic {REDACTED}"),
+        ("Authorization: Bearer abc.def", f"Authorization: Bearer {REDACTED}"),
+        ("Authorization: Basic", "Authorization: Basic"),
+    ],
+)
+def test_precise_assignment_redaction_still_hides_the_secret_without_failing(value: str, expected: str) -> None:
+    """Values the default redactor refuses or keeps whole are reduced to their secret token instead."""
+    assert redact_sensitive_text(value, precise_assignments=True) == expected
+
+
+def test_precise_assignment_redaction_applies_to_nested_data() -> None:
+    """Structured redaction passes the precise mode to every nested string."""
+    redacted = redact_sensitive_data(
+        {"command": "export TOKEN=abc; rm -rf ~", "steps": [{"run": "password=hunter2 && make deploy"}]},
+        precise_assignments=True,
+    )
+
+    assert redacted == {
+        "command": f"export TOKEN={REDACTED}; rm -rf ~",
+        "steps": [{"run": f"password={REDACTED} && make deploy"}],
+    }

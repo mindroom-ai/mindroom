@@ -59,6 +59,13 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# Precise redaction ends a value at whitespace and shell syntax so text after the secret stays visible;
+# escaped characters stay inside the token so an escaped quote cannot expose the rest of a secret.
+_PRECISE_VALUE_TOKEN = r"(?:\\.|[^\s,&)\]}\"';|<>`(\\])+"
+_PRECISE_VALUE_TOKEN_PATTERN = re.compile(_PRECISE_VALUE_TOKEN)
+_NEXT_LINE_INDENT_PATTERN = re.compile(r"(?:\r\n|\r|\n)[^\S\r\n]*")
+_AUTHORIZATION_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+_AUTHORIZATION_CREDENTIAL_PATTERN = re.compile(rf"[^\S\r\n]+(?P<credential>{_PRECISE_VALUE_TOKEN})")
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -114,6 +121,7 @@ _SECRET_KEYS: frozenset[str] = frozenset(
         "x_token",
     },
 )
+_AUTHORIZATION_KEYS: frozenset[str] = frozenset({"authorization", "proxy_authorization"})
 _OAUTH_QUERY_KEYS: frozenset[str] = frozenset({"code", "state"})
 _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
     {
@@ -367,6 +375,29 @@ def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int]
     return value_start + 1, value_end, value_end + 1
 
 
+def _precise_assignment_value_span(value: str, value_start: int, *, authorization: bool) -> tuple[int, int] | None:
+    """Return the one secret token after an assignment prefix, without ever failing.
+
+    Quotes are ignored because a reviewer-facing preview cannot know whether one opens
+    or closes a string, and a value that starts on the next line is that line's first token.
+    Authorization values keep their scheme word visible and lose only the credential.
+    """
+    next_line = _NEXT_LINE_INDENT_PATTERN.match(value, value_start)
+    if next_line is not None:
+        value_start = next_line.end()
+    if value.startswith(("'", '"'), value_start):
+        value_start += 1
+    token = _PRECISE_VALUE_TOKEN_PATTERN.match(value, value_start)
+    if token is None:
+        return None
+    if authorization and _AUTHORIZATION_SCHEME_PATTERN.fullmatch(token.group()):
+        credential = _AUTHORIZATION_CREDENTIAL_PATTERN.match(value, token.end())
+        if credential is None:
+            return None if token.group().lower() in {"basic", "bearer"} else token.span()
+        return None if credential.group("credential") == REDACTED else credential.span("credential")
+    return token.span()
+
+
 def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:
     if not spans:
         return value
@@ -379,14 +410,29 @@ def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> s
     return "".join(parts)
 
 
-def _redact_secret_assignments(value: str) -> str:
-    """Redact shallow key assignments with one forward-only scan."""
+def _redact_secret_assignments(value: str, *, precise: bool) -> str:
+    """Redact shallow key assignments with one forward-only scan.
+
+    Precise redaction replaces only one secret token per assignment and never fails,
+    so a reviewer still sees any command text that follows the secret.
+    """
     spans: list[tuple[int, int]] = []
     search_start = 0
     while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix_match.end()
         classification = _classify_key(prefix_match.group("key"))
         if not classification.is_secret:
+            continue
+
+        if precise:
+            precise_span = _precise_assignment_value_span(
+                value,
+                prefix_match.end(),
+                authorization=classification.normalized in _AUTHORIZATION_KEYS,
+            )
+            if precise_span is not None:
+                spans.append(precise_span)
+                search_start = precise_span[1]
             continue
 
         value_span = _assignment_value_span(value, prefix_match.end())
@@ -442,7 +488,7 @@ def _redact_url(value: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc, query=query))
 
 
-def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
+def _redact_query_fragment(value: str, *, max_length: int | None, precise_assignments: bool) -> str:
     query_items: list[tuple[str, str]] = []
     changed = False
     for key, item in parse_qsl(value, keep_blank_values=True):
@@ -452,7 +498,7 @@ def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
         else:
             query_items.append((key, item))
     if not changed:
-        return redact_sensitive_text(value, max_length=max_length)
+        return redact_sensitive_text(value, max_length=max_length, precise_assignments=precise_assignments)
     return _truncate_text(urlencode(query_items, doseq=True, safe="*"), max_length)
 
 
@@ -485,7 +531,7 @@ def _redact_url_match(match: re.Match[str]) -> str:
     return match.group("prefix") + _redact_url(url) + trailing_backslashes
 
 
-def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
+def _redact_sensitive_text(value: str, *, max_length: int | None, precise_assignments: bool) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
     has_url = "://" in bounded_value
@@ -503,22 +549,30 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     if has_token:
         redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
     if has_assignment:
-        redacted = _redact_secret_assignments(redacted)
+        redacted = _redact_secret_assignments(redacted, precise=precise_assignments)
     return _truncate_text(redacted, max_length)
 
 
-def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) -> str:
+def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, precise_assignments: bool) -> str:
     try:
-        return _redact_sensitive_text(value, max_length=max_length)
+        return _redact_sensitive_text(value, max_length=max_length, precise_assignments=precise_assignments)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
 
 
-def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
-    """Redact common credential patterns without letting redaction break its caller."""
+def redact_sensitive_text(value: str, *, max_length: int | None = None, precise_assignments: bool = False) -> str:
+    """Redact common credential patterns without letting redaction break its caller.
+
+    ``precise_assignments`` redacts only the secret token of each assignment, for
+    previews a reviewer must be able to read in full, such as tool approval cards.
+    """
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
-    return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+    return _redact_sensitive_text_fail_closed(
+        value,
+        max_length=max_length,
+        precise_assignments=precise_assignments,
+    )
 
 
 def _normalized_structured_value(value: object) -> object:
@@ -547,6 +601,7 @@ def _redact_mapping(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    precise_assignments: bool,
     ancestor_ids: frozenset[int],
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
@@ -588,6 +643,7 @@ def _redact_mapping(
             _depth=depth + 1,
             _force_redact=force_redact or redact_key,
             _ancestor_ids=ancestor_ids,
+            precise_assignments=precise_assignments,
         )
     if mapping_is_truncated:
         redacted["__truncated__"] = f"{len(value) - len(items)} more items"
@@ -603,6 +659,7 @@ def _redact_sequence(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    precise_assignments: bool,
     ancestor_ids: frozenset[int],
 ) -> list[_RedactedValue]:
     items = list(value) if max_collection_items is None else list(islice(value, max_collection_items))
@@ -616,6 +673,7 @@ def _redact_sequence(
             _depth=depth + 1,
             _force_redact=force_redact,
             _ancestor_ids=ancestor_ids,
+            precise_assignments=precise_assignments,
         )
         for item in items
     ]
@@ -630,6 +688,7 @@ def _redact_scalar_value(
     parent_key: str | None,
     max_string_length: int | None,
     force_redact: bool,
+    precise_assignments: bool,
 ) -> _RedactedValue:
     if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
         redacted: _RedactedValue = REDACTED
@@ -639,15 +698,27 @@ def _redact_scalar_value(
         redacted = str(value)
     elif isinstance(value, str):
         if _is_query_container(parent_key):
-            redacted = _redact_query_fragment(value, max_length=max_string_length)
+            redacted = _redact_query_fragment(
+                value,
+                max_length=max_string_length,
+                precise_assignments=precise_assignments,
+            )
         else:
-            redacted = _redact_sensitive_text_fail_closed(value, max_length=max_string_length)
+            redacted = _redact_sensitive_text_fail_closed(
+                value,
+                max_length=max_string_length,
+                precise_assignments=precise_assignments,
+            )
     elif isinstance(value, float):
         redacted = value if math.isfinite(value) else None
     elif value is None or isinstance(value, bool | int):
         redacted = value
     else:
-        redacted = _redact_sensitive_text_fail_closed(_safe_repr(value), max_length=max_string_length)
+        redacted = _redact_sensitive_text_fail_closed(
+            _safe_repr(value),
+            max_length=max_string_length,
+            precise_assignments=precise_assignments,
+        )
     return redacted
 
 
@@ -661,6 +732,7 @@ def _redact_sensitive_data(
     _depth: int = 0,
     _force_redact: bool = False,
     _ancestor_ids: frozenset[int] = frozenset(),
+    precise_assignments: bool = False,
 ) -> _RedactedValue:
     if max_depth is not None and _depth >= max_depth:
         return _TRUNCATED
@@ -679,6 +751,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
+            precise_assignments=precise_assignments,
         )
     value_id = id(value)
     if value_id in _ancestor_ids:
@@ -695,6 +768,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
+            precise_assignments=precise_assignments,
         )
     elif isinstance(value, list | tuple | set | frozenset):
         redacted = _redact_sequence(
@@ -706,6 +780,7 @@ def _redact_sensitive_data(
             max_depth=max_depth,
             force_redact=_force_redact,
             ancestor_ids=_ancestor_ids | {value_id},
+            precise_assignments=precise_assignments,
         )
     else:
         redacted = _redact_scalar_value(
@@ -713,6 +788,7 @@ def _redact_sensitive_data(
             parent_key=_parent_key,
             max_string_length=max_string_length,
             force_redact=_force_redact,
+            precise_assignments=precise_assignments,
         )
     return redacted
 
@@ -723,8 +799,12 @@ def redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
+    precise_assignments: bool = False,
 ) -> _RedactedValue:
-    """Redact structured data without letting redaction break its caller."""
+    """Redact structured data without letting redaction break its caller.
+
+    ``precise_assignments`` has the same meaning as in ``redact_sensitive_text``.
+    """
     collection_limit = None if max_collection_items is None else max(max_collection_items, 0)
     depth_limit = _MAX_DEPTH if max_depth is None else min(max(max_depth, 0), _MAX_DEPTH)
     try:
@@ -733,6 +813,7 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=collection_limit,
             max_depth=depth_limit,
+            precise_assignments=precise_assignments,
         )
     except Exception:
         if isinstance(value, Mapping):
