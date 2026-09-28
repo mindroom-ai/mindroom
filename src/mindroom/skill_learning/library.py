@@ -33,7 +33,8 @@ from mindroom.tool_system.workspace_skills import (
     MAX_WORKSPACE_SKILLS,
     MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
-    BudgetOverrun,
+    BudgetStop,
+    ProposedSkill,
     SkillFrontmatterTooLargeError,
     SkillPassBudget,
     SkillUsage,
@@ -49,12 +50,9 @@ from mindroom.tool_system.workspace_skills import (
     parse_skill_markdown,
     parse_skill_metadata,
     read_text_at,
-    skill_parse_charge,
-    skill_prompt_bytes,
     support_entry_count,
     update_skill_usages,
-    workspace_skill,
-    workspace_skill_budget,
+    workspace_skill_load,
     workspace_skill_name,
 )
 
@@ -79,22 +77,18 @@ class SkillEditError(ValueError):
     """A refused skill edit, worded for the model that asked for it."""
 
 
-_OVERRUN_REFUSALS: dict[BudgetOverrun, str] = {
-    "stopped": (
-        "The workspace's skills are already past a skill loading budget, so loading skips some of them; shrink, merge, "
-        "or remove skills before adding to them."
-    ),
+_LOADING_STOPS: dict[BudgetStop, str] = {
     "prompt": (
-        f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
-        "budget, and skill loading would skip some; shorten or merge skills instead."
+        f"After this change, skill loading would stop at the workspace's {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
+        "budget and skip skills; shorten skills instead."
     ),
     "read": (
-        f"This change would put the workspace's SKILL.md files over the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB "
-        "skill loading reads, and it would skip some; shorten or merge skills instead."
+        f"After this change, skill loading would stop at the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB of SKILL.md "
+        "files it reads and skip skills; shorten skills instead."
     ),
     "parse": (
-        f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
-        "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
+        f"After this change, skill loading would stop at the workspace's {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} KiB "
+        "frontmatter parse budget and skip skills; move detail from frontmatter into skill bodies."
     ),
 }
 
@@ -348,7 +342,7 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
                 "improve or merge an existing skill instead."
             )
             raise SkillEditError(msg)
-        _require_workspace_budgets(skills_root, name, content, skill_fd=None)
+        _require_loadable(skills_root, name, content, skill_fd=None)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
@@ -359,7 +353,7 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         )
 
 
-def _require_workspace_budgets(
+def _require_loadable(
     skills_root: Path,
     name: str,
     markdown: str,
@@ -367,7 +361,11 @@ def _require_workspace_budgets(
     skill_fd: int | None,
     added: tuple[str, str] | None = None,
 ) -> None:
-    """Refuse a change after which skill loading would stop at a workspace budget and skip skills."""
+    """Refuse a change after which skill loading would skip a skill it loads now, or a SKILL.md the change writes.
+
+    Loading itself decides, reading the changed directory as the change would leave it, so the check counts exactly
+    what loading counts, in a workspace already past a budget too.
+    """
     listings = {
         kind: list_support_files(skill_fd, skills_root / name, kind) if skill_fd is not None else []
         for kind in ("scripts", "references")
@@ -375,26 +373,17 @@ def _require_workspace_budgets(
     if added is not None:
         kind, filename = added
         listings[kind] = [*listings[kind], filename]
-    try:
-        changed = workspace_skill(
-            markdown,
-            skills_root,
-            name,
-            scripts=listings["scripts"],
-            references=listings["references"],
-        )
-    except (TypeError, ValueError):
-        # A support file can be added to a skill whose SKILL.md loading skips, and loading still charges its parse.
-        changed = None
-    # Loading charges every directory it measures, refused ones too, so the check counts what loading counts.
-    overrun = workspace_skill_budget(skills_root).overrun_after(
-        name,
-        prompt_bytes=skill_prompt_bytes(changed) if changed is not None else None,
-        read=len(markdown.encode()),
-        parse=skill_parse_charge(markdown, changed),
-    )
-    if overrun is not None:
-        raise SkillEditError(_OVERRUN_REFUSALS[overrun])
+    required = set(workspace_skill_load(skills_root).skills)
+    if added is None:
+        required.add(name)
+    proposed = ProposedSkill(name, markdown, scripts=listings["scripts"], references=listings["references"])
+    after = workspace_skill_load(skills_root, proposed)
+    if required <= set(after.skills):
+        return
+    if after.stop is None:
+        msg = f"Skill loading would not load {name!r} after this change."
+        raise SkillEditError(msg)
+    raise SkillEditError(_LOADING_STOPS[after.stop])
 
 
 def write_skill_file(
@@ -419,7 +408,7 @@ def write_skill_file(
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False, learner=learner)
-            _require_workspace_budgets(skills_root, name, content, skill_fd=skill_fd)
+            _require_loadable(skills_root, name, content, skill_fd=skill_fd)
         elif current is None:
             if support_entry_count(skill_fd, directory) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
                 msg = (
@@ -427,7 +416,7 @@ def write_skill_file(
                     "offers; extend an existing file instead."
                 )
                 raise SkillEditError(msg)
-            _require_workspace_budgets(
+            _require_loadable(
                 skills_root,
                 name,
                 markdown.content,
@@ -544,7 +533,7 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     if not skills_root.is_dir():
         return []
     # Only skills that loading reads can be learned or used, and reading no more bounds what the pass parses.
-    loaded = list(workspace_skill_budget(skills_root).prompt_bytes) if archive_after_days > 0 else []
+    loaded = list(workspace_skill_load(skills_root).skills) if archive_after_days > 0 else []
     with open_skills_root(skills_root) as root_fd:
         archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now) if loaded else []
         forget_missing_skill_usage(root_fd)

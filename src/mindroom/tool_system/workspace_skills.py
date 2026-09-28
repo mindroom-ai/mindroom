@@ -15,7 +15,7 @@ import stat
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -310,11 +310,12 @@ def _each_skill_directory[Result](
     read: Callable[[int, str], Result | None],
     *,
     limit: int | None = None,
+    stand_in: tuple[str, Callable[[], Result | None]] | None = None,
 ) -> Iterator[Result]:
     """Read visible workspace skill directories as the caller consumes them, skipping unreadable entries.
 
     Worker code can plant entries in a shared workspace, so one never hides the others or fails the caller, and an
-    unavailable root yields nothing.
+    unavailable root yields nothing. ``stand_in`` reads one directory, present or not, in place of what is on disk.
     """
     try:
         with open_skills_root(skills_root) as root_fd:
@@ -323,6 +324,8 @@ def _each_skill_directory[Result](
                 # LocalSkills loaded such a file as the only skill of the root, hiding every skill directory beside it.
                 logger.warning("Ignoring SKILL.md directly in the workspace skills directory", path=str(skills_root))
             directories = list_entries(root_fd, directories=True)
+            if stand_in is not None and stand_in[0] not in directories:
+                directories = sorted([*directories, stand_in[0]])
             if limit is not None and len(directories) > limit:
                 logger.warning(
                     "Loading only the first workspace skills",
@@ -333,8 +336,7 @@ def _each_skill_directory[Result](
                 directories = directories[:limit]
             for directory in directories:
                 try:
-                    with open_directory_within_root(root_fd, directory) as skill_fd:
-                        result = read(skill_fd, directory)
+                    result = _read_skill_directory(root_fd, directory, read, stand_in)
                 except (OSError, ValueError, TypeError) as exc:
                     logger.warning(
                         "Skipping unreadable workspace skill",
@@ -348,6 +350,18 @@ def _each_skill_directory[Result](
         return
     except OSError as exc:
         logger.warning("Workspace skill root is unavailable", path=str(skills_root), error=str(exc))
+
+
+def _read_skill_directory[Result](
+    root_fd: int,
+    directory: str,
+    read: Callable[[int, str], Result | None],
+    stand_in: tuple[str, Callable[[], Result | None]] | None,
+) -> Result | None:
+    if stand_in is not None and stand_in[0] == directory:
+        return stand_in[1]()
+    with open_directory_within_root(root_fd, directory) as skill_fd:
+        return read(skill_fd, directory)
 
 
 # AGNO_COMPAT: LocalSkills reads skill files by pathname and follows links.
@@ -379,91 +393,119 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
 
     Every loaded skill reaches the system prompt, so the skills share a count cap and a total budget.
     """
-    skills: list[Skill] = []
-    loaded_bytes = 0
-    for _directory, skill, prompt_bytes in _measured_skills(skills_root, _WorkspaceSkillBudget()):
-        loaded_bytes += prompt_bytes
-        if loaded_bytes > MAX_WORKSPACE_SKILLS_BYTES:
-            logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
-            break
-        skills.append(skill)
-    return skills
+    return list(workspace_skill_load(skills_root).skills.values())
+
+
+BudgetStop = Literal["prompt", "read", "parse"]
 
 
 @dataclass(frozen=True)
 class _BudgetSpent:
     """A pass stopped because one of its budgets ran out."""
 
+    stop: BudgetStop
     warning: str
 
 
-_FRONTMATTER_BUDGET_SPENT = _BudgetSpent("Workspace skill frontmatter exceeds its parse budget; skipping the rest")
-_READ_BUDGET_SPENT = _BudgetSpent("Workspace skill files exceed their read budget; skipping the rest")
+_PROMPT_BUDGET_SPENT = _BudgetSpent("prompt", "Workspace skills exceed their budget; skipping the rest")
+_FRONTMATTER_BUDGET_SPENT = _BudgetSpent(
+    "parse",
+    "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
+)
+_READ_BUDGET_SPENT = _BudgetSpent("read", "Workspace skill files exceed their read budget; skipping the rest")
 
 
-def _measured_skills(skills_root: Path, record: _WorkspaceSkillBudget) -> Iterator[tuple[str, Skill, int]]:
-    """Yield the skills loading reads with their prompt bytes, measured inside the guard that skips one skill.
+@dataclass(frozen=True)
+class _WorkspaceSkillLoad:
+    """The skills one loading pass loads, by directory, and the budget that stopped it before the rest, if any."""
 
-    Frontmatter is parsed only while the workspace's frontmatter budget lasts, and each parse is charged before it runs,
-    so planted skill files, refused or not, cannot make the primary parse more than that per load. ``record`` receives
-    what the pass spent on each directory it measured, and whether a budget stopped it before the rest.
+    skills: dict[str, Skill]
+    stop: BudgetStop | None
+
+
+@dataclass(frozen=True)
+class ProposedSkill:
+    """One skill directory as a change would leave it, which a loading pass can read before the change is written."""
+
+    directory: str
+    markdown: str
+    scripts: list[str]
+    references: list[str]
+
+
+def workspace_skill_load(skills_root: Path, proposed: ProposedSkill | None = None) -> _WorkspaceSkillLoad:
+    """Load one workspace's skills within its count, prompt, read, and parse budgets, stopping at the first one spent.
+
+    Frontmatter is parsed only while the pass's parse budget lasts, and each parse is charged before it runs, so planted
+    skill files, refused or not, cannot make the primary parse more than that per load. With ``proposed``, the pass
+    reads that directory as a change would leave it, so a check sees what loading would do after the change; such a
+    pass logs no budget warning, since nothing it describes has happened.
     """
     budget = SkillPassBudget()
 
-    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | _BudgetSpent | None:
-        unread = budget.read_remaining
-        result = _charged_skill(skill_fd, skills_root, directory, budget, record)
-        # A directory the pass stops at was not measured, so an edit of it cannot count on loading reaching it.
-        if not isinstance(result, _BudgetSpent):
-            record.read_charges[directory] = unread - budget.read_remaining
-        return result
+    def measured(skill_fd: int, directory: str) -> tuple[str, Skill] | _BudgetSpent | None:
+        skill_path = skills_root / directory
+        content = _read_skill_markdown(skill_fd, skill_path / SKILL_FILENAME, budget)
+        return _charged_skill(budget, skills_root, directory, content, lambda: _support_listings(skill_fd, skill_path))
 
-    for result in _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS):
+    stand_in = None
+    if proposed is not None:
+        stand_in = (
+            proposed.directory,
+            lambda: _charged_skill(
+                budget,
+                skills_root,
+                proposed.directory,
+                _charged_text(budget, proposed.markdown.encode()),
+                lambda: (proposed.scripts, proposed.references),
+            ),
+        )
+    skills: dict[str, Skill] = {}
+    prompt_bytes = 0
+    for result in _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS, stand_in=stand_in):
         if isinstance(result, _BudgetSpent):
-            logger.warning(result.warning, path=str(skills_root))
-            record.stopped = True
-            return
-        yield result
+            spent = result
+        else:
+            directory, skill = result
+            prompt_bytes += _skill_prompt_bytes(skill)
+            if prompt_bytes <= MAX_WORKSPACE_SKILLS_BYTES:
+                skills[directory] = skill
+                continue
+            spent = _PROMPT_BUDGET_SPENT
+        if proposed is None:
+            logger.warning(spent.warning, path=str(skills_root))
+        return _WorkspaceSkillLoad(skills, spent.stop)
+    return _WorkspaceSkillLoad(skills, None)
 
 
 def _charged_skill(
-    skill_fd: int,
+    budget: SkillPassBudget,
     skills_root: Path,
     directory: str,
-    budget: SkillPassBudget,
-    record: _WorkspaceSkillBudget,
-) -> tuple[str, Skill, int] | _BudgetSpent | None:
-    """Read and parse one skill directory within the pass's budgets, recording what its frontmatter cost."""
-    path = skills_root / directory / SKILL_FILENAME
-    content = _read_skill_markdown(skill_fd, path, budget)
+    content: str | None,
+    listings: Callable[[], tuple[list[str], list[str]]],
+) -> tuple[str, Skill] | _BudgetSpent | None:
+    """Build the skill loading reads from one SKILL.md it read, parsing only within the pass's budget."""
     if budget.read_spent:
         return _READ_BUDGET_SPENT
-    if content is None:
-        return None
-    size = _checked_frontmatter_bytes(content, path)
-    if size is None:
+    size = None if content is None else _checked_frontmatter_bytes(content, skills_root / directory / SKILL_FILENAME)
+    if content is None or size is None:
         return None
     # Spent even when the parse raises or skill loading refuses the skill it parsed.
     if not budget.spend_parse(size):
         return _FRONTMATTER_BUDGET_SPENT
-    record.parse_charges[directory] = size
-    skill = _read_skill(skill_fd, content, skills_root, directory)
+    scripts, references = listings()
+    skill = _workspace_skill(content, skills_root, directory, scripts=scripts, references=references)
+    if skill is None:
+        return None
     # Only a loaded skill's JSON5 metadata is parsed later, so only it adds that weight.
-    surcharge = metadata_surcharge(skill.metadata) if skill is not None else 0
-    if not budget.spend_parse(surcharge):
+    if not budget.spend_parse(metadata_surcharge(skill.metadata)):
         return _FRONTMATTER_BUDGET_SPENT
-    record.parse_charges[directory] += surcharge
-    return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
+    return directory, skill
 
 
-def _read_skill(skill_fd: int, content: str, skills_root: Path, directory: str) -> Skill | None:
-    return workspace_skill(
-        content,
-        skills_root,
-        directory,
-        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
-        references=list_support_files(skill_fd, skills_root / directory, "references"),
-    )
+def _support_listings(skill_fd: int, skill_path: Path) -> tuple[list[str], list[str]]:
+    return list_support_files(skill_fd, skill_path, "scripts"), list_support_files(skill_fd, skill_path, "references")
 
 
 @dataclass
@@ -493,8 +535,7 @@ class SkillPassBudget:
             data = read_regular_file_within_root(skill_fd, SKILL_FILENAME, max_bytes=MAX_SKILL_FILE_BYTES)
         except FileNotFoundError:
             return None
-        self.read_remaining -= len(data)
-        return None if self.read_spent else data.decode("utf-8")
+        return _charged_text(self, data)
 
     def spend_parse(self, cost: int) -> bool:
         """Charge a parse of ``cost`` when it fits, and return whether it did."""
@@ -502,6 +543,12 @@ class SkillPassBudget:
             return False
         self.parse_remaining -= cost
         return True
+
+
+def _charged_text(budget: SkillPassBudget, data: bytes) -> str | None:
+    """Charge one SKILL.md's bytes to the pass's read limit, and return its text while the pass is within it."""
+    budget.read_remaining -= len(data)
+    return None if budget.read_spent else data.decode("utf-8")
 
 
 def metadata_surcharge(metadata: object) -> int:
@@ -513,11 +560,6 @@ def frontmatter_charge(content: str) -> int:
     """Return what parsing a SKILL.md charges its pass: its frontmatter, or nothing over the cap that refuses it unparsed."""
     size = _frontmatter_bytes(content)
     return 0 if size > _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES else size
-
-
-def skill_parse_charge(content: str, skill: Skill | None) -> int:
-    """Return what skill loading charges one SKILL.md, whose skill it loads, or refuses when ``skill`` is None."""
-    return frontmatter_charge(content) + (metadata_surcharge(skill.metadata) if skill is not None else 0)
 
 
 def _frontmatter_bytes(content: str) -> int:
@@ -534,58 +576,10 @@ def _checked_frontmatter_bytes(content: str, path: Path) -> int | None:
     return size
 
 
-def skill_prompt_bytes(skill: Skill) -> int:
+def _skill_prompt_bytes(skill: Skill) -> int:
     """Return one skill's share of the workspace prompt budget: loaded skill content, not only its prompt listing."""
     prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
     return len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
-
-
-BudgetOverrun = Literal["stopped", "prompt", "read", "parse"]
-
-
-@dataclass
-class _WorkspaceSkillBudget:
-    """What one loading pass spent on a workspace, directory by directory.
-
-    ``prompt_bytes`` holds each loaded skill's share of the prompt budget, ``read_charges`` and ``parse_charges`` what
-    the pass read and parsed of every directory it measured, refused ones included, and ``stopped`` whether a read or
-    parse budget ran out before the pass measured the rest.
-    """
-
-    prompt_bytes: dict[str, int] = field(default_factory=dict)
-    read_charges: dict[str, int] = field(default_factory=dict)
-    parse_charges: dict[str, int] = field(default_factory=dict)
-    stopped: bool = False
-
-    def overrun_after(self, directory: str, *, prompt_bytes: int | None, read: int, parse: int) -> BudgetOverrun | None:
-        """Return the budget loading would stop at once ``directory`` costs this, or None when nothing it loads is lost.
-
-        ``prompt_bytes`` is None for a skill loading refuses. In a workspace already past a read or parse budget,
-        loading never reaches the directories after its stop, so only a measured directory may change, and only
-        without costing more.
-        """
-        others = [name for name in self.read_charges if name != directory]
-        if self.stopped and (
-            directory not in self.read_charges
-            or read > self.read_charges[directory]
-            or parse > self.parse_charges.get(directory, 0)
-        ):
-            return "stopped"
-        loaded_bytes = sum(size for name, size in self.prompt_bytes.items() if name != directory)
-        if prompt_bytes is not None and loaded_bytes + prompt_bytes > MAX_WORKSPACE_SKILLS_BYTES:
-            return "prompt"
-        if sum(self.read_charges[name] for name in others) + read > MAX_WORKSPACE_SKILL_READ_BYTES:
-            return "read"
-        if sum(self.parse_charges.get(name, 0) for name in others) + parse > MAX_WORKSPACE_FRONTMATTER_BYTES:
-            return "parse"
-        return None
-
-
-def workspace_skill_budget(skills_root: Path) -> _WorkspaceSkillBudget:
-    """Return what a loading pass spends on this workspace, as skill loading measures it."""
-    record = _WorkspaceSkillBudget()
-    record.prompt_bytes = {directory: size for directory, _skill, size in _measured_skills(skills_root, record)}
-    return record
 
 
 def support_entry_count(skill_fd: int, directory: str) -> int:
@@ -638,7 +632,7 @@ def _read_skill_markdown(skill_fd: int, path: Path, budget: SkillPassBudget) -> 
         return None
 
 
-def workspace_skill(
+def _workspace_skill(
     content: str,
     skills_root: Path,
     directory: str,

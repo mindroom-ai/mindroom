@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.skills.skill import Skill
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
@@ -885,13 +884,8 @@ def test_chat_finds_only_skill_directories_loading_reads(tmp_path: Path) -> None
 def test_json5_metadata_counts_at_its_parse_weight() -> None:
     """JSON5 parses slower per byte than YAML, so a skill's JSON5 metadata counts more toward the parse budget."""
     metadata = "{openclaw: {requires: {bins: [git]}}}"
-    skill = Skill(name="s", description="d", instructions="", source_path="s", metadata=metadata)
-    plain = Skill(name="s", description="d", instructions="", source_path="s", metadata={"a": 1})
-    content = f"---\nname: s\ndescription: d\nmetadata: {metadata!r}\n---\nbody\n"
-    size = len(content.split("---\n")[1].rstrip("\n").encode())
-    assert workspace_skills_module.skill_parse_charge(content, plain) == size
-    assert workspace_skills_module.skill_parse_charge(content, skill) == size + 2 * len(metadata)
-    assert workspace_skills_module.skill_parse_charge(content, None) == size
+    assert workspace_skills_module.metadata_surcharge(metadata) == 2 * len(metadata)
+    assert workspace_skills_module.metadata_surcharge({"a": 1}) == 0
 
 
 def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:

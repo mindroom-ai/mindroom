@@ -23,6 +23,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.skills.skill import Skill
 from agno.tools.function import Function
 from anthropic import AsyncAnthropic
 from google import genai
@@ -2758,30 +2759,37 @@ def test_skill_manage_refuses_frontmatter_past_its_parse_caps(tmp_path: Path) ->
     assert not (root / "deploy-checks").exists()
 
 
-def test_skill_manage_counts_the_frontmatter_of_refused_skills(tmp_path: Path) -> None:
+@pytest.mark.parametrize("refusal", ["a name too long", "frontmatter that is a list"])
+def test_skill_manage_counts_the_frontmatter_of_refused_skills(tmp_path: Path, refusal: str) -> None:
     """Loading charges refused skills' frontmatter too, so a change it would skip is refused instead of saved."""
     root = tmp_path / "skills"
     per_skill = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 256
     for index in range(workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill):
         name = f"a-{index:02d}"
-        _write_skill(root, name, f"---\nname: {'long-' * 20}{index}\ndescription: d\nnote: {'n' * per_skill}\n---\n")
+        refused = (
+            f"name: {'long-' * 20}{index}\ndescription: d\nnote: {'n' * per_skill}"
+            if refusal == "a name too long"
+            else f"- {index}\n- {'n' * per_skill}"
+        )
+        _write_skill(root, name, f"---\n{refused}\n---\n")
     near_cap = LEARNED.replace("description:", f"note: {'n' * per_skill}\ndescription:")
     with pytest.raises(library.SkillEditError, match="parse budget"):
         library.create_skill(root, "deploy-checks", near_cap, reserved_names=frozenset(), learner=True)
     assert not (root / "deploy-checks").exists()
 
 
-def test_skill_manage_changes_nothing_loading_skips_in_a_workspace_already_past_a_budget(tmp_path: Path) -> None:
-    """Loading stops at a budget written past by hand, so only a skill it reaches may change, and only without growing."""
+def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_parse_budget(tmp_path: Path) -> None:
+    """Loading stops at a budget hand edits passed, so a change is refused only when loading would skip one more skill."""
     root = tmp_path / "skills"
     names = [f"s-{index:03d}" for index in range(130)]
     for name in names:
         # Descriptions up to 1024 characters are allowed, so ordinary hand-written skills can fill the budget.
         _write_skill(root, name, f"---\nname: {name}\ndescription: {'d' * 1000}\n---\nSteps to follow.\n")
-    loaded = [skill.name for skill in workspace_skills_module.load_workspace_skills(root)]
+    _write_skill(root, "a-broken", f"---\n- {'n' * 4000}\n---\nSteps to follow.\n")
+    loaded = set(workspace_skills_module.workspace_skill_load(root).skills)
     assert names[0] in loaded
     assert names[-1] not in loaded
-    with pytest.raises(library.SkillEditError, match="already past a skill loading budget"):
+    with pytest.raises(library.SkillEditError, match="parse budget"):
         library.create_skill(
             root,
             "zz-new",
@@ -2789,23 +2797,48 @@ def test_skill_manage_changes_nothing_loading_skips_in_a_workspace_already_past_
             reserved_names=frozenset(),
             learner=False,
         )
-    for name, change in ((names[0], "Steps to follow, carefully."), (names[-1], "Steps.")):
+    grown = f"---\nname: {names[0]}\ndescription: {'d' * 1000}\nmetadata: {{note: {'n' * 3000}}}\n---\nSteps.\n"
+    for name, content in ((names[0], grown), (names[-1], f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n")):
         current = library.read_skill_file(root, name)
         assert current is not None
-        with pytest.raises(library.SkillEditError, match="already past a skill loading budget"):
-            library.write_skill_file(
-                root,
-                name,
-                "SKILL.md",
-                current.content.replace("Steps to follow.", change),
-                expected_digest=current.digest,
-                learner=False,
-            )
+        with pytest.raises(library.SkillEditError, match="parse budget"):
+            library.write_skill_file(root, name, "SKILL.md", content, expected_digest=current.digest, learner=False)
+    for name, content in (
+        (names[0], f"---\nname: {names[0]}\ndescription: {'d' * 1000}\n---\nSteps to follow, carefully.\n"),
+        ("a-broken", "---\nname: a-broken\ndescription: Repaired\n---\nSteps.\n"),
+    ):
+        current = library.read_skill_file(root, name)
+        assert current is not None
+        library.write_skill_file(root, name, "SKILL.md", content, expected_digest=current.digest, learner=False)
+        assert (root / name / "SKILL.md").read_text() == content
+    assert loaded | {"a-broken"} <= set(workspace_skills_module.workspace_skill_load(root).skills)
+
+
+def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_prompt_budget(tmp_path: Path) -> None:
+    """A skill that loads can shrink in a workspace hand edits put past the prompt budget, and cannot grow into a cut."""
+    root = tmp_path / "skills"
+    names = [f"s-{index:02d}" for index in range(10)]
+    for name in names:
+        # The first eight large skills leave about 10 KB of the prompt budget; the last one is cut.
+        body = "x" * (50_000 if name == names[0] else 1_041_000)
+        _write_skill(root, name, f"---\nname: {name}\ndescription: d\n---\n{body}\n")
+    loaded = set(workspace_skills_module.workspace_skill_load(root).skills)
+    assert names[-2] in loaded
+    assert names[-1] not in loaded
     current = library.read_skill_file(root, names[0])
     assert current is not None
-    shrunk = current.content.replace("Steps to follow.", "Steps.")
+    with pytest.raises(library.SkillEditError, match="prompt budget"):
+        library.write_skill_file(
+            root,
+            names[0],
+            "SKILL.md",
+            current.content.replace("x" * 50_000, "x" * 90_000),
+            expected_digest=current.digest,
+            learner=False,
+        )
+    shrunk = current.content.replace("x" * 50_000, "x")
     library.write_skill_file(root, names[0], "SKILL.md", shrunk, expected_digest=current.digest, learner=False)
-    assert (root / names[0] / "SKILL.md").read_text() == shrunk
+    assert loaded <= set(workspace_skills_module.workspace_skill_load(root).skills)
 
 
 def test_skill_manage_refuses_a_change_past_the_read_budget(tmp_path: Path) -> None:
@@ -2817,7 +2850,7 @@ def test_skill_manage_refuses_a_change_past_the_read_budget(tmp_path: Path) -> N
     for index in range(16):
         _write_skill(root, f"a-{index:02d}", refused + "x" * (size - len(refused)))
     grown = LEARNED.replace("1. Run the smoke test.", "x" * 60_000)
-    with pytest.raises(library.SkillEditError, match=r"SKILL\.md files over"):
+    with pytest.raises(library.SkillEditError, match=r"SKILL\.md files it reads"):
         library.create_skill(root, "deploy-checks", grown, reserved_names=frozenset(), learner=True)
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     assert [skill.name for skill in workspace_skills_module.load_workspace_skills(root)] == ["deploy-checks"]
@@ -2934,11 +2967,12 @@ def test_ownership_reads_stay_within_the_frontmatter_budget(
         return real_json5(text)
 
     # As if loading had measured small files, which worker code then replaced.
-    measured = workspace_skills_module._WorkspaceSkillBudget(prompt_bytes=dict.fromkeys(names, 0))
+    stand_in = Skill(name="s", description="d", instructions="", source_path="s")
+    measured = workspace_skills_module._WorkspaceSkillLoad(dict.fromkeys(names, stand_in), None)
     with (
         patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", yaml_counted),
         patch.object(workspace_skills_module.json5, "loads", json5_counted),
-        patch.object(library, "workspace_skill_budget", return_value=measured),
+        patch.object(library, "workspace_skill_load", return_value=measured),
     ):
         if reader == "catalog":
             assert library.learned_skill_directories(root, names)
@@ -2971,10 +3005,11 @@ def test_ownership_reads_stay_within_the_read_budget(tmp_path: Path, reader: str
             read.append(len(data))
         return data
 
-    measured = workspace_skills_module._WorkspaceSkillBudget(prompt_bytes=dict.fromkeys(names, 0))
+    stand_in = Skill(name="s", description="d", instructions="", source_path="s")
+    measured = workspace_skills_module._WorkspaceSkillLoad(dict.fromkeys(names, stand_in), None)
     with (
         patch.object(workspace_skills_module, "read_regular_file_within_root", counted),
-        patch.object(library, "workspace_skill_budget", return_value=measured),
+        patch.object(library, "workspace_skill_load", return_value=measured),
     ):
         if reader == "catalog":
             library.learned_skill_directories(root, names)
