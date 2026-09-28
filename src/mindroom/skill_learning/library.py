@@ -119,6 +119,10 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
     if not isinstance(frontmatter_name, str) or frontmatter_name.strip() != name:
         msg = f"Frontmatter name must be exactly {name!r}."
         raise SkillEditError(msg)
+    # Skill loading drops a skill whose metadata it cannot read, so such an edit would silently remove the skill.
+    if parse_skill_metadata(frontmatter.get("metadata"), path=name) is None:
+        msg = "Frontmatter metadata must be a mapping or a JSON5 object string."
+        raise SkillEditError(msg)
     if not isinstance(description, str) or not description.strip():
         msg = "Frontmatter must include a non-empty description."
         raise SkillEditError(msg)

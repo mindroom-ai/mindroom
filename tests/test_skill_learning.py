@@ -2637,6 +2637,32 @@ def test_a_history_snapshot_pruned_by_another_process_never_refuses_a_change(tmp
     assert "1. Run smoke." in (root / "deploy-checks/SKILL.md").read_text()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    ['"not json5 {"', "[1, 2]", '"plain words"'],
+    ids=["broken json5", "list", "words"],
+)
+async def test_skill_manage_refuses_metadata_that_skill_loading_drops(tmp_path: Path, metadata: str) -> None:
+    """A create or edit whose metadata skill loading cannot read is refused instead of making the skill vanish."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    tools = SkillManageTools("mind", config, paths, root)
+    broken = HANDWRITTEN.replace("handwritten", "probe").replace(
+        "description: Mine\n",
+        f"description: Mine\nmetadata: {metadata}\n",
+    )
+    created = json.loads(await tools.skill_manage("create", "probe", content=broken))
+    assert not created["success"]
+    assert "metadata" in created["error"]
+    assert json.loads(await tools.skill_manage("create", "probe", content=HANDWRITTEN.replace("handwritten", "probe")))[
+        "success"
+    ]
+    edited = json.loads(await tools.skill_manage("edit", "probe", content=broken))
+    assert not edited["success"]
+    assert "probe" in load_skill_catalog(config, paths, "mind", root).entries
+
+
 def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_path: Path) -> None:
     """Like Hermes' record of a create, a chat skill_manage create of a reused name starts a fresh, user-owned record."""
     root = tmp_path / "skills"

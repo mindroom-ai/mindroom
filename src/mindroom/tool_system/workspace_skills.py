@@ -123,7 +123,8 @@ def list_support_files(skill_fd: int, skill_path: Path, directory: str) -> list[
             if len(filenames) > _MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
                 logger.warning(
                     "Listing only the first workspace skill files",
-                    directory=directory,
+                    path=str(skill_path / directory),
+                    limit=_MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
                     found=len(filenames),
                 )
             # A file too large to read is not offered.
