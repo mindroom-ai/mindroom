@@ -942,7 +942,7 @@ _APP_INPUTS = [
     ("hover", {"x": 100, "y": 200}),
     ("drag", {"start_x": 100, "start_y": 200, "end_x": 400, "end_y": 500, "duration_ms": 500}),
     ("scroll", {"direction": "down", "pages": 1}),
-    ("type_text", {"text": "a\n"}),
+    ("type_text", {"text": "a"}),
     ("keypress", {"keys": ["enter"]}),
     ("click_element", {"element_index": 0}),
     ("set_value", {"element_index": 0, "value": "a"}),
@@ -1689,6 +1689,20 @@ async def test_bridge_without_apps_never_starts_gui_event_pump(
         await bridge.stop()
         await asyncio.wait_for(worker, timeout=1)
         bridge.close()
+
+
+@pytest.mark.parametrize("app_id", ["chat.mindroom.menubar", "chat.mindroom.desktophelper"])
+def test_mindroom_itself_can_never_be_an_allowlisted_app(app_id: str) -> None:
+    """MindRoom's windows grant shell auto-approval and control, so agent input must never be allowed to reach them."""
+    with pytest.raises(ValueError, match=f"control MindRoom itself \\({app_id}\\)"):
+        replace(_policy(allow_control=True), allowed_app_ids=frozenset({APP_ID, app_id}))
+    with pytest.raises(ValueError, match="control MindRoom itself"):
+        DesktopBridgePolicy(
+            controller=CONTROLLER,
+            allowed_requester_ids=frozenset({ALICE}),
+            allowed_agent_names=frozenset({"computer"}),
+            allowed_app_ids=frozenset({app_id}),
+        )
 
 
 def test_local_capabilities_require_matching_policy_and_providers(selected_root: Path) -> None:

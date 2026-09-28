@@ -53,6 +53,24 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertTrue(store.selectedAppIDs.isEmpty)
     }
 
+    func testMindRoomItselfIsNeverOfferedAsAControllableApplication() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("MindRoom.app")
+        let contents = bundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "chat.mindroom.menubar", "CFBundleName": "MindRoom", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        let store = DesktopControlStore()
+
+        XCTAssertNil(store.addApplication(at: bundle))
+
+        XCTAssertFalse(store.selectedAppIDs.contains("chat.mindroom.menubar"))
+        XCTAssertEqual(store.errorMessage, "Choose a macOS application with a bundle identifier other than MindRoom itself.")
+        XCTAssertFalse(InstalledApplicationCatalog.applications().contains { InstalledApplicationCatalog.mindRoomIdentifiers.contains($0.id) })
+    }
+
     func testStatusRefreshPreservesDeselectedAppsAcrossExternalConfigurationChanges() {
         let store = DesktopControlStore()
         store.hydrateConfiguration(from: configuredStatus(revision: 1, apps: ["com.example.Editor"]))
