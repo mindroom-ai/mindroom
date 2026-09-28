@@ -909,7 +909,8 @@ class TestMentionScanCost:
     """Mention scanning stays linear in the body so one message cannot stall the shared event loop."""
 
     def test_overlong_explicit_matrix_id_token_validates_bounded_prefixes(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A single huge @-token only validates prefixes a Matrix user ID could have."""
         config = _make_config(_default_runtime_paths())

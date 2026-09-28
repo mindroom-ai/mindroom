@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.api.request_body_limit import MAX_REQUEST_BODY_BYTES
+from mindroom.api.request_body_limit import _MAX_REQUEST_BODY_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -12,11 +12,11 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
 _CHUNK = b"x" * (1024 * 1024)
-_TOO_LARGE_DETAIL = {"detail": f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes"}
+_TOO_LARGE_DETAIL = {"detail": f"Request body exceeds {_MAX_REQUEST_BODY_BYTES} bytes"}
 
 
 def _oversized_chunks() -> Iterator[bytes]:
-    for _ in range(MAX_REQUEST_BODY_BYTES // len(_CHUNK) + 1):
+    for _ in range(_MAX_REQUEST_BODY_BYTES // len(_CHUNK) + 1):
         yield _CHUNK
 
 
@@ -24,7 +24,7 @@ def test_declared_oversized_body_is_rejected_on_unauthenticated_route(test_clien
     """A Content-Length above the limit gets 413 before the anonymous session route parses anything."""
     response = test_client.post(
         "/api/auth/session",
-        content=b"{" + b" " * MAX_REQUEST_BODY_BYTES + b"}",
+        content=b"{" + b" " * _MAX_REQUEST_BODY_BYTES + b"}",
         headers={"Content-Type": "application/json"},
     )
 
@@ -49,7 +49,7 @@ def test_openai_compatible_body_above_the_limit_is_rejected(test_client: TestCli
     """The OpenAI-compatible endpoint shares the same limit."""
     response = test_client.post(
         "/v1/chat/completions",
-        content=b" " * (MAX_REQUEST_BODY_BYTES + 1),
+        content=b" " * (_MAX_REQUEST_BODY_BYTES + 1),
         headers={"Content-Type": "application/json"},
     )
 
@@ -68,7 +68,7 @@ def test_knowledge_uploads_keep_their_own_larger_limit(test_client: TestClient) 
     """Multipart knowledge uploads spool to disk and enforce their per-file limit, so the body limit skips them."""
     response = test_client.post(
         "/api/knowledge/bases/missing/upload",
-        files={"files": ("large.txt", _CHUNK * (MAX_REQUEST_BODY_BYTES // len(_CHUNK) + 1), "text/plain")},
+        files={"files": ("large.txt", _CHUNK * (_MAX_REQUEST_BODY_BYTES // len(_CHUNK) + 1), "text/plain")},
     )
 
     assert response.status_code != 413
