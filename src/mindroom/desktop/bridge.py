@@ -974,7 +974,7 @@ class DesktopBridge:
         *,
         offset: int | None = None,
     ) -> dict[str, object]:
-        """Reply inline when the encrypted response fits one to-device message, otherwise attach the full output.
+        """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
 
         Output starts at byte ``offset``; without one, a running command shows its newest output. ``next_offset``
         is the byte just past the returned output, where the next check continues.
@@ -994,7 +994,7 @@ class DesktopBridge:
         if result.state == "running":
             if offset is None:
                 return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
-            head = output.read(offset)[:MAX_INLINE_RESPONSE_BYTES]
+            head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
             return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
         try:
             content = output.read(offset or 0)

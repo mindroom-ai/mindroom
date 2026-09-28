@@ -78,11 +78,13 @@ class DesktopShellOutput(ShellOutputCapture):
         """Report output dropped past the cap or lost to a capture error."""
         return self.stdout.error is not None
 
-    def read(self, offset: int = 0) -> bytes:
-        """Return the retained output from byte *offset* on."""
-        self.stdout.file.seek(offset)
-        # Reading to the end leaves the engine's next write appending after existing output.
-        return self.stdout.file.read()
+    def read(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        """Return retained output from byte *offset*, at most *max_bytes* of it.
+
+        ``pread`` leaves the file position where the engine's next write appends.
+        """
+        size = self.size
+        return os.pread(self.stdout.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
 
     def tail(self, max_bytes: int) -> bytes:
         """Return at most the newest *max_bytes* bytes; the first character may be partial."""
@@ -98,7 +100,7 @@ class DesktopShellOutput(ShellOutputCapture):
             message = f"Shell output offset is past the captured output ({size} bytes)."
             raise DesktopShellError(message)
         # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
-        if offset < size and os.pread(self.stdout.file.fileno(), 1, offset)[0] & 0xC0 == 0x80:
+        if offset < size and self.read(offset, 1)[0] & 0xC0 == 0x80:
             message = "Shell output offset must be at the start of a UTF-8 character."
             raise DesktopShellError(message)
 
@@ -446,7 +448,7 @@ class DesktopShell:
         *,
         offset: int | None = None,
     ) -> DesktopShellResult:
-        """Report the caller's own handle; a completed handle is handed over once and forgotten.
+        """Report the caller's own handle; a finished (completed or killed) handle is handed over once and forgotten.
 
         An invalid output ``offset`` is rejected before the hand-over, so a corrected check still gets the output.
         """

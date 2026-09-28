@@ -1074,9 +1074,10 @@ async def _check_until_finished(
     handle: str,
     *,
     first_sequence: int,
+    **parameters: object,
 ) -> tuple[dict[str, object], int]:
     for sequence in range(first_sequence, first_sequence + 600):
-        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence)))
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, **parameters)))
         result = _response(transport).result
         if result["state"] != "running":
             return result, sequence
@@ -1105,7 +1106,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
     transport: AsyncMock,
     tmp_path: Path,
 ) -> None:
-    """A command past its inline wait becomes a handle, and one completed check returns its complete output."""
+    """A command past its inline wait becomes a handle, and one completed check returns its output from the offset."""
     shell = _local_shell()
     shell.grant(60)
     bridge = _local_bridge(shell=shell)
@@ -1128,12 +1129,12 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
     assert _response(transport).result["state"] == "running"
 
     (tmp_path / "release").touch()
-    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=3)
+    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=3, offset=6)
     assert _without_metrics(completed) == {
         "state": "completed",
         "handle": handle,
         "exit_code": 3,
-        "output": "early\nlate",
+        "output": "late",
         "output_bytes": 10,
         "output_truncated": False,
         "output_attachment": None,
@@ -1286,6 +1287,7 @@ async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
     assert isinstance(handle, str)
     (tmp_path / "release").touch()
     completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=2)
+    assert completed["state"] == "completed"
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
     assert _response(transport).error == "Unknown shell handle."
 
@@ -1525,7 +1527,7 @@ async def test_failed_output_upload_keeps_exit_code_and_newest_output(
     result = response.result
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 4, None)
     assert str(result["output"]).endswith("tail")
-    assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
+    assert (result["output_bytes"], result["output_truncated"], result["next_offset"]) == (100_004, True, 100_004)
     assert "Matrix media upload failed: offline" in str(result["warning"])
     assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     await bridge.stop()
@@ -1581,7 +1583,7 @@ _LARGE_OUTPUT = "import sys; sys.stdout.write('x' * 100_000 + 'tail')"
 def _assert_upload_fallback(result: dict[str, object]) -> None:
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 0, None)
     assert str(result["output"]).endswith("tail")
-    assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
+    assert (result["output_bytes"], result["output_truncated"], result["next_offset"]) == (100_004, True, 100_004)
     assert "upload did not finish within 0.2 seconds" in str(result["warning"])
 
 

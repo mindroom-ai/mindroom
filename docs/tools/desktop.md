@@ -164,7 +164,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
   With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
   An offset past the captured output, a negative offset, or one inside a UTF-8 character is rejected, and a finished handle stays available for a corrected check.
 - `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
-  A later `check_shell` then reports `state: "killed"` with the signal's negative `exit_code`, -15 or -9, while `completed` means the command exited on its own.
+  A later `check_shell` then reports `state: "killed"` with the exit code the command ended with, normally the negative signal number (-15, or -9 with `force=true`), while `completed` means the command exited on its own.
 
 ### Local Approval
 
@@ -190,11 +190,11 @@ Revoking clears auto-approval, rejects a waiting request, and stops every runnin
 A command still running after its inline wait keeps running as a handle instead of being killed.
 The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops the command with `kill_shell`.
 Every shell result reports `next_offset`, the byte just past the returned output, while `output_bytes` stays the total captured size.
-Passing the last `next_offset` as the `check_shell` offset returns only newer output, whole UTF-8 characters that are never repeated or skipped.
+Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and `output_truncated: true` then means more output is available from the new `next_offset`.
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
 The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.
-A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with exit code -9 instead of an unknown handle.
+A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"`, normally with exit code -9, instead of an unknown handle.
 A finished `check_shell` hands its output over once and then forgets the handle.
 If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
 The bridge retains at most 16 handles.
