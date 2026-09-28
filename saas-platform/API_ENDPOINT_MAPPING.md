@@ -99,6 +99,8 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 
 User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
 `GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion can still see, export, and cancel it; suspended and unverified accounts stay rejected there too.
+The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route accepts, including system and webhook routes.
+Rows name the account that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified, and only bodies of at most 8 KiB are parsed into them.
 
 ## SSO and Matrix OIDC
 

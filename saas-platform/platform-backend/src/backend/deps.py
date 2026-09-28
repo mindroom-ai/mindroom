@@ -15,6 +15,7 @@ import jwt
 from backend import auth_monitor
 from backend.metrics import record_admin_verification, record_auth_event
 from backend.config import auth_client, logger, supabase
+from backend.utils.audit import AuditActor, record_audit_actor
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -280,10 +281,16 @@ async def _authenticate_user(authorization: str | None, request: Request | None)
     return user_data
 
 
+def _record_audit_actor(request: Request | None, account_id: object, email: str | None) -> None:
+    if request is not None:
+        record_audit_actor(request, AuditActor(account_id=str(account_id), email=email))
+
+
 async def verify_user(authorization: str = Header(None), request: Request = None) -> dict:
     """Verify a user via Supabase JWT whose account is active."""
     user_data = await _authenticate_user(authorization, request)
     _require_account_access(user_data["account"], allow_pending_deletion=False)
+    _record_audit_actor(request, user_data["account_id"], user_data["email"])
     return user_data
 
 
@@ -295,10 +302,11 @@ async def verify_user_allow_deleted(authorization: str = Header(None), request: 
     """
     user_data = await _authenticate_user(authorization, request)
     _require_account_access(user_data["account"], allow_pending_deletion=True)
+    _record_audit_actor(request, user_data["account_id"], user_data["email"])
     return user_data
 
 
-async def verify_admin(authorization: str = Header(None)) -> dict:
+async def verify_admin(authorization: str = Header(None), request: Request = None) -> dict:
     """Verify admin access via Supabase auth for an active admin account."""
     try:
         token = _extract_bearer_token(authorization)
@@ -323,6 +331,7 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
             record_admin_verification("forbidden")
             raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301
         record_admin_verification("success")
+        _record_audit_actor(request, user.user.id, user.user.email)
         return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
     except HTTPException:
         raise

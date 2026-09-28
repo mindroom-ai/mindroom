@@ -3,6 +3,7 @@ Shared audit logging utilities.
 KISS principle - simple function for consistent audit logging.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
 import re
@@ -10,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from backend.config import supabase
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
@@ -256,6 +258,19 @@ def _redact_audit_details(value: Any, parent_key: str | None, depth: int) -> Any
 def redact_audit_details(value: Any) -> Any:  # noqa: ANN401
     """Recursively redact credential-bearing fields from audit details, bounding text length and nesting depth."""
     return _redact_audit_details(value, parent_key=None, depth=0)
+
+
+@dataclass(frozen=True)
+class AuditActor:
+    """Authenticated account an audited request is attributed to."""
+
+    account_id: str
+    email: str | None
+
+
+def record_audit_actor(request: Request, actor: AuditActor) -> None:
+    """Attribute the audit row of the current request to an authenticated account."""
+    request.state.audit_actor = actor
 
 
 def create_audit_log(
