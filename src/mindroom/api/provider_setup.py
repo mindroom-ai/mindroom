@@ -150,10 +150,10 @@ async def connect_provider(request: Request, payload: ConnectProviderRequest) ->
     if not api_key:
         raise HTTPException(status_code=400, detail="Paste an API key first.")
     await _verify_provider_key(payload.provider, api_key)
-    save_dashboard_api_key(request, payload.provider, api_key)
+    service = save_dashboard_api_key(request, payload.provider, api_key)
     logger.info("provider_key_connected", provider=payload.provider)
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     return ConnectProviderResponse(
-        service=payload.provider,
+        service=service,
         missing=_missing_provider_keys(config, runtime_paths),
     )
