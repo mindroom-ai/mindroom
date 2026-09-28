@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Approval controls stay disabled this long after a request appears or replaces another one.
@@ -46,9 +47,7 @@ struct DesktopShellApprovalView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Shell command waiting for your approval", systemImage: "terminal").font(.headline)
             // The whole command is shown, never clipped, so the decision buttons always come after all of it.
-            Text(request.displayCommand)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+            DesktopLeftToRightText(text: request.displayCommand, textStyle: .body)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
                 .background(Color(nsColor: .textBackgroundColor))
@@ -59,7 +58,11 @@ struct DesktopShellApprovalView: View {
                 Label("This request contains control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
-            detail("Working folder", request.displayCwd)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Working folder").font(.callout)
+                DesktopLeftToRightText(text: request.displayCwd, textStyle: .callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             detail("Agent", request.displayAgentName)
             detail("Requester", request.displayRequesterID)
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -150,6 +153,50 @@ struct DesktopShellApprovalView: View {
         LabeledContent(title) {
             Text(value).font(.system(.callout, design: .monospaced)).textSelection(.enabled).multilineTextAlignment(.trailing)
         }
+    }
+}
+
+/// Selectable monospaced text whose every line is laid out left to right, so a leading right-to-left letter cannot
+/// reverse how a line of a command reads. Only the layout direction is set; the text, and so any copy of it, is unchanged.
+struct DesktopLeftToRightText: NSViewRepresentable {
+    let text: String
+    let textStyle: NSFont.TextStyle
+
+    static func attributedText(_ text: String, textStyle: NSFont.TextStyle) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.baseWritingDirection = .leftToRight
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byWordWrapping
+        let size = NSFont.preferredFont(forTextStyle: textStyle).pointSize
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+    }
+
+    /// The height all lines of the field need at this width, so the whole text is always shown.
+    @MainActor
+    static func height(of field: NSTextField, width: CGFloat) -> CGFloat {
+        let bounds = NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
+        return ceil(field.cell?.cellSize(forBounds: bounds).height ?? 0)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.isSelectable = true
+        field.baseWritingDirection = .leftToRight
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        field.attributedStringValue = Self.attributedText(text, textStyle: textStyle)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite else { return nil }
+        return CGSize(width: width, height: Self.height(of: field, width: width))
     }
 }
 

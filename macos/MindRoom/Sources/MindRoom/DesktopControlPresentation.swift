@@ -107,8 +107,8 @@ extension DesktopShellStatus {
 }
 
 extension DesktopShellRequest {
-    var displayCommand: String { desktopLeftToRightLines(desktopSafePreview(command)) }
-    var displayCwd: String { desktopLeftToRightLines(desktopSafePreview(cwd)) }
+    var displayCommand: String { desktopSafePreview(command) }
+    var displayCwd: String { desktopSafePreview(cwd) }
     var displayRequesterID: String { desktopSafePreview(requesterID) }
     var displayAgentName: String { desktopSafePreview(agentName) }
     var hasEscapedCharacters: Bool {
@@ -121,14 +121,6 @@ extension DesktopShellRequest {
         let lines = command.unicodeScalars.filter { $0 == "\n" }.count + 1
         return "\(characters) \(characters == 1 ? "character" : "characters") on \(lines) \(lines == 1 ? "line" : "lines")"
     }
-}
-
-/// Starts every line with a left-to-right mark, so a leading right-to-left letter cannot flip how the line reads.
-/// Only the display changes; the command that runs stays exact.
-func desktopLeftToRightLines(_ text: String) -> String {
-    text.split(separator: "\n", omittingEmptySubsequences: false)
-        .map { "\u{200E}\($0)" }
-        .joined(separator: "\n")
 }
 
 /// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
