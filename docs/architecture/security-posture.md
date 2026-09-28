@@ -90,6 +90,7 @@ These bounds hold for trusted and untrusted callers alike, because the cost of o
 | Image dimensions for Matrix uploads | Width, height, and EXIF orientation come from PNG, JPEG, GIF, and WebP header data | Pixel data is never decoded, so an eXIf chunk after PNG image data is ignored and other formats upload without dimensions |
 | `website` pages and redirect hops | 2 MiB each, requested with identity encoding | The fetch fails; a compressed response is refused rather than inflated |
 | Long-text sidecar payloads | 2 MiB, checked against `Content-Length` and while the payload streams | The sidecar stays unresolved |
+| Matrix media downloads for images, voice, and files | 64 MiB, checked against `Content-Length` and while the payload streams; rate limits, lost connections, and timeouts are retried up to three attempts | The media is dropped |
 | `calculator` | `factorial()` up to 1558 and `is_prime()` up to 10**12 | A JSON error payload, returned before any computation |
 | `sleep` | 300 seconds, awaited on the event loop so no thread is held | An error message, returned without waiting |
 

@@ -403,7 +403,7 @@ class TestVoiceHandler:
         await _handle_voice_message(client, room, event, config)
 
         # Verify no processing occurred
-        client.download.assert_not_called()
+        client.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_transcription_basic(self) -> None:

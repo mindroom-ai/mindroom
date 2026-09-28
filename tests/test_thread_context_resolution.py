@@ -33,6 +33,7 @@ from tests.conftest import (
     request_envelope,
     unwrap_extracted_collaborator,
 )
+from tests.matrix_media_helpers import media_response
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _matrix_room,
@@ -960,10 +961,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        bot.client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(
+        bot.client.send = AsyncMock(
+            return_value=media_response(
+                json.dumps(
                     {
                         "msgtype": "m.text",
                         "body": "Hydrated plain reply from sidecar",
@@ -1018,7 +1018,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$plain1:localhost",
         ]
         assert preview_context.requires_model_history_refresh is False
-        bot.client.download.assert_not_awaited()
+        bot.client.send.assert_not_awaited()
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
 
     @pytest.mark.asyncio

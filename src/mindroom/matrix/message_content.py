@@ -15,23 +15,19 @@ plaintext store that misses a redaction serves deleted content.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
 import nio
 from nio import crypto
-from nio.api import MATRIX_MEDIA_API_PATH
 
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import download_bounded_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
     from collections.abc import Collection
-
-    from aiohttp import ClientResponse
 
 logger = get_logger(__name__)
 
@@ -49,11 +45,6 @@ logger = get_logger(__name__)
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
-_MXC_DOWNLOAD_CHUNK_BYTES = 64 * 1024
-_MXC_DOWNLOAD_ATTEMPTS = 3
-# nio waits this long after a rate limit that names no delay.
-_MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS = 5.0
-_MXC_RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
 _MAX_SIDECAR_HOPS = 8
 
 
@@ -123,74 +114,20 @@ async def _resolve_event_content(
     return _with_event_relation(resolved_content, preview_content), True
 
 
-def _log_mxc_bytes_over_limit(mxc_url: str, *, stage: str, size_bytes: int | None) -> None:
+def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
+    if len(payload) <= _MXC_TEXT_MAX_BYTES:
+        return False
     logger.warning(
         "mxc_text_payload_exceeds_byte_limit",
         mxc_url=mxc_url,
         stage=stage,
-        size_bytes=size_bytes,
+        size_bytes=len(payload),
         limit_bytes=_MXC_TEXT_MAX_BYTES,
     )
-
-
-def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
-    if len(payload) <= _MXC_TEXT_MAX_BYTES:
-        return False
-    _log_mxc_bytes_over_limit(mxc_url, stage=stage, size_bytes=len(payload))
     return True
 
 
-def _rate_limit_wait_seconds(response: ClientResponse) -> float:
-    retry_after = response.headers.get("Retry-After", "")
-    wait_seconds = float(retry_after) if retry_after.isdigit() else _MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS
-    return min(wait_seconds, _MXC_RATE_LIMIT_MAX_WAIT_SECONDS)
-
-
-async def _read_bounded_mxc_body(mxc_url: str, response: ClientResponse) -> bytes | None:
-    if response.status != 200:
-        logger.error("mxc_download_failed", mxc_url=mxc_url, http_status=response.status)
-        return None
-    if response.content_length is not None and response.content_length > _MXC_TEXT_MAX_BYTES:
-        _log_mxc_bytes_over_limit(mxc_url, stage="declared", size_bytes=response.content_length)
-        return None
-    try:
-        return await collect_bounded_bytes(
-            response.content.iter_chunked(_MXC_DOWNLOAD_CHUNK_BYTES),
-            max_bytes=_MXC_TEXT_MAX_BYTES,
-        )
-    except ByteLimitExceededError:
-        _log_mxc_bytes_over_limit(mxc_url, stage="download", size_bytes=None)
-        return None
-
-
-async def _download_bounded_mxc_payload(
-    client: nio.AsyncClient,
-    mxc_url: str,
-    server_name: str,
-    media_id: str,
-) -> bytes | None:
-    """Download one MXC payload without buffering more than the sidecar byte limit.
-
-    nio's download reads the whole body before a caller can check its size, and
-    any room member can point a sidecar at media as large as the homeserver allows.
-    Rate-limited attempts are retried a few times, as nio's own request loop would.
-    """
-    path = nio.Api._build_path(["download", server_name, media_id], {"allow_remote": "true"}, MATRIX_MEDIA_API_PATH)
-    headers = {"Authorization": f"Bearer {client.access_token}"} if client.access_token else None
-    attempt = 1
-    while True:
-        response = await client.send("GET", path, headers=headers)
-        try:
-            if response.status != 429 or attempt == _MXC_DOWNLOAD_ATTEMPTS:
-                return await _read_bounded_mxc_body(mxc_url, response)
-            wait_seconds = _rate_limit_wait_seconds(response)
-        finally:
-            response.release()
-        attempt += 1
-        await asyncio.sleep(wait_seconds)
-
-
-async def _download_mxc_text(  # noqa: PLR0911, C901
+async def _download_mxc_text(  # noqa: PLR0911
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -207,18 +144,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
 
     """
     try:
-        # Parse MXC URL
-        if not mxc_url.startswith("mxc://"):
-            logger.error("invalid_mxc_url", mxc_url=mxc_url)
-            return None
-
-        # Validate the MXC URL structure before issuing the download.
-        parts = mxc_url[6:].split("/", 1)
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            logger.error("invalid_mxc_url_format", mxc_url=mxc_url)
-            return None
-
-        payload = await _download_bounded_mxc_payload(client, mxc_url, parts[0], parts[1])
+        payload = await download_bounded_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
         if payload is None:
             return None
 

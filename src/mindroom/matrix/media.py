@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,10 +10,12 @@ from typing import Any, TypeGuard
 from urllib.parse import urlsplit
 
 import nio
-from aiohttp import ClientResponse
+from aiohttp import ClientConnectionError, ClientResponse
 from nio import crypto
+from nio.api import MATRIX_MEDIA_API_PATH
 from nio.http import TransportResponse
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
 
@@ -38,6 +41,12 @@ _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _matrix_media_max_bytes = 64 * 1024 * 1024
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_MXC_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_MXC_DOWNLOAD_ATTEMPTS = 3
+# nio waits this long after a rate limit that names no delay.
+_MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS = 5
+_MXC_RATE_LIMIT_MAX_WAIT_SECONDS = 30
+_MXC_CONNECTION_RETRY_WAIT_SECONDS = 1
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
 _HEADER_DIMENSION_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
@@ -397,25 +406,6 @@ def _media_payload_exceeds_limit_for_event(
     return True
 
 
-def _validated_download_body(
-    response: object,
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> bytes | None:
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    if not isinstance(response, nio.DownloadResponse):
-        logger.error("Media download returned invalid response", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    body = response.body
-    if not isinstance(body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
-        return None
-    if _media_payload_exceeds_limit_for_event(event, body, stage="download"):
-        return None
-    return body
-
-
 def _decrypt_validated_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,
@@ -428,18 +418,88 @@ def _decrypt_validated_media_bytes(
     return decrypted_bytes
 
 
+def _mxc_media_path(mxc_url: str) -> str | None:
+    """Return the authenticated media download path for one ``mxc://server/media_id`` URI."""
+    server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
+    if not mxc_url.startswith("mxc://") or not separator or not server_name or not media_id or "/" in media_id:
+        return None
+    return nio.Api._build_path(["download", server_name, media_id], {"allow_remote": "true"}, MATRIX_MEDIA_API_PATH)
+
+
+def _rate_limit_wait_seconds(response: ClientResponse) -> int:
+    retry_after = response.headers.get("Retry-After", "")
+    wait_seconds = int(retry_after) if retry_after.isdecimal() else _MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS
+    return min(wait_seconds, _MXC_RATE_LIMIT_MAX_WAIT_SECONDS)
+
+
+def _log_media_over_limit(mxc_url: str, *, stage: str, size_bytes: int | None, max_bytes: int) -> None:
+    logger.warning(
+        "matrix_media_exceeds_byte_limit",
+        mxc_url=mxc_url,
+        stage=stage,
+        size_bytes=size_bytes,
+        limit_bytes=max_bytes,
+    )
+
+
+async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_bytes: int) -> bytes | None:
+    if response.status != 200:
+        logger.error("matrix_media_download_failed", mxc_url=mxc_url, http_status=response.status)
+        return None
+    if response.content_length is not None and response.content_length > max_bytes:
+        _log_media_over_limit(mxc_url, stage="declared", size_bytes=response.content_length, max_bytes=max_bytes)
+        return None
+    try:
+        return await collect_bounded_bytes(
+            response.content.iter_chunked(_MXC_DOWNLOAD_CHUNK_BYTES),
+            max_bytes=max_bytes,
+        )
+    except ByteLimitExceededError:
+        _log_media_over_limit(mxc_url, stage="download", size_bytes=None, max_bytes=max_bytes)
+        return None
+
+
+async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> bytes | None:
+    """Download one MXC payload without buffering more than ``max_bytes``.
+
+    nio's download reads the whole body before a caller can check its size, and any room member
+    can point an event at media as large as the homeserver allows.
+    Like nio's request loop, rate limits, lost connections, and timeouts are retried, here a bounded number of times.
+    """
+    path = _mxc_media_path(mxc_url)
+    if path is None:
+        logger.error("invalid_mxc_url", mxc_url=mxc_url)
+        return None
+    headers = {"Authorization": f"Bearer {client.access_token}"} if client.access_token else None
+    attempt = 1
+    while True:
+        try:
+            # Like nio's own download, no overall timeout: the byte limit bounds a slow transfer's memory.
+            response = await client.send("GET", path, headers=headers, timeout=0)
+            try:
+                if response.status != 429 or attempt == _MXC_DOWNLOAD_ATTEMPTS:
+                    return await _read_bounded_media_body(mxc_url, response, max_bytes)
+                wait_seconds = _rate_limit_wait_seconds(response)
+            finally:
+                response.release()
+        except (ClientConnectionError, TimeoutError):
+            if attempt == _MXC_DOWNLOAD_ATTEMPTS:
+                raise
+            wait_seconds = _MXC_CONNECTION_RETRY_WAIT_SECONDS
+        attempt += 1
+        await asyncio.sleep(wait_seconds)
+
+
 async def download_media_bytes(
     client: nio.AsyncClient,
     event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
 ) -> bytes | None:
     """Download and decrypt Matrix media payload bytes."""
     try:
-        response = await client.download(event.url)
+        downloaded_bytes = await download_bounded_mxc_bytes(client, event.url, max_bytes=_matrix_media_max_bytes)
     except Exception:
-        logger.exception("Error downloading media")
+        logger.exception("Error downloading media", event_id=_event_id_for_log(event))
         return None
-
-    downloaded_bytes = _validated_download_body(response, event)
     if downloaded_bytes is None:
         return None
 

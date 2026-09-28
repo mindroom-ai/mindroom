@@ -13,6 +13,7 @@ from mindroom import voice_handler
 from mindroom.config.main import Config
 from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_media_helpers import media_response
 
 
 @pytest.mark.asyncio
@@ -26,7 +27,6 @@ async def test_voice_handler_returns_transcription() -> None:
     """
     # Mock client
     client = AsyncMock()
-    client.download = AsyncMock()
 
     # Mock room
     room = MagicMock()
@@ -48,11 +48,7 @@ async def test_voice_handler_returns_transcription() -> None:
     config.voice.enabled = True
 
     # Mock audio download
-    client.download.return_value = nio.DownloadResponse(
-        body=b"fake audio data",
-        content_type="audio/ogg",
-        filename=None,
-    )
+    client.send.return_value = media_response(b"fake audio data")
 
     # Mock transcription and AI processing
     with (

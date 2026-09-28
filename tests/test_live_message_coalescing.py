@@ -4075,9 +4075,7 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
         thread_id="$thread",
         latest_event_id=image_event.event_id,
     )
-    download_response = MagicMock(spec=nio.DownloadResponse)
-    download_response.body = b"\x89PNG\r\n\x1a\npayload"
-    bot.client.download = AsyncMock(return_value=download_response)
+    bot.client.send = AsyncMock(return_value=media_response(b"\x89PNG\r\n\x1a\npayload"))
 
     with patch("mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids", new=AsyncMock(return_value=[])):
         payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(

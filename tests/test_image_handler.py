@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
+from aiohttp import ClientConnectionError
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix import image_handler
@@ -19,10 +21,10 @@ from mindroom.matrix.media import (
     upload_content_uri,
     upload_media_bytes,
 )
+from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
-
-def _download_response(body: bytes) -> nio.DownloadResponse:
-    return nio.DownloadResponse(body=body, content_type="application/octet-stream", filename=None)
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class TestExtractCaption:
@@ -133,13 +135,14 @@ class TestDownloadImage:
         event.url = "mxc://example.org/abc123"
         event.source = {"content": {"info": {"mimetype": "image/png"}}}
 
-        client.download.return_value = _download_response(b"image_data")
+        client.send.return_value = media_response(b"image_data")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
         assert result.content == b"image_data"
         assert result.mime_type == "image/png"
-        client.download.assert_called_once_with("mxc://example.org/abc123")
+        client.send.assert_awaited_once()
+        assert requested_mxc(client.send.await_args.args[1]) == "mxc://example.org/abc123"
 
     @pytest.mark.asyncio
     async def test_download_encrypted_image(self) -> None:
@@ -160,7 +163,7 @@ class TestDownloadImage:
             },
         }
 
-        client.download.return_value = _download_response(b"encrypted_image_data")
+        client.send.return_value = media_response(b"encrypted_image_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_image_data"
@@ -185,7 +188,7 @@ class TestDownloadImage:
         event.url = "mxc://example.org/mismatch"
         event.source = {"content": {"info": {"mimetype": "image/jpeg"}}}
 
-        client.download.return_value = _download_response(b"\x89PNG\r\n\x1a\nrest")
+        client.send.return_value = media_response(b"\x89PNG\r\n\x1a\nrest")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
@@ -199,36 +202,97 @@ class TestDownloadImage:
         event.event_id = "$test_event"
         event.url = "mxc://example.org/fail"
 
-        client.download.return_value = nio.DownloadError("download failed")
+        client.send.return_value = media_response(None)
 
         result = await image_handler.download_image(client, event)
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_download_returns_none_on_exception(self) -> None:
-        """Test that exceptions from client.download() return None."""
+    async def test_download_retries_timeouts_then_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Timeouts are retried a bounded number of times, then the download fails closed."""
+        monkeypatch.setattr(media_module, "_MXC_CONNECTION_RETRY_WAIT_SECONDS", 0)
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/timeout"
 
-        client.download.side_effect = TimeoutError("connection timed out")
+        client.send.side_effect = TimeoutError("connection timed out")
 
         result = await image_handler.download_image(client, event)
         assert result is None
+        assert client.send.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_download_media_bytes_returns_none_on_invalid_response(self) -> None:
-        """Malformed Matrix download responses should fail closed."""
+    async def test_download_recovers_after_a_lost_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dropped connection is retried, as nio's request loop did."""
+        monkeypatch.setattr(media_module, "_MXC_CONNECTION_RETRY_WAIT_SECONDS", 0)
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/flaky"
+        event.source = {"content": {"info": {"mimetype": "image/png"}}}
+
+        client.send.side_effect = [ClientConnectionError("reset"), media_response(b"\x89PNG\r\n\x1a\nrest")]
+
+        result = await image_handler.download_image(client, event)
+        assert isinstance(result, Image)
+        assert result.content == b"\x89PNG\r\n\x1a\nrest"
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_returns_none_on_server_error(self) -> None:
+        """A failed Matrix download fails closed and releases the connection."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/invalid"
-        client.download.return_value = object()
+        client.send.return_value = FakeMediaResponse(status=500)
 
         result = await download_media_bytes(client, event)
 
         assert result is None
+        assert client.send.return_value.released
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_stops_reading_at_the_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Media larger than the ingestion limit is abandoned as it streams, never buffered whole."""
+        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 10)
+        served: list[bytes] = []
+
+        def body() -> Iterator[bytes]:
+            for _ in range(100):
+                served.append(b"12345")
+                yield b"12345"
+
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/huge"
+        client.send.return_value = FakeMediaResponse(chunks=body())
+
+        result = await download_media_bytes(client, event)
+
+        assert result is None
+        assert len(served) == 3
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_refuses_a_declared_oversized_length_without_reading(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Content-Length above the limit is refused before any body byte is read."""
+        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+
+        def unread_body() -> Iterator[bytes]:
+            pytest.fail("Read the body of media that declared an oversized length")
+            yield b""
+
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/declared-too-large"
+        client.send.return_value = FakeMediaResponse(chunks=unread_body(), content_length=6)
+
+        assert await download_media_bytes(client, event) is None
 
     @pytest.mark.asyncio
     async def test_download_media_bytes_rejects_unencrypted_payload_over_limit(
@@ -241,7 +305,7 @@ class TestDownloadImage:
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/too-large"
-        client.download.return_value = _download_response(b"123456")
+        client.send.return_value = media_response(b"123456")
 
         result = await download_media_bytes(client, event)
 
@@ -267,7 +331,7 @@ class TestDownloadImage:
                 },
             },
         }
-        client.download.return_value = _download_response(b"123456")
+        client.send.return_value = media_response(b"123456")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             result = await download_media_bytes(client, event)
@@ -295,7 +359,7 @@ class TestDownloadImage:
                 },
             },
         }
-        client.download.return_value = _download_response(b"small")
+        client.send.return_value = media_response(b"small")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment", return_value=b"123456"):
             result = await download_media_bytes(client, event)
@@ -319,7 +383,7 @@ class TestDownloadImage:
             },
         }
 
-        client.download.return_value = _download_response(b"encrypted_image_data")
+        client.send.return_value = media_response(b"encrypted_image_data")
 
         result = await image_handler.download_image(client, event)
         assert result is None
@@ -341,7 +405,7 @@ class TestDownloadImage:
             },
         }
 
-        client.download.return_value = _download_response(b"encrypted_image_data")
+        client.send.return_value = media_response(b"encrypted_image_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.side_effect = ValueError("bad ciphertext")
@@ -358,7 +422,7 @@ class TestDownloadImage:
         event.url = "mxc://example.org/notype"
         event.source = {"content": {}}
 
-        client.download.return_value = _download_response(b"image_data")
+        client.send.return_value = media_response(b"image_data")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
@@ -382,7 +446,7 @@ class TestDownloadImage:
             },
         }
 
-        client.download.return_value = _download_response(b"encrypted_data")
+        client.send.return_value = media_response(b"encrypted_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"
@@ -409,7 +473,7 @@ class TestDownloadImage:
             },
         }
 
-        client.download.return_value = _download_response(b"encrypted_data")
+        client.send.return_value = media_response(b"encrypted_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"

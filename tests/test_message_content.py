@@ -9,6 +9,7 @@ import nio
 import pytest
 from nio import crypto
 
+import mindroom.matrix.media as media_module
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -931,6 +932,7 @@ class TestDownloadMxcText:
             "GET",
             "/_matrix/client/v1/media/download/server/media123?allow_remote=true",
             headers={"Authorization": f"Bearer {TEST_ACCESS_TOKEN}"},
+            timeout=0,
         )
         assert client.send.return_value.released
         assert await _download_mxc_text(client, "mxc://server/media123") == "Downloaded text content"
@@ -982,6 +984,19 @@ class TestDownloadMxcText:
         assert await _download_mxc_text(client, "mxc://server/limited") == "after the wait"
         assert client.send.await_count == 2
         assert rate_limited.released
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_without_a_numeric_delay_waits_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing or non-numeric Retry-After falls back to nio's default wait instead of failing."""
+        monkeypatch.setattr(media_module, "_MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS", 0)
+        client = _make_client()
+        client.send.side_effect = [
+            FakeMediaResponse(status=429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+            FakeMediaResponse(status=429, headers={"Retry-After": "1.5e9"}),
+            media_response(b"after the wait"),
+        ]
+
+        assert await _download_mxc_text(client, "mxc://server/limited") == "after the wait"
 
     @pytest.mark.asyncio
     async def test_download_gives_up_after_repeated_rate_limits(self) -> None:
@@ -1036,7 +1051,6 @@ class TestDownloadMxcText:
                 yield chunk
 
         client = _make_client()
-        client.download.side_effect = lambda **_kwargs: nio.DownloadResponse(b"".join(body()), "text/plain", None)
         client.send.return_value = FakeMediaResponse(chunks=body())
 
         assert await _download_mxc_text(client, "mxc://server/huge") is None
