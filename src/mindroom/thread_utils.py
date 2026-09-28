@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -163,6 +164,44 @@ def get_agents_in_thread(
     return agents
 
 
+@dataclass(frozen=True, slots=True)
+class _RevisionMentions:
+    config: Config
+    runtime_paths: RuntimePaths
+    user_ids: list[str]
+
+
+# Turn planning rescans every hydrated message of a thread on each turn, so mentions are remembered per visible
+# revision. The key also carries a hash of the text mentions are read from, because a revision served as its
+# sidecar preview for one read has other text than the same revision once its sidecar resolves.
+_REVISION_MENTION_MEMORY_SIZE = 4096
+_revision_mentions: OrderedDict[tuple[str, str, tuple[int, ...]], _RevisionMentions] = OrderedDict()
+
+
+def _revision_mentioned_user_ids(
+    message: ResolvedVisibleMessage,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return one visible revision's mentioned user IDs, extracting them once per config."""
+    content = message.content
+    fingerprint = tuple(
+        hash(value) if isinstance(value, str) else hash(repr(value))
+        for value in (content.get("body"), content.get("formatted_body"), content.get("m.mentions"))
+    )
+    key = (message.event_id, message.latest_event_id, fingerprint)
+    remembered = _revision_mentions.get(key)
+    if remembered is not None and remembered.config is config and remembered.runtime_paths is runtime_paths:
+        _revision_mentions.move_to_end(key)
+        return remembered.user_ids
+    user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
+    _revision_mentions[key] = _RevisionMentions(config=config, runtime_paths=runtime_paths, user_ids=user_ids)
+    _revision_mentions.move_to_end(key)
+    while len(_revision_mentions) > _REVISION_MENTION_MEMORY_SIZE:
+        _revision_mentions.popitem(last=False)
+    return user_ids
+
+
 def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
@@ -263,9 +302,7 @@ def get_all_mentioned_agents_in_thread(
     registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
-        content = msg.content
-        user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-        agents = _agents_from_user_ids(user_ids, registry)
+        agents = _agents_from_user_ids(_revision_mentioned_user_ids(msg, config, runtime_paths), registry)
 
         for agent in agents:
             if agent.full_id not in seen_ids:
