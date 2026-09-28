@@ -350,6 +350,7 @@ def run_device_pairing(
     When renew_expired is True, expired sessions and approvals whose credentials never arrived start a new code and announce it again, and transient failures to start a session are retried with backoff.
     When False, these outcomes and start failures raise ValueError (prevents indefinite waiting in interactive flows).
     Returns None when stop_waiting, checked before each session start, start retry, and poll, reports that pairing is no longer needed.
+    The callback may instead raise to abort its caller, as the CLI does for local cancellation.
     """
     post = post_request or _httpx_post
     sleep = sleep or time.sleep

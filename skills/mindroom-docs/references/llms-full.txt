@@ -26386,6 +26386,10 @@ In a terminal, `connect` asks before pairing again.
 Without a terminal, it does not pair and exits with code `3`, so scripts and the macOS app can tell this apart from a failure (exit code `1`).
 Add `--force` to pair again without asking.
 
+The macOS app uses `--graceful-cancel` so SIGTERM stops a waiting connection with exit code `130` without saving credentials.
+An approval request already in flight, or a credential save already underway, finishes and reports its normal success or error result instead.
+This preserves credentials that the provisioning service issues only once.
+
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 
 - `MINDROOM_PROVISIONING_URL`

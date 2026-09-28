@@ -154,6 +154,26 @@ final class EmbeddedWebTabsTests: XCTestCase {
         XCTAssertEqual(policy.decide(URL(string: "https://external.example.net/help")!, clicked: true), .openBrowser)
     }
 
+    func testApprovalSSOPopupUsesLoadedOriginInsteadOfSavedChatWebsite() throws {
+        let suite = "MindRoomPairingWebsiteTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ChatWebsitePreferences(defaults: defaults)
+        XCTAssertTrue(preferences.save("https://custom-chat.example.org"))
+        let tabs = EmbeddedWebTabs(desktop: DesktopControlStore(), preferences: preferences)
+        let approval = URL(string: "https://chat.example.org/connect?code=ABCD-EFGH")!
+        let login = URL(string: "https://matrix.example.net/_matrix/client/v3/login/sso/redirect?redirectUrl=https%3A%2F%2Fchat.example.org%2Flogin")!
+        tabs.openChat(url: approval)
+        tabs.chat.stopLoading()
+        XCTAssertTrue(tabs.canStartChatSSOPopup(login, from: approval))
+        XCTAssertFalse(tabs.canStartChatSSOPopup(login, from: preferences.url))
+        tabs.webView(tabs.chat, didFail: nil, withError: NSError(domain: "test", code: 1))
+        XCTAssertTrue(tabs.canStartChatSSOPopup(login, from: approval))
+        tabs.openChat()
+        tabs.chat.stopLoading()
+        XCTAssertFalse(tabs.canStartChatSSOPopup(login, from: approval))
+    }
+
     func testMatrixSSOEntryRequiresMatchingChatCallback() {
         let chat = URL(string: "https://custom-chat.example.org")!
         let wrong = [
