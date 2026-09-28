@@ -349,7 +349,9 @@ class TestAdminEndpoints:
         from backend.deps import AuthCacheEntry, _auth_cache  # noqa: PLC0415
 
         account_id = "5f0b2c1e-8c3d-4f7a-9b21-6e4d3a2c1b0f"
-        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": account_id, "status": "suspended"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock(
+            data=[{"id": account_id, "status": "suspended"}]
+        )
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": account_id, "email": "u@x.test"}])
         _auth_cache.clear()
         expires_at = datetime.now(UTC) + timedelta(minutes=5)

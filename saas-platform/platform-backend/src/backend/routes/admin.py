@@ -30,6 +30,8 @@ from pydantic import BaseModel
 
 router = APIRouter()
 ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
+# The accounts.status CHECK constraint allows exactly these values.
+ACCOUNT_STATUSES = ("active", "suspended", "deleted", "pending_verification")
 
 
 def audit_log_entry(
@@ -280,9 +282,8 @@ async def update_account_status(
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
 
-    valid_statuses = ["active", "suspended", "deleted", "pending_verification"]
-    if request.status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+    if request.status not in ACCOUNT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {list(ACCOUNT_STATUSES)}")
 
     try:
         result = (

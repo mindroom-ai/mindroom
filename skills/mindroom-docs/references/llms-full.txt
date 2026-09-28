@@ -24863,6 +24863,7 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
 The script prints the API response and exits non-zero when the query fails.
 Migrations `002` through `004` are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
 Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
+Migration `006` is re-runnable too: it sets missing account statuses to `active`, and it fails without changing anything while an account holds a status other than `active`, `suspended`, `deleted`, or `pending_verification`, so correct those rows first.
 
 ## Multi-Tenant Architecture
 
