@@ -98,9 +98,9 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 | POST | `/my/gdpr/consent` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: consent preferences |
 
 User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
-`GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion can still see, export, and cancel it; suspended and unverified accounts stay rejected there too.
-The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route accepts, including system and webhook routes.
-Rows name the account that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified, and only bodies of at most 8 KiB are parsed into them.
+`GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion (`deleted_at` set) can still see, export, and cancel it; suspended and unverified accounts stay rejected there too.
+The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
+Rows name the account that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified, and only those rows include the redacted request body, when it is at most 8 KiB; other rows hold request metadata only.
 
 ## SSO and Matrix OIDC
 

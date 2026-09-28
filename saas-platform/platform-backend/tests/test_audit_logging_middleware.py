@@ -13,8 +13,8 @@ from backend import auth_monitor, deps
 from backend.middleware import audit_logging
 from backend.middleware.audit_logging import AUDIT_BODY_MAX_BYTES, AuditLoggingMiddleware
 from backend.routes import admin as admin_routes
-from backend.utils.audit import REDACTED
-from fastapi import FastAPI
+from backend.utils.audit import REDACTED, AuditActor, record_audit_actor
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from main import app
 
@@ -80,33 +80,86 @@ def test_unrouted_mutation_does_no_body_work(audit_table: Mock, redaction_spy: M
     audit_table.insert.assert_not_called()
 
 
-def _app_with_mutation_routes(paths: list[str]) -> FastAPI:
+def _app_with_mutation_routes(paths: list[str], actor: AuditActor | None = None) -> FastAPI:
+    def accept(request: Request) -> dict[str, bool]:
+        if actor is not None:
+            record_audit_actor(request, actor)
+        return {"ok": True}
+
     test_app = FastAPI()
     test_app.add_middleware(AuditLoggingMiddleware)
     for path in paths:
-        test_app.add_api_route(path, lambda: {"ok": True}, methods=["POST"])
+        test_app.add_api_route(path, accept, methods=["POST"])
     return test_app
 
 
 MOUNTED_MUTATION_PATHS = ["/my/instances/provision", "/system/provision", "/webhooks/stripe", "/stripe/checkout"]
+ACCOUNT = AuditActor(account_id="user_123", email="user@example.test")
 
 
 @pytest.mark.parametrize("path", MOUNTED_MUTATION_PATHS)
 def test_successful_mutations_are_audited_on_every_mounted_prefix(path: str, audit_table: Mock) -> None:
     """Tenant, provisioner, and webhook mutations produce audit rows, not only admin ones."""
-    client = TestClient(_app_with_mutation_routes(MOUNTED_MUTATION_PATHS))
+    client = TestClient(_app_with_mutation_routes(MOUNTED_MUTATION_PATHS, actor=ACCOUNT))
 
     response = client.post(path, json={"tier": "pro"})
 
     assert response.status_code == 200
     [row] = _inserted_rows(audit_table)
+    assert row["account_id"] == "user_123"
     assert row["details"]["path"] == path
     assert row["details"]["tier"] == "pro"
 
 
+def test_mutations_without_an_authenticated_account_are_audited_without_their_body(
+    audit_table: Mock, redaction_spy: Mock
+) -> None:
+    """Provisioner, webhook, and anonymous rows hold request metadata only, so their bodies are never parsed."""
+    client = TestClient(_app_with_mutation_routes(["/webhooks/stripe"]))
+
+    response = client.post("/webhooks/stripe", json={"customer_email": "payer@example.test"})
+
+    assert response.status_code == 200
+    [row] = _inserted_rows(audit_table)
+    assert "account_id" not in row
+    assert row["details"]["path"] == "/webhooks/stripe"
+    assert "customer_email" not in row["details"]
+    [(redacted,), _kwargs] = redaction_spy.call_args
+    assert "customer_email" not in redacted
+
+
+@pytest.mark.usefixtures("real_auth")
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("POST", "/my/instances/provision/"), ("PUT", "/admin/accounts/acc_1/status/"), ("POST", "/webhooks/stripe/")],
+)
+def test_redirected_mutations_are_not_audited(method: str, path: str, audit_table: Mock, redaction_spy: Mock) -> None:
+    """A trailing-slash redirect answers before authentication, so it must not be parsed, redacted, or audited."""
+    response = TestClient(app).request(method, path, json={"a": "a" * 4096}, follow_redirects=False)
+
+    assert response.status_code == 307
+    redaction_spy.assert_not_called()
+    audit_table.insert.assert_not_called()
+
+
+@pytest.mark.usefixtures("real_auth")
+@pytest.mark.parametrize(("method", "path"), [("DELETE", "/my/sso-cookie"), ("POST", "/admin/auth/logout")])
+def test_anonymous_routes_do_not_parse_their_body(
+    method: str, path: str, audit_table: Mock, redaction_spy: Mock
+) -> None:
+    """Routes that answer anyone still produce a metadata row, but an unauthenticated body is never parsed."""
+    response = TestClient(app).request(method, path, json={"payload": "a" * 4096})
+
+    assert response.status_code == 200
+    [row] = _inserted_rows(audit_table)
+    assert "account_id" not in row
+    [(redacted,), _kwargs] = redaction_spy.call_args
+    assert "payload" not in redacted
+
+
 def test_oversized_body_is_audited_without_being_captured(audit_table: Mock, redaction_spy: Mock) -> None:
     """Bodies above the audit cap are recorded by a marker, never buffered or parsed for the audit row."""
-    client = TestClient(_app_with_mutation_routes(["/my/instances/provision"]))
+    client = TestClient(_app_with_mutation_routes(["/my/instances/provision"], actor=ACCOUNT))
     body = json.dumps({"payload": "a" * (AUDIT_BODY_MAX_BYTES * 2)})
 
     response = client.post("/my/instances/provision", content=body, headers={"Content-Type": "application/json"})

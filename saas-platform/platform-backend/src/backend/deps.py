@@ -102,11 +102,16 @@ def _account_is_active(account: dict[str, Any]) -> bool:
     return account.get("status") == ACTIVE_ACCOUNT_STATUS and account.get("deleted_at") is None
 
 
+def _account_is_pending_deletion(account: dict[str, Any]) -> bool:
+    return account.get("deleted_at") is not None and account.get("status") in {
+        ACTIVE_ACCOUNT_STATUS,
+        PENDING_DELETION_ACCOUNT_STATUS,
+    }
+
+
 def _require_account_access(account: dict[str, Any], *, allow_pending_deletion: bool) -> None:
     """Reject suspended, unverified, and deleted accounts; optionally admit accounts awaiting deletion."""
-    if _account_is_active(account):
-        return
-    if allow_pending_deletion and account.get("status") in {ACTIVE_ACCOUNT_STATUS, PENDING_DELETION_ACCOUNT_STATUS}:
+    if _account_is_active(account) or (allow_pending_deletion and _account_is_pending_deletion(account)):
         return
     raise HTTPException(status_code=403, detail="Account is not active")
 

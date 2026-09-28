@@ -1,4 +1,4 @@
-"""Audit logging middleware for successful state-changing requests."""
+"""Audit logging middleware for accepted state-changing requests."""
 
 from __future__ import annotations
 
@@ -26,12 +26,13 @@ async def _audited_body(request: Request) -> bytes | None:
     content_length = request.headers.get("content-length")
     if content_length is None:
         return None if "transfer-encoding" in request.headers else b""
-    if not content_length.isdigit() or int(content_length) > AUDIT_BODY_MAX_BYTES:
+    if not (content_length.isascii() and content_length.isdigit()) or int(content_length) > AUDIT_BODY_MAX_BYTES:
         return None
     return await request.body()
 
 
 def _body_details(body: bytes | None) -> Any:  # noqa: ANN401
+    """Parse a buffered body for the audit row of an authenticated account."""
     if body is None:
         return {"body": "not-captured"}
     if not body:
@@ -43,10 +44,11 @@ def _body_details(body: bytes | None) -> Any:  # noqa: ANN401
 
 
 class AuditLoggingMiddleware(BaseHTTPMiddleware):
-    """Write an audit row for every state-changing request that a route accepted.
+    """Write an audit row for every state-changing request that a route accepted with a 2xx status.
 
-    Body parsing and redaction run only after the route answered with a success status,
-    so unauthenticated and unrouted requests cost no audit work beyond buffering a small body.
+    The body is parsed and redacted only when an auth dependency recorded the account behind the request,
+    so unauthenticated, unrouted, redirected, and machine-to-machine requests cost no body work
+    beyond buffering at most `AUDIT_BODY_MAX_BYTES`, and their rows hold request metadata only.
     """
 
     AUDIT_METHODS: ClassVar[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -72,7 +74,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         body = await _audited_body(request)
         request.state.audit_actor = None
         response = await call_next(request)
-        if response.status_code >= 400:
+        if not 200 <= response.status_code < 300:
             return response
 
         path = request.url.path
@@ -82,7 +84,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             action=self._get_action(request.method),
             resource_type=self._get_resource_type(path),
             resource_id=self._extract_resource_id(path),
-            details=_body_details(body),
+            details=_body_details(body) if actor else {},
             ip_address=client_ip_from_request(request),
             user_email=actor.email if actor else None,
             path=path,

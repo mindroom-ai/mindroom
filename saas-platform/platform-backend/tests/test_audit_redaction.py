@@ -127,7 +127,31 @@ def test_redact_audit_details_is_bounded_on_adversarial_strings(text: str) -> No
     elapsed = time.perf_counter() - started
 
     assert elapsed < 1
+    assert all(len(key) <= MAX_AUDIT_TEXT_LENGTH for key in redacted)
     assert all(len(value) <= MAX_AUDIT_TEXT_LENGTH for value in redacted.values())
+
+
+def test_redact_audit_details_bounds_quoted_secrets_that_never_close() -> None:
+    """Quoted secret values whose inner quotes never end them are delimited without rescanning the text."""
+    started = time.perf_counter()
+    redact_audit_details({str(index): "token='a'b " * 420 for index in range(20)})
+
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "children",
+    [
+        pytest.param([""] * 5_000, id="list-items"),
+        pytest.param({f"k{index}": "" for index in range(5_000)}, id="child-keys"),
+    ],
+)
+def test_redact_audit_details_classifies_each_key_once(children: object) -> None:
+    """A long key is not renormalized for every child value or key beneath it."""
+    started = time.perf_counter()
+    redact_audit_details({"AAa" * 1_365: children})
+
+    assert time.perf_counter() - started < 1
 
 
 def test_redact_audit_text_truncates_after_redacting_the_cut_region() -> None:
@@ -149,6 +173,27 @@ def test_redact_audit_text_redacts_secret_assignments_after_non_secret_keys() ->
         f'{{"password": "{REDACTED}", "name": "kept"}}'
     )
     assert "tok-secret" not in redact_audit_text("a=" * 1_000 + "token=tok-secret")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password='it's-hunter2' user=bob",
+        "login failed password='o'reilly-hunter2', user=bob",
+        'token="say "hunter2" twice" and next=1',
+    ],
+)
+def test_redact_audit_text_does_not_close_quoted_values_at_inner_quotes(text: str) -> None:
+    """A quote inside a quoted secret does not end it unless a delimiter or the next assignment follows."""
+    assert "hunter2" not in redact_audit_text(text)
+
+
+def test_redact_audit_details_redacts_unparseable_urls_instead_of_failing() -> None:
+    """A malformed URL must not make redaction raise, which would drop the whole audit row."""
+    assert redact_audit_details({"note": "see http://[broken", "ok": "kept"}) == {
+        "note": f"see {REDACTED}",
+        "ok": "kept",
+    }
 
 
 def test_redact_audit_details_bounds_nesting_depth() -> None:

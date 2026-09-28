@@ -484,6 +484,7 @@ async def test_verify_user_allow_deleted_admits_accounts_pending_deletion(
         pytest.param(_account_row(status="suspended"), id="suspended"),
         pytest.param(_account_row(status="suspended", deleted_at="2026-09-01T00:00:00Z"), id="suspended-and-deleted"),
         pytest.param(_account_row(status="pending_verification"), id="pending-verification"),
+        pytest.param(_account_row(status="deleted"), id="deleted-without-pending-deletion"),
     ],
 )
 async def test_verify_user_allow_deleted_still_rejects_blocked_accounts(

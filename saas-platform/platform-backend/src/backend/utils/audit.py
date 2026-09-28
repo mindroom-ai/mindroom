@@ -3,6 +3,7 @@ Shared audit logging utilities.
 KISS principle - simple function for consistent audit logging.
 """
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
@@ -37,6 +38,8 @@ _ASSIGNMENT_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z0-9_.-])[\"']?(?P<key>[A-Za
 _ASSIGNMENT_VALUE_END_PATTERN = re.compile(
     r"[\r\n,&)\]}]|(?<!\s)\s++(?:and\s++)?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]", re.IGNORECASE
 )
+_QUOTE_PATTERN = re.compile(r"[\"']")
+_LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
 _ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
 _NON_ALPHANUMERIC_RUN_PATTERN = re.compile(r"[^a-z0-9]+")
@@ -101,8 +104,8 @@ def _is_secret_key(value: object) -> bool:
     return any(window in parts or compact.endswith(compact_key) for window, compact_key in _SECRET_KEY_VARIANTS)
 
 
-def _is_query_container(value: str | None) -> bool:
-    return value is not None and _normalize_key(value) in _QUERY_CONTAINER_KEYS
+def _is_query_container(value: str) -> bool:
+    return _normalize_key(value) in _QUERY_CONTAINER_KEYS
 
 
 def _is_redacted_query_key(value: object) -> bool:
@@ -118,28 +121,56 @@ def _redact_matched_token(match: re.Match[str]) -> str:
     return full_match[:prefix_end] + REDACTED + full_match[suffix_start:]
 
 
-def _closing_quote(value: str, quote: str, start: int) -> int | None:
-    """Return the index of the unescaped quote closing a value on its own line, or None."""
-    position = start
-    while (position := value.find(quote, position)) >= 0:
+@dataclass(frozen=True)
+class _QuoteIndex:
+    """Positions, found in one pass over a text, that bound quoted assignment values."""
+
+    closing_quotes: dict[str, list[int]]
+    line_breaks: list[int]
+
+
+def _index_quotes(value: str) -> _QuoteIndex:
+    """Find every quote that can close a value: unescaped, and followed by the end, a delimiter, or an assignment.
+
+    Requiring what follows the quote keeps a quote inside the value (as in `'it's'`) from ending it early,
+    and indexing once keeps later lookups from rescanning the text.
+    """
+    closing_quotes: dict[str, list[int]] = {"'": [], '"': []}
+    for match in _QUOTE_PATTERN.finditer(value):
+        position = match.start()
         escape_start = position
-        while escape_start > start and value[escape_start - 1] == "\\":
+        while escape_start > 0 and value[escape_start - 1] == "\\":
             escape_start -= 1
-        if (position - escape_start) % 2 == 0:
-            break
-        position += 1
-    if position < 0 or value.find("\n", start, position) >= 0 or value.find("\r", start, position) >= 0:
+        after = position + 1
+        if (position - escape_start) % 2 == 0 and (
+            after == len(value) or _ASSIGNMENT_VALUE_END_PATTERN.match(value, after)
+        ):
+            closing_quotes[match.group()].append(position)
+    return _QuoteIndex(
+        closing_quotes=closing_quotes, line_breaks=[match.start() for match in _LINE_BREAK_PATTERN.finditer(value)]
+    )
+
+
+def _closing_quote(quotes: _QuoteIndex, quote: str, start: int) -> int | None:
+    """Return the index of the quote closing a value that starts at `start` on the same line, or None."""
+    positions = quotes.closing_quotes[quote]
+    candidate_index = bisect_left(positions, start)
+    if candidate_index == len(positions):
         return None
-    return position
+    candidate = positions[candidate_index]
+    line_break_index = bisect_left(quotes.line_breaks, start)
+    if line_break_index < len(quotes.line_breaks) and quotes.line_breaks[line_break_index] < candidate:
+        return None
+    return candidate
 
 
-def _assignment_value_span(value: str, value_start: int) -> tuple[int, int] | None:
+def _assignment_value_span(value: str, value_start: int, quotes: _QuoteIndex) -> tuple[int, int] | None:
     """Return the span of one assigned value, or None when it is empty.
 
     A quoted value ends at its closing quote; an unquoted or unclosed one ends at a delimiter or the next assignment.
     """
     if value_start < len(value) and value[value_start] in {"'", '"'}:
-        closing = _closing_quote(value, value[value_start], value_start + 1)
+        closing = _closing_quote(quotes, value[value_start], value_start + 1)
         if closing is not None:
             return value_start + 1, closing
     value_end_match = _ASSIGNMENT_VALUE_END_PATTERN.search(value, value_start)
@@ -152,6 +183,7 @@ def _redact_secret_assignments(value: str) -> str:
 
     Scanning resumes inside every value it keeps, so assignments nested there are still found without recursion.
     """
+    quotes = _index_quotes(value)
     parts: list[str] = []
     copied_until = 0
     search_start = 0
@@ -160,7 +192,7 @@ def _redact_secret_assignments(value: str) -> str:
         key = prefix.group("key")
         if not _is_secret_key(key):
             continue
-        span = _assignment_value_span(value, prefix.end())
+        span = _assignment_value_span(value, prefix.end(), quotes)
         if span is None:
             continue
         value_start, value_end = span
@@ -186,7 +218,10 @@ def _truncate_audit_text(value: str) -> str:
 
 
 def _redact_url(value: str) -> str:
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return REDACTED
     if parsed.scheme not in {"http", "https"}:
         return value
 
@@ -236,28 +271,31 @@ def redact_audit_text(value: str) -> str:
     return _truncate_audit_text(_redact_secret_assignments(redacted))
 
 
-def _redact_audit_details(value: Any, parent_key: str | None, depth: int) -> Any:  # noqa: ANN401
+def _redact_audit_details(value: Any, *, in_query_container: bool, depth: int) -> Any:  # noqa: ANN401
     if depth >= MAX_AUDIT_DEPTH:
         return TRUNCATED
     if isinstance(value, dict):
-        return {
-            str(key): REDACTED
-            if _is_secret_key(key) or (_is_query_container(parent_key) and _is_redacted_query_key(key))
-            else _redact_audit_details(item, parent_key=str(key), depth=depth + 1)
-            for key, item in value.items()
-        }
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_secret_key(key_text) or (in_query_container and _is_redacted_query_key(key_text)):
+                redacted_item = REDACTED
+            else:
+                redacted_item = _redact_audit_details(
+                    item, in_query_container=_is_query_container(key_text), depth=depth + 1
+                )
+            redacted[_truncate_audit_text(key_text)] = redacted_item
+        return redacted
     if isinstance(value, list):
-        return [_redact_audit_details(item, parent_key=parent_key, depth=depth + 1) for item in value]
+        return [_redact_audit_details(item, in_query_container=in_query_container, depth=depth + 1) for item in value]
     if isinstance(value, str):
-        if _is_query_container(parent_key):
-            return _redact_query_fragment(value)
-        return redact_audit_text(value)
+        return _redact_query_fragment(value) if in_query_container else redact_audit_text(value)
     return value
 
 
 def redact_audit_details(value: Any) -> Any:  # noqa: ANN401
     """Recursively redact credential-bearing fields from audit details, bounding text length and nesting depth."""
-    return _redact_audit_details(value, parent_key=None, depth=0)
+    return _redact_audit_details(value, in_query_container=False, depth=0)
 
 
 @dataclass(frozen=True)
