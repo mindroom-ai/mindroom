@@ -40,6 +40,10 @@ path = "mindroom.bounded_bytes"
 depends_on = []
 
 [[modules]]
+path = "mindroom.bounded_http_body"
+depends_on = ["mindroom.bounded_bytes"]
+
+[[modules]]
 path = "mindroom.embedding_factory"
 depends_on = [
     "mindroom.credentials_sync",
@@ -4588,7 +4592,12 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.tool_system.worker_media"
-depends_on = ["mindroom.server_fetch_url", "mindroom.tool_system.media_transport", "mindroom.tool_system.worker_proxy_client"]
+depends_on = [
+    "mindroom.bounded_http_body",
+    "mindroom.server_fetch_url",
+    "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.worker_proxy_client",
+]
 
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
@@ -7101,7 +7110,7 @@ depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registr
 
 [[modules]]
 path = "mindroom.tools.agno_compat_trafilatura"
-depends_on = ["mindroom.server_fetch_url"]
+depends_on = ["mindroom.bounded_http_body", "mindroom.server_fetch_url"]
 visibility = ["mindroom.tools.trafilatura"]
 
 [[interfaces]]

@@ -473,12 +473,12 @@ def test_worker_media_unread_redirect_still_rejects_private_destination(
     assert redirect.closed
 
 
-@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd", "identity, gzip", "unknown"])
+@pytest.mark.parametrize("encoding", ["gzip", "x-gzip", "deflate", "br", "zstd", "identity, gzip"])
 def test_worker_media_encoded_final_body_is_never_read(
     monkeypatch: pytest.MonkeyPatch,
     encoding: str,
 ) -> None:
-    """Unsupported HTTP encodings fail before body collection or decompression."""
+    """Compressing HTTP encodings fail before body collection or decompression."""
     monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
     final = _UnreadBodyStream(
         (
@@ -500,12 +500,12 @@ def test_worker_media_encoded_final_body_is_never_read(
     assert b"accept-encoding: identity\r\n" in final.written.lower()
 
 
-@pytest.mark.parametrize("encoding", ["identity", "Identity", "identity, identity"])
+@pytest.mark.parametrize("encoding", ["identity", "Identity", "identity, identity", "unknown", "utf-8"])
 def test_worker_media_identity_encoding_keeps_content(
     monkeypatch: pytest.MonkeyPatch,
     encoding: str,
 ) -> None:
-    """Explicit identity coding retains original bytes and MIME metadata."""
+    """Identity coding, or a value naming no compression, retains original bytes and MIME metadata."""
     response = _response(body=b"media").replace(
         b"\r\n\r\n",
         f"\r\nContent-Encoding: {encoding}\r\n\r\n".encode("ascii"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,11 +13,12 @@ class ByteLimitExceededError(ValueError):
     """A byte stream exceeded the caller's collection limit."""
 
 
-def _append_within_limit(body: bytearray, chunk: bytes, max_bytes: int) -> None:
-    if len(chunk) > max_bytes - len(body):
-        message = f"Byte stream exceeds {max_bytes} bytes"
-        raise ByteLimitExceededError(message)
-    body.extend(chunk)
+@dataclass(frozen=True, slots=True)
+class BytePrefix:
+    """At most a limit's worth of one stream, and whether the stream went on past it."""
+
+    data: bytes
+    truncated: bool
 
 
 async def collect_bounded_bytes(chunks: AsyncIterable[bytes], *, max_bytes: int) -> bytes:
@@ -27,17 +29,23 @@ async def collect_bounded_bytes(chunks: AsyncIterable[bytes], *, max_bytes: int)
     """
     body = bytearray()
     async for chunk in chunks:
-        _append_within_limit(body, chunk, max_bytes)
+        if len(chunk) > max_bytes - len(body):
+            message = f"Byte stream exceeds {max_bytes} bytes"
+            raise ByteLimitExceededError(message)
+        body.extend(chunk)
     return bytes(body)
 
 
-def collect_bounded_sync_bytes(chunks: Iterable[bytes], *, max_bytes: int) -> bytes:
-    """Collect a synchronous stream through EOF without buffering an overflowing chunk.
+def collect_sync_byte_prefix(chunks: Iterable[bytes], *, max_bytes: int) -> BytePrefix:
+    """Collect a synchronous stream up to ``max_bytes`` and stop reading at the first chunk that crosses it.
 
     Iterator failures propagate unchanged.
     The caller owns the stream's lifetime.
     """
     body = bytearray()
     for chunk in chunks:
-        _append_within_limit(body, chunk, max_bytes)
-    return bytes(body)
+        if len(chunk) > max_bytes - len(body):
+            body.extend(chunk[: max_bytes - len(body)])
+            return BytePrefix(bytes(body), truncated=True)
+        body.extend(chunk)
+    return BytePrefix(bytes(body), truncated=False)

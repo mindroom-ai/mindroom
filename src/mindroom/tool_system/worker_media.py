@@ -14,6 +14,7 @@ from agno.media import Audio, File, Image, Video
 from agno.tools.function import ToolResult
 from httpx._utils import get_environment_proxies
 
+from mindroom.bounded_http_body import read_identity_body_prefix
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
@@ -77,18 +78,12 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                     request = response.next_request
                     continue
                 response.raise_for_status()
-                encoding = response.headers.get("content-encoding", "")
-                if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
-                    msg = "Worker media requires identity content encoding."
+                content = read_identity_body_prefix(response, max_bytes=limit)
+                if content.truncated:
+                    msg = "Worker media exceeds the byte limit."
                     raise ValueError(msg)
-                content = bytearray()
-                for chunk in response.iter_raw(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > limit:
-                        msg = "Worker media exceeds the byte limit."
-                        raise ValueError(msg)
-                    content.extend(chunk)
                 mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                return bytes(content), mime or None
+                return content.data, mime or None
             finally:
                 response.close()
         msg = "Exceeded maximum allowed redirects."

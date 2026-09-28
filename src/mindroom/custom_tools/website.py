@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
@@ -15,7 +16,8 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
-from mindroom.bounded_bytes import collect_bounded_sync_bytes
+from mindroom.bounded_bytes import BytePrefix
+from mindroom.bounded_http_body import read_identity_body_prefix
 from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
@@ -58,8 +60,10 @@ _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
 _TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
 _MAX_REDIRECTS = 10
-# BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so pages stay small.
-_MAX_PAGE_BYTES = 2 * 1024 * 1024
+# BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so only a prefix is parsed.
+_MAX_PAGE_BYTES = 1024 * 1024
+_NO_BODY = BytePrefix(b"", truncated=False)
+_TRUNCATED_PAGE_NOTE = f"[Page truncated: only its first {_MAX_PAGE_BYTES // (1024 * 1024)} MiB was read.]"
 
 
 def _normalize_text(text: str) -> str:
@@ -169,19 +173,18 @@ def _normalized_hostname(url: str) -> str:
         return ""
 
 
-def _bounded_page_body(response: httpx.Response) -> bytes:
-    """Read one uncompressed response body without buffering past the page byte limit."""
-    encoding = response.headers.get("content-encoding", "")
-    if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
-        msg = "Website pages require identity content encoding."
-        raise ValueError(msg)
-    return collect_bounded_sync_bytes(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
+@dataclass(frozen=True, slots=True)
+class _FetchedPage:
+    """One fetched hop: its status and headers, and at most the page byte limit of its body."""
+
+    response: httpx.Response
+    truncated: bool
 
 
-def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> httpx.Response:
+def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> _FetchedPage:
     """Fetch one URL hop through the server-fetch transport when no proxy is configured.
 
-    Bodies are requested uncompressed and read as raw bytes within the page byte limit,
+    Bodies are requested uncompressed and read as raw bytes up to the page byte limit,
     so a small compressed body can never inflate in the primary process.
     Redirects are returned without their bodies for the caller to validate and follow.
     """
@@ -192,12 +195,10 @@ def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> ht
         httpx.Client(headers={"Accept-Encoding": "identity"}, timeout=timeout, **route) as client,
         client.stream("GET", url) as response,
     ):
-        content = b"" if response.is_redirect else _bounded_page_body(response)
-        return httpx.Response(
-            response.status_code,
-            headers=response.headers,
-            content=content,
-            request=response.request,
+        body = _NO_BODY if response.is_redirect else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES)
+        return _FetchedPage(
+            httpx.Response(response.status_code, headers=response.headers, content=body.data, request=response.request),
+            truncated=body.truncated,
         )
 
 
@@ -255,15 +256,15 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
         log_warning(f"HTTP status error while crawling {safe_current_url}: {error.response.status_code}")
 
-    def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
+    def _get_validated_response(self, current_url: str) -> tuple[_FetchedPage, str]:
         """Fetch a URL while validating every redirect hop before following it."""
         request_url = validate_server_fetch_url(current_url)
         fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(request_url, timeout=self.timeout, **fetch_kwargs)
-            if not response.is_redirect:
-                return response, request_url
-            request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
+            page = _server_fetch_get(request_url, timeout=self.timeout, **fetch_kwargs)
+            if not page.response.is_redirect:
+                return page, request_url
+            request_url = validate_server_fetch_redirect_url(request_url, page.response.headers.get("location"))
 
         request = httpx.Request("GET", current_url)
         raise httpx.TooManyRedirects(_TOO_MANY_REDIRECTS, request=request)
@@ -281,13 +282,13 @@ class _MindRoomWebsiteReader(WebsiteReader):
         safe_current_url = _safe_url_for_log(current_url)
         try:
             log_debug(f"Crawling: {safe_current_url}")
-            response, fetched_url = self._get_validated_response(current_url)
+            page, fetched_url = self._get_validated_response(current_url)
             if current_url != starting_url and not _url_matches_crawl_host(fetched_url, crawl_host):
                 log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(fetched_url)}")
                 return 0
-            response.raise_for_status()
+            page.response.raise_for_status()
             return self._record_response_content(
-                response,
+                page,
                 current_url=fetched_url,
                 current_depth=current_depth,
                 crawl_host=crawl_host,
@@ -336,7 +337,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
     def _record_response_content(
         self,
-        response: httpx.Response,
+        page: _FetchedPage,
         *,
         current_url: str,
         current_depth: int,
@@ -344,9 +345,11 @@ class _MindRoomWebsiteReader(WebsiteReader):
         crawler_result: dict[str, str],
     ) -> bool:
         """Queue crawl links from the unmodified page, then extract its content from the same parse."""
-        soup = BeautifulSoup(response.content, "html.parser")
+        soup = BeautifulSoup(page.response.content, "html.parser")
         self._queue_links(soup, current_url, current_depth, crawl_host)
         main_content = _extract_main_content_in_place(soup)
+        if main_content and page.truncated:
+            main_content = f"{main_content}\n\n{_TRUNCATED_PAGE_NOTE}"
         if main_content:
             crawler_result[current_url] = main_content
         return bool(main_content)

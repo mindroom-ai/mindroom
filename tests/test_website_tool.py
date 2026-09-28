@@ -15,13 +15,13 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
-from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.custom_tools.website import (
-    _MAX_PAGE_BYTES,
     _MAX_REDIRECTS,
     _TOO_MANY_REDIRECTS,
+    _TRUNCATED_PAGE_NOTE,
     WebsiteTools,
     _extract_main_content_in_place,
+    _FetchedPage,
     _MindRoomWebsiteReader,
     _safe_url_for_log,
 )
@@ -30,6 +30,15 @@ from mindroom.tools.website import website_tools
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+
+def _untruncated(fetch: Callable[..., httpx.Response]) -> Callable[..., _FetchedPage]:
+    """Adapt a response-returning fake to the reader's whole-page fetch result."""
+
+    def fetch_page(url: str, **kwargs: object) -> _FetchedPage:
+        return _FetchedPage(fetch(url, **kwargs), truncated=False)
+
+    return fetch_page
 
 
 @pytest.fixture(autouse=True)
@@ -104,7 +113,7 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = json.loads(WebsiteTools().read_url(root_url))
@@ -125,7 +134,7 @@ def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyP
         msg = "private URL should be rejected before an HTTP request is made"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
 
     with pytest.raises(ValueError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read("http://127.0.0.1:8000/private")
@@ -142,7 +151,7 @@ def test_website_reader_rejects_unsupported_schemes(monkeypatch: pytest.MonkeyPa
         msg = "unsupported URL schemes should be rejected before a request is made"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
 
     with pytest.raises(ValueError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read("file:///etc/passwd")
@@ -168,7 +177,7 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     with pytest.raises(ValueError, match="URL is not allowed"):
@@ -195,9 +204,10 @@ def test_website_reader_follows_allowed_redirect_chain(monkeypatch: pytest.Monke
         assert url == final_url
         return httpx.Response(200, text="ok", request=request)
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
 
-    response, fetched_url = _MindRoomWebsiteReader()._get_validated_response(start_url)
+    page, fetched_url = _MindRoomWebsiteReader()._get_validated_response(start_url)
+    response = page.response
 
     assert requested_urls == [start_url, intermediate_url, final_url]
     assert response.status_code == 200
@@ -234,7 +244,7 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -255,7 +265,7 @@ def test_website_reader_respects_max_redirects(monkeypatch: pytest.MonkeyPatch) 
         request = httpx.Request("GET", url)
         return httpx.Response(302, headers={"Location": start_url}, request=request)
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
 
     with pytest.raises(httpx.TooManyRedirects, match=_TOO_MANY_REDIRECTS):
         _MindRoomWebsiteReader()._get_validated_response(start_url)
@@ -353,7 +363,7 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -397,7 +407,7 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -435,7 +445,7 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -469,7 +479,7 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -530,7 +540,7 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         assert min_seconds == 1
         assert max_seconds == 3
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -590,7 +600,7 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
 
     monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
     monkeypatch.setattr("agno.knowledge.reader.website_reader.log_debug", fake_log_debug)
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", _untruncated(fake_get))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     WebsiteTools().read_url(full_url)
@@ -664,14 +674,18 @@ def _mock_server_fetch_transport(
     return requests
 
 
-def test_website_fetch_refuses_compressed_bodies_without_inflating(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A small gzip body that inflates to megabytes is refused instead of decoded in the primary process."""
+@pytest.mark.parametrize("encoding", ["gzip", "x-gzip", "deflate", "br", "zstd", "identity, gzip"])
+def test_website_fetch_refuses_compressed_bodies_without_inflating(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """A small compressed body that would inflate to megabytes is refused instead of decoded in the primary process."""
     bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))
     requests = _mock_server_fetch_transport(
         monkeypatch,
         lambda _request: httpx.Response(
             200,
-            headers={"Content-Encoding": "gzip", "Content-Type": "text/html"},
+            headers={"Content-Encoding": encoding, "Content-Type": "text/html"},
             content=iter([bomb]),
         ),
     )
@@ -682,25 +696,52 @@ def test_website_fetch_refuses_compressed_bodies_without_inflating(monkeypatch: 
     assert [request.headers["Accept-Encoding"] for request in requests] == ["identity"]
 
 
-def test_website_fetch_stops_reading_at_the_page_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An oversized page is abandoned once it crosses the limit rather than buffered whole."""
-    chunk = b"<p>x</p>" * 8192
+@pytest.mark.parametrize("encoding", ["utf-8", "none", "identity"])
+def test_website_fetch_reads_bodies_whose_encoding_names_no_compression(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """Content-Encoding values that name no compression are ignored, as httpx ignores them."""
+    page = b"<html><body><main><p>Readable text behind a mislabelled encoding.</p></main></body></html>"
+    _mock_server_fetch_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"Content-Encoding": encoding}, content=iter([page])),
+    )
+
+    fetched, _url = _MindRoomWebsiteReader()._get_validated_response("https://example.test/")
+
+    assert fetched.response.content == page
+    assert fetched.truncated is False
+
+
+def test_website_read_url_parses_a_truncated_prefix_of_an_oversized_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An oversized page is read only up to the limit, and the extracted text says it was truncated."""
+    page_limit = 64 * 1024
+    monkeypatch.setattr("mindroom.custom_tools.website._MAX_PAGE_BYTES", page_limit)
+    chunk = b"<p>word</p>" * 600
     served_chunks: list[int] = []
 
     def body() -> Iterator[bytes]:
-        for index in range(48):
+        yield b"<html><body><main>"
+        for index in range(1000):
             served_chunks.append(index)
             yield chunk
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
 
     _mock_server_fetch_transport(
         monkeypatch,
         lambda _request: httpx.Response(200, headers={"Content-Type": "text/html"}, content=body()),
     )
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
-    with pytest.raises(ByteLimitExceededError):
-        _MindRoomWebsiteReader()._get_validated_response("https://example.test/")
+    documents = json.loads(WebsiteTools().read_url("https://example.test/"))
 
-    assert len(served_chunks) <= _MAX_PAGE_BYTES // len(chunk) + 1
+    assert len(served_chunks) <= page_limit // len(chunk) + 1
+    assert documents[0]["content"].startswith("word word")
+    assert documents[-1]["content"].endswith(_TRUNCATED_PAGE_NOTE)
 
 
 def test_website_read_url_reads_pages_within_the_limit_after_redirect(monkeypatch: pytest.MonkeyPatch) -> None:

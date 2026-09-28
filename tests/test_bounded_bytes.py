@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes, collect_bounded_sync_bytes
+from mindroom.bounded_bytes import ByteLimitExceededError, BytePrefix, collect_bounded_bytes, collect_sync_byte_prefix
 
 
 async def _chunks(values: list[bytes]) -> AsyncIterator[bytes]:
@@ -84,15 +84,14 @@ async def test_cancellation_reaches_pending_read() -> None:
     assert cancelled == [raised.value]
 
 
-def test_sync_collection_matches_async_limits() -> None:
-    """The synchronous collector keeps exact-limit bodies and rejects the first overflowing chunk unread."""
+def test_sync_prefix_stops_reading_at_the_first_chunk_that_crosses_the_limit() -> None:
+    """The synchronous collector keeps exact-limit bodies whole and truncates at the first overflowing chunk."""
 
     def stream() -> Iterator[bytes]:
         yield b"a"
         yield b"bc"
-        yield b"d"
+        yield b"de"
         pytest.fail("Read past the overflowing chunk")
 
-    assert collect_bounded_sync_bytes(iter([b"a", b"", b"bc"]), max_bytes=3) == b"abc"
-    with pytest.raises(ByteLimitExceededError):
-        collect_bounded_sync_bytes(stream(), max_bytes=3)
+    assert collect_sync_byte_prefix(iter([b"a", b"", b"bc", b""]), max_bytes=3) == BytePrefix(b"abc", truncated=False)
+    assert collect_sync_byte_prefix(stream(), max_bytes=4) == BytePrefix(b"abcd", truncated=True)

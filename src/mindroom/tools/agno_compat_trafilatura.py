@@ -9,6 +9,7 @@ from trafilatura import spider as trafilatura_spider
 from trafilatura.downloads import USER_AGENT, Response
 from trafilatura.settings import DEFAULT_CONFIG
 
+from mindroom.bounded_http_body import CompressedHttpBodyError, read_identity_body_prefix
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     validate_server_fetch_redirect_url,
@@ -22,16 +23,15 @@ _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 
 def _read_response(response: httpx.Response, url: str, *, decode: bool) -> Response | None:
     """Buffer one uncompressed response body within Trafilatura's download size limit."""
-    if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+    try:
+        body = read_identity_body_prefix(response, max_bytes=_MAX_FILE_SIZE)
+    except CompressedHttpBodyError:
         log_warning("Trafilatura download used an unrequested content encoding")
         return None
-    data = bytearray()
-    for chunk in response.iter_raw():
-        if len(data) + len(chunk) > _MAX_FILE_SIZE:
-            log_warning("Trafilatura download exceeded the maximum file size")
-            return None
-        data.extend(chunk)
-    fetched = Response(bytes(data), response.status_code, url)
+    if body.truncated:
+        log_warning("Trafilatura download exceeded the maximum file size")
+        return None
+    fetched = Response(body.data, response.status_code, url)
     fetched.decode_data(decode)
     return fetched
 
