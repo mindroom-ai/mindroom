@@ -57,22 +57,30 @@ def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
     """Serve `/api/health` and a not-ready `/api/ready` on the API address until the block exits.
 
     Container probes then see a live process that is waiting for pairing instead of a closed port.
-    Raises OSError when the address cannot be bound, before pairing starts.
+    Raises OSError naming the address when it cannot be resolved or bound, before pairing starts.
     """
-    # Bind every resolved address, as the real API server does, so `localhost` answers on both loopbacks.
-    addresses = {
-        (family, address)
-        for family, _type, _proto, _canonname, address in socket.getaddrinfo(
-            host,
-            port,
-            type=socket.SOCK_STREAM,
-            flags=socket.AI_PASSIVE,
-        )
-    }
     with ExitStack() as servers:
-        for family, address in addresses:
-            server = _ProbeServer(family, address)
-            servers.callback(server.server_close)
-            threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True).start()
-            servers.callback(server.shutdown)
+        try:
+            # Bind every resolved address in resolver order, as the real API server does,
+            # so `localhost` answers on both loopbacks.
+            addresses = dict.fromkeys(
+                (family, address)
+                for family, _type, _proto, _canonname, address in socket.getaddrinfo(
+                    host,
+                    port,
+                    type=socket.SOCK_STREAM,
+                    flags=socket.AI_PASSIVE,
+                )
+            )
+            for family, address in addresses:
+                server = _ProbeServer(family, address)
+                servers.callback(server.server_close)
+                threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True).start()
+                servers.callback(server.shutdown)
+        except OSError as exc:
+            msg = (
+                f"Cannot listen on the API address {host}:{port} ({exc.strerror or exc}); "
+                "change --api-host or --api-port, or pass --no-api."
+            )
+            raise OSError(msg) from exc
         yield

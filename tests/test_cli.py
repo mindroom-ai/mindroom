@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -602,17 +603,28 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         assert _probe_status("127.0.0.1", port) == 200
         assert _probe_status("[::1]", port) == 200
 
+    # Taking the second resolved loopback makes the failure come after the first listener is already bound.
+    resolved = list(
+        dict.fromkeys(
+            (info[0], info[4])
+            for info in socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+        ),
+    )
+    (first_family, first_address), (second_family, second_address) = resolved[:2]
     # Probe connections leave TIME_WAIT entries, which SO_REUSEADDR skips just as the real API server does.
-    with socket.socket() as occupied:
+    with socket.socket(second_family) as occupied:
         occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        occupied.bind(("127.0.0.1", port))
+        occupied.bind(second_address)
         occupied.listen()
-        with pytest.raises(OSError, match="Address already in use"), serve_pairing_probes("localhost", port):
+        with (
+            pytest.raises(OSError, match=re.escape(f"localhost:{port} (Address already in use)")),
+            serve_pairing_probes("localhost", port),
+        ):
             pass
-    # No listener stays bound after the failure.
-    with socket.socket(socket.AF_INET6) as released:
+    # The first listener is released again after the failure.
+    with socket.socket(first_family) as released:
         released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        released.bind(("::1", port))
+        released.bind(first_address)
         released.listen()
 
 
@@ -654,7 +666,8 @@ def test_run_fails_before_pairing_when_the_api_address_is_taken(tmp_path: Path) 
         )
 
     assert result.exit_code == 1
-    assert "Error:" in result.output
+    assert "Cannot listen on the API address" in result.output
+    assert f"127.0.0.1:{port}" in result.output
     mock_pair.assert_not_called()
     mock_run.assert_not_called()
 
