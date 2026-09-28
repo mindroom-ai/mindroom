@@ -34,6 +34,7 @@ from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -909,7 +910,8 @@ class ConfigManagerTools(Toolkit):
             output.append(f"- **Model ID**: {model_id}")
 
             if model_config.host:
-                output.append(f"- **Host**: {model_config.host}")
+                # Any requester may list models, so URL userinfo and credential query values stay masked.
+                output.append(f"- **Host**: {redact_sensitive_text(model_config.host)}")
 
             if model_name == "default":
                 output.append("- **Note**: This is typically the system default model")

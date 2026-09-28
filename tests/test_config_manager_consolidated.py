@@ -383,6 +383,28 @@ def test_platform_administrator_reads_redacted_agent_config(tmp_path: Path) -> N
     assert missing == "Error: Agent 'absent' not found."
 
 
+def test_available_models_masks_host_credentials(tmp_path: Path) -> None:
+    """Any requester may list models, so credentials embedded in a model host stay masked."""
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(
+        Config(
+            models={
+                "local": {
+                    "provider": "ollama",
+                    "id": "qwen3.8:27b",
+                    "host": "https://ollama:host-password-sentinel@models.example.org:11434/?api_key=host-query-sentinel",
+                },
+            },
+        ),
+        config_path,
+    )
+
+    result = _config_manager(config_path).get_info(info_type="available_models")
+
+    assert "models.example.org:11434" in result
+    assert "sentinel" not in result
+
+
 class TestConsolidatedConfigManager:
     """Test the consolidated ConfigManager with four tools."""
 
