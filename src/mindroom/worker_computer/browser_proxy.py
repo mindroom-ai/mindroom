@@ -1,4 +1,4 @@
-"""Worker-local SOCKS5 CONNECT relay enforcing browser destination policy."""
+"""Loopback SOCKS5 CONNECT relay enforcing browser destination policy at dial time."""
 
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mappi
             if value is not None:
                 settings[name] = value
     if "auto_proxy" in settings:
-        msg = "Computer browser requires all_proxy instead of automatic proxy configuration."
+        msg = "Browser requires all_proxy instead of automatic proxy configuration."
         raise ValueError(msg)
     proxy = settings.get("all_proxy")
     http, https = settings.get("http_proxy"), settings.get("https_proxy")
     if not proxy and http and http == https:
         proxy = http
     if not proxy and (http or https or settings.get("socks_server")):
-        msg = "Computer browser requires all_proxy or matching http_proxy and https_proxy settings."
+        msg = "Browser requires all_proxy or matching http_proxy and https_proxy settings."
         raise ValueError(msg)
     if proxy:
         parsed = urlsplit(proxy)
@@ -50,7 +50,7 @@ def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mappi
             or parsed.query
             or parsed.fragment
         ):
-            msg = "Computer browser requires an HTTP(S) proxy URL without embedded credentials."
+            msg = "Browser requires an HTTP(S) proxy URL without embedded credentials."
             raise ValueError(msg)
         _ = parsed.port  # Validate malformed ports before launching either provider.
     return proxy or None
@@ -73,7 +73,7 @@ class BrowserDestinationProxy:
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
 
     async def start(self) -> None:
-        """Listen only on an ephemeral worker loopback port."""
+        """Listen only on an ephemeral loopback port of the process that owns the browser."""
         if self._server is None:
             self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
             self._port = self._server.sockets[0].getsockname()[1]

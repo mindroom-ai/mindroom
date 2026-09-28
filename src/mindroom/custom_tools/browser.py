@@ -1714,7 +1714,36 @@ class BrowserTools(Toolkit):
                     return state
                 await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
+            allow_loopback = self._worker_display is not None
             user_data_dir = _profile_dir(self._profiles_root, profile_name)
+            launch_kwargs = _persistent_launch_kwargs(
+                self._runtime_paths,
+                user_data_dir,
+                headless=self._worker_display is None,
+                executable_override=(
+                    self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
+                    if self._worker_display is not None
+                    else None
+                ),
+            )
+            upstream = browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ)
+            if upstream:
+                # The operator's egress proxy owns every destination Chromium does not dial itself.
+                launch_kwargs["proxy"] = {
+                    "server": upstream,
+                    "bypass": COMPUTER_PROXY_BYPASS if allow_loopback else "<-loopback>",
+                }
+            if self._worker_process_env is not None:
+                launch_kwargs["env"] = self._worker_process_env
+            if self._worker_display is not None:
+                launch_kwargs["chromium_sandbox"] = True
+                launch_kwargs["env"] = {
+                    **os.environ,
+                    **self._runtime_paths.process_env,
+                    "DISPLAY": self._worker_display,
+                }
+                launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+
             manager = async_playwright()
             acquisition = asyncio.create_task(manager.start())
             context: BrowserContext | None = None
@@ -1723,36 +1752,15 @@ class BrowserTools(Toolkit):
                 # The public manager cannot stop its transport during subprocess
                 # creation. Let acquisition settle before attempting cleanup.
                 playwright = await asyncio.shield(acquisition)
-                launch_kwargs = _persistent_launch_kwargs(
-                    self._runtime_paths,
-                    user_data_dir,
-                    headless=self._worker_display is None,
-                    executable_override=(
-                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
-                        if self._worker_display is not None
-                        else None
-                    ),
-                )
-                if self._worker_process_env is not None:
-                    launch_kwargs["env"] = self._worker_process_env
-                if self._worker_display is not None:
-                    upstream = browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ)
-                    if upstream:
-                        launch_kwargs["proxy"] = {"server": upstream, "bypass": COMPUTER_PROXY_BYPASS}
-                    else:
-                        destination_proxy = BrowserDestinationProxy(
-                            allow_private_networks=self._allow_private_networks,
-                            allow_loopback=True,
-                        )
-                        await destination_proxy.start()
-                        launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": "<-loopback>"}
-                    launch_kwargs["chromium_sandbox"] = True
-                    launch_kwargs["env"] = {
-                        **os.environ,
-                        **self._runtime_paths.process_env,
-                        "DISPLAY": self._worker_display,
-                    }
-                    launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+                if not upstream:
+                    # Page routes see neither WebSockets nor the address Chromium resolves for itself, so every
+                    # TCP connection, including redirects and service-worker fetches, dials a validated address.
+                    destination_proxy = BrowserDestinationProxy(
+                        allow_private_networks=self._allow_private_networks,
+                        allow_loopback=allow_loopback,
+                    )
+                    await destination_proxy.start()
+                    launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": "<-loopback>"}
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
@@ -1760,7 +1768,7 @@ class BrowserTools(Toolkit):
                     lambda route: continue_or_abort_browser_fetch(
                         route,
                         allow_private_networks=self._allow_private_networks,
-                        allow_loopback=self._worker_display is not None,
+                        allow_loopback=allow_loopback,
                     ),
                 )
                 state = _BrowserProfileState(

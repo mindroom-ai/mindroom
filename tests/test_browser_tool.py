@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -40,6 +41,7 @@ from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
@@ -47,12 +49,15 @@ from tests.authorization_helpers import (
 )
 from tests.browser_lifecycle_helpers import LifecycleBrowser
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.test_worker_browser_proxy import _connect as _socks_connect
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from playwright.async_api import Download as PlaywrightDownload
+
+    from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 DESKTOP_MEDIA = EncryptedDesktopMedia(
@@ -1325,6 +1330,248 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
         await tool.aclose()
 
 
+_PROXY_ENV_NAMES = ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server")
+_REBINDING_HOST = "rebind.test"
+_WEBSOCKET_PROBE_JS = """
+() => new Promise((resolve) => {
+  const socket = new WebSocket("ws://127.0.0.1:%d/socket");
+  socket.onopen = () => { socket.close(); resolve("open"); };
+  socket.onerror = () => resolve("error");
+})
+"""
+
+
+def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _PROXY_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
+def _chromium_executable() -> str:
+    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
+    if executable is None:
+        pytest.skip("Chromium required for browser egress integration")
+    return executable
+
+
+@pytest_asyncio.fixture
+async def loopback_service() -> AsyncIterator[tuple[int, list[str]]]:
+    """Serve an observable loopback page and WebSocket endpoint standing in for an internal service."""
+    hits: list[str] = []
+
+    async def serve(request: web.Request) -> web.StreamResponse:
+        hits.append(request.path)
+        if request.path == "/socket":
+            socket_response = web.WebSocketResponse()
+            await socket_response.prepare(request)
+            await socket_response.close()
+            return socket_response
+        return web.Response(text="<title>Internal service</title>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", serve)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    try:
+        await site.start()
+        assert site._server is not None
+        yield site._server.sockets[0].getsockname()[1], hits
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_headless_host_browser_dials_only_validated_addresses(
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A hostname that answers public to validation but loopback to the dialer never reaches the loopback service."""
+    executable = _chromium_executable()
+    _clear_proxy_env(monkeypatch)
+    port, hits = loopback_service
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect_addresses = browser_proxy.validated_connect_addresses
+    dialing = threading.local()
+
+    def connect_time_addresses(
+        host: str,
+        *,
+        port: int,
+        allow_private_networks: bool,
+        allow_loopback: bool = False,
+    ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        dialing.active = True
+        try:
+            return real_connect_addresses(
+                host,
+                port=port,
+                allow_private_networks=allow_private_networks,
+                allow_loopback=allow_loopback,
+            )
+        finally:
+            dialing.active = False
+
+    def rebinding_getaddrinfo(
+        host: str | bytes | None,
+        service: str | bytes | int | None,
+        *args: int,
+        **kwargs: int,
+    ) -> object:
+        if host != _REBINDING_HOST:
+            return real_getaddrinfo(host, service, *args, **kwargs)
+        # The attacker's DNS answers the open pre-check and page route with a public address.
+        address = "127.0.0.1" if getattr(dialing, "active", False) else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, service))]
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", connect_time_addresses)
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding_getaddrinfo)
+    original_launch = _persistent_launch_kwargs
+
+    def rebinding_launch(
+        runtime_paths: RuntimePaths,
+        user_data_dir: Path,
+        *,
+        headless: bool,
+        executable_override: str | None = None,
+    ) -> dict[str, Any]:
+        options = original_launch(
+            runtime_paths,
+            user_data_dir,
+            headless=headless,
+            executable_override=executable_override,
+        )
+        # Chromium's own resolver sees the rebound answer whenever it resolves the hostname itself.
+        options.setdefault("args", []).append(f"--host-resolver-rules=MAP {_REBINDING_HOST} 127.0.0.1")
+        return options
+
+    monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", rebinding_launch)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    tool = BrowserTools(paths)
+    try:
+        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+            await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
+        assert hits == []
+    finally:
+        await tool.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("binding", "expected"), [("unbound", "error"), ("headless", "error"), ("computer", "open")])
+async def test_page_websockets_follow_browser_destination_policy(
+    binding: str,
+    expected: str,
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Page WebSockets reach loopback only from a Computer browser, like its HTTP requests."""
+    executable = _chromium_executable()
+    _clear_proxy_env(monkeypatch)
+    port, hits = loopback_service
+    original_launch = _persistent_launch_kwargs
+
+    def headless_launch(
+        runtime_paths: RuntimePaths,
+        user_data_dir: Path,
+        *,
+        headless: bool,
+        executable_override: str | None = None,
+    ) -> dict[str, Any]:
+        del headless
+        return original_launch(runtime_paths, user_data_dir, headless=True, executable_override=executable_override)
+
+    monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    tool = BrowserTools(paths)
+    if binding == "computer":
+        tool.bind_worker_display(":99", tmp_path / "workspace")
+    elif binding == "headless":
+        tool.bind_worker_headless(tmp_path / "workspace", dict(os.environ))
+    try:
+        await tool.browser(action="start")
+        result = json.loads(
+            await tool.browser(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
+        )
+        assert result["result"] == expected
+        assert ("/socket" in hits) is (expected == "open")
+    finally:
+        await tool.aclose()
+
+
+async def _socks_connect_status(proxy: BrowserDestinationProxy, host: str, port: int) -> int:
+    """Return the SOCKS5 reply code for one CONNECT through a browser destination relay."""
+    _reader, writer, status = await _socks_connect(proxy, host, port, literal=True)
+    writer.close()
+    await writer.wait_closed()
+    return status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_private_networks", [False, True])
+async def test_host_browser_launches_through_connect_time_destination_proxy(
+    allow_private_networks: bool,
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Primary Chromium dials every TCP destination through the relay that applies the tool's policy."""
+    _clear_proxy_env(monkeypatch)
+    port, _hits = loopback_service
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths, allow_private_networks=allow_private_networks)
+    launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext(pages=[]))
+
+    state = await tool._ensure_profile("mindroom")
+    try:
+        proxy = state.destination_proxy
+        assert proxy is not None
+        assert launch_kwargs["proxy"] == {"server": proxy.endpoint, "bypass": "<-loopback>"}
+        assert (await _socks_connect_status(proxy, "127.0.0.1", port) == 0) is allow_private_networks
+        assert await _socks_connect_status(proxy, "169.254.169.254", 80) != 0
+    finally:
+        await tool.aclose()
+    with pytest.raises(ConnectionRefusedError):
+        await asyncio.open_connection("127.0.0.1", urlsplit(proxy.endpoint).port)
+
+
+@pytest.mark.asyncio
+async def test_host_browser_keeps_configured_upstream_proxy_for_every_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An operator egress proxy stays the only route, including for loopback destinations."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:3128")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext(pages=[]))
+
+    state = await tool._ensure_profile("mindroom")
+    try:
+        assert state.destination_proxy is None
+        assert launch_kwargs["proxy"] == {"server": "http://127.0.0.1:3128", "bypass": "<-loopback>"}
+    finally:
+        await tool.aclose()
+
+
 def _validation_ran_on_event_loop(calls: list[bool]) -> Callable[..., str]:
     def validate(url: str, **_kwargs: object) -> str:
         try:
@@ -1679,6 +1926,7 @@ async def test_agent_browser_profiles_live_in_each_agent_state_root(
     tmp_path: Path,
 ) -> None:
     """Signed-in host browser state never crosses agents or the requesters of a private agent."""
+    _clear_proxy_env(monkeypatch)
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {

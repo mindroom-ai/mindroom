@@ -65,7 +65,7 @@ def test_browser_proxy_settings_preserve_worker_route(
 )
 def test_browser_proxy_settings_never_silently_bypass_unsupported_routes(worker_env: dict[str, str]) -> None:
     """Unsupported browser proxy modes fail before any direct traffic can escape."""
-    with pytest.raises(ValueError, match="Computer browser requires"):
+    with pytest.raises(ValueError, match="Browser requires"):
         browser_upstream_proxy_url({}, worker_env)
 
 
