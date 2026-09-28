@@ -2793,6 +2793,26 @@ async def test_a_created_skill_is_parsed_off_the_event_loop(tmp_path: Path) -> N
     assert threading.main_thread() not in threads
 
 
+def test_archival_seeds_every_first_seen_skill_in_one_usage_write(tmp_path: Path) -> None:
+    """Starting the inactivity clock of many adopted skills rewrites the usage file once, not once per skill."""
+    root = tmp_path / "skills"
+    for index in range(20):
+        name = f"adopted-{index:02d}"
+        _write_skill(root, name, LEARNED.replace("deploy-checks", name))
+    writes: list[int] = []
+    real = workspace_skills_module._write_usage_records
+
+    def counted(root_fd: int, records: dict[str, object]) -> None:
+        writes.append(len(records))
+        real(root_fd, records)
+
+    with patch.object(workspace_skills_module, "_write_usage_records", counted):
+        assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+    assert writes == [20]
+    records = json.loads((root / ".usage.json").read_text())
+    assert all("created_at" in record for record in records.values())
+
+
 def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
     """Directories past the skill count never load, so archival neither parses nor archives them."""
     root = tmp_path / "skills"

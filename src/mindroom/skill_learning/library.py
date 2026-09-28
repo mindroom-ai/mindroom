@@ -45,9 +45,11 @@ from mindroom.tool_system.workspace_skills import (
     parse_skill_markdown,
     parse_skill_metadata,
     read_text_at,
+    skill_parse_cost,
     skill_prompt_bytes,
     support_entry_count,
     update_skill_usage,
+    update_skill_usages,
     workspace_skill,
     workspace_skill_budget_shares,
     workspace_skill_name,
@@ -328,7 +330,8 @@ def _require_prompt_budget(
             "budget, and skill loading would skip some; shorten or merge skills instead."
         )
         raise SkillEditError(msg)
-    if sum(share.frontmatter_bytes for share in others) + frontmatter_bytes(markdown) > MAX_WORKSPACE_FRONTMATTER_BYTES:
+    parse_cost = skill_parse_cost(frontmatter_bytes(markdown), changed)
+    if sum(share.parse_cost for share in others) + parse_cost > MAX_WORKSPACE_FRONTMATTER_BYTES:
         msg = (
             f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
             "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
@@ -489,6 +492,7 @@ def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: in
     if archive_after_days <= 0:
         return []
     archived: list[str] = []
+    first_seen: list[str] = []
     usage = load_skill_usage(root_fd)
     for name in loaded:
         try:
@@ -503,7 +507,7 @@ def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: in
         last_activity = usage.get(name, SkillUsage()).last_activity_at()
         if last_activity is None:
             # First sight of an adopted or restored skill starts its inactivity clock, like Hermes' seeded records.
-            update_skill_usage(root_fd, name, lambda record: record.model_copy(update={"created_at": now}))
+            first_seen.append(name)
             continue
         if (now - last_activity).days < archive_after_days:
             continue
@@ -515,4 +519,9 @@ def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: in
                 dst_dir_fd=archive_fd,
             )
         archived.append(name)
+    # One write for every first-seen skill, instead of rewriting the usage file for each.
+    update_skill_usages(
+        root_fd,
+        dict.fromkeys(first_seen, lambda record: record.model_copy(update={"created_at": now})),
+    )
     return archived

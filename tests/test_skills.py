@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.skills.skill import Skill
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
@@ -714,6 +715,66 @@ def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> No
     events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
     assert "Refused a workspace skill whose frontmatter is too large" in events
     assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
+
+
+def test_a_full_library_of_ordinary_skills_loads(tmp_path: Path) -> None:
+    """The count cap, not the frontmatter budget, bounds a library whose frontmatter is the size real skills use."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
+    for index in range(count):
+        name = f"skill-{index:03d}"
+        (workspace_skills / name).mkdir()
+        # Hermes' own skills have about 390 bytes of frontmatter on average and under 500 at the 90th percentile.
+        (workspace_skills / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {'Use when handling a common task. ' * 8}\n"
+            "metadata:\n  hermes:\n    tags: [common, task]\n    related_skills: [other-skill]\n---\nSteps.\n",
+            encoding="utf-8",
+        )
+    assert len(_skill_names(_load_agent_skills(tmp_path, storage))) == count
+
+
+def test_unchanged_frontmatter_is_parsed_once_across_loads(tmp_path: Path) -> None:
+    """Every agent build loads the library, so parses of unchanged frontmatter are reused."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    for index in range(3):
+        _write_skill(workspace_skills, f"cached-{index}-{tmp_path.name}", "Cached skill")
+    real = workspace_skills_module.yaml_io.safe_load_untrusted
+    parses: list[str] = []
+
+    def counted(text: str) -> object:
+        parses.append(text)
+        return real(text)
+
+    with patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", counted):
+        first = _skill_names(_load_agent_skills(tmp_path, storage))
+        parsed_first = len(parses)
+        assert _skill_names(_load_agent_skills(tmp_path, storage)) == first
+    assert parsed_first == 3
+    assert len(parses) == parsed_first
+
+
+def test_planted_skill_files_stay_within_the_read_budget(tmp_path: Path) -> None:
+    """Refused files count toward what a pass reads, so planted ones cannot make it read without bound."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    oversized = "---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n" + "x" * (1 << 20) + "\n"
+    for index in range(20):
+        (workspace_skills / f"a-{index:02d}").mkdir()
+        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_text(oversized[: (1 << 20) - 100], encoding="utf-8")
+    with capture_logs() as logs:
+        _load_agent_skills(tmp_path, storage)
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert "Workspace skill files exceed their read budget; skipping the rest" in events
+    refused = [entry for entry in logs if entry["event"] == "Refused a workspace skill whose frontmatter is too large"]
+    assert len(refused) < 20
+
+
+def test_json5_metadata_counts_at_its_parse_weight() -> None:
+    """JSON5 parses slower per byte than YAML, so a skill's JSON5 metadata counts more toward the parse budget."""
+    metadata = "{openclaw: {requires: {bins: [git]}}}"
+    skill = Skill(name="s", description="d", instructions="", source_path="s", metadata=metadata)
+    plain = Skill(name="s", description="d", instructions="", source_path="s", metadata={"a": 1})
+    assert workspace_skills_module.skill_parse_cost(100, plain) == 100
+    assert workspace_skills_module.skill_parse_cost(100, skill) == 100 + 2 * len(metadata)
 
 
 def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:

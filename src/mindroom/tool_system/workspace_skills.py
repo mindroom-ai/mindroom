@@ -6,6 +6,7 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
@@ -26,7 +28,7 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -44,7 +46,13 @@ MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 # The primary parses worker-writable frontmatter with pure-Python YAML and JSON5, so both its size per skill and its
 # total per workspace stay bounded; skill bodies are never parsed.
 _MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES = 8 << 10
-MAX_WORKSPACE_FRONTMATTER_BYTES = 64 << 10
+MAX_WORKSPACE_FRONTMATTER_BYTES = 128 << 10
+# JSON5 metadata parses about three times slower per byte than YAML, so it counts three times toward that budget.
+_JSON5_PARSE_WEIGHT = 3
+# Refused files count too, so planted ones cannot make a pass read without bound.
+_MAX_WORKSPACE_SKILL_READ_BYTES = 16 << 20
+# Loads repeat for every agent build and skill edit, so parses of unchanged frontmatter and metadata are reused.
+_PARSE_CACHE_ENTRIES = 1024
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
@@ -175,14 +183,28 @@ def _strict_frontmatter(text: str, *, trusted: bool) -> Any:  # noqa: ANN401
     Workspace frontmatter, which worker code can write, gets PyYAML's pure-Python loader like Agno's LocalSkills, with
     the refusals of ``yaml_io.safe_load_untrusted``; operator-owned skill roots keep the fast safe loader.
     """
+    value, error = _cached_frontmatter(text, trusted=trusted)
+    if error is not None:
+        raise YAMLError(error)
+    return copy.deepcopy(value)
+
+
+@lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
+def _cached_frontmatter(text: str, *, trusted: bool) -> tuple[object, str | None]:
     try:
-        return (yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}
-    except YAMLError:
-        raise
+        return (yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}, None
     except Exception as exc:
         # PyYAML refuses values such as 2026-02-30, `!!int ""`, `!!bool maybe`, or deep nesting with ValueError,
         # IndexError, KeyError, AttributeError, or RecursionError; like LocalSkills, any of them makes the YAML invalid.
-        raise YAMLError(str(exc)) from exc
+        return None, str(exc)
+
+
+@lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
+def _cached_json5(text: str) -> tuple[object, str | None]:
+    try:
+        return json5.loads(text), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def normalized_newlines(text: str) -> str:
@@ -227,13 +249,12 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return cast("dict[str, Any]", raw)
     if isinstance(raw, str):
-        try:
-            parsed = json5.loads(raw)
-        except Exception as exc:
-            logger.warning("Failed to parse skill metadata JSON5", path=path, error=str(exc))
+        parsed, error = _cached_json5(raw)
+        if error is not None:
+            logger.warning("Failed to parse skill metadata JSON5", path=path, error=error)
             return None
         if isinstance(parsed, dict):
-            return parsed
+            return copy.deepcopy(cast("dict[str, Any]", parsed))
         logger.warning("Skill metadata JSON5 must be an object", path=path)
         return None
 
@@ -321,10 +342,18 @@ class _SkillBudgetShare:
     """One loaded skill's share of the workspace prompt budget and of its frontmatter parse budget."""
 
     prompt_bytes: int
-    frontmatter_bytes: int
+    parse_cost: int
 
 
-_FRONTMATTER_BUDGET_SPENT = object()
+@dataclass(frozen=True)
+class _BudgetSpent:
+    """A pass stopped because one of its budgets ran out."""
+
+    warning: str
+
+
+_FRONTMATTER_BUDGET_SPENT = _BudgetSpent("Workspace skill frontmatter exceeds its parse budget; skipping the rest")
+_READ_BUDGET_SPENT = _BudgetSpent("Workspace skill files exceed their read budget; skipping the rest")
 
 
 def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, _SkillBudgetShare]]:
@@ -334,35 +363,50 @@ def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, _SkillBudg
     primary parse more than that per load.
     """
     parsed_bytes = 0
+    read_bytes = 0
 
-    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, _SkillBudgetShare] | object | None:
-        nonlocal parsed_bytes
+    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, _SkillBudgetShare] | _BudgetSpent | None:
+        nonlocal parsed_bytes, read_bytes
         content = _read_skill_markdown(skill_fd, skills_root, directory)
         if content is None:
             return None
+        read_bytes += len(content)
+        if read_bytes > _MAX_WORKSPACE_SKILL_READ_BYTES:
+            return _READ_BUDGET_SPENT
         size = _checked_frontmatter_bytes(content, skills_root / directory / SKILL_FILENAME)
         if size is None:
             return None
         if parsed_bytes + size > MAX_WORKSPACE_FRONTMATTER_BYTES:
             return _FRONTMATTER_BUDGET_SPENT
-        parsed_bytes += size
-        skill = workspace_skill(
-            content,
-            skills_root,
-            directory,
-            scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
-            references=list_support_files(skill_fd, skills_root / directory, "references"),
-        )
-        return None if skill is None else (directory, skill, _SkillBudgetShare(skill_prompt_bytes(skill), size))
+        skill = _read_skill(skill_fd, content, skills_root, directory)
+        cost = skill_parse_cost(size, skill) if skill is not None else 0
+        if parsed_bytes + cost > MAX_WORKSPACE_FRONTMATTER_BYTES:
+            return _FRONTMATTER_BUDGET_SPENT
+        parsed_bytes += cost
+        return None if skill is None else (directory, skill, _SkillBudgetShare(skill_prompt_bytes(skill), cost))
 
     for result in _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS):
-        if result is _FRONTMATTER_BUDGET_SPENT:
-            logger.warning(
-                "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
-                path=str(skills_root),
-            )
+        if isinstance(result, _BudgetSpent):
+            logger.warning(result.warning, path=str(skills_root))
             return
-        yield cast("tuple[str, Skill, _SkillBudgetShare]", result)
+        yield result
+
+
+def _read_skill(skill_fd: int, content: str, skills_root: Path, directory: str) -> Skill | None:
+    return workspace_skill(
+        content,
+        skills_root,
+        directory,
+        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
+        references=list_support_files(skill_fd, skills_root / directory, "references"),
+    )
+
+
+def skill_parse_cost(frontmatter_size: int, skill: Skill) -> int:
+    """Return what one skill's frontmatter costs to parse, in YAML bytes, counting JSON5 metadata at its weight."""
+    metadata = skill.metadata
+    json5_bytes = len(metadata.encode()) if isinstance(metadata, str) else 0
+    return frontmatter_size + (_JSON5_PARSE_WEIGHT - 1) * json5_bytes
 
 
 def frontmatter_bytes(content: str) -> int:
@@ -537,24 +581,32 @@ def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
 
 
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
-    """Replace one skill's usage record atomically, leaving every other record as written.
+    """Replace one skill's usage record atomically, leaving every other record as written."""
+    update_skill_usages(root_fd, {directory: update})
+
+
+def update_skill_usages(root_fd: int, updates: Mapping[str, Callable[[SkillUsage], SkillUsage]]) -> None:
+    """Replace several skills' usage records in one atomic write, leaving every other record as written.
 
     Telemetry never fails its caller: records are cleaned when read, and a write that fails is logged.
     The lock is process-local on purpose: any lock inside the worker-shared workspace could be held by worker
     code to stall the primary, so concurrent primaries sharing one storage root may occasionally drop a count.
     """
+    if not updates:
+        return
     with _USAGE_LOCK:
         records = _usage_records(root_fd)
         if records is None:
             # Rewriting an unreadable file would drop every record in it; a person can still repair it.
             return
-        current = _parse_usage(records.get(directory)) or SkillUsage()
-        records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
+        for directory, update in updates.items():
+            current = _parse_usage(records.get(directory)) or SkillUsage()
+            records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
         try:
             _write_usage_records(root_fd, records)
         except OSError as exc:
-            # The change this records has already landed, so a failed write, such as on a full disk, is only logged.
-            logger.warning("Could not update skill usage telemetry", directory=directory, error=str(exc))
+            # The changes this records have already landed, so a failed write, such as on a full disk, is only logged.
+            logger.warning("Could not update skill usage telemetry", directories=sorted(updates), error=str(exc))
 
 
 def forget_missing_skill_usage(root_fd: int) -> None:
