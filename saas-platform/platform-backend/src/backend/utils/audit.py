@@ -16,9 +16,10 @@ from fastapi import Request
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
 TRUNCATED = "... [truncated]"
-# Only this many characters of each audit string are redacted and kept, which bounds the cost of the recursive
-# assignment regex below: its worst measured case at this length is about 20 ms, against about 75 ms at 1 KiB.
-MAX_AUDIT_TEXT_LENGTH = 512
+# Only this many characters of each audit string are redacted, which bounds the cost of the recursive assignment
+# regex below. Its worst case, nested assignments followed by a long whitespace run, grows with about the cube of the
+# length: measured at about 30 ms at this length, 60 ms at 320, and 250 ms at 512.
+MAX_AUDIT_TEXT_LENGTH = 256
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
@@ -80,6 +81,7 @@ _URL_QUERY_SECRET_KEYS = frozenset(
     }
 )
 _QUERY_CONTAINER_KEYS = frozenset({"query", "query_params", "query_string", "callback_query"})
+_ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _SECRET_KEY_VARIANTS = tuple(
     (key, key.replace("_", ""), tuple(key.split("_"))) for key in sorted(_SECRET_KEYS, key=len, reverse=True)
 )
@@ -87,7 +89,9 @@ _SECRET_KEY_VARIANTS = tuple(
 
 def _normalize_key(value: object) -> str:
     key = str(value).strip()
-    key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    # Zero-width lookarounds split an acronym from the next word without the backtracking of `([A-Z]+)([A-Z][a-z])`,
+    # which was quadratic in the length of an uppercase run.
+    key = _ACRONYM_BOUNDARY_PATTERN.sub("_", key)
     key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
     return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
@@ -205,9 +209,10 @@ def _redact_query_fragment(value: str) -> str:
 
 
 def redact_audit_text(value: str) -> str:
-    """Redact credential-bearing values from free-form audit text, keeping at most `MAX_AUDIT_TEXT_LENGTH` characters.
+    """Redact credential-bearing values from the first `MAX_AUDIT_TEXT_LENGTH` characters of free-form audit text.
 
     Longer text is cut before redaction and marked as truncated.
+    Redaction markers can make the output several times longer than the redacted text.
     A credential that straddles the cut can keep its beginning; only platform admins supply audit text that long.
     """
     if len(value) > MAX_AUDIT_TEXT_LENGTH:

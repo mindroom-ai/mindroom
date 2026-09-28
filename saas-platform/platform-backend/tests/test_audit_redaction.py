@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
-from backend.utils.audit import MAX_AUDIT_TEXT_LENGTH, REDACTED, TRUNCATED, redact_audit_details, redact_audit_text
+from backend.utils.audit import (
+    MAX_AUDIT_TEXT_LENGTH,
+    REDACTED,
+    TRUNCATED,
+    _normalize_key,
+    redact_audit_details,
+    redact_audit_text,
+)
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 
 def test_redact_audit_details_recurses_and_matches_case_insensitive_headers() -> None:
@@ -73,26 +83,45 @@ def test_redact_audit_details_redacts_oauth_url_and_query_values() -> None:
 
 
 @pytest.mark.parametrize(
-    "unit",
+    "text",
     [
-        pytest.param("a", id="delimiter-free-run"),
-        pytest.param("A", id="uppercase-run"),
-        pytest.param("a=", id="chained-assignments"),
-        pytest.param("a='", id="chained-quoted-assignments"),
-        pytest.param("token=x,", id="many-secret-assignments"),
-        pytest.param("http://?code='", id="urls-that-grow-when-redacted"),
-        pytest.param(".:", id="short-assignment-runs"),
+        pytest.param("a" * 1_000_000, id="delimiter-free-run"),
+        pytest.param("A" * 1_000_000, id="uppercase-run"),
+        pytest.param("a=" * 500_000, id="chained-assignments"),
+        pytest.param("a='" * 333_333, id="chained-quoted-assignments"),
+        pytest.param("token=x," * 125_000, id="many-secret-assignments"),
+        pytest.param("http://?code='" * 71_428, id="urls-that-grow-when-redacted"),
+        pytest.param(".:" * 500_000, id="short-assignment-runs"),
+        pytest.param("a=" * 80 + "'http://?" + "A" * 1_000_000, id="nested-assignments-before-an-uppercase-query"),
+        pytest.param("a=" * 66 + " " * 1_000_000, id="nested-assignments-before-whitespace"),
+        pytest.param("=a" * 66 + "\f" * 1_000_000, id="nested-assignments-before-form-feeds"),
     ],
 )
-def test_redact_audit_details_cost_is_bounded_by_the_text_cap(unit: str) -> None:
+def test_redact_audit_details_cost_is_bounded_by_the_text_cap(text: str) -> None:
     """Only the first `MAX_AUDIT_TEXT_LENGTH` characters are redacted, so megabyte strings cost what the cap costs."""
-    text = unit * (1_000_000 // len(unit))
+    timings = []
+    for _ in range(3):
+        started = time.perf_counter()
+        redacted = redact_audit_details({"value": text})
+        timings.append(time.perf_counter() - started)
 
-    started = time.perf_counter()
-    redacted = redact_audit_details({"value": text})
-
-    assert time.perf_counter() - started < 0.25
+    assert min(timings) < 0.1
     assert redacted["value"].endswith(TRUNCATED)
+
+
+def _normalize_key_with_backtracking(value: object) -> str:
+    """The previous key normalization, whose first substitution was quadratic on uppercase runs."""
+    key = str(value).strip()
+    key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+
+
+@settings(max_examples=2_000)
+@given(st.text(st.sampled_from("AaBbZz09_-. ")))
+def test_normalize_key_matches_the_backtracking_normalization(key: str) -> None:
+    """The linear acronym split normalizes every key exactly as the backtracking substitution did."""
+    assert _normalize_key(key) == _normalize_key_with_backtracking(key)
 
 
 def test_redact_audit_text_keeps_short_text_whole() -> None:
@@ -121,7 +150,7 @@ def test_redact_audit_text_keeps_short_text_whole() -> None:
         ("{'detail': \"password='abc,def'\"}", "def"),
         ("{'detail': \"password='abc,def'\"}", "abc"),
         ('{"password": "pw-secret", "name": "kept"}', "pw-secret"),
-        ("a=" * 200 + "token=tok-secret", "tok-secret"),
+        ("a=" * 100 + "token=tok-secret", "tok-secret"),
     ],
 )
 def test_redact_audit_text_redacts_review_leak_cases(text: str, secret: str) -> None:
