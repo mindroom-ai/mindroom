@@ -103,7 +103,7 @@ That page shows when each paired install was last seen.
 A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
 Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
 The service records these reports with ten-minute resolution.
-If the connection was revoked, the install logs a warning asking you to run `mindroom connect` again.
+If the service rejects the credentials as invalid or revoked, the install logs a warning asking you to run `mindroom connect` again and stops reporting.
 The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
 Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
 Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from typing import TYPE_CHECKING
 
 import httpx
@@ -22,7 +21,6 @@ _PAIRED_ENV = {
     "MINDROOM_LOCAL_CLIENT_ID": "local-client",
     "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
 }
-_REVOKED_WARNING = "This install's connection was revoked in MindRoom Chat; run `mindroom connect` to pair again."
 
 
 class _StopLoopError(Exception):
@@ -79,10 +77,10 @@ async def test_heartbeat_reports_at_startup_and_then_every_interval(
     sleeps, sleep = _sleep_until(stop_after=3)
 
     with pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), interval_seconds=42.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), sleep=sleep)
 
     assert len(requests) == 3
-    assert sleeps == [42.0, 42.0, 42.0]
+    assert sleeps == [6 * 60 * 60] * 3
     for request in requests:
         assert request.method == "POST"
         assert request.url == "https://provisioning.example/v1/local-mindroom/heartbeat"
@@ -90,12 +88,6 @@ async def test_heartbeat_reports_at_startup_and_then_every_interval(
         assert request.headers["X-Local-MindRoom-Client-Secret"] == "local-secret"
         assert request.content == b""
     assert all(kwargs["timeout"] == provisioning_heartbeat._HEARTBEAT_TIMEOUT_SECONDS for kwargs in client_kwargs)
-
-
-def test_heartbeat_defaults_to_six_hours() -> None:
-    """Production callers get a six-hour heartbeat interval."""
-    default = inspect.signature(run_provisioning_heartbeat).parameters["interval_seconds"].default
-    assert default == 6 * 60 * 60
 
 
 @pytest.mark.asyncio
@@ -112,41 +104,50 @@ async def test_heartbeat_follows_matrix_ssl_verify(
     env = _PAIRED_ENV if ssl_verify is None else {**_PAIRED_ENV, "MATRIX_SSL_VERIFY": ssl_verify}
 
     with pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), interval_seconds=1.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), sleep=sleep)
 
     assert [kwargs["verify"] for kwargs in client_kwargs] == [expected_verify]
 
 
 @pytest.mark.asyncio
-async def test_revoked_connection_warns_once_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A revoked connection logs one clear warning and stops heartbeating."""
-    requests, _ = _install_transport(
-        monkeypatch,
-        lambda _request: httpx.Response(403, json={"detail": "Connection revoked"}),
-    )
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401, json={"detail": "Invalid local client credentials"}),
+        httpx.Response(403, json={"detail": "Connection revoked"}),
+    ],
+    ids=["invalid", "revoked"],
+)
+async def test_rejected_credentials_warn_once_and_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+) -> None:
+    """Invalid or revoked credentials log one clear warning and stop heartbeating."""
+    requests, _ = _install_transport(monkeypatch, lambda _request: response)
     sleeps, sleep = _sleep_until(stop_after=3)
 
     with capture_logs() as logs:
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), interval_seconds=1.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), sleep=sleep)
 
     assert len(requests) == 1
     assert sleeps == []
     assert [log for log in logs if log["log_level"] == "warning"] == [
-        {"event": _REVOKED_WARNING, "log_level": "warning"},
+        {"event": provisioning_heartbeat._REJECTED_WARNING, "log_level": "warning"},
     ]
 
 
 @pytest.mark.asyncio
-async def test_older_service_without_heartbeat_endpoint_is_silent(
+async def test_older_service_without_heartbeat_endpoint_adds_no_mindroom_logs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A provisioning service that predates the endpoint answers 404, which is not worth reporting."""
+    """A service that predates the endpoint answers 404; MindRoom logs nothing beyond httpx's usual request line."""
     requests, _ = _install_transport(monkeypatch, lambda _request: httpx.Response(404, json={"detail": "Not Found"}))
     _, sleep = _sleep_until(stop_after=2)
 
     with capture_logs() as logs, pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), interval_seconds=1.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), sleep=sleep)
 
     assert len(requests) == 2
     assert logs == []
@@ -173,7 +174,7 @@ async def test_heartbeat_failures_are_debug_only_and_keep_running(
     _, sleep = _sleep_until(stop_after=2)
 
     with capture_logs() as logs, pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), interval_seconds=1.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), sleep=sleep)
 
     assert len(requests) == 2
     assert logs
@@ -191,10 +192,10 @@ async def test_invalid_provisioning_url_is_debug_only_and_keeps_running(
     env = {**_PAIRED_ENV, "MINDROOM_PROVISIONING_URL": "https://provisioning.example:abc"}
 
     with capture_logs() as logs, pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), interval_seconds=1.0, sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), sleep=sleep)
 
     assert requests == []
-    assert sleeps == [1.0, 1.0]
+    assert sleeps == [6 * 60 * 60] * 2
     assert [(log["event"], log["log_level"]) for log in logs] == [("Provisioning heartbeat failed", "debug")] * 2
 
 
@@ -217,7 +218,7 @@ async def test_unpaired_install_sends_nothing(
     requests, _ = _install_transport(monkeypatch, lambda _request: httpx.Response(200))
     sleeps, sleep = _sleep_until(stop_after=1)
 
-    await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), interval_seconds=1.0, sleep=sleep)
+    await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), sleep=sleep)
 
     assert requests == []
     assert sleeps == []

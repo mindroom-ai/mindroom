@@ -86,7 +86,6 @@ depends_on = []
 visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
-    "mindroom.matrix.provisioning_heartbeat",
 ]
 
 [[modules]]
@@ -2460,7 +2459,6 @@ depends_on = [
 path = "mindroom.matrix.provisioning_heartbeat"
 depends_on = [
     "mindroom.constants",
-    "mindroom.http_error_detail",
     "mindroom.logging_config",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.provisioning_env",

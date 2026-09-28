@@ -17,6 +17,7 @@ from requests import exceptions as requests_exceptions
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.matrix.provisioning import local_client_headers
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClaimValidationError,
@@ -132,10 +133,7 @@ async def _google_runtime_bootstrapper(
         raise OAuthProviderError(msg)
 
     provisioning_url, local_client_id, local_client_secret = provisioning_credentials
-    headers = {
-        "X-Local-MindRoom-Client-Id": local_client_id,
-        "X-Local-MindRoom-Client-Secret": local_client_secret,
-    }
+    headers = local_client_headers(local_client_id, local_client_secret)
     try:
         client_id, client_secret = await _fetch_provisioned_google_client(provisioning_url, headers)
     except OAuthProviderError as exc:

@@ -868,7 +868,7 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
 
 def test_client_error_detail_constants_match_service() -> None:
     """The runtime client classifies register-agent and heartbeat 403s by these exact strings."""
-    assert matrix_provisioning.CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
+    assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
     assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL
 
 
@@ -1174,15 +1174,16 @@ def test_homeserver_token_lookups_are_rate_limited_per_client_before_the_lookup(
     """Unauthenticated callers cannot make the service call the homeserver more than the per-address limit."""
     lookups = _count_homeserver_lookups(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
 
     with TestClient(app) as client:
-        statuses = [_garbage_browser_request(client, endpoint, headers).status_code for _ in range(31)]
+        statuses = [_garbage_browser_request(client, endpoint, headers).status_code for _ in range(limit + 1)]
     with TestClient(app, client=("203.0.113.9", 50000)) as other_client:
         other_status = _garbage_browser_request(other_client, endpoint, headers).status_code
 
-    assert statuses == [401] * 30 + [429]
+    assert statuses == [401] * limit + [429]
     assert other_status == 401
-    assert len(lookups) == 31
+    assert len(lookups) == limit + 1
 
 
 def test_homeserver_token_lookup_limit_is_shared_across_browser_endpoints(
@@ -1193,38 +1194,65 @@ def test_homeserver_token_lookup_limit_is_shared_across_browser_endpoints(
     lookups = _count_homeserver_lookups(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
     headers = {OPENID_TOKEN_HEADER: "garbage"}
+    limit = provisioning.HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE
+    endpoints = ("inspect", "approve", "connections-list")
 
     with TestClient(app) as client:
-        for endpoint in ("inspect", "approve", "connections-list") * 10:
-            assert _garbage_browser_request(client, endpoint, headers).status_code == 401
+        for index in range(limit):
+            assert _garbage_browser_request(client, endpoints[index % len(endpoints)], headers).status_code == 401
         assert _garbage_browser_request(client, "connections-revoke", headers).status_code == 429
 
-    assert len(lookups) == 30
+    assert len(lookups) == limit
+
+
+def test_verified_users_behind_one_address_reach_their_own_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-address lookup limit leaves room for several users behind one NAT to reach their per-user limits."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        statuses = {
+            user: [client.get("/v1/local-mindroom/connections", headers=headers).status_code for _ in range(61)]
+            for user, headers in (("alice", ALICE_OPENID_HEADERS), ("bob", BOB_OPENID_HEADERS))
+        }
+        pair_statuses = [
+            client.get(
+                "/v1/local-mindroom/pair/status",
+                headers={**ALICE_OPENID_HEADERS, provisioning.PAIR_STATUS_SESSION_HEADER: "unknown"},
+            ).status_code
+            for _ in range(61)
+        ]
+
+    assert statuses == {"alice": [200] * 60 + [429], "bob": [200] * 60 + [429]}
+    assert pair_statuses == [404] * 60 + [429]
 
 
 def test_device_poll_is_rate_limited_per_device_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One polling client cannot use up the budget of other clients behind the same address."""
     _patch_openid_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    per_secret = provisioning.DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE
+    per_address = provisioning.DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE
+
+    def _poll(device_secret: object) -> httpx.Response:
+        return client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": device_secret})
 
     with TestClient(app) as client:
         greedy = _start_device_pairing(client, "greedy")
         polite = _start_device_pairing(client, "polite")
-        greedy_statuses = [
-            client.post(
-                "/v1/local-mindroom/pair/device/poll",
-                json={"device_secret": greedy["device_secret"]},
-            ).status_code
-            for _ in range(31)
-        ]
-        polite_poll = client.post(
-            "/v1/local-mindroom/pair/device/poll",
-            json={"device_secret": polite["device_secret"]},
-        )
+        greedy_statuses = [_poll(greedy["device_secret"]).status_code for _ in range(per_address)]
+        polite_poll = _poll(polite["device_secret"])
+        # Polls rejected by the device limit leave the shared address budget untouched.
+        remaining = per_address - per_secret - 1
+        other_statuses = [_poll(f"secret-{index}").status_code for index in range(remaining + 1)]
 
-    assert greedy_statuses == [200] * 30 + [429]
+    assert greedy_statuses == [200] * per_secret + [429] * (per_address - per_secret)
     assert polite_poll.status_code == 200
     assert polite_poll.json()["status"] == "pending"
+    assert other_statuses == [404] * remaining + [429]
 
 
 def test_device_poll_allows_many_clients_behind_one_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

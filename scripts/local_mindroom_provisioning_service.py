@@ -36,11 +36,12 @@ kept for one release to allow existing chat clients to migrate.
 
 Rate limits: every request that the service must resolve through the
 homeserver (OpenID userinfo, or whoami for legacy access tokens) first counts
-against a per-client-address limit of 30 per minute, so invalid tokens cannot
-make the service flood the homeserver; per-user limits apply after
-verification. Device polls are limited to 300 per minute per client address,
-leaving room for many CLIs behind one NAT, and to 30 per minute per device
-secret, so one client cannot starve the others.
+against a per-client-address limit of 300 per minute, so invalid tokens cannot
+make the service flood the homeserver while many users behind one NAT still
+reach their per-user limits, which apply after verification. Device polls are
+limited to 30 per minute per device secret, so one client cannot starve the
+others, and then to 300 per minute per client address, leaving room for many
+CLIs behind one NAT.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
@@ -127,7 +128,8 @@ PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
-HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 30
+# It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
+HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
 # Many CLIs polling every few seconds may share one NAT address; each device secret is limited separately.
 DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE = 300
 DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE = 30
@@ -1199,16 +1201,17 @@ async def poll_device_pair(
     remote = request.client.host if request.client else "unknown"
     device_secret_hash = _hash_token(payload.device_secret)
     async with state.lock:
-        _enforce_rate_limit_unlocked(
-            state,
-            key=f"pair:device:poll:{remote}",
-            limit=DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE,
-            window_seconds=60,
-        )
+        # The device limit runs first so polls it rejects do not use up the address budget shared behind a NAT.
         _enforce_rate_limit_unlocked(
             state,
             key=f"pair:device:poll:secret:{device_secret_hash}",
             limit=DEVICE_POLL_LIMIT_PER_SECRET_PER_MINUTE,
+            window_seconds=60,
+        )
+        _enforce_rate_limit_unlocked(
+            state,
+            key=f"pair:device:poll:{remote}",
+            limit=DEVICE_POLL_LIMIT_PER_ADDRESS_PER_MINUTE,
             window_seconds=60,
         )
         session_id = state.pair_session_by_device_secret_hash.get(device_secret_hash)
