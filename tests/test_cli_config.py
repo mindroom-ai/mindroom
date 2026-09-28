@@ -3939,7 +3939,8 @@ class TestConnect:
         """Printed exports must remain one literal shell value."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        client_secret = f"[red]{'x' * 120};$(id)[/red]"
+        provisioning_url = "https://x.test/[red]a b;$(id)[/red]"
+        client_secret = "x" * 120
         responses = [
             httpx.Response(
                 200,
@@ -3955,7 +3956,7 @@ class TestConnect:
                 200,
                 json={
                     "status": "connected",
-                    "client_id": "client value",
+                    "client_id": "client-123",
                     "client_secret": client_secret,
                     "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
@@ -3969,16 +3970,16 @@ class TestConnect:
             [
                 "connect",
                 "--provisioning-url",
-                "https://x.test/a b",
+                provisioning_url,
                 "--no-persist-env",
             ],
             cfg,
         )
 
         assert result.exit_code == 0
-        assert "export MINDROOM_PROVISIONING_URL='https://x.test/a b'" in result.output
-        assert "export MINDROOM_LOCAL_CLIENT_ID='client value'" in result.output
-        assert f"  export MINDROOM_LOCAL_CLIENT_SECRET='{client_secret}'" in result.output.splitlines()
+        assert f"  export MINDROOM_PROVISIONING_URL='{provisioning_url}'" in result.output.splitlines()
+        assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
+        assert f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}" in result.output.splitlines()
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
 
     def test_connect_uses_runtime_env_default_provisioning_url(

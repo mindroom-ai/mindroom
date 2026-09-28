@@ -4106,7 +4106,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.cli.owner"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.matrix.identity"]
 visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",

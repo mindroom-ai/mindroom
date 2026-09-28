@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import re
 import socket
 import time
@@ -48,6 +49,8 @@ __all__ = [
 
 _API_PATH = "/v1/local-mindroom/pair/device"
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
+# Issued client credentials are written unquoted to .env and sent as headers, so only plain token characters pass.
+_CLIENT_CREDENTIAL_RE = re.compile(r"[A-Za-z0-9._~+/-]{1,512}={0,2}")
 _DEFAULT_POLL_INTERVAL_SECONDS = 3
 _MAX_BACKOFF_SECONDS = 30
 # An approval near expiry may still be handed out, so outages get this grace before timing out locally.
@@ -145,7 +148,7 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
     owner_user_id_invalid = (
         isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
     )
-    client_id = _required_non_empty_string(data, "client_id")
+    client_id = _required_client_credential(data, "client_id")
     raw_namespace = data.get("namespace")
     parsed_namespace = _parse_namespace(raw_namespace)
     namespace_invalid = isinstance(raw_namespace, str) and bool(raw_namespace.strip()) and parsed_namespace is None
@@ -154,7 +157,7 @@ def _parse_pair_complete(data: dict[str, object]) -> PairCompleteResult:
 
     return PairCompleteResult(
         client_id=client_id,
-        client_secret=_required_non_empty_string(data, "client_secret"),
+        client_secret=_required_client_credential(data, "client_secret"),
         namespace=parsed_namespace,
         owner_user_id=parsed_owner_user_id,
         namespace_invalid=namespace_invalid,
@@ -202,7 +205,7 @@ def _start_session(
     return DevicePairSession(
         pair_code=_required_non_empty_string(started, "pair_code"),
         device_secret=_required_non_empty_string(started, "device_secret"),
-        approve_url=_required_non_empty_string(started, "approve_url"),
+        approve_url=_parse_approve_url(_required_non_empty_string(started, "approve_url")),
         poll_interval_seconds=_validate_poll_interval(started.get("poll_interval_seconds")),
         expires_at=_parse_expires_at(_required_non_empty_string(started, "expires_at")),
     )
@@ -655,6 +658,39 @@ def _required_non_empty_string(data: dict[str, object], key: str) -> str:
             return value
     msg = f"Provisioning response missing {key}."
     raise ValueError(msg)
+
+
+def _required_client_credential(data: dict[str, object], key: str) -> str:
+    """Read an issued client credential, refusing anything but a plain token."""
+    value = _required_non_empty_string(data, key)
+    if _CLIENT_CREDENTIAL_RE.fullmatch(value) is None:
+        msg = f"Provisioning response has invalid {key}."
+        raise ValueError(msg)
+    return value
+
+
+def _parse_approve_url(raw_value: str) -> str:
+    """Return an approval link a browser may open: an https page, or http on a loopback development server."""
+    msg = "Pairing response has invalid approve_url."
+    if not raw_value.isprintable() or " " in raw_value:
+        raise ValueError(msg)
+    try:
+        parsed = urlparse(raw_value)
+    except ValueError:
+        raise ValueError(msg) from None
+    host = parsed.hostname
+    if host and (parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(host))):
+        return raw_value
+    raise ValueError(msg)
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _parse_namespace(raw_value: object) -> str | None:
