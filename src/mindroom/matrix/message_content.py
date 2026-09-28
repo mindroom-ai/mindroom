@@ -16,18 +16,22 @@ plaintext store that misses a redaction serves deleted content.
 from __future__ import annotations
 
 import json
+import math
+from collections import OrderedDict
+from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import download_bounded_mxc_bytes
+from mindroom.matrix.media import MxcUnavailable, download_bounded_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
 
 logger = get_logger(__name__)
 
@@ -45,7 +49,63 @@ logger = get_logger(__name__)
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
-_MAX_SIDECAR_HOPS = 8
+# The writer uploads one sidecar per message, and the nested edits scripts/utilities/repair_nested_sidecars.py
+# repairs hold one more, so a chain longer than two can only come from a crafted event.
+_MAX_SIDECAR_HOPS = 2
+# Unreadable sidecars are remembered per process, so every agent in a room and every read does not fetch them again.
+# Plaintext is never kept: it belongs to the visible revision the projection stores.
+_UNAVAILABLE_SIDECAR_CACHE_SIZE = 1024
+_TRANSIENT_UNAVAILABLE_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class _UnavailableSidecar:
+    permanent: bool
+    expires_at: float
+
+
+_unavailable_sidecars: OrderedDict[tuple[str, str | None], _UnavailableSidecar] = OrderedDict()
+
+
+def reset_unavailable_sidecar_cache() -> None:
+    """Forget which sidecars could not be read, primarily for isolated tests."""
+    _unavailable_sidecars.clear()
+
+
+def _cached_unavailable_sidecar(key: tuple[str, str | None]) -> MxcUnavailable | None:
+    entry = _unavailable_sidecars.get(key)
+    if entry is None:
+        return None
+    if entry.expires_at <= monotonic():
+        del _unavailable_sidecars[key]
+        return None
+    _unavailable_sidecars.move_to_end(key)
+    return MxcUnavailable(permanent=entry.permanent)
+
+
+def _remember_unavailable_sidecar(key: tuple[str, str | None], unavailable: MxcUnavailable) -> None:
+    expires_at = math.inf if unavailable.permanent else monotonic() + _TRANSIENT_UNAVAILABLE_SECONDS
+    _unavailable_sidecars[key] = _UnavailableSidecar(permanent=unavailable.permanent, expires_at=expires_at)
+    _unavailable_sidecars.move_to_end(key)
+    while len(_unavailable_sidecars) > _UNAVAILABLE_SIDECAR_CACHE_SIZE:
+        _unavailable_sidecars.popitem(last=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarContent:
+    """One event's canonical content, or its preview and why the sidecar behind it could not be read."""
+
+    content: dict[str, Any]
+    changed: bool
+    permanently_unavailable: bool
+    downloads: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SidecarChain:
+    content: dict[str, Any]
+    unavailable: MxcUnavailable | None
+    downloads: int
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -107,11 +167,23 @@ async def _resolve_event_content(
     client: nio.AsyncClient | None,
 ) -> tuple[dict[str, Any], bool]:
     """Return one event's canonical content plus whether resolving it changed anything."""
-    preview_content = _normalized_content_dict(event_source.get("content", {}))
-    resolved_content = await _resolve_canonical_content(preview_content, client)
-    if resolved_content is preview_content:
-        return preview_content, False
-    return _with_event_relation(resolved_content, preview_content), True
+    sidecar = await resolve_sidecar_content(event_source.get("content", {}), client)
+    return sidecar.content, sidecar.changed
+
+
+async def resolve_sidecar_content(content: object, client: nio.AsyncClient | None) -> SidecarContent:
+    """Resolve one event content's long-text sidecar chain and say whether an unresolved one can never resolve."""
+    preview_content = _normalized_content_dict(content)
+    chain = await _resolve_canonical_content(preview_content, client)
+    resolved_content = (
+        preview_content if chain.content is preview_content else _with_event_relation(chain.content, preview_content)
+    )
+    return SidecarContent(
+        content=resolved_content,
+        changed=chain.content is not preview_content,
+        permanently_unavailable=chain.unavailable is not None and chain.unavailable.permanent,
+        downloads=chain.downloads,
+    )
 
 
 def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
@@ -127,60 +199,40 @@ def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool
     return True
 
 
-async def _download_mxc_text(  # noqa: PLR0911
+async def _download_mxc_text(
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
-) -> str | None:
-    """Download the text content behind one MXC reference.
+) -> str | MxcUnavailable:
+    """Download the text content behind one MXC reference, or say why it cannot be read.
 
-    Args:
-        client: Matrix client
-        mxc_url: The MXC URL to download from
-        file_info: Optional encryption info for E2EE rooms
-
-    Returns:
-        The downloaded text content, or None if download failed
-
+    A payload that cannot decrypt, exceeds the limit once decrypted, or is not UTF-8 never will.
     """
-    try:
-        payload = await download_bounded_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
-        if payload is None:
-            return None
-
-        # Handle encryption if needed
-        if file_info and "key" in file_info:
-            # Decrypt the content
-            try:
-                decrypted = crypto.attachments.decrypt_attachment(
-                    payload,
-                    file_info["key"]["k"],
-                    file_info["hashes"]["sha256"],
-                    file_info["iv"],
-                )
-                text_bytes = decrypted
-            except Exception:
-                logger.exception("Failed to decrypt attachment")
-                return None
-            if not isinstance(text_bytes, bytes):
-                logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
-                return None
-            if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
-                return None
-        else:
-            text_bytes = payload
-
-        # Decode to text
+    download = await download_bounded_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
+    if isinstance(download, MxcUnavailable):
+        return download
+    text_bytes = download.data
+    if file_info and "key" in file_info:
         try:
-            decoded_text: str = text_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            logger.exception("Downloaded content is not valid UTF-8 text")
-            return None
-    except Exception:
-        logger.exception("Error downloading MXC content")
-        return None
-    else:
-        return decoded_text
+            text_bytes = crypto.attachments.decrypt_attachment(
+                text_bytes,
+                file_info["key"]["k"],
+                file_info["hashes"]["sha256"],
+                file_info["iv"],
+            )
+        except Exception:
+            logger.exception("Failed to decrypt attachment", mxc_url=mxc_url)
+            return MxcUnavailable(permanent=True)
+        if not isinstance(text_bytes, bytes):
+            logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
+            return MxcUnavailable(permanent=True)
+        if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
+            return MxcUnavailable(permanent=True)
+    try:
+        return text_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.warning("mxc_text_payload_not_utf8", mxc_url=mxc_url)
+        return MxcUnavailable(permanent=True)
 
 
 async def extract_and_resolve_message(
@@ -274,29 +326,52 @@ async def resolve_event_source_content(
 async def _resolve_canonical_content(
     content: dict[str, Any],
     client: nio.AsyncClient | None,
-) -> dict[str, Any]:
-    """Follow bounded v2 sidecar chains, retaining unresolved content on failure."""
-    if client is None:
-        return content
+) -> _SidecarChain:
+    """Follow bounded v2 sidecar chains, retaining unresolved content and why on failure."""
+    first_sidecar = sidecar_content_to_resolve(content)
+    first_mxc_url = None if first_sidecar is None else sidecar_mxc_url(first_sidecar)
+    if client is None or first_sidecar is None or first_mxc_url is None:
+        return _SidecarChain(content=content, unavailable=None, downloads=0)
+    cache_key = _sidecar_cache_key(first_mxc_url, first_sidecar)
+    if (cached := _cached_unavailable_sidecar(cache_key)) is not None:
+        return _SidecarChain(content=content, unavailable=cached, downloads=0)
+    chain = await _download_sidecar_chain(content, client)
+    if chain.unavailable is not None:
+        _remember_unavailable_sidecar(cache_key, chain.unavailable)
+    return chain
+
+
+def _sidecar_cache_key(mxc_url: str, sidecar_content: Mapping[str, Any]) -> tuple[str, str | None]:
+    """Key one sidecar by its media and, for encrypted media, the ciphertext hash its event names."""
+    file_info = sidecar_content.get("file")
+    hashes = file_info.get("hashes") if isinstance(file_info, dict) else None
+    sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+    return mxc_url, sha256 if isinstance(sha256, str) else None
+
+
+async def _download_sidecar_chain(content: dict[str, Any], client: nio.AsyncClient) -> _SidecarChain:
     visited: set[str] = set()
-    for _ in range(_MAX_SIDECAR_HOPS):
+    for downloads in range(_MAX_SIDECAR_HOPS + 1):
         sidecar_content = sidecar_content_to_resolve(content)
         if sidecar_content is None:
-            break
+            return _SidecarChain(content=content, unavailable=None, downloads=downloads)
         mxc_url = sidecar_mxc_url(sidecar_content)
-        if mxc_url is None or mxc_url in visited:
-            break
+        if mxc_url is None or mxc_url in visited or downloads == _MAX_SIDECAR_HOPS:
+            logger.warning("mxc_sidecar_chain_unresolvable", mxc_url=mxc_url, hops=downloads)
+            return _SidecarChain(content=content, unavailable=MxcUnavailable(permanent=True), downloads=downloads)
         visited.add(mxc_url)
-        full_text = await _download_mxc_text(
-            client,
-            mxc_url,
-            sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
-        )
-        if full_text is None:
-            break
+        file_info = sidecar_content.get("file")
+        try:
+            full_text = await _download_mxc_text(client, mxc_url, file_info if isinstance(file_info, dict) else None)
+        except Exception:
+            logger.exception("Error downloading MXC content", mxc_url=mxc_url)
+            full_text = MxcUnavailable(permanent=False)
+        if isinstance(full_text, MxcUnavailable):
+            return _SidecarChain(content=content, unavailable=full_text, downloads=downloads + 1)
         resolved_content = _extract_large_message_v2_content(full_text)
         if resolved_content is None:
-            logger.warning("Invalid large-message v2 payload JSON, returning preview content")
-            break
+            logger.warning("Invalid large-message v2 payload JSON, returning preview content", mxc_url=mxc_url)
+            return _SidecarChain(content=content, unavailable=MxcUnavailable(permanent=True), downloads=downloads + 1)
         content = resolved_content
-    return content
+    msg = "Sidecar chain ended without an outcome"
+    raise AssertionError(msg)

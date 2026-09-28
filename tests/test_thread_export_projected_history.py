@@ -128,6 +128,8 @@ class FakeHomeserver:
     relation_calls: int = 0
     messages_calls: int = 0
     download_calls: int = 0
+    # Media download failures by MXC URL, as HTTP statuses; an absent sidecar answers 404.
+    sidecar_statuses: dict[str, int] = field(default_factory=dict)
     access_token: str = TEST_ACCESS_TOKEN
 
     @property
@@ -188,7 +190,10 @@ class FakeHomeserver:
         """Return one stored long-text sidecar the way a media download request receives it."""
         assert method == "GET"
         self.download_calls += 1
-        payload = self.sidecars.get(requested_mxc(path))
+        mxc = requested_mxc(path)
+        if mxc in self.sidecar_statuses:
+            return FakeMediaResponse(status=self.sidecar_statuses[mxc])
+        payload = self.sidecars.get(mxc)
         return media_response(None if payload is None else payload.encode())
 
 
@@ -557,11 +562,11 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(
     client.send.assert_not_awaited()
 
 
-async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_preview(
+async def test_an_unreachable_sidecar_fails_the_thread_instead_of_exporting_the_preview(
     router: PrincipalStore,
 ) -> None:
-    """A file that cannot be read leaves the debt owed, and the caller is told."""
-    homeserver = FakeHomeserver()
+    """A file that may become readable later leaves the debt owed, and the caller is told."""
+    homeserver = FakeHomeserver(sidecar_statuses={SIDECAR_URL: 503})
     serve_thread(
         homeserver,
         raw(ROOT, "root", ts=100),
@@ -578,6 +583,30 @@ async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_p
 
     with pytest.raises(RuntimeError, match="awaiting a server refetch"):
         await export(reader_for(router, homeserver))
+
+
+async def test_a_missing_sidecar_exports_its_preview_marked_unavailable(router: PrincipalStore) -> None:
+    """A file that can never be read settles its message with the preview, so the thread still exports."""
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [
+            raw(
+                "$b:example.org",
+                "the whole long mes…",
+                ts=200,
+                thread_id=ROOT,
+                extra_content=sidecar_content(),
+            ),
+        ],
+    )
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole long mes…"]
+    assert messages[-1].content["io.mindroom.long_text_unavailable"] is True
+    assert homeserver.download_calls == 1
 
 
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(

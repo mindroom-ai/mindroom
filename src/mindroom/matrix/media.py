@@ -47,6 +47,9 @@ _MXC_DOWNLOAD_ATTEMPTS = 3
 _MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS = 5
 _MXC_RATE_LIMIT_MAX_WAIT_SECONDS = 30
 _MXC_CONNECTION_RETRY_WAIT_SECONDS = 1
+_MXC_DOWNLOAD_BASE_SECONDS = 30
+_MXC_DOWNLOAD_MIN_BYTES_PER_SECOND = 256 * 1024
+_TRANSIENT_CLIENT_ERROR_STATUSES = frozenset({401, 408, 429})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
 _HEADER_DIMENSION_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
@@ -442,40 +445,73 @@ def _log_media_over_limit(mxc_url: str, *, stage: str, size_bytes: int | None, m
     )
 
 
-async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_bytes: int) -> bytes | None:
+@dataclass(frozen=True, slots=True)
+class MxcFetched:
+    """A whole MXC payload within the caller's byte limit."""
+
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class MxcUnavailable:
+    """An MXC payload that could not be read, and whether retrying could ever change that."""
+
+    permanent: bool
+
+
+type MxcDownload = MxcFetched | MxcUnavailable
+
+
+def _unavailable_for_status(mxc_url: str, status: int) -> MxcUnavailable:
+    # Client errors such as 404 M_NOT_FOUND or 413 M_TOO_LARGE answer for the media itself; an expired token,
+    # a timeout, a rate limit, or a server error can clear on a later attempt.
+    permanent = 400 <= status < 500 and status not in _TRANSIENT_CLIENT_ERROR_STATUSES
+    logger.warning("matrix_media_download_failed", mxc_url=mxc_url, http_status=status, permanent=permanent)
+    return MxcUnavailable(permanent=permanent)
+
+
+async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_bytes: int) -> MxcDownload:
     if response.status != 200:
-        logger.error("matrix_media_download_failed", mxc_url=mxc_url, http_status=response.status)
-        return None
+        return _unavailable_for_status(mxc_url, response.status)
     if response.content_length is not None and response.content_length > max_bytes:
         _log_media_over_limit(mxc_url, stage="declared", size_bytes=response.content_length, max_bytes=max_bytes)
-        return None
+        return MxcUnavailable(permanent=True)
     try:
-        return await collect_bounded_bytes(
+        data = await collect_bounded_bytes(
             response.content.iter_chunked(_MXC_DOWNLOAD_CHUNK_BYTES),
             max_bytes=max_bytes,
         )
     except ByteLimitExceededError:
         _log_media_over_limit(mxc_url, stage="download", size_bytes=None, max_bytes=max_bytes)
-        return None
+        return MxcUnavailable(permanent=True)
+    return MxcFetched(data)
 
 
-async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> bytes | None:
+def _download_timeout_seconds(max_bytes: int) -> float:
+    """Return a whole-transfer deadline that still lets a slow but steady link deliver ``max_bytes``."""
+    return _MXC_DOWNLOAD_BASE_SECONDS + max_bytes / _MXC_DOWNLOAD_MIN_BYTES_PER_SECOND
+
+
+async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> MxcDownload:
     """Download one MXC payload without buffering more than ``max_bytes``.
 
     nio's download reads the whole body before a caller can check its size, and any room member
     can point an event at media as large as the homeserver allows.
-    Like nio's request loop, rate limits, lost connections, and timeouts are retried, here a bounded number of times.
+    Like nio's request loop, rate limits, lost connections, and timeouts are retried, here a bounded number of times,
+    and each attempt must finish within a deadline scaled to ``max_bytes``.
     """
     path = _mxc_media_path(mxc_url)
     if path is None:
-        logger.error("invalid_mxc_url", mxc_url=mxc_url)
-        return None
-    headers = {"Authorization": f"Bearer {client.access_token}"} if client.access_token else None
+        logger.warning("invalid_mxc_url", mxc_url=mxc_url)
+        return MxcUnavailable(permanent=True)
+    headers = {"Accept-Encoding": "identity"}
+    if client.access_token:
+        headers["Authorization"] = f"Bearer {client.access_token}"
+    timeout = _download_timeout_seconds(max_bytes)
     attempt = 1
     while True:
         try:
-            # Like nio's own download, no overall timeout: the byte limit bounds a slow transfer's memory.
-            response = await client.send("GET", path, headers=headers, timeout=0)
+            response = await client.send("GET", path, headers=headers, timeout=timeout)
             try:
                 if response.status != 429 or attempt == _MXC_DOWNLOAD_ATTEMPTS:
                     return await _read_bounded_media_body(mxc_url, response, max_bytes)
@@ -484,7 +520,8 @@ async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, m
                 response.release()
         except (ClientConnectionError, TimeoutError):
             if attempt == _MXC_DOWNLOAD_ATTEMPTS:
-                raise
+                logger.warning("matrix_media_download_interrupted", mxc_url=mxc_url, attempts=attempt)
+                return MxcUnavailable(permanent=False)
             wait_seconds = _MXC_CONNECTION_RETRY_WAIT_SECONDS
         attempt += 1
         await asyncio.sleep(wait_seconds)
@@ -496,12 +533,13 @@ async def download_media_bytes(
 ) -> bytes | None:
     """Download and decrypt Matrix media payload bytes."""
     try:
-        downloaded_bytes = await download_bounded_mxc_bytes(client, event.url, max_bytes=_matrix_media_max_bytes)
+        downloaded = await download_bounded_mxc_bytes(client, event.url, max_bytes=_matrix_media_max_bytes)
     except Exception:
         logger.exception("Error downloading media", event_id=_event_id_for_log(event))
         return None
-    if downloaded_bytes is None:
+    if not isinstance(downloaded, MxcFetched):
         return None
+    downloaded_bytes = downloaded.data
 
     if isinstance(event, nio.RoomEncryptedMedia):
         return _decrypt_validated_media_bytes(event, downloaded_bytes)

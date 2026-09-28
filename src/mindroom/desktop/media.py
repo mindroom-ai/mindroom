@@ -13,7 +13,7 @@ from mindroom.desktop.protocol import (
     SHELL_OUTPUT_MIME_TYPE,
     EncryptedDesktopMedia,
 )
-from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import MxcUnavailable, download_bounded_mxc_bytes, upload_content_uri, upload_media_bytes
 
 _IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 
@@ -86,19 +86,16 @@ async def download_encrypted_media(
     """Download, authenticate, and decrypt one desktop media object, checking its declared size and type."""
     try:
         async with asyncio.timeout(timeout_seconds):
-            response = await client.download(media.url)
+            download = await download_bounded_mxc_bytes(client, media.url, max_bytes=_max_bytes(media.mime_type))
     except TimeoutError as exc:
         msg = f"Matrix media download did not finish within {timeout_seconds:g} seconds."
         raise DesktopMediaError(msg) from exc
-    if not isinstance(response, nio.DownloadResponse) or not isinstance(response.body, bytes):
-        msg = f"Matrix media download failed: {response}"
-        raise DesktopMediaError(msg)
-    if len(response.body) > _max_bytes(media.mime_type):
-        msg = "Encrypted Matrix media exceeds the desktop media limit."
+    if isinstance(download, MxcUnavailable):
+        msg = "Matrix media download failed or exceeded the desktop media limit."
         raise DesktopMediaError(msg)
     try:
         payload = crypto.attachments.decrypt_attachment(
-            response.body,
+            download.data,
             media.key,
             media.sha256,
             media.iv,

@@ -23,9 +23,11 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.matrix import media as media_module
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
+    _MAX_SIDECAR_DOWNLOADS_PER_READ,
     _MESSAGES_PAGE_LIMIT,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
@@ -41,6 +43,7 @@ from mindroom.matrix.conversation_reads import (
     projected_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.matrix.message_content import reset_unavailable_sidecar_cache
 from tests.conftest import TEST_ACCESS_TOKEN
 from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
@@ -168,6 +171,8 @@ class FakeClient:
     # The bodies this server serves for long-text sidecars, by MXC URL, and a
     # count of how many times each was actually fetched.
     sidecars: dict[str, str] = field(default_factory=dict)
+    # Media download failures by MXC URL, as HTTP statuses; an absent sidecar answers 404.
+    sidecar_statuses: dict[str, int] = field(default_factory=dict)
     downloads: list[str] = field(default_factory=list)
     access_token: str = TEST_ACCESS_TOKEN
     # Whether this device has crypto set up at all. nio only attempts
@@ -200,6 +205,8 @@ class FakeClient:
         assert method == "GET"
         mxc = requested_mxc(path)
         self.downloads.append(mxc)
+        if mxc in self.sidecar_statuses:
+            return FakeMediaResponse(status=self.sidecar_statuses[mxc])
         payload = self.sidecars.get(mxc)
         return media_response(None if payload is None else payload.encode())
 
@@ -1702,20 +1709,24 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    @pytest.mark.parametrize("status", [429, 500, 503])
     async def test_an_unreachable_attachment_keeps_the_read_incomplete(
         self,
         alice: PrincipalStore,
+        status: int,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed fetch must not settle the debt with the preview.
+        """A fetch that may succeed later must not settle the debt with the preview.
 
         This is the direction that matters. Installing the preview here would
         clear the refresh token, and the truncated body would then look exactly
         like content that had been resolved -- permanently, because nothing
         would ever ask again. Failing loudly leaves it repairable.
         """
+        monkeypatch.setattr(media_module, "_MXC_RATE_LIMIT_DEFAULT_WAIT_SECONDS", 0)
         source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
         await admit_all(alice, [source])
-        client = FakeClient(events={"$long": source})
+        client = FakeClient(events={"$long": source}, sidecar_statuses={"mxc://s/gone": status})
         reader = await self._reader(alice, client)
 
         with pytest.raises(_StaleConversationError):
@@ -1724,6 +1735,55 @@ class TestSidecarResolution:
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert page.messages == ()
         assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+
+    @pytest.mark.parametrize(
+        ("sidecars", "statuses"),
+        [
+            pytest.param({}, {}, id="missing"),
+            pytest.param({}, {"mxc://s/bad": 413}, id="oversized"),
+            pytest.param({"mxc://s/bad": "not a message payload"}, {}, id="invalid"),
+        ],
+    )
+    async def test_an_unreadable_attachment_settles_with_its_marked_preview_once(
+        self,
+        alice: PrincipalStore,
+        sidecars: dict[str, str],
+        statuses: dict[str, int],
+    ) -> None:
+        """An attachment that can never be read is downloaded once, then its preview is served, marked unavailable.
+
+        Anyone in the room can post one, so a debt nothing can repay would fail every later strict read.
+        """
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/bad")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source}, sidecars=sidecars, sidecar_statuses=statuses)
+        reader = await self._reader(alice, client)
+
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        reset_unavailable_sidecar_cache()
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/bad"]
+        for page in (first, second):
+            [message] = page.messages
+            assert message.content["body"] == "The answer beg [continues]"
+            assert message.content["io.mindroom.long_text_unavailable"] is True
+            assert "io.mindroom.long_text" not in message.content
+            assert page.refresh_pending == ()
+
+    async def test_an_edit_after_an_unavailable_attachment_resolves_normally(self, alice: PrincipalStore) -> None:
+        """Settling one revision with its preview does not stop a later edit from replacing it."""
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source})
+        reader = await self._reader(alice, client)
+        await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        await admit_all(alice, [raw("$edit", "The corrected answer", ts=2_000, replaces="$long")])
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["The corrected answer"]
+        assert client.downloads == ["mxc://s/gone"]
 
 
 class TestPointRefetch:
@@ -2449,8 +2509,9 @@ class TestRefreshStarvation:
         await admit_all(alice, [wanted, *unrepairable])
         client = FakeClient(
             events={"$wanted": wanted, **{f"$new{index}": source for index, source in enumerate(unrepairable)}},
-            # Only the older message's attachment exists; every newer one fails.
+            # Only the older message's attachment exists; every newer one fails in a way that may clear later.
             sidecars={"mxc://s/wanted": TestSidecarResolution._payload("the older answer")},
+            sidecar_statuses={f"mxc://s/gone{index}": 503 for index in range(70)},
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
         await alice.install_hydrated_conversation(
@@ -2461,10 +2522,14 @@ class TestRefreshStarvation:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        with pytest.raises(_StaleConversationError):
-            await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
+        # Each read starts a bounded number of sidecar downloads, and failures are remembered, so every read
+        # after the first reaches debts the earlier ones did not, until the requested one is attempted.
+        for _read in range(len(unrepairable) // _MAX_SIDECAR_DOWNLOADS_PER_READ + 1):
+            with pytest.raises(_StaleConversationError):
+                await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
 
         assert "mxc://s/wanted" in client.downloads, "the requested message was never attempted"
+        assert len(client.downloads) == len(unrepairable) + 1, "a remembered failure was downloaded again"
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
         assert [message.content["body"] for message in page.messages] == ["the older answer"]
 

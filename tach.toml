@@ -5563,7 +5563,7 @@ visibility = ["mindroom.turn_controller"]
 exclusive = true
 
 [[interfaces]]
-expose = ["holds_unresolved_sidecar", "sidecar_content_to_resolve", "sidecar_mxc_url"]
+expose = ["holds_unresolved_sidecar", "sidecar_content_to_resolve", "sidecar_mxc_url", "unavailable_sidecar_content"]
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.event_journal",

@@ -63,8 +63,8 @@ from mindroom.event_journal import (
 from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
-from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from mindroom.matrix.message_content import resolve_sidecar_content
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, unavailable_sidecar_content
 from mindroom.matrix.transport_progress import is_transport_progress_revision
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
@@ -121,6 +121,8 @@ _MAX_FETCHED_EVENTS = 20_000
 # yields events rather than pages, so there is no request for this side of the
 # code to count. See `_fetch_relations`.
 _MAX_MESSAGES_REQUESTS = 400
+# Sidecar downloads one strict read may start, so a page of unreadable attachments costs a bounded fetch per read.
+_MAX_SIDECAR_DOWNLOADS_PER_READ = 8
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
 # under the fresh epoch is almost always enough; a room whose membership keeps
@@ -449,6 +451,17 @@ def _reduce_current_revision(
             content=visible_content(relation.content),
         )
     return winner
+
+
+@dataclass(slots=True)
+class _SidecarDownloadBudget:
+    """Sidecar downloads one strict read may still start.
+
+    Debts beyond it keep their tokens for a later read, which reaches them because unreadable
+    sidecars are remembered and cost no download while remembered.
+    """
+
+    remaining: int = _MAX_SIDECAR_DOWNLOADS_PER_READ
 
 
 @dataclass
@@ -1108,7 +1121,7 @@ class ConversationHydrator:
                 )
             start = next_start
 
-    async def refresh(self, request: RefreshRequest) -> bool:
+    async def refresh(self, request: RefreshRequest, sidecar_budget: _SidecarDownloadBudget | None = None) -> bool:
         """Refetch one logical message whose visible revision was redacted.
 
         Returns whether the projection was updated. A ``False`` result leaves
@@ -1162,7 +1175,11 @@ class ConversationHydrator:
             )
             return False
         revision = _reduce_current_revision(projected, relations.events)
-        content = await self._resolved_content(revision.event_id, revision.content)
+        content = await self._resolved_content(
+            revision.event_id,
+            revision.content,
+            sidecar_budget if sidecar_budget is not None else _SidecarDownloadBudget(),
+        )
         if content is None:
             return False
         return await self.store.install_refetched_revision(
@@ -1178,6 +1195,7 @@ class ConversationHydrator:
         self,
         event_id: str,
         content: Mapping[str, object],
+        sidecar_budget: _SidecarDownloadBudget,
     ) -> Mapping[str, object] | None:
         """Return one revision's whole text, fetching its sidecar when it has one.
 
@@ -1192,25 +1210,32 @@ class ConversationHydrator:
         hydrated room, because the caller asking for the text is the one whose
         page size bounds how much of it is worth fetching.
 
-        Returning nothing means the attachment could not be read. The message
-        then stays unreadable and keeps its refresh token, so the next strict
-        read tries again rather than installing the preview and calling the
-        debt settled.
+        Returning nothing means the attachment could not be read this time. The
+        message then stays unreadable and keeps its refresh token, so the next
+        strict read tries again rather than installing the preview and calling
+        the debt settled. An attachment that can never be read -- missing,
+        oversized, undecryptable, or not a message payload -- is settled
+        instead with its preview and an explicit unavailable marker, because
+        any room member can post one and a debt nothing can repay would fail
+        every later strict read of the conversation.
         """
         if not holds_unresolved_sidecar(content):
             return content
-        resolved = await resolve_event_source_content(
-            {"event_id": event_id, "content": dict(content)},
-            self._client(),
-        )
-        resolved_content = resolved.get("content")
-        if not isinstance(resolved_content, dict) or holds_unresolved_sidecar(resolved_content):
-            logger.info(
-                "conversation_refresh_sidecar_unresolved",
-                event_id=event_id,
-            )
+        if sidecar_budget.remaining <= 0:
+            logger.info("conversation_refresh_sidecar_deferred", event_id=event_id)
             return None
-        return resolved_content
+        sidecar = await resolve_sidecar_content(content, self._client())
+        sidecar_budget.remaining -= sidecar.downloads
+        if not holds_unresolved_sidecar(sidecar.content):
+            return sidecar.content
+        if sidecar.permanently_unavailable:
+            logger.info("conversation_refresh_sidecar_unavailable", event_id=event_id)
+            return unavailable_sidecar_content(content)
+        logger.info(
+            "conversation_refresh_sidecar_unresolved",
+            event_id=event_id,
+        )
+        return None
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.
@@ -1226,5 +1251,6 @@ class ConversationHydrator:
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
         """
+        sidecar_budget = _SidecarDownloadBudget()
         for request in requests:
-            await self.refresh(request)
+            await self.refresh(request, sidecar_budget)

@@ -16,6 +16,8 @@ from mindroom.desktop.media import (
     upload_encrypted_media,
 )
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, SHELL_OUTPUT_MIME_TYPE, EncryptedDesktopMedia
+from tests.conftest import TEST_ACCESS_TOKEN
+from tests.matrix_media_helpers import media_response
 
 JPEG = b"\xff\xd8\xffdesktop-image"
 OUTPUT = "shell output é \x01 😀\n".encode()
@@ -61,6 +63,7 @@ async def test_screenshot_is_encrypted_before_upload_and_authenticated_after_dow
 
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_ACCESS_TOKEN
 
     media = await upload_encrypted_media(
         client,
@@ -73,7 +76,7 @@ async def test_screenshot_is_encrypted_before_upload_and_authenticated_after_dow
     assert uploaded
     assert uploaded[0] != JPEG
     assert JPEG not in uploaded[0]
-    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+    client.send.return_value = media_response(uploaded[0])
     assert await download_encrypted_screenshot(client, media, timeout_seconds=1) == JPEG
 
 
@@ -96,6 +99,7 @@ async def test_screenshot_ciphertext_tampering_fails_closed(monkeypatch: pytest.
 
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_ACCESS_TOKEN
     media = await upload_encrypted_media(
         client,
         JPEG,
@@ -104,7 +108,7 @@ async def test_screenshot_ciphertext_tampering_fails_closed(monkeypatch: pytest.
         timeout_seconds=1,
     )
     tampered = bytes([uploaded[0][0] ^ 1, *uploaded[0][1:]])
-    client.download.return_value = nio.DownloadResponse(tampered, "application/octet-stream", None)
+    client.send.return_value = media_response(tampered)
 
     with pytest.raises(DesktopMediaError, match="authentication or decryption failed"):
         await download_encrypted_screenshot(client, media, timeout_seconds=1)
@@ -114,11 +118,13 @@ async def test_screenshot_ciphertext_tampering_fails_closed(monkeypatch: pytest.
 async def test_screenshot_download_timeout_is_bounded() -> None:
     """A stuck Matrix media request cannot hold the desktop tool open indefinitely."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_ACCESS_TOKEN
 
-    async def stuck_download(_url: str) -> None:
+    async def stuck_download(*_args: object, **_kwargs: object) -> None:
         await asyncio.Event().wait()
 
-    client.download.side_effect = stuck_download
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send.side_effect = stuck_download
     media = EncryptedDesktopMedia(
         url="mxc://example.org/screenshot",
         key="key",
@@ -137,6 +143,7 @@ async def test_shell_output_round_trips_byte_exact_with_size_and_hash_checks(mon
     """Text output uses the screenshot encryption path and is authenticated the same way after download."""
     uploaded = _capture_uploads(monkeypatch)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_ACCESS_TOKEN
     media = await upload_encrypted_media(
         client,
         OUTPUT,
@@ -148,16 +155,16 @@ async def test_shell_output_round_trips_byte_exact_with_size_and_hash_checks(mon
     assert OUTPUT not in uploaded[0]
     assert EncryptedDesktopMedia.from_content(media.to_content(), kind="output_attachment") == media
 
-    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+    client.send.return_value = media_response(uploaded[0])
     assert await download_encrypted_media(client, media, timeout_seconds=1) == OUTPUT
     with pytest.raises(DesktopMediaError, match="Only screenshots"):
         await download_encrypted_screenshot(client, media, timeout_seconds=1)
 
     tampered = bytes([uploaded[0][0] ^ 1, *uploaded[0][1:]])
-    client.download.return_value = nio.DownloadResponse(tampered, "application/octet-stream", None)
+    client.send.return_value = media_response(tampered)
     with pytest.raises(DesktopMediaError, match="authentication or decryption failed"):
         await download_encrypted_media(client, media, timeout_seconds=1)
-    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+    client.send.return_value = media_response(uploaded[0])
     with pytest.raises(DesktopMediaError, match="size does not match"):
         await download_encrypted_media(client, replace(media, size=media.size + 1), timeout_seconds=1)
 

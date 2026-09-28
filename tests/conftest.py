@@ -117,6 +117,7 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.matrix.message_content import reset_unavailable_sidecar_cache
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
@@ -2881,6 +2882,14 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _reset_unavailable_sidecars() -> Generator[None, None, None]:
+    """Keep the process-wide memory of unreadable long-text sidecars isolated per test."""
+    reset_unavailable_sidecar_cache()
+    yield
+    reset_unavailable_sidecar_cache()
 
 
 @pytest.fixture(autouse=True)

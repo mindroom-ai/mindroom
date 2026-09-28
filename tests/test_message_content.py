@@ -22,11 +22,13 @@ from mindroom.matrix.client_visible_messages import (
     thread_root_body_preview,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import MxcUnavailable
 from mindroom.matrix.message_content import (
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
     resolve_event_source_content,
+    resolve_sidecar_content,
 )
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, sidecar_mxc_url
 from mindroom.matrix.state import MatrixState
@@ -132,9 +134,64 @@ async def test_sidecar_chain_has_a_bounded_download_budget() -> None:
 
     client = _make_client()
     client.send.side_effect = [media_response(json.dumps(preview(index)).encode()) for index in range(1, 10)]
-    resolved = await resolve_event_source_content({"content": preview(0)}, client)
-    assert client.send.await_count == 8
-    assert holds_unresolved_sidecar(resolved["content"])
+    resolved = await resolve_sidecar_content(preview(0), client)
+    assert client.send.await_count == message_content_module._MAX_SIDECAR_HOPS == 2
+    assert holds_unresolved_sidecar(resolved.content)
+    assert resolved.permanently_unavailable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "permanent"),
+    [
+        pytest.param(FakeMediaResponse(status=404), True, id="missing"),
+        pytest.param(FakeMediaResponse(status=413), True, id="too-large"),
+        pytest.param(FakeMediaResponse(status=403), True, id="forbidden"),
+        pytest.param(media_response(b"\xff\xfe"), True, id="not-utf8"),
+        pytest.param(media_response(b"[1, 2]"), True, id="not-an-object"),
+        pytest.param(FakeMediaResponse(status=500), False, id="server-error"),
+        pytest.param(FakeMediaResponse(status=401), False, id="expired-token"),
+    ],
+)
+async def test_unreadable_sidecars_are_classified_and_remembered(response: FakeMediaResponse, permanent: bool) -> None:
+    """Failures that can never clear are permanent, others transient, and neither is downloaded again soon."""
+    content = {
+        "body": "preview",
+        "url": "mxc://server/sidecar",
+        "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+    }
+    client = _make_client()
+    client.send.return_value = response
+
+    first = await resolve_sidecar_content(content, client)
+    second = await resolve_sidecar_content(content, client)
+
+    assert (first.permanently_unavailable, first.downloads) == (permanent, 1)
+    assert (second.permanently_unavailable, second.downloads) == (permanent, 0)
+    assert client.send.await_count == 1
+    assert holds_unresolved_sidecar(second.content)
+
+
+@pytest.mark.asyncio
+async def test_transient_sidecar_failures_are_retried_after_their_short_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient failure is only remembered briefly, so the sidecar resolves once the homeserver recovers."""
+    now = 1_000.0
+    monkeypatch.setattr(message_content_module, "monotonic", lambda: now)
+    content = {
+        "body": "preview",
+        "url": "mxc://server/sidecar",
+        "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+    }
+    client = _make_client()
+    client.send.side_effect = [FakeMediaResponse(status=503), media_response(json.dumps({"body": "whole"}).encode())]
+
+    assert not (await resolve_sidecar_content(content, client)).permanently_unavailable
+    assert (await resolve_sidecar_content(content, client)).downloads == 0
+    now += message_content_module._TRANSIENT_UNAVAILABLE_SECONDS + 1
+    resolved = await resolve_sidecar_content(content, client)
+
+    assert resolved.content == {"body": "whole"}
+    assert client.send.await_count == 2
 
 
 class TestResolvedMessageExtraction:
@@ -911,14 +968,14 @@ class TestDownloadMxcText:
         """Test handling of invalid MXC URL."""
         client = AsyncMock()
         result = await _download_mxc_text(client, "http://not-mxc-url")
-        assert result is None
+        assert result == MxcUnavailable(permanent=True)
 
     @pytest.mark.asyncio
     async def test_malformed_mxc_url(self) -> None:
         """Test handling of malformed MXC URL."""
         client = AsyncMock()
         result = await _download_mxc_text(client, "mxc://no-media-id")
-        assert result is None
+        assert result == MxcUnavailable(permanent=True)
 
     @pytest.mark.asyncio
     async def test_successful_download(self) -> None:
@@ -931,8 +988,8 @@ class TestDownloadMxcText:
         client.send.assert_awaited_once_with(
             "GET",
             "/_matrix/client/v1/media/download/server/media123?allow_remote=true",
-            headers={"Authorization": f"Bearer {TEST_ACCESS_TOKEN}"},
-            timeout=0,
+            headers={"Accept-Encoding": "identity", "Authorization": f"Bearer {TEST_ACCESS_TOKEN}"},
+            timeout=media_module._download_timeout_seconds(message_content_module._MXC_TEXT_MAX_BYTES),
         )
         assert client.send.return_value.released
         assert await _download_mxc_text(client, "mxc://server/media123") == "Downloaded text content"
@@ -971,7 +1028,7 @@ class TestDownloadMxcText:
         client.send.return_value = media_response(None)
 
         result = await _download_mxc_text(client, "mxc://server/media123")
-        assert result is None
+        assert result == MxcUnavailable(permanent=True)
         assert client.send.return_value.released
 
     @pytest.mark.asyncio
@@ -1004,7 +1061,7 @@ class TestDownloadMxcText:
         client = _make_client()
         client.send.side_effect = [FakeMediaResponse(status=429, headers={"Retry-After": "0"}) for _ in range(5)]
 
-        assert await _download_mxc_text(client, "mxc://server/limited") is None
+        assert await _download_mxc_text(client, "mxc://server/limited") == MxcUnavailable(permanent=False)
         assert client.send.await_count == 3
 
     @pytest.mark.asyncio
@@ -1014,7 +1071,7 @@ class TestDownloadMxcText:
         client = _make_client()
         client.send.return_value = FakeMediaResponse(chunks=[b"123", b"456"])
 
-        assert await _download_mxc_text(client, "mxc://server/oversized") is None
+        assert await _download_mxc_text(client, "mxc://server/oversized") == MxcUnavailable(permanent=True)
         assert client.send.return_value.released
 
     @pytest.mark.asyncio
@@ -1032,7 +1089,7 @@ class TestDownloadMxcText:
         client = _make_client()
         client.send.return_value = FakeMediaResponse(chunks=unread_body(), content_length=6)
 
-        assert await _download_mxc_text(client, "mxc://server/declared-oversized") is None
+        assert await _download_mxc_text(client, "mxc://server/declared-oversized") == MxcUnavailable(permanent=True)
         assert client.send.return_value.released
 
     @pytest.mark.asyncio
@@ -1053,7 +1110,7 @@ class TestDownloadMxcText:
         client = _make_client()
         client.send.return_value = FakeMediaResponse(chunks=body())
 
-        assert await _download_mxc_text(client, "mxc://server/huge") is None
+        assert await _download_mxc_text(client, "mxc://server/huge") == MxcUnavailable(permanent=True)
         assert len(served) * len(chunk) <= message_content_module._MXC_TEXT_MAX_BYTES + len(chunk)
 
     @pytest.mark.asyncio
@@ -1070,7 +1127,7 @@ class TestDownloadMxcText:
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment") as mock_decrypt:
             result = await _download_mxc_text(client, "mxc://server/encrypted-oversized", file_info)
 
-        assert result is None
+        assert result == MxcUnavailable(permanent=True)
         mock_decrypt.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1084,7 +1141,7 @@ class TestDownloadMxcText:
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
             result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
 
-        assert result is None
+        assert result == MxcUnavailable(permanent=True)
 
 
 class TestCanonicalContentResolution:

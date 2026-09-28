@@ -57,6 +57,8 @@ from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session,
 from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError
+from tests.conftest import TEST_ACCESS_TOKEN
+from tests.matrix_media_helpers import media_response
 from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
@@ -1243,7 +1245,8 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         [ciphertext] = uploaded
         assert expected not in ciphertext
         client = AsyncMock(spec=nio.AsyncClient)
-        client.download.return_value = nio.DownloadResponse(ciphertext, "application/octet-stream", None)
+        client.access_token = TEST_ACCESS_TOKEN
+        client.send.return_value = media_response(ciphertext)
         assert await download_encrypted_media(client, media, timeout_seconds=1) == expected
         assert (await call("check_shell", handle=handle)).error == "Unknown shell handle."
 

@@ -52,6 +52,8 @@ from mindroom.desktop.protocol import (
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
+from tests.conftest import TEST_ACCESS_TOKEN
+from tests.matrix_media_helpers import media_response
 from tests.test_olm_to_device import olm_transport
 
 # The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
@@ -1300,7 +1302,8 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
     assert expected not in uploaded[0]
     client = AsyncMock(spec=nio.AsyncClient)
-    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send.return_value = media_response(uploaded[0])
     assert await download_encrypted_media(client, media, timeout_seconds=1) == expected
     await bridge.stop()
     bridge.close()
@@ -1531,7 +1534,8 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
     assert attached["output"] == ""
     media = EncryptedDesktopMedia.from_content(attached["output_attachment"], kind="output_attachment")
     download = AsyncMock(spec=nio.AsyncClient)
-    download.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+    download.access_token = TEST_ACCESS_TOKEN
+    download.send.return_value = media_response(uploaded[0])
     assert await download_encrypted_media(download, media, timeout_seconds=1) == (character * (count + 1)).encode()
 
 
