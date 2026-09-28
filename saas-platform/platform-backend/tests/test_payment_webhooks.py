@@ -196,6 +196,27 @@ def test_payment_succeeded_records_payment(db: _SchemaCheckedSupabase) -> None:
     assert "error" not in event
 
 
+def test_payment_succeeded_falls_back_to_subscription_account(db: _SchemaCheckedSupabase) -> None:
+    db.row("accounts", id=ACCOUNT_ID)["stripe_customer_id"] = "cus_other"
+
+    assert _deliver("invoice.payment_succeeded", _invoice()) == {"received": True, "error": None}
+
+    assert db.row("payments", invoice_id="in_1")["account_id"] == ACCOUNT_ID
+    assert db.row("webhook_events", stripe_event_id="evt_1")["account_id"] == ACCOUNT_ID
+
+
+def test_payment_succeeded_without_any_account_writes_no_payment(db: _SchemaCheckedSupabase) -> None:
+    db.row("accounts", id=ACCOUNT_ID)["stripe_customer_id"] = "cus_other"
+    db.row("subscriptions", id=SUBSCRIPTION_ROW_ID)["stripe_subscription_id"] = "sub_other"
+
+    assert _deliver("invoice.payment_succeeded", _invoice()) == {"received": True, "error": "Failed to process payment"}
+
+    assert db.tables["payments"] == []
+    event = db.row("webhook_events", stripe_event_id="evt_1")
+    assert "account_id" not in event
+    assert event["error"] == "Failed to process payment"
+
+
 def test_gdpr_export_includes_recorded_payments(db: _SchemaCheckedSupabase) -> None:
     _deliver("invoice.payment_succeeded", _invoice())
 
