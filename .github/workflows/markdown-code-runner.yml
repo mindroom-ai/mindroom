@@ -12,9 +12,8 @@ permissions:
 jobs:
   markdown-code-runner:
     runs-on: ubuntu-latest
-    # The last step pushes regenerated docs back to the branch.
-    permissions:
-      contents: write
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -38,23 +37,55 @@ jobs:
           uv sync
           uv run python docs/run_markdown_code_runner.py
 
-      - name: Commit updated docs
-        id: commit
+      - name: Export updated docs as a patch
+        id: diff
         run: |
-          git add -A
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          if git diff --quiet && git diff --staged --quiet; then
+          git add -A -- '*.md'
+          if git diff --cached --quiet; then
             echo "No changes in docs, skipping commit."
-            echo "commit_status=skipped" >> $GITHUB_ENV
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "Update auto-generated docs"
-            echo "commit_status=committed" >> $GITHUB_ENV
+            git diff --cached --binary > "$RUNNER_TEMP/docs.patch"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Push changes
-        if: env.commit_status == 'committed'
-        uses: ad-m/github-push-action@master
+      - name: Upload docs patch
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.head_ref }}
+          name: docs-patch
+          path: ${{ runner.temp }}/docs.patch
+          retention-days: 1
+
+  # This job holds the write token, so it runs no repository or dependency code: it only applies the patch and pushes.
+  push-docs:
+    needs: markdown-code-runner
+    if: needs.markdown-code-runner.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download docs patch
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-patch
+          path: ${{ runner.temp }}/docs-patch
+
+      - name: Commit and push updated docs
+        env:
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          git apply --index "$RUNNER_TEMP/docs-patch/docs.patch"
+          if git diff --cached --name-only | grep -v '\.md$'; then
+            echo "::error::The docs patch changes files other than Markdown."
+            exit 1
+          fi
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit -m "Update auto-generated docs"
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"

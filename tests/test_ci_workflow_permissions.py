@@ -5,18 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import re
+
 import pytest
 import yaml
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
-# Jobs that install or run code chosen by the pull request, mapped to the only write scopes they may hold.
-_CODE_RUNNING_JOBS = {
-    ("pytest.yml", "test"): {},
-    ("tach.yml", "check"): {},
-    ("security-scan.yml", "scan"): {},
-    ("docs.yml", "build"): {},
-    ("markdown-code-runner.yml", "markdown-code-runner"): {"contents": "write"},
-}
+# Jobs that install or run repository or dependency code chosen by the pushed commit.
+_CODE_RUNNING_JOBS = (
+    ("docs.yml", "build"),
+    ("macos-tests.yml", "packaging"),
+    ("macos-tests.yml", "swift-tests"),
+    ("markdown-code-runner.yml", "markdown-code-runner"),
+    ("pytest.yml", "test"),
+    ("security-scan.yml", "scan"),
+    ("smoke-stacks.yml", "smoke"),
+    ("tach.yml", "check"),
+)
 
 
 def _load_workflow(name: str) -> dict[str, Any]:
@@ -42,8 +47,8 @@ def test_every_workflow_job_declares_token_permissions(workflow_path: Path) -> N
         _job_permissions(workflow, job)
 
 
-@pytest.mark.parametrize(("workflow_name", "job"), sorted(_CODE_RUNNING_JOBS))
-def test_code_running_jobs_hold_no_extra_write_scope_or_persisted_token(workflow_name: str, job: str) -> None:
+@pytest.mark.parametrize(("workflow_name", "job"), _CODE_RUNNING_JOBS)
+def test_code_running_jobs_hold_no_write_scope_or_persisted_token(workflow_name: str, job: str) -> None:
     """Dependency code these jobs install must find neither a write token nor the checkout credential on disk."""
     workflow = _load_workflow(workflow_name)
     permissions = _job_permissions(workflow, job)
@@ -51,11 +56,27 @@ def test_code_running_jobs_hold_no_extra_write_scope_or_persisted_token(workflow
         step for step in workflow["jobs"][job]["steps"] if str(step.get("uses", "")).startswith("actions/checkout@")
     ]
 
-    assert {scope: level for scope, level in permissions.items() if level == "write"} == _CODE_RUNNING_JOBS[
-        (workflow_name, job)
-    ]
+    assert "write" not in permissions.values()
     assert checkouts
     assert all(step.get("with", {}).get("persist-credentials") is False for step in checkouts)
+
+
+def test_docs_push_job_runs_no_repository_code_with_its_write_token() -> None:
+    """The generated docs arrive as a patch, and the pushing job only applies, checks, commits, and pushes it."""
+    workflow = _load_workflow("markdown-code-runner.yml")
+    push_job = workflow["jobs"]["push-docs"]
+    actions = [step["uses"].split("@")[0] for step in push_job["steps"] if "uses" in step]
+    commands = [
+        match.group(1)
+        for step in push_job["steps"]
+        for line in step.get("run", "").splitlines()
+        if (match := re.match(r"\s*([^\s;]+)", line))
+    ]
+
+    assert push_job["needs"] == "markdown-code-runner"
+    assert _job_permissions(workflow, "push-docs") == {"contents": "write"}
+    assert actions == ["actions/checkout", "actions/download-artifact"]
+    assert set(commands) <= {"git", "if", "echo", "exit", "fi"}
 
 
 def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
