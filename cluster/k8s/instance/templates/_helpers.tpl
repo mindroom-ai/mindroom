@@ -88,5 +88,6 @@ Its /app/config.yaml is only the seed; each request carries the primary's live c
 
 {{- define "mindroom.staticRunnerVolume" -}}
 - name: sandbox-workspace
-  emptyDir: {}
+  emptyDir:
+    sizeLimit: {{ required "sandboxRunnerWorkspaceSizeLimit is required" .Values.sandboxRunnerWorkspaceSizeLimit | quote }}
 {{- end }}

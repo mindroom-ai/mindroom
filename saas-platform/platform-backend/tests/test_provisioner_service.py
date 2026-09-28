@@ -1,10 +1,14 @@
 """Focused unit tests for the extracted provisioner service helpers."""
 
 import base64
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
 from backend.openrouter import CreatedOpenRouterKey
 from backend.services import provisioner_service
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestSecretDerivation:
@@ -104,6 +108,19 @@ class TestHelmArgsAssembly:
 
         set_pairs = dict(helm_args[i + 1].split("=", 1) for i, arg in enumerate(helm_args) if arg == "--set")
         assert set_pairs == provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+
+    def test_pro_resource_profile_overrides_every_default_chart_resource_quantity(self):
+        """A larger plan must not keep a default quantity, such as an ephemeral-storage limit, by omission."""
+        chart_values = yaml.safe_load((_REPOSITORY_ROOT / "cluster/k8s/instance/values.yaml").read_text())
+        default_keys = {
+            f"{component}.{kind}.{resource}"
+            for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources")
+            for kind, quantities in chart_values[component].items()
+            for resource in quantities
+        }
+
+        assert "sandboxRunnerResources.limits.ephemeral-storage" in default_keys
+        assert default_keys <= set(provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"])
 
     def test_resource_profile_helm_args_unknown_profile_is_noop(self):
         """Unknown resource profiles add no Helm arguments."""

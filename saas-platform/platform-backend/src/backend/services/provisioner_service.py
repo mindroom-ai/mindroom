@@ -96,16 +96,22 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "storage": "25Gi",
         "mindroomResources.requests.memory": "1Gi",
         "mindroomResources.requests.cpu": "500m",
+        "mindroomResources.requests.ephemeral-storage": "2Gi",
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
+        "mindroomResources.limits.ephemeral-storage": "16Gi",
         "synapseResources.requests.memory": "1Gi",
         "synapseResources.requests.cpu": "500m",
+        "synapseResources.requests.ephemeral-storage": "512Mi",
         "synapseResources.limits.memory": "4Gi",
         "synapseResources.limits.cpu": "2000m",
+        "synapseResources.limits.ephemeral-storage": "4Gi",
         "sandboxRunnerResources.requests.memory": "512Mi",
         "sandboxRunnerResources.requests.cpu": "250m",
+        "sandboxRunnerResources.requests.ephemeral-storage": "1Gi",
         "sandboxRunnerResources.limits.memory": "2Gi",
         "sandboxRunnerResources.limits.cpu": "1000m",
+        "sandboxRunnerResources.limits.ephemeral-storage": "8Gi",
     }
 }
 

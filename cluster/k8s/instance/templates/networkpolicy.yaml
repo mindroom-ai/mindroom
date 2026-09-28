@@ -39,8 +39,8 @@ spec:
     - port: 53
       protocol: TCP
   # Allow HTTP/HTTPS to public addresses and to the ingress controller, which serves the platform API and tenant hosts.
-  # Tool code shares this pod's network identity, so metadata services, node and private networks,
-  # and other pods stay unreachable over these ports.
+  # Tool code shares this pod's network identity, so metadata services, private networks including
+  # private node addresses, and other pods stay unreachable over these ports.
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0

@@ -11,29 +11,41 @@ storagePath: "/mindroom_data"  # Base path inside container for persisted state
 # namespace with `kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx` and set this to match.
 ingressControllerNamespace: ingress-nginx
 
+# Tenants share nodes, so every container bounds its ephemeral storage (writable layer, logs, and emptyDirs).
+# Kubelet evicts only the pod that exceeds its limit.
+# The primary's limit leaves room for tool extras it installs into the image's virtualenv at runtime.
 mindroomResources:
   requests:
     memory: "512Mi"
     cpu: "250m"
+    ephemeral-storage: "1Gi"
   limits:
     memory: "2Gi"
     cpu: "1000m"
+    ephemeral-storage: "8Gi"
 
 synapseResources:
   requests:
     memory: "512Mi"
     cpu: "250m"
+    ephemeral-storage: "256Mi"
   limits:
     memory: "2Gi"
     cpu: "1000m"
+    ephemeral-storage: "2Gi"
 
+# The sandbox runner runs tenant shell and python code on a writable root filesystem.
 sandboxRunnerResources:
   requests:
     memory: "256Mi"
     cpu: "100m"
+    ephemeral-storage: "512Mi"
   limits:
     memory: "1Gi"
     cpu: "500m"
+    ephemeral-storage: "4Gi"
+# Size limit of the sandbox runner's /app/workspace emptyDir; kubelet evicts the pod once usage exceeds it.
+sandboxRunnerWorkspaceSizeLimit: 1Gi
 
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest

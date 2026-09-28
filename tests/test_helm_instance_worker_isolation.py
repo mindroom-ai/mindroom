@@ -270,7 +270,7 @@ def test_tenant_namespace_enforces_the_pod_security_baseline() -> None:
 
 
 def test_instance_chart_limits_web_egress_to_public_addresses_and_the_ingress_controller() -> None:
-    """Tenant code must not reach metadata services, node or private networks, or other pods over HTTP(S)."""
+    """Tenant code must not reach metadata services, private networks, or other pods over HTTP(S)."""
     docs = _render_instance_chart()
     policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
     web_rules = [
@@ -817,7 +817,7 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
     ]
     assert volumes["storage"] == {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"}}
     assert volumes["config"] == {"name": "config", "configMap": {"name": "mindroom-config-demo"}}
-    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {}}
+    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {"sizeLimit": "1Gi"}}
     assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/mindroom_data"
     assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
         "mkdir",
@@ -1181,12 +1181,30 @@ def test_instance_chart_renders_configurable_control_plane_resources() -> None:
     synapse = _resource(docs, "Deployment", "synapse-demo")
 
     assert _container(mindroom, "mindroom")["resources"] == {
-        "requests": {"cpu": "300m", "memory": "768Mi"},
-        "limits": {"cpu": "1500m", "memory": "3Gi"},
+        "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "1Gi"},
+        "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "8Gi"},
     }
     assert _container(synapse, "synapse")["resources"] == {
-        "requests": {"cpu": "350m", "memory": "1Gi"},
-        "limits": {"cpu": "2", "memory": "4Gi"},
+        "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "256Mi"},
+        "limits": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "2Gi"},
+    }
+
+
+@pytest.mark.parametrize("workspace_size_limit", [None, "2Gi"])
+def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(workspace_size_limit: str | None) -> None:
+    """Tenant tool code shares a node with other tenants, so no instance container may fill its disk."""
+    set_args = () if workspace_size_limit is None else (f"sandboxRunnerWorkspaceSizeLimit={workspace_size_limit}",)
+    docs = _render_chart(Path("cluster/k8s/instance"), *set_args)
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+    containers = [_container(mindroom, "mindroom"), _container(mindroom, "sandbox-runner"), _container(synapse, "synapse")]
+
+    for container in containers:
+        assert "ephemeral-storage" in container["resources"]["requests"], container["name"]
+        assert "ephemeral-storage" in container["resources"]["limits"], container["name"]
+    assert _volumes_by_name(mindroom)["sandbox-workspace"] == {
+        "name": "sandbox-workspace",
+        "emptyDir": {"sizeLimit": workspace_size_limit or "1Gi"},
     }
 
 
