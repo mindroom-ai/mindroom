@@ -3,10 +3,16 @@
 This module is the single owner of the subscription-driven instance lifecycle.
 Stripe webhooks and the nightly cleanup job both call it, so they behave identically:
 
-- Not entitled: stop the instance, disable its platform-paid OpenRouter key, and schedule teardown.
-- Entitled again: start the instance (or reprovision it when it was torn down), re-enable the key,
-  and clear the schedule.
+- Not entitled (including every subscription of an account pending deletion): stop the instance,
+  disable its platform-paid OpenRouter key, and schedule teardown.
+- Entitled again: start the instance (or reprovision it when it was torn down or its key does not match
+  the tier), re-enable the key, and clear the schedule.
+- Entitled on a different tier: redeploy a running instance with the tier's key and resources, and revoke
+  a larger key from an instance that is not running.
 - Teardown due and still not entitled: uninstall everything and mark the instance deprovisioned.
+
+Account deletion also runs through this module: a deletion request holds the instances and cancels Stripe
+billing, and the GDPR hard delete uninstalls every instance before the account's rows are deleted.
 
 `lifecycle_stopped_at` marks the instances this module holds.
 Customer or admin stops never set it, so a manually stopped instance of an entitled subscription is left alone.
@@ -20,7 +26,8 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
 from backend.config import INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
@@ -33,11 +40,13 @@ from backend.entitlements import (
 )
 from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
-from backend.pricing import get_plan_details
 from backend.services.instances_data import get_instance, update_instance
 from backend.services.provisioner_service import (
     CLEARED_OPENROUTER_KEY_METADATA,
+    openrouter_key_exceeds_plan,
+    openrouter_key_matches_plan,
     provision_instance,
+    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
     start_instance,
     uninstall_instance,
@@ -47,13 +56,15 @@ if TYPE_CHECKING:
     from supabase import Client
 
 LIFECYCLE_INSTANCE_COLUMNS = (
-    "instance_id,subscription_id,account_id,status,openrouter_key_hash,"
-    "lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
+    "instance_id,subscription_id,account_id,status,openrouter_key_hash,openrouter_key_limit_usd,"
+    "openrouter_key_limit_reset,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
 _PAGE_SIZE = 1000
 _STRIPE_REFRESH_ATTEMPTS = 3
 _INSTANCES_NAMESPACE = "mindroom-instances"
+# Stripe subscriptions in these states no longer bill and cannot be cancelled again.
+_ENDED_STRIPE_STATUSES = frozenset({"canceled", "incomplete_expired"})
 # Serializes webhook-triggered and nightly runs for the same subscription within this process.
 _subscription_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -81,8 +92,9 @@ async def reconcile_subscription_instances(
 
     The subscription and its instances are read inside the per-subscription lock, so a run never acts on
     a snapshot that a concurrent webhook or nightly run already changed.
-    The stored status is refreshed from Stripe before any stop or resume, and always when
+    The stored status is refreshed from Stripe before any instance changes, and always when
     `refresh_from_stripe` is set (the nightly run), so a lost or out-of-order webhook cannot win.
+    A subscription of an account pending deletion is never entitled, so its instances stop without asking Stripe.
     """
     summary = summary or LifecycleSummary()
     now = now or datetime.now(UTC)
@@ -100,10 +112,12 @@ async def reconcile_subscription_instances(
             .data
             or []
         )
-        entitled = is_subscription_service_active(subscription, now=now)
-        would_stop = not entitled and any(instance.get("status") != "deprovisioned" for instance in instances)
-        would_resume = entitled and any(instance.get("lifecycle_stopped_at") for instance in instances)
-        if refresh_from_stripe or would_stop or would_resume:
+        account_may_run = _account_may_run(_account(sb, subscription["account_id"]))
+        entitled = account_may_run and is_subscription_service_active(subscription, now=now)
+        if account_may_run and (
+            refresh_from_stripe
+            or any(_needs_change(instance, subscription, entitled=entitled) for instance in instances)
+        ):
             refreshed = await _refresh_status_from_stripe(sb, subscription_id)
             if refreshed is None:
                 return summary
@@ -111,10 +125,12 @@ async def reconcile_subscription_instances(
             entitled = is_subscription_service_active(subscription, now=now)
         for instance in instances:
             try:
-                if entitled:
+                if not entitled:
+                    await _hold(sb, instance, subscription, now, summary)
+                elif instance.get("lifecycle_stopped_at"):
                     await _resume(sb, instance, subscription, summary)
                 else:
-                    await _hold(sb, instance, subscription, now, summary)
+                    await _align_plan(sb, instance, subscription)
             except Exception as exc:  # noqa: BLE001
                 _record_error(sb, instance, exc, now, summary)
 
@@ -128,9 +144,9 @@ async def reconcile_subscription_instances(
 
 
 async def reconcile_account_instances(account_id: str) -> None:
-    """Reconcile the instances of one account's subscriptions; used after Stripe webhooks.
+    """Reconcile the instances of one account's subscriptions; used after Stripe webhooks and deletion changes.
 
-    Runs as a background task after the webhook response, so it never fails the webhook.
+    Webhooks run it as a background task after their response, so it never fails the caller.
     Instance errors are stored on the instance and retried by the nightly job.
     """
     try:
@@ -140,6 +156,41 @@ async def reconcile_account_instances(account_id: str) -> None:
             await reconcile_subscription_instances(subscription["id"])
     except Exception:
         logger.exception("Instance lifecycle reconcile failed for account %s; the nightly job retries", account_id)
+
+
+async def stop_account_for_deletion(account_id: str) -> None:
+    """Stop an account's hosted service right after it asked to be deleted.
+
+    Its instances are held like those of an inactive subscription, then every Stripe subscription of its customer
+    is cancelled so billing ends. Holding never raises, so a Stripe failure still leaves the instances stopped; that
+    error propagates, and `tear_down_account` cancels again before the account's rows are deleted.
+    """
+    await reconcile_account_instances(account_id)
+    await _cancel_stripe_subscriptions(ensure_supabase(), account_id)
+
+
+async def tear_down_account(account_id: str) -> None:
+    """End billing and uninstall every hosted instance of an account whose deletion grace period ended.
+
+    Instance rows are the only record tying Helm releases, volumes, Secrets, and OpenRouter keys to their owner,
+    so delete the account's rows only after this returns. A failure propagates for the next run to retry, and every
+    step tolerates resources that are already gone, including instances a legacy soft delete marked deprovisioned
+    without uninstalling them.
+    """
+    sb = ensure_supabase()
+    await _cancel_stripe_subscriptions(sb, account_id)
+    for instance in _account_instances(sb, account_id):
+        async with _subscription_locks[str(instance["subscription_id"])]:
+            await uninstall_instance(instance["instance_id"])
+
+
+async def verified_subscription(sb: Client, subscription_id: str) -> dict[str, Any] | None:
+    """Return a subscription row whose stored status was just confirmed with Stripe, or None when it is gone.
+
+    Callers that mint platform-paid resources use this, so a stale stored status never grants them.
+    """
+    async with _subscription_locks[str(subscription_id)]:
+        return await _refresh_status_from_stripe(sb, subscription_id)
 
 
 async def reconcile_all_subscriptions(*, now: datetime | None = None) -> LifecycleSummary:
@@ -155,6 +206,49 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
             logger.exception("Instance lifecycle reconcile failed for subscription %s", subscription_id)
             summary.errors.append(f"subscription {subscription_id}: {exc}")
     return summary
+
+
+def _account_may_run(account: dict[str, Any] | None) -> bool:
+    """Return whether an account may run instances at all: it exists and is not pending deletion."""
+    return account is not None and account.get("deleted_at") is None
+
+
+def _may_run_instances(
+    subscription: dict[str, Any], account: dict[str, Any] | None, *, now: datetime | None = None
+) -> bool:
+    """Return whether a subscription may run its instances: it is entitled and its account is not pending deletion."""
+    return _account_may_run(account) and is_subscription_service_active(subscription, now=now)
+
+
+def _account(sb: Client, account_id: str) -> dict[str, Any] | None:
+    rows = sb.table("accounts").select("id,deleted_at").eq("id", account_id).limit(1).execute().data
+    return rows[0] if rows else None
+
+
+def _account_instances(sb: Client, account_id: str) -> list[dict[str, Any]]:
+    """Return every instance the account's rows own, by account or by subscription."""
+    columns = "instance_id,subscription_id"
+    rows = sb.table("instances").select(columns).eq("account_id", account_id).execute().data or []
+    subscriptions = sb.table("subscriptions").select("id").eq("account_id", account_id).execute().data or []
+    if subscriptions:
+        subscription_ids = [subscription["id"] for subscription in subscriptions]
+        rows += sb.table("instances").select(columns).in_("subscription_id", subscription_ids).execute().data or []
+    return list({str(row["instance_id"]): row for row in rows}.values())
+
+
+async def _cancel_stripe_subscriptions(sb: Client, account_id: str) -> None:
+    """Cancel every Stripe subscription of the account's customer that still bills; a no-op without Stripe."""
+    rows = sb.table("accounts").select("stripe_customer_id").eq("id", account_id).limit(1).execute().data
+    customer_id = rows[0].get("stripe_customer_id") if rows else None
+    if customer_id and stripe.api_key:
+        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id))
+
+
+def _cancel_customer_subscriptions(customer_id: str) -> None:
+    for subscription in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
+        if subscription.status not in _ENDED_STRIPE_STATUSES:
+            stripe.Subscription.cancel(subscription.id)
+            logger.info("Cancelled Stripe subscription %s of customer %s", subscription.id, customer_id)
 
 
 async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[str, Any] | None:
@@ -215,18 +309,19 @@ def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, A
     """
     now = now or datetime.now(UTC)
     rows = _instance_rows(
-        ensure_supabase(), f"{LIFECYCLE_INSTANCE_COLUMNS},subscription:subscriptions(*),account:accounts(email)"
+        ensure_supabase(),
+        f"{LIFECYCLE_INSTANCE_COLUMNS},subscription:subscriptions(*),account:accounts(email,deleted_at)",
     )
     pending: list[dict[str, Any]] = []
     stuck: list[dict[str, Any]] = []
     for row in rows:
         subscription = row.pop("subscription", None) or {}
-        account = row.pop("account", None) or {}
+        account = row.pop("account", None)
         item = {
             **row,
-            "account_email": account.get("email"),
+            "account_email": (account or {}).get("email"),
             "subscription_status": subscription.get("status"),
-            "problem": _lifecycle_problem(row, subscription, now),
+            "problem": _lifecycle_problem(row, subscription, account, now),
         }
         if row.get("lifecycle_stopped_at") and row.get("status") != "deprovisioned":
             pending.append(item)
@@ -236,7 +331,9 @@ def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, A
     return pending, stuck
 
 
-def _lifecycle_problem(instance: dict[str, Any], subscription: dict[str, Any], now: datetime) -> str | None:
+def _lifecycle_problem(
+    instance: dict[str, Any], subscription: dict[str, Any], account: dict[str, Any] | None, now: datetime
+) -> str | None:
     """Describe why an instance's lifecycle state disagrees with its subscription, or None when it agrees."""
     if instance.get("lifecycle_error"):
         return f"Last lifecycle step failed: {instance['lifecycle_error']}"
@@ -244,7 +341,7 @@ def _lifecycle_problem(instance: dict[str, Any], subscription: dict[str, Any], n
     if status == "deprovisioned":
         return None
     held = instance.get("lifecycle_stopped_at") is not None
-    entitled = bool(subscription) and is_subscription_service_active(subscription, now=now)
+    entitled = bool(subscription) and _may_run_instances(subscription, account, now=now)
     if held and entitled:
         return "Subscription is entitled again but the instance is still held"
     if held and status != "stopped":
@@ -279,17 +376,15 @@ async def _resume(
     sb: Client, instance: dict[str, Any], subscription: dict[str, Any], summary: LifecycleSummary
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
-    if instance.get("lifecycle_stopped_at") is None:
-        return
     instance_id = instance["instance_id"]
-    plan = get_plan_details(subscription["tier"])
-    # A hosted-budget instance without a key lost it in an earlier failed attempt; only provisioning mints one.
-    missing_key = bool(plan and plan.included_ai_budget_usd > 0 and not instance.get("openrouter_key_hash"))
+    # Only provisioning mints the tier's key, or drops one the tier does not include (for example after a downgrade),
+    # and a key lost in an earlier failed attempt is missing too; re-enabling the stored key would hand it back.
+    key_mismatch = not openrouter_key_matches_plan(instance, subscription["tier"])
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if (
         instance.get("status") == "deprovisioned"
-        or missing_key
+        or key_mismatch
         or failed_before
         or not await check_deployment_exists(str(instance_id))
     ):
@@ -307,6 +402,40 @@ async def _resume(
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
+
+
+def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "revoke"] | None:
+    """Return how an instance the lifecycle does not hold must change to carry only its tier's AI budget."""
+    if openrouter_key_matches_plan(instance, tier):
+        return None
+    if instance.get("status") == "running":
+        # Provisioning mints the tier's key, revokes the old one, and applies the tier's resources.
+        return "redeploy"
+    # A stopped, failed, or provisioning instance is not redeployed, which would start it or race the provision;
+    # it only loses a key its tier does not pay for, and a smaller key waits until the instance runs again.
+    return "revoke" if openrouter_key_exceeds_plan(instance, tier) else None
+
+
+def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
+    if not entitled:
+        return instance.get("status") != "deprovisioned"
+    if instance.get("lifecycle_stopped_at"):
+        return True
+    return _plan_alignment(instance, subscription["tier"]) is not None
+
+
+async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[str, Any]) -> None:
+    """Keep an entitled instance the lifecycle does not hold on its subscription tier's platform-paid AI budget."""
+    instance_id = instance["instance_id"]
+    alignment = _plan_alignment(instance, subscription["tier"])
+    if alignment == "redeploy":
+        logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
+        await _reprovision(sb, instance_id, subscription)
+    elif alignment == "revoke":
+        logger.info("Revoking the OpenRouter key of instance %s, which its tier does not include", instance_id)
+        await revoke_instance_openrouter_key(sb, instance_id)
+    if instance.get("lifecycle_error"):
+        update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
 
 
 async def _reprovision(sb: Client, instance_id: Any, subscription: dict[str, Any]) -> None:
@@ -357,7 +486,7 @@ async def _hold(
 async def _teardown(sb: Client, instance_id: Any, subscription: dict[str, Any], summary: LifecycleSummary) -> None:
     """Uninstall an instance whose grace period ended, unless its subscription became entitled meanwhile."""
     fresh = sb.table("subscriptions").select("*").eq("id", subscription["id"]).limit(1).execute().data
-    if fresh and is_subscription_service_active(fresh[0]):
+    if fresh and _may_run_instances(fresh[0], _account(sb, fresh[0]["account_id"])):
         logger.warning(
             "Skipping teardown of instance %s: subscription %s is entitled again", instance_id, fresh[0]["id"]
         )

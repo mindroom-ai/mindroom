@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from backend.tasks.cleanup import run_cleanup_job
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
+from postgrest.exceptions import APIError
 
 from tests.fake_supabase import FakeSupabase
 
@@ -42,6 +44,7 @@ class Platform:
     provision: AsyncMock
     uninstall: AsyncMock
     set_key_disabled: AsyncMock
+    revoke_key: AsyncMock
     stripe: Mock
 
     def instance(self) -> dict[str, Any]:
@@ -78,6 +81,8 @@ def _instance(status: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
         "status": status,
         "tier": "hobby",
         "openrouter_key_hash": "key_hash_7",
+        "openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd,
+        "openrouter_key_limit_reset": "monthly",
         "lifecycle_stopped_at": None,
         "teardown_after": None,
         "lifecycle_error": None,
@@ -126,6 +131,7 @@ def platform() -> Iterator[Platform]:
         provision=AsyncMock(side_effect=provision),
         uninstall=mark("deprovisioned"),
         set_key_disabled=AsyncMock(),
+        revoke_key=AsyncMock(),
         stripe=Mock(api_key=""),
     )
     with (
@@ -138,6 +144,7 @@ def platform() -> Iterator[Platform]:
         patch(f"{lifecycle}.provision_instance", platform.provision),
         patch(f"{lifecycle}.uninstall_instance", platform.uninstall),
         patch(f"{lifecycle}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
+        patch(f"{lifecycle}.revoke_instance_openrouter_key", platform.revoke_key),
         patch(f"{lifecycle}.stripe", platform.stripe),
         patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
     ):
@@ -153,17 +160,41 @@ def _send_webhook(event_type: str, obj: dict[str, Any]) -> dict[str, Any]:
     return response.json()
 
 
-def _stripe_subscription(status: str) -> dict[str, Any]:
+def _stripe_subscription(status: str, tier: str = "hobby") -> dict[str, Any]:
     return {
         "id": "sub_stripe_1",
         "customer": "cus_1",
         "status": status,
-        "items": {
-            "data": [{"price": {"id": "price_hobby", "metadata": {"tier": "hobby", "billing_cycle": "monthly"}}}]
-        },
+        "items": {"data": [{"price": {"id": f"price_{tier}", "metadata": {"tier": tier, "billing_cycle": "monthly"}}}]},
         "trial_end": None,
         "canceled_at": None,
     }
+
+
+def _pro_key() -> dict[str, Any]:
+    """Stored metadata of the platform-paid key a pro instance was provisioned with."""
+    return {
+        "openrouter_key_hash": "key_hash_pro",
+        "openrouter_key_limit_usd": get_plan_details("pro").included_ai_budget_usd,
+        "openrouter_key_limit_reset": "monthly",
+    }
+
+
+def _held(now: datetime) -> dict[str, Any]:
+    return {
+        "lifecycle_stopped_at": (now - timedelta(days=2)).isoformat(),
+        "teardown_after": (now + timedelta(days=28)).isoformat(),
+    }
+
+
+def _pending_deletion(platform: Platform, *, days_ago: float = 1) -> None:
+    deleted_at = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    platform.db.row("accounts", id=ACCOUNT_ID).update({"deleted_at": deleted_at, "status": "deleted"})
+
+
+def _stripe_lists(platform: Platform, *subscriptions: Mock) -> None:
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.list.return_value.auto_paging_iter.return_value = list(subscriptions)
 
 
 def test_webhook_cancel_stops_instance_disables_key_and_schedules_teardown(platform: Platform) -> None:
@@ -271,7 +302,9 @@ async def test_nightly_job_catches_missed_cancellation_and_records_run(platform:
     platform.db.tables["instances"].append(_instance("error"))
 
     with (
-        patch("backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0}),
+        patch(
+            "backend.tasks.cleanup.cleanup_soft_deleted_accounts", return_value={"accounts_deleted": 0, "errors": []}
+        ),
         patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
         patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
     ):
@@ -1039,3 +1072,358 @@ def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:
         assert "REVOKE ALL ON TABLE cleanup_runs FROM PUBLIC, anon, authenticated;" in sql
         assert "GRANT ALL ON TABLE cleanup_runs TO service_role;" in sql
         assert "'incomplete', 'incomplete_expired', 'unpaid'" in sql
+
+
+def _request_deletion(platform: Platform) -> Any:  # noqa: ANN401
+    # The soft_delete_account RPC is recorded, not run, so the account is marked pending deletion up front.
+    _pending_deletion(platform, days_ago=0)
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db):
+            return TestClient(app).post("/my/gdpr/request-deletion", json={"confirmation": True})
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_deletion_request_stops_instances_and_cancels_stripe_billing(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    _stripe_lists(
+        platform,
+        Mock(id="sub_stripe_1", status="active"),
+        Mock(id="sub_stripe_old", status="canceled"),
+    )
+
+    response = _request_deletion(platform)
+
+    assert response.status_code == 200
+    assert platform.db.rpc_calls[0][0] == "soft_delete_account"
+    platform.stripe.Subscription.cancel.assert_called_once_with("sub_stripe_1")
+    assert platform.scaled_down()
+    assert platform.set_key_disabled.await_args.kwargs == {"disabled": True}
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_account_pending_deletion_stays_stopped_while_stripe_still_reports_active(platform: Platform) -> None:
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(datetime.now(UTC))))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "active", "trial_end": None}
+
+    summary = await reconcile_all_subscriptions()
+
+    platform.stripe.Subscription.retrieve.assert_not_called()
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+    assert summary.instances_resumed == 0
+
+
+@pytest.mark.asyncio
+async def test_account_pending_deletion_stops_instances_during_a_stripe_outage(platform: Platform) -> None:
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.side_effect = RuntimeError("stripe unavailable")
+
+    summary = await reconcile_all_subscriptions()
+
+    assert summary.errors == []
+    assert platform.scaled_down()
+    assert platform.instance()["status"] == "stopped"
+
+
+def _cleanup_with_other_tasks_stubbed() -> Any:  # noqa: ANN401
+    return (
+        patch("backend.tasks.cleanup.cleanup_old_audit_logs", return_value={"audit_logs_deleted": 0}),
+        patch("backend.tasks.cleanup.cleanup_old_usage_metrics", return_value={"usage_metrics_deleted": 0}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_uninstalls_every_instance_and_cancels_billing_before_deleting_rows(
+    platform: Platform,
+) -> None:
+    _pending_deletion(platform, days_ago=8)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned"))
+    _stripe_lists(platform, Mock(id="sub_stripe_1", status="past_due"))
+    order: list[str] = []
+    platform.uninstall.side_effect = lambda instance_id: order.append(f"uninstall {instance_id}")
+    platform.stripe.Subscription.cancel.side_effect = lambda stripe_id: order.append(f"cancel {stripe_id}")
+
+    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
+    with audit_logs, usage_metrics:
+        run = await run_cleanup_job()
+
+    assert order == ["cancel sub_stripe_1", "uninstall 7"]
+    assert platform.db.rpc_calls == [("hard_delete_account", {"target_account_id": ACCOUNT_ID})]
+    assert run["summary"]["accounts"]["accounts_deleted"] == 1
+    assert run["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_teardown_keeps_the_account_rows_for_the_next_run(platform: Platform) -> None:
+    _pending_deletion(platform, days_ago=8)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+    platform.uninstall.side_effect = HTTPException(status_code=500, detail="Failed to uninstall instance: timeout")
+
+    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
+    with audit_logs, usage_metrics:
+        run = await run_cleanup_job()
+
+    assert platform.db.rpc_calls == []
+    assert run["ok"] is False
+    assert run["summary"]["accounts"]["accounts_deleted"] == 0
+    assert "Failed to uninstall instance: timeout" in run["summary"]["accounts"]["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platform) -> None:
+    _pending_deletion(platform, days_ago=2)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+
+    audit_logs, usage_metrics = _cleanup_with_other_tasks_stubbed()
+    with audit_logs, usage_metrics:
+        await run_cleanup_job()
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.db.rpc_calls == []
+
+
+def test_cancelled_deletion_restores_the_account_and_reconciles_through_the_lifecycle(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    # The restore_account RPC is recorded, not run, so the account is restored up front.
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db),
+            patch("backend.routes.gdpr.instance_lifecycle.reconcile_account_instances") as reconcile,
+        ):
+            platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = now.isoformat()
+            response = TestClient(app).post("/my/gdpr/cancel-deletion")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert platform.db.rpc_calls == [("restore_account", {"target_account_id": ACCOUNT_ID})]
+    reconcile.assert_awaited_once_with(ACCOUNT_ID)
+
+
+def test_fresh_provision_confirms_the_stored_status_with_stripe(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.stripe.api_key = "sk_test"
+    platform.stripe.Subscription.retrieve.return_value = {"status": "canceled", "trial_end": None}
+    provision = AsyncMock(return_value={"success": True, "customer_id": "7"})
+    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    try:
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
+            patch("backend.services.provisioner_service.provision_instance", provision),
+        ):
+            response = TestClient(app).post("/my/instances/provision")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 402
+    provision.assert_not_awaited()
+    assert platform.subscription()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_resume_on_a_cheaper_tier_reprovisions_instead_of_reenabling_the_old_key(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key(), **_held(datetime.now(UTC))))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.start.assert_not_awaited()
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "byok"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+def test_plan_change_redeploys_a_running_instance_with_the_new_budget(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+
+    _send_webhook("customer.subscription.updated", _stripe_subscription("active", tier="hobby"))
+
+    assert platform.subscription()["tier"] == "hobby"
+    platform.provision.assert_awaited_once()
+    assert platform.provision.await_args.kwargs["data"]["tier"] == "hobby"
+    platform.revoke_key.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    redeploy = platform.provision.side_effect
+
+    async def helm_fails_once(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        if platform.provision.await_count == 1:
+            msg = "Helm install failed: timed out"
+            raise RuntimeError(msg)
+        # The retry publishes the hobby key.
+        platform.instance().update({"openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd})
+        return await redeploy(*args, **kwargs)
+
+    platform.provision.side_effect = helm_fails_once
+
+    first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    assert "Helm install failed" in platform.instance()["lifecycle_error"]
+
+    second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert first.errors
+    assert second.errors == []
+    assert platform.provision.await_count == 2
+    assert platform.instance()["lifecycle_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_change_revokes_a_larger_key_of_a_stopped_instance_without_starting_it(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.revoke_key.assert_awaited_once()
+    assert platform.revoke_key.await_args.args[1] == 7
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_plan_upgrade_keeps_the_smaller_key_of_a_stopped_instance(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
+    platform.db.tables["instances"].append(_instance("stopped"))
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.revoke_key.assert_not_awaited()
+    platform.provision.assert_not_awaited()
+    platform.start.assert_not_awaited()
+
+
+_SERVICE = "backend.services.provisioner_service"
+_REPROVISION_7 = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "instance_id": 7}
+
+
+def _pvc_listing(size: str) -> str:
+    return json.dumps(
+        {
+            "items": [
+                {"spec": {"storageClassName": "hcloud-volumes", "resources": {"requests": {"storage": size}}}},
+                {"spec": {"storageClassName": "hcloud-volumes", "resources": {"requests": {"storage": size}}}},
+            ]
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_reprovisioning_on_a_tier_without_budget_deletes_the_stored_key() -> None:
+    db = FakeSupabase({"instances": [_instance("stopped", tier="pro", **_pro_key())]})
+    published: dict[str, str] = {}
+    delete_key = Mock(return_value=None)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        published.update(secret_data)
+        return "hash"
+
+    with (
+        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}.create_openrouter_key", Mock(side_effect=AssertionError("byok has no budget"))),
+        patch(f"{_SERVICE}.delete_openrouter_key", delete_key),
+        patch(f"{_SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        await provision_instance(
+            db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None, resume_lifecycle_hold=True
+        )
+
+    delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="key_hash_pro")
+    assert published["openrouter_key"] == ""
+    row = db.row("instances", instance_id=7)
+    assert row["openrouter_key_hash"] is None
+    assert row["openrouter_key_limit_usd"] is None
+    assert row["tier"] == "byok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "existing_size", "expected_size"),
+    [("hobby", "25Gi", "25Gi"), ("pro", "10Gi", "25Gi"), ("pro", "50Gi", "50Gi")],
+)
+async def test_reprovisioning_never_shrinks_the_instance_volumes(
+    tier: str, existing_size: str, expected_size: str
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", openrouter_key_hash=None)]})
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+
+    async def kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:  # noqa: ARG001
+        return (0, _pvc_listing(existing_size), "") if args[:2] == ["get", "pvc"] else (0, "", "")
+
+    created = CreatedOpenRouterKey("key", "hash_new", "label", get_plan_details(tier).included_ai_budget_usd, "monthly")
+    with (
+        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}.create_openrouter_key", Mock(return_value=created)),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", kubectl),
+        patch(f"{_SERVICE}.run_helm", helm),
+        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        await provision_instance(db, data={**_REPROVISION_7, "tier": tier}, background_tasks=None)
+
+    helm_args = helm.await_args.args[0]
+    storage_sets = [
+        value for flag, value in zip(helm_args, helm_args[1:]) if flag == "--set" and value.startswith("storage=")
+    ]
+    assert storage_sets[-1] == f"storage={expected_size}"
+
+
+@pytest.mark.asyncio
+async def test_a_second_instance_for_one_subscription_is_refused_by_the_database() -> None:
+    create_key = Mock()
+    helm = AsyncMock()
+    duplicate = APIError({"code": "23505", "message": "duplicate key value violates unique constraint"})
+    with (
+        patch(f"{_SERVICE}.create_instance", Mock(side_effect=duplicate)),
+        patch(f"{_SERVICE}.create_openrouter_key", create_key),
+        patch(f"{_SERVICE}.run_helm", helm),
+        pytest.raises(HTTPException) as refused,
+    ):
+        await provision_instance(
+            FakeSupabase({"instances": []}),
+            data={"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "pro"},
+            background_tasks=None,
+        )
+
+    assert refused.value.status_code == 409
+    create_key.assert_not_called()
+    helm.assert_not_awaited()
+
+
+def test_instances_allow_one_row_per_subscription() -> None:
+    migration = (MIGRATIONS_DIR / "005_account_deletion_and_instance_uniqueness.sql").read_text(encoding="utf-8")
+    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
+
+    assert "subscription_id UUID NOT NULL UNIQUE REFERENCES subscriptions(id) ON DELETE CASCADE" in baseline
+    assert "ADD CONSTRAINT instances_subscription_id_key UNIQUE (subscription_id)" in migration
+    for sql in (migration, baseline):
+        assert "CREATE INDEX idx_instances_subscription_id" not in sql

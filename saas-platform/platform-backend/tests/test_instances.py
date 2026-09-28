@@ -180,6 +180,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         instance_mock = MagicMock()
@@ -256,6 +257,7 @@ class TestInstancesEndpoints:
         mock_supabase.table.side_effect = table_side_effect
         mock_sub_chain.select.return_value = mock_sub_chain
         mock_sub_chain.eq.return_value = mock_sub_chain
+        mock_sub_chain.limit.return_value = mock_sub_chain
         mock_inst_chain.select.return_value = mock_inst_chain
         mock_inst_chain.eq.return_value = mock_inst_chain
         mock_inst_chain.limit.return_value = mock_inst_chain
@@ -297,6 +299,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         # Setup mock chain for instance query
@@ -359,6 +362,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         instance_mock = MagicMock()
@@ -653,6 +657,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         # Setup mock chain for instance query

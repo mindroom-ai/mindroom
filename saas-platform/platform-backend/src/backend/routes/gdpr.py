@@ -16,7 +16,7 @@ from backend.models import (
     GdprDeletionResponse,
     GdprExportResponse,
 )
-from backend.services import instances_data
+from backend.services import instance_lifecycle, instances_data
 
 router = APIRouter()
 
@@ -106,8 +106,9 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
             "payment_info": "Payment and webhook records retain account references and payment identifiers.",
             "invoices": "Payment and webhook records are not removed by account cleanup and can prevent deletion.",
             "external_data": (
-                "Account cleanup does not delete the authentication user, Stripe customer or subscription data, "
-                "Matrix data, or persistent volumes; separate processor and operator policies apply."
+                "Account cleanup uninstalls hosted instances with their Matrix homeserver data and persistent volumes, "
+                "but does not delete the authentication user, Stripe customer or subscription records, or copies held "
+                "by other Matrix homeservers; separate processor and operator policies apply."
             ),
         },
         "third_party_processors": [
@@ -134,6 +135,7 @@ async def request_account_deletion(
             "status": "confirmation_required",
             "message": "Please confirm deletion by setting confirmation=true",
             "warning": (
+                "Confirming cancels any paid subscription and stops your hosted instances immediately. "
                 "Scheduled cleanup becomes eligible after 7 days. "
                 "You can request cancellation while your account is still pending deletion. "
                 "Completed application-database deletion cannot be undone; "
@@ -156,15 +158,20 @@ async def request_account_deletion(
         }
     ).execute()
 
-    # Soft-delete now; the optional cleanup scheduler attempts database deletion after 7 days.
+    # Soft-delete now; the optional cleanup scheduler uninstalls the instances and deletes the rows after 7 days.
     # Payment/webhook references can block cleanup; external data is outside this RPC.
     sb.rpc(
         "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
     ).execute()
+    # Held until cleanup: an account pending deletion never runs instances, and Stripe stops billing it.
+    await instance_lifecycle.stop_account_for_deletion(account_id)
 
     return {
         "status": "deletion_scheduled",
-        "message": "Your account has been scheduled for deletion",
+        "message": (
+            "Your account has been scheduled for deletion; any paid subscription was cancelled "
+            "and your hosted instances were stopped"
+        ),
         "grace_period_days": 7,
         "deletion_date": (
             "Eligible for scheduled application-database cleanup after 7 days, when cleanup is enabled; "
@@ -172,18 +179,20 @@ async def request_account_deletion(
         ),
         "cancellation": (
             "While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings, "
-            "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion."
+            "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion. "
+            "Cancelling restores the account but not the cancelled subscription."
         ),
         "data_deleted": (
-            "Cleanup targets application-database account, subscription, instance, "
+            "Cleanup uninstalls hosted instances with their Matrix homeserver data, persistent volumes, and "
+            "platform-paid AI keys, then targets application-database account, subscription, instance, "
             "existing account-linked audit-log, and subscription-linked usage records"
         ),
         "data_retained": (
             "After successful account deletion, a deletion audit record retains your account UUID. "
             "Separate audit-log cleanup may remove it later. "
             "Payment and webhook records retain account references and can prevent cleanup. "
-            "Cleanup does not delete the authentication user, Stripe customer or subscription data, "
-            "Matrix data, or persistent volumes; separate processor and operator policies apply."
+            "Cleanup does not delete the authentication user, Stripe customer or subscription records, "
+            "or copies held by other Matrix homeservers; separate processor and operator policies apply."
         ),
     }
 
@@ -247,5 +256,14 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
 
     # The RPC restores the account and records the cancellation in one transaction.
     sb.rpc("restore_account", {"target_account_id": account_id}).execute()
+    # Instances held for the deletion restart only while their subscription is entitled.
+    await instance_lifecycle.reconcile_account_instances(account_id)
 
-    return {"status": "success", "message": "Account deletion request has been cancelled", "account_status": "active"}
+    return {
+        "status": "success",
+        "message": (
+            "Account deletion request has been cancelled. "
+            "Hosted instances restart once your subscription is active; choose a plan again if it was cancelled."
+        ),
+        "account_status": "active",
+    }

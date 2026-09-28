@@ -105,7 +105,7 @@ CREATE INDEX idx_subscriptions_stripe_subscription_id ON subscriptions(stripe_su
 CREATE TABLE instances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id UUID REFERENCES accounts(id) ON DELETE CASCADE,
-    subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    subscription_id UUID NOT NULL UNIQUE REFERENCES subscriptions(id) ON DELETE CASCADE, -- One instance per subscription
 
     -- Instance identification
     instance_id INTEGER UNIQUE NOT NULL DEFAULT nextval('instance_id_seq'), -- Numeric K8s instance id
@@ -155,7 +155,6 @@ CREATE TABLE instances (
 );
 
 CREATE INDEX idx_instances_account_id ON instances(account_id);
-CREATE INDEX idx_instances_subscription_id ON instances(subscription_id);
 CREATE INDEX idx_instances_status ON instances(status);
 CREATE INDEX idx_instances_subdomain ON instances(subdomain);
 CREATE INDEX idx_instances_instance_id ON instances(instance_id);
@@ -352,7 +351,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- SOFT DELETE FUNCTIONS (GDPR Compliance)
 -- ============================================================================
 
--- Soft delete function for accounts
+-- Soft delete function for accounts.
+-- Only the account changes: the backend cancels Stripe billing and the instance lifecycle stops the
+-- account's instances, so subscription status keeps coming from Stripe alone.
 CREATE OR REPLACE FUNCTION soft_delete_account(
     target_account_id UUID,
     reason TEXT DEFAULT 'user_request',
@@ -384,21 +385,11 @@ BEGIN
         ),
         TRUE
     );
-
-    -- Mark related data while avoiding unnecessary churn
-    UPDATE subscriptions
-    SET status = 'cancelled', updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status != 'cancelled';
-
-    UPDATE instances
-    SET status = 'deprovisioned', updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status NOT IN ('deprovisioned', 'stopped');
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Restore function (for accidental deletions within grace period)
+-- Restore function (for accidental deletions within grace period).
+-- Only the account changes; held instances resume through the instance lifecycle while their subscription is entitled.
 CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
@@ -414,21 +405,6 @@ BEGIN
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NOT NULL;
-
-    -- Restore related data that was cancelled/deprovisioned during soft delete
-    UPDATE subscriptions
-    SET
-        status = 'active',
-        updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status = 'cancelled';
-
-    UPDATE instances
-    SET
-        status = 'running',
-        updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status = 'deprovisioned';
 
     -- Audit log entry
     INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)

@@ -12,9 +12,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import tempfile
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
@@ -86,6 +88,7 @@ from backend.services.instances_data import (
     update_instance_status,
 )
 from fastapi import BackgroundTasks, HTTPException
+from postgrest.exceptions import APIError
 
 _MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
 # Rooms created by the seeded instance config (cluster/k8s/instance/default-config.yaml).
@@ -110,6 +113,13 @@ _RESOURCE_PROFILE_HELM_VALUES = {
 }
 
 _INSTANCES_NAMESPACE = "mindroom-instances"
+# PostgreSQL unique_violation, raised when a second instance row is inserted for one subscription.
+_UNIQUE_VIOLATION = "23505"
+_QUANTITY = re.compile(r"(\d+(?:\.\d+)?)([KMGTPE]i|[kMGTPE])?")
+_QUANTITY_FACTORS = {
+    **{suffix: 1024**power for power, suffix in enumerate(("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei"))},
+    **{suffix: 1000**power for power, suffix in enumerate(("k", "M", "G", "T", "P", "E"), start=1)},
+}
 
 
 def _env_flag_enabled(value: str) -> bool:
@@ -378,29 +388,54 @@ async def _provision_credentials_encryption_key(
     return ""
 
 
-async def _existing_instance_storage_class_name(instance_id: str, namespace: str) -> str | None:
-    """Return the bound PVC storage class for an existing instance."""
+@dataclass(frozen=True)
+class _ExistingVolumes:
+    """Settings of an instance's existing PVCs that a redeploy must keep, because Kubernetes cannot change them."""
+
+    storage_class_name: str | None = None
+    storage: str | None = None  # Largest requested size; a bound PVC can grow but never shrink.
+
+
+def _quantity_bytes(quantity: str) -> float:
+    """Return the size a Kubernetes storage quantity such as `25Gi` or `10G` stands for."""
+    match = _QUANTITY.fullmatch(quantity)
+    if match is None:
+        msg = f"Cannot compare the storage size {quantity!r}"
+        raise HTTPException(status_code=500, detail=msg)
+    return float(match.group(1)) * _QUANTITY_FACTORS[match.group(2) or ""]
+
+
+async def _existing_instance_volumes(instance_id: str, namespace: str) -> _ExistingVolumes:
+    """Return the storage class and requested size of an existing instance's PVCs."""
     code, out, err = await run_kubectl(
         ["get", "pvc", *_instance_pvc_names(instance_id), "--ignore-not-found", "-o", "json"], namespace=namespace
     )
     if code != 0:
-        msg = f"Failed to inspect existing PVC storage class for instance {instance_id}: {err or out}"
+        msg = f"Failed to inspect existing PVCs for instance {instance_id}: {err or out}"
         raise HTTPException(status_code=500, detail=msg)
     if not out.strip():
-        return None
+        return _ExistingVolumes()
 
-    payload = json.loads(out)
-    storage_classes = {
-        item.get("spec", {}).get("storageClassName", "").strip()
-        for item in payload.get("items", [])
-        if item.get("spec", {}).get("storageClassName", "").strip()
-    }
-    if not storage_classes:
-        return None
+    specs = [item.get("spec", {}) for item in json.loads(out).get("items", [])]
+    storage_classes = {spec.get("storageClassName", "").strip() for spec in specs} - {""}
     if len(storage_classes) > 1:
         msg = f"Instance {instance_id} has PVCs with different storage classes: {', '.join(sorted(storage_classes))}"
         raise HTTPException(status_code=500, detail=msg)
-    return storage_classes.pop()
+    sizes = {spec.get("resources", {}).get("requests", {}).get("storage", "").strip() for spec in specs} - {""}
+    return _ExistingVolumes(
+        storage_class_name=next(iter(storage_classes), None),
+        storage=max(sizes, key=_quantity_bytes, default=None),
+    )
+
+
+def _append_storage_helm_args(helm_args: list[str], resource_profile: str, existing_storage: str | None) -> None:
+    """Keep existing volumes at least their current size, since Kubernetes refuses to shrink a PVC.
+
+    A tier's profile can lower the requested size (for example a downgrade from pro), and Helm would then fail.
+    """
+    requested = _RESOURCE_PROFILE_HELM_VALUES.get(resource_profile, {}).get("storage")
+    if existing_storage and (requested is None or _quantity_bytes(requested) < _quantity_bytes(existing_storage)):
+        helm_args += ["--set", f"storage={existing_storage}"]
 
 
 def _openrouter_key_name(*, tier: str, account_id: Any, instance_id: str) -> str:
@@ -442,6 +477,30 @@ CLEARED_OPENROUTER_KEY_METADATA = {
 }
 
 
+def _included_ai_budget_usd(tier: str) -> int:
+    plan = get_plan_details(tier)
+    return plan.included_ai_budget_usd if plan else 0
+
+
+def openrouter_key_matches_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
+    """Return whether an instance holds exactly the platform-paid OpenRouter key its tier includes.
+
+    A tier without an included AI budget matches only an instance that stores no key.
+    """
+    budget = _included_ai_budget_usd(tier)
+    if budget <= 0:
+        return _stored_openrouter_key_hash(instance_row) is None
+    return _matching_openrouter_metadata(instance_row, budget)
+
+
+def openrouter_key_exceeds_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
+    """Return whether an instance holds a platform-paid key with a larger budget than its tier includes."""
+    if _stored_openrouter_key_hash(instance_row) is None:
+        return False
+    limit = instance_row.get("openrouter_key_limit_usd")
+    return limit is None or int(limit) > _included_ai_budget_usd(tier)
+
+
 async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], *, disabled: bool) -> None:
     """Disable or re-enable the platform-paid OpenRouter key of one instance, if it has one.
 
@@ -464,7 +523,7 @@ async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], 
         logger.info("OpenRouter key %s for instance %s no longer exists", key_hash, instance_row.get("instance_id"))
 
 
-async def _revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
+async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
     """Delete the platform-paid OpenRouter key of one instance and forget its metadata."""
     key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
     if key_hash is None:
@@ -525,9 +584,11 @@ async def _provision_openrouter_key(
     A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
     or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
     """
-    plan = get_plan_details(tier)
-    monthly_limit_usd = plan.included_ai_budget_usd if plan else 0
+    monthly_limit_usd = _included_ai_budget_usd(tier)
     if monthly_limit_usd <= 0:
+        # A tier without an included budget keeps no platform-paid key, including one left from a pricier tier.
+        if _stored_openrouter_key_hash(existing_instance_row) is not None:
+            await revoke_instance_openrouter_key(sb, instance_id)
         return "", None
 
     if _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
@@ -608,7 +669,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if existing_instance_id:
         customer_id = str(existing_instance_id)
         try:
-            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"})
+            updated_rows = update_instance(sb, customer_id, {"status": "provisioning", "tier": tier})
             if not updated_rows:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
@@ -642,6 +703,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         except HTTPException:
             raise
         except Exception as e:
+            if isinstance(e, APIError) and e.code == _UNIQUE_VIOLATION:
+                # A concurrent request inserted this subscription's instance first; the database allows only one.
+                raise HTTPException(status_code=409, detail="This subscription already has an instance") from e
             logger.exception("Failed to insert instance")
             raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
 
@@ -691,11 +755,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     credentials_encryption_key = await _provision_credentials_encryption_key(
         customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
     )
-    storage_class_name = INSTANCE_STORAGE_CLASS_NAME
-    if existing_instance_id:
-        storage_class_name = (
-            await _existing_instance_storage_class_name(customer_id, namespace)
-        ) or INSTANCE_STORAGE_CLASS_NAME
+    existing_volumes = (
+        await _existing_instance_volumes(customer_id, namespace) if existing_instance_id else _ExistingVolumes()
+    )
+    storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
     try:
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
@@ -753,8 +816,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         if storage_class_name:
             helm_args += ["--set", f"storageClassName={storage_class_name}"]
         plan = get_plan_details(tier)
-        if plan:
-            _append_resource_profile_helm_args(helm_args, plan.resource_profile)
+        resource_profile = plan.resource_profile if plan else ""
+        _append_resource_profile_helm_args(helm_args, resource_profile)
+        _append_storage_helm_args(helm_args, resource_profile, existing_volumes.storage)
         if INSTANCE_MINDROOM_IMAGE:
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
@@ -982,7 +1046,7 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 
         await _delete_resources_outside_release(instance_id)
-        await _revoke_instance_openrouter_key(ensure_supabase(), instance_id)
+        await revoke_instance_openrouter_key(ensure_supabase(), instance_id)
 
         if not update_instance_status(instance_id, "deprovisioned"):
             logger.warning("Failed to update database for instance %s", instance_id)

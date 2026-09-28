@@ -1,12 +1,16 @@
 """Test GDPR endpoints functionality."""
 
-from unittest.mock import MagicMock, patch
+import re
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from main import app
 from backend.deps import verify_user
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 
 
 @pytest.fixture
@@ -44,6 +48,38 @@ def mock_supabase():
         mock_sb = MagicMock()
         mock.return_value = mock_sb
         yield mock_sb
+
+
+@pytest.fixture
+def mock_lifecycle():
+    """Stub the instance lifecycle steps the deletion routes run after their RPC."""
+    with (
+        patch("backend.routes.gdpr.instance_lifecycle.stop_account_for_deletion", new=AsyncMock()) as stop,
+        patch("backend.routes.gdpr.instance_lifecycle.reconcile_account_instances", new=AsyncMock()) as reconcile,
+    ):
+        yield MagicMock(stop_account_for_deletion=stop, reconcile_account_instances=reconcile)
+
+
+def _function_body(sql: str, name: str) -> str:
+    match = re.search(rf"CREATE OR REPLACE FUNCTION {name}\(.*?\$\$(.*?)\$\$", sql, re.DOTALL)
+    assert match is not None, name
+    return match.group(1)
+
+
+def test_account_deletion_functions_change_only_the_account() -> None:
+    """Soft delete and restore leave subscription and instance state to Stripe and the instance lifecycle."""
+    migration = (MIGRATIONS_DIR / "005_account_deletion_and_instance_uniqueness.sql").read_text(encoding="utf-8")
+    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
+
+    assert migration.lstrip().startswith("--")
+    assert "BEGIN;" in migration
+    assert migration.rstrip().endswith("COMMIT;")
+    for sql in (migration, baseline):
+        for name in ("soft_delete_account", "restore_account"):
+            body = _function_body(sql, name)
+            assert "UPDATE accounts" in body
+            assert "subscriptions" not in body
+            assert "instances" not in body
 
 
 class TestGDPREndpoints:
@@ -129,13 +165,20 @@ class TestGDPREndpoints:
         data = response.json()
         assert "confirm deletion" in data["message"].lower()
 
-    def test_request_deletion_with_confirmation(self, client, mock_verify_user, mock_user, mock_supabase):
+    def test_request_deletion_with_confirmation(
+        self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle
+    ):
         """Test successful deletion request."""
 
         # Mock soft_delete_account function
         mock_rpc = MagicMock()
         mock_rpc.execute.return_value = MagicMock(data=None)
         mock_supabase.rpc.return_value = mock_rpc
+
+        async def stop_after_soft_delete(_account_id: str) -> None:
+            mock_rpc.execute.assert_called_once_with()
+
+        mock_lifecycle.stop_account_for_deletion.side_effect = stop_after_soft_delete
 
         response = client.post(
             "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
@@ -159,8 +202,11 @@ class TestGDPREndpoints:
                 "requested_by": mock_user["account_id"],
             },
         )
+        # The hosted service stops only after the account is marked pending deletion.
+        mock_lifecycle.stop_account_for_deletion.assert_awaited_once_with(mock_user["account_id"])
+        assert "cancelled" in data["message"]
 
-    def test_cancel_deletion(self, client, mock_verify_user, mock_user, mock_supabase):
+    def test_cancel_deletion(self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle):
         """Test canceling deletion request."""
 
         # Mock account query to show it's soft-deleted
@@ -189,6 +235,8 @@ class TestGDPREndpoints:
         mock_supabase.rpc.assert_called_once_with("restore_account", {"target_account_id": mock_user["account_id"]})
         mock_rpc.execute.assert_called_once_with()
         mock_supabase.table.assert_called_once_with("accounts")
+        # Held instances resume only when their subscription is entitled.
+        mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):
         """Test updating consent preferences."""
@@ -245,7 +293,7 @@ class TestGDPREndpoints:
         assert data["subscriptions"] == []
         assert data["instances"] == []
 
-    def test_deletion_idempotent(self, client, mock_verify_user, mock_supabase):
+    def test_deletion_idempotent(self, client, mock_verify_user, mock_supabase, mock_lifecycle):
         """Test deletion request is idempotent."""
 
         mock_rpc = MagicMock()

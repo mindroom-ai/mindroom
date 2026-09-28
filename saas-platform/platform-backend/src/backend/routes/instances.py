@@ -198,7 +198,10 @@ async def provision_user_instance(
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
-    subscription = sub_result.data[0]
+    # Provisioning mints a platform-paid OpenRouter key, so a Stripe-billed status is confirmed with Stripe first.
+    subscription = await instance_lifecycle.verified_subscription(sb, sub_result.data[0]["id"])
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="No subscription found")
     assert_instance_entitlement(subscription, "provision")
 
     inst_result = (

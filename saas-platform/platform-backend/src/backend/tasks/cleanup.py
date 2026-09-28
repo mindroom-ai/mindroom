@@ -10,15 +10,19 @@ import logging
 from typing import Any
 
 from backend.deps import ensure_supabase
-from backend.services.instance_lifecycle import reconcile_all_subscriptions
+from backend.services.instance_lifecycle import reconcile_all_subscriptions, tear_down_account
 
 logger = logging.getLogger(__name__)
 
 
-def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
+async def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
     """
     Hard delete accounts that have been soft-deleted for longer than grace period.
     This ensures GDPR compliance while giving users time to recover accounts.
+
+    Each account's hosted instances are uninstalled and its Stripe billing is cancelled before its rows go,
+    because those rows are the only record of what to tear down. An account whose teardown or delete fails
+    keeps its rows, is reported in `errors`, and is retried by the next run.
     """
     sb = ensure_supabase()
     cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
@@ -33,14 +37,21 @@ def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
     )
 
     accounts_deleted = 0
+    errors: list[str] = []
 
     for account in result.data or []:
-        # Call hard delete function
-        sb.rpc("hard_delete_account", {"target_account_id": account["id"]}).execute()
+        account_id = account["id"]
+        try:
+            await tear_down_account(account_id)
+            sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
+        except Exception as exc:
+            logger.exception("Failed to delete account %s; the next run retries", account_id)
+            errors.append(f"account {account_id}: {exc}")
+            continue
         accounts_deleted += 1
-        logger.info(f"Hard deleted account {account['id']} after {grace_period_days} day grace period")
+        logger.info(f"Hard deleted account {account_id} after {grace_period_days} day grace period")
 
-    return {"accounts_deleted": accounts_deleted, "timestamp": datetime.now(UTC).isoformat()}
+    return {"accounts_deleted": accounts_deleted, "errors": errors, "timestamp": datetime.now(UTC).isoformat()}
 
 
 def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
@@ -105,8 +116,15 @@ async def run_cleanup_job() -> dict[str, Any]:
     started_at = datetime.now(UTC)
     summary: dict[str, Any] = {}
     ok = True
+    try:
+        summary["accounts"] = await cleanup_soft_deleted_accounts()
+        ok = not summary["accounts"]["errors"]
+    except Exception as exc:
+        logger.exception("Cleanup task accounts failed")
+        summary["accounts"] = {"error": str(exc)}
+        ok = False
+
     retention_tasks: dict[str, Callable[[], dict]] = {
-        "accounts": cleanup_soft_deleted_accounts,
         "audit_logs": cleanup_old_audit_logs,
         "usage_metrics": cleanup_old_usage_metrics,
     }
