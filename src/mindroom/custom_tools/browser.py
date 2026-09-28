@@ -1726,7 +1726,11 @@ class BrowserTools(Toolkit):
                     else None
                 ),
             )
-            upstream = browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ)
+            # A headless worker browser runs with its prepared environment, so that is where its route is set.
+            upstream = browser_upstream_proxy_url(
+                self._runtime_paths.process_env,
+                os.environ if self._worker_process_env is None else self._worker_process_env,
+            )
             if upstream:
                 # The operator's egress proxy owns every destination Chromium does not dial itself.
                 launch_kwargs["proxy"] = {
