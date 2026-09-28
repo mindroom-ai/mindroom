@@ -56,12 +56,13 @@ type _DelegationEventKind = Literal[
     "usage",
 ]
 type _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
+type _DelegationStatus = _DelegationActiveStatus | DelegationTerminalStatus
 
 _SCHEMA_VERSION = 1
 _DELEGATION_DIRECTORY = Path(".mindroom/delegations")
 _RECEIPT_DIRECTORY = Path(".mindroom/delegation_receipts")
 _MAX_INLINE_VALUE_BYTES = 64 * 1024
-# Every write folds and renders the whole worker-writable record, so these caps bound what one planted record costs.
+# Every write folds the whole worker-writable record, so these caps bound what one planted record costs.
 # Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real records stay far below them.
 _MAX_RUN_BYTES = 4 << 20
 _MAX_EVENT_LINE_BYTES = 4 << 20
@@ -71,6 +72,7 @@ _MAX_EVENTS = 65536
 _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
+_STATUSES = frozenset({"running", "paused", *_TERMINAL_STATUSES})
 # Worker code can lock any file in the record directory, so writers of one record exclude each other in this process.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _RECORD_LOCKS_GUARD = threading.Lock()
@@ -192,6 +194,83 @@ class DelegationEvent:
     event_id: str | None = None
 
 
+@dataclass
+class _DelegationRun:
+    """The rebuildable run.json summary; a load keeps only these typed fields, so nothing else planted there survives."""
+
+    delegation_id: str
+    metadata: DelegationMetadata
+    status: _DelegationStatus
+    started_at: str
+    updated_at: str
+    finished_at: str | None
+    output: _JsonValue
+    error: _JsonValue
+    usage: _JsonValue
+    event_count: int
+    record_reference: str
+
+    @classmethod
+    def from_json(cls, payload: object) -> _DelegationRun:
+        """Parse one run summary, refusing any field the primary would not have written."""
+        if not isinstance(payload, dict):
+            msg = "Delegation run must be an object"
+            raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
+        run = cast("dict[str, object]", payload)
+        schema_version = run.get("schema_version")
+        if type(schema_version) is not int or schema_version != _SCHEMA_VERSION:
+            msg = "Delegation run has an unsupported schema version"
+            raise ValueError(msg)
+        status = _string_field(run, "status")
+        event_count = run.get("event_count")
+        if status not in _STATUSES or type(event_count) is not int:
+            msg = "Delegation run has an invalid status or event count"
+            raise ValueError(msg)
+        return cls(
+            delegation_id=_string_field(run, "delegation_id"),
+            metadata=DelegationMetadata(
+                caller_agent_name=_string_field(run, "caller_agent_name"),
+                child_agent_name=_string_field(run, "child_agent_name"),
+                requester_id=_optional_string_field(run, "requester_id"),
+                parent_run_id=_optional_string_field(run, "parent_run_id"),
+                parent_tool_call_id=_optional_string_field(run, "parent_tool_call_id"),
+                source_room_id=_optional_string_field(run, "source_room_id"),
+                source_thread_id=_optional_string_field(run, "source_thread_id"),
+                model_name=_optional_string_field(run, "model_name"),
+                task=_string_field(run, "task"),
+                parent_delegation_id=_optional_string_field(run, "parent_delegation_id"),
+                subagent_id=_optional_string_field(run, "subagent_id"),
+                previous_delegation_id=_optional_string_field(run, "previous_delegation_id"),
+            ),
+            status=cast("_DelegationStatus", status),
+            started_at=_string_field(run, "started_at"),
+            updated_at=_string_field(run, "updated_at"),
+            finished_at=_optional_string_field(run, "finished_at"),
+            output=_inline_field(run, "output"),
+            error=_inline_field(run, "error"),
+            usage=_inline_field(run, "usage"),
+            event_count=event_count,
+            record_reference=_string_field(run, "record_reference"),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        """Return the run.json payload."""
+        return {
+            "schema_version": _SCHEMA_VERSION,
+            "delegation_id": self.delegation_id,
+            **asdict(self.metadata),
+            "status": self.status,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
+            "output": self.output,
+            "error": self.error,
+            "usage": self.usage,
+            "event_count": self.event_count,
+            "record_reference": self.record_reference,
+        }
+
+
 @dataclass(frozen=True)
 class DelegationRecordOwner:
     """Resolve scoped workspaces and durably maintain delegation audit exports."""
@@ -276,8 +355,7 @@ class DelegationRecordOwner:
             if _record_entry_exists(record_fd, "run.json"):
                 msg = f"Delegation record already exists: {resolved_id}"
                 raise FileExistsError(msg)
-            run = cast(
-                "dict[str, _JsonValue]",
+            run = _DelegationRun.from_json(
                 redact_sensitive_data(
                     {
                         "schema_version": _SCHEMA_VERSION,
@@ -305,7 +383,7 @@ class DelegationRecordOwner:
                 event_id="delegation_started",
             )
             _append_jsonl(record_fd, event, committed_events=0)
-            run["event_count"] = 1
+            run.event_count = 1
             _write_record_views(handle, record_fd, run)
         return handle
 
@@ -342,10 +420,10 @@ class DelegationRecordOwner:
                 event_id=event.event_id,
             )
             _append_jsonl(record_fd, payload, committed_events=log.event_count)
-            run["event_count"] = sequence
-            run["updated_at"] = timestamp
+            run.event_count = sequence
+            run.updated_at = timestamp
             if event.status is not None:
-                run["status"] = event.status
+                run.status = event.status
             _write_record_views(handle, record_fd, run)
 
     def _finish(
@@ -365,7 +443,7 @@ class DelegationRecordOwner:
             run = _load_run(handle, record_fd)
             _validate_run_identity(run, handle.locator)
             log = _fold_event_log(handle, record_fd, run)
-            if run.get("status") == status:
+            if run.status == status:
                 _write_record_views(handle, record_fd, run)
                 return
             _ensure_active(run)
@@ -390,17 +468,13 @@ class DelegationRecordOwner:
                 event_id="delegation_finished",
             )
             _append_jsonl(record_fd, event, committed_events=log.event_count, terminal=True)
-            run.update(
-                {
-                    "status": status,
-                    "updated_at": timestamp,
-                    "finished_at": timestamp,
-                    "output": terminal_data["output"],
-                    "error": terminal_data["error"],
-                    "usage": terminal_data["usage"],
-                    "event_count": sequence,
-                },
-            )
+            run.status = status
+            run.updated_at = timestamp
+            run.finished_at = timestamp
+            run.output = terminal_data["output"]
+            run.error = terminal_data["error"]
+            run.usage = terminal_data["usage"]
+            run.event_count = sequence
             _write_record_views(handle, record_fd, run)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
@@ -547,11 +621,46 @@ def _record_entry_exists(record_fd: int, filename: str) -> bool:
 
 
 def _json_bytes(payload: object) -> bytes:
-    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    # Compact, because indenting deeply nested data a worker planted would multiply its size.
+    return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _write_run(record_fd: int, run: Mapping[str, object]) -> None:
-    payload = _json_bytes(run)
+def _string_field(run: Mapping[str, object], name: str) -> str:
+    value = run.get(name)
+    if not isinstance(value, str):
+        msg = f"Delegation run field {name} must be a string"
+        raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
+    return value
+
+
+def _optional_string_field(run: Mapping[str, object], name: str) -> str | None:
+    if name not in run:
+        msg = f"Delegation run field {name} is missing"
+        raise ValueError(msg)
+    value = run[name]
+    if value is not None and not isinstance(value, str):
+        msg = f"Delegation run field {name} must be a string or null"
+        raise ValueError(msg)
+    return value
+
+
+def _inline_field(run: Mapping[str, object], name: str) -> _JsonValue:
+    if name not in run:
+        msg = f"Delegation run field {name} is missing"
+        raise ValueError(msg)
+    return _inline_value(run[name])
+
+
+def _inline_value(value: object) -> _JsonValue:
+    """Return a value no larger than one the primary keeps inline; it moves larger ones to artifacts."""
+    if len(json.dumps(value, sort_keys=True).encode("utf-8")) > _MAX_INLINE_VALUE_BYTES:
+        msg = "Delegation record value exceeds its size limit"
+        raise ValueError(msg)
+    return cast("_JsonValue", value)
+
+
+def _write_run(record_fd: int, run: _DelegationRun) -> None:
+    payload = _json_bytes(run.to_json())
     if len(payload) > _MAX_RUN_BYTES:
         # Refused before writing, so run.json never holds what its reader refuses.
         msg = "Delegation record exceeds its size limit"
@@ -589,47 +698,29 @@ def _append_jsonl(
         os.close(descriptor)
 
 
-def _load_run(handle: DelegationRecordHandle, record_fd: int) -> dict[str, _JsonValue]:
+def _load_run(handle: DelegationRecordHandle, record_fd: int) -> _DelegationRun:
     try:
-        payload = json.loads(read_regular_file_within_root(record_fd, "run.json", max_bytes=_MAX_RUN_BYTES))
+        return _DelegationRun.from_json(
+            json.loads(read_regular_file_within_root(record_fd, "run.json", max_bytes=_MAX_RUN_BYTES)),
+        )
     except FileNotFoundError:
         raise
     except (OSError, RecursionError, ValueError) as exc:
         msg = f"Delegation record is unreadable: {handle.locator.delegation_id}"
         raise ValueError(msg) from exc
-    if not isinstance(payload, dict):
-        msg = f"Delegation record is malformed: {handle.locator.delegation_id}"
-        raise TypeError(msg)
-    return cast("dict[str, _JsonValue]", payload)
 
 
-def _validate_run_identity(
-    run: Mapping[str, object],
-    locator: DelegationRecordLocator,
-) -> None:
-    expected = (
-        _SCHEMA_VERSION,
-        locator.delegation_id,
-        locator.caller_agent_name,
-        locator.child_agent_name,
-        locator.started_date,
-    )
-    started_at = run.get("started_at")
-    actual = (
-        run.get("schema_version"),
-        run.get("delegation_id"),
-        run.get("caller_agent_name"),
-        run.get("child_agent_name"),
-        started_at[:10] if isinstance(started_at, str) else None,
-    )
+def _validate_run_identity(run: _DelegationRun, locator: DelegationRecordLocator) -> None:
+    expected = (locator.delegation_id, locator.caller_agent_name, locator.child_agent_name, locator.started_date)
+    actual = (run.delegation_id, run.metadata.caller_agent_name, run.metadata.child_agent_name, run.started_at[:10])
     if actual != expected:
         msg = f"Delegation record identity mismatch: {locator.delegation_id}"
         raise ValueError(msg)
 
 
-def _ensure_active(run: Mapping[str, object]) -> None:
-    if run.get("status") in _TERMINAL_STATUSES:
-        msg = f"Delegation record is already terminal: {run.get('delegation_id')}"
+def _ensure_active(run: _DelegationRun) -> None:
+    if run.status in _TERMINAL_STATUSES:
+        msg = f"Delegation record is already terminal: {run.delegation_id}"
         raise ValueError(msg)
 
 
@@ -638,14 +729,14 @@ class _EventLogSummary:
     """What one pass over the committed event log found besides the run view it folded."""
 
     event_count: int = 0
-    last_sequence: object = None
+    last_sequence: int | None = None
     contains_event_id: bool = False
 
 
 def _fold_event_log(
     handle: DelegationRecordHandle,
     record_fd: int,
-    run: dict[str, _JsonValue],
+    run: _DelegationRun,
     *,
     event_id: str | None = None,
 ) -> _EventLogSummary:
@@ -653,8 +744,9 @@ def _fold_event_log(
     summary = _EventLogSummary()
     for event in _iter_events(handle, record_fd):
         _apply_event(run, event)
+        sequence = event.get("sequence")
         summary.event_count += 1
-        summary.last_sequence = event.get("sequence")
+        summary.last_sequence = sequence if type(sequence) is int else None
         if event_id is not None and event.get("event_id") == event_id:
             summary.contains_event_id = True
     return summary
@@ -663,7 +755,7 @@ def _fold_event_log(
 def _next_sequence(handle: DelegationRecordHandle, log: _EventLogSummary) -> int:
     if log.event_count == 0:
         return 1
-    if type(log.last_sequence) is not int:
+    if log.last_sequence is None:
         msg = f"Delegation event sequence is malformed: {handle.locator.delegation_id}"
         raise ValueError(msg)
     return log.last_sequence + 1
@@ -723,17 +815,17 @@ def _event_payload(
     }
 
 
-def _apply_event(run: dict[str, _JsonValue], event: Mapping[str, object]) -> None:
+def _apply_event(run: _DelegationRun, event: Mapping[str, object]) -> None:
     """Fold one committed event into the run view."""
     sequence = event.get("sequence")
     timestamp = event.get("timestamp")
     if type(sequence) is int:
-        run["event_count"] = sequence
+        run.event_count = sequence
     if isinstance(timestamp, str):
-        run["updated_at"] = timestamp
+        run.updated_at = timestamp
     event_status = event.get("status")
     if event_status in {"running", "paused"}:
-        run["status"] = cast("_JsonValue", event_status)
+        run.status = cast("_DelegationActiveStatus", event_status)
     if event.get("kind") != "delegation_finished":
         return
     data = event.get("data")
@@ -743,25 +835,25 @@ def _apply_event(run: dict[str, _JsonValue], event: Mapping[str, object]) -> Non
     terminal_status = terminal_data.get("status")
     if terminal_status not in _TERMINAL_STATUSES:
         return
-    run.update(
-        {
-            "status": cast("_JsonValue", terminal_status),
-            "finished_at": cast("_JsonValue", timestamp),
-            "output": cast("_JsonValue", terminal_data.get("output")),
-            "error": cast("_JsonValue", terminal_data.get("error")),
-            "usage": cast("_JsonValue", terminal_data.get("usage")),
-        },
-    )
+    run.status = cast("DelegationTerminalStatus", terminal_status)
+    run.finished_at = timestamp if isinstance(timestamp, str) else None
+    run.output = _inline_value(terminal_data.get("output"))
+    run.error = _inline_value(terminal_data.get("error"))
+    run.usage = _inline_value(terminal_data.get("usage"))
 
 
 def _write_record_views(
     handle: DelegationRecordHandle,
     record_fd: int,
-    run: Mapping[str, object],
+    run: _DelegationRun,
 ) -> None:
-    """Rewrite the run summary and both readable projections."""
+    """Rewrite the run summary and the caller's receipt, and render the transcript once the run is terminal.
+
+    Rendering reads the whole log again, so a running record keeps its events in events.jsonl only.
+    """
     _write_run(record_fd, run)
-    _write_transcript(handle, record_fd, run)
+    if run.status in _TERMINAL_STATUSES:
+        _write_transcript(handle, record_fd, run)
     _write_receipt(handle, run)
 
 
@@ -801,18 +893,18 @@ def _safe_artifact_label(value: str) -> str:
 
 def _write_receipt(
     handle: DelegationRecordHandle,
-    run: Mapping[str, object],
+    run: _DelegationRun,
 ) -> None:
     receipt = {
         "schema_version": _SCHEMA_VERSION,
         "delegation_id": handle.locator.delegation_id,
         "caller_agent_name": handle.locator.caller_agent_name,
         "child_agent_name": handle.locator.child_agent_name,
-        "status": run["status"],
+        "status": run.status,
         "record_reference": handle._record_reference,
-        "started_at": run["started_at"],
-        "updated_at": run["updated_at"],
-        "finished_at": run["finished_at"],
+        "started_at": run.started_at,
+        "updated_at": run.updated_at,
+        "finished_at": run.finished_at,
     }
     write_file_within_root(
         handle.caller_workspace,
@@ -825,22 +917,22 @@ def _write_receipt(
 def _write_transcript(
     handle: DelegationRecordHandle,
     record_fd: int,
-    run: Mapping[str, object],
+    run: _DelegationRun,
 ) -> None:
     header = [
-        f"# Delegation {run['delegation_id']}",
+        f"# Delegation {run.delegation_id}",
         "",
-        f"- Caller: {run['caller_agent_name']}",
-        f"- Child: {run['child_agent_name']}",
-        f"- Model: {run['model_name']}",
-        f"- Status: {run['status']}",
-        f"- Started: {run['started_at']}",
-        f"- Updated: {run['updated_at']}",
-        f"- Record: {run['record_reference']}",
+        f"- Caller: {run.metadata.caller_agent_name}",
+        f"- Child: {run.metadata.child_agent_name}",
+        f"- Model: {run.metadata.model_name}",
+        f"- Status: {run.status}",
+        f"- Started: {run.started_at}",
+        f"- Updated: {run.updated_at}",
+        f"- Record: {run.record_reference}",
         "",
         "## Task",
         "",
-        str(run["task"]),
+        run.metadata.task,
         "",
         "## Events",
         "",

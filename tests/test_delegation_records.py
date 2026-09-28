@@ -277,11 +277,19 @@ async def test_an_append_over_a_planted_log_holds_one_event_at_a_time(tmp_path: 
 
     assert peak < 8 << 20
     assert _read_events(event_path)[-1]["sequence"] == 2003
+    assert not (_record_dir(handle) / "transcript.md").exists()
+    tracemalloc.start()
+    try:
+        await owner.finish(handle, status="completed", output="Done")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 << 20
     assert (_record_dir(handle) / "transcript.md").stat().st_size < 2 * event_path.stat().st_size
 
 
 @pytest.mark.asyncio
-async def test_a_log_with_more_events_than_the_cap_is_refused_before_it_is_folded(
+async def test_a_log_with_more_events_than_the_cap_is_refused_once_the_fold_passes_the_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,6 +311,123 @@ async def test_a_log_with_more_events_than_the_cap_is_refused_before_it_is_folde
         await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
 
     assert event_path.read_bytes() == committed
+
+
+def _nested_value(depth: int = 400, width: int = 300_000) -> str:
+    """Return JSON text that indenting would multiply by its depth."""
+    return "[" * depth + "[]," * width + "[]" + "]" * depth
+
+
+@pytest.mark.asyncio
+async def test_a_planted_run_view_field_is_dropped_instead_of_rendered(tmp_path: Path) -> None:
+    """Only the typed run fields survive a load, so a nested value planted beside them costs nothing to rewrite."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    planted = run_path.read_text(encoding="utf-8").rstrip().removesuffix("}") + f', "padding": {_nested_value()}}}'
+    run_path.write_text(planted, encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert "padding" not in _read_json(run_path)
+    assert run_path.stat().st_size < 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["output", "error", "usage"])
+async def test_a_planted_run_view_value_larger_than_an_inline_value_is_refused(tmp_path: Path, field_name: str) -> None:
+    """The primary moves values above 64 KiB to artifacts, so a larger nested one in run.json is refused, not rendered."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    run[field_name] = None
+    planted = json.dumps(run).replace(f'"{field_name}": null', f'"{field_name}": {_nested_value()}')
+    run_path.write_text(planted, encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="unreadable"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert run_path.read_text(encoding="utf-8") == planted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_field",
+    ["model_name", "task", "record_reference", "finished_at", "event_count", "status"],
+)
+async def test_a_run_view_missing_or_mistyping_a_field_is_refused(tmp_path: Path, run_field: str) -> None:
+    """A run.json a worker rewrote without a field the views need is unreadable, not a crash while rendering."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    del run[run_field]
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    run[run_field] = ["not", "a", "scalar"]
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.finish(handle, status="completed", output="Done")
+
+
+@pytest.mark.asyncio
+async def test_a_planted_terminal_event_larger_than_an_inline_value_is_refused(tmp_path: Path) -> None:
+    """A planted terminal event cannot carry a nested output into run.json that the primary would never keep inline."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.write(
+            '{"sequence": 2, "kind": "delegation_finished", "timestamp": "2026-01-01T00:00:00Z", '
+            f'"data": {{"status": "failed", "output": null, "error": {_nested_value()}, "usage": null}}}}\n',
+        )
+    run_before = (_record_dir(handle) / "run.json").read_bytes()
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="size limit"):
+            await owner.finish(handle, status="failed", error="Failed")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert (_record_dir(handle) / "run.json").read_bytes() == run_before
 
 
 @pytest.mark.asyncio
@@ -529,7 +654,8 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     assert str(run["started_at"]).endswith("Z")
     events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [(event["sequence"], event["kind"]) for event in events] == [(1, "delegation_started")]
-    assert "Investigate the failure" in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
+    # Rendering reads the whole log, so the transcript waits for the terminal event.
+    assert not (_record_dir(handle) / "transcript.md").exists()
 
     receipt = _read_json(_receipt_path(handle))
     assert receipt["delegation_id"] == "delegation-123"
@@ -592,8 +718,10 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         "result": {"items": [{"name": "first"}, {"name": "second"}]},
     }
     assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
+    await owner.finish(handle, status="completed", output="Done")
     transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
-    assert transcript.index("tool_call") < transcript.index("tool_result")
+    assert "Investigate the failure" in transcript
+    assert transcript.index("tool_call") < transcript.index("tool_result") < transcript.index("delegation_finished")
 
 
 @pytest.mark.asyncio
@@ -664,9 +792,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
         delegation_id="event-repair",
     )
     run_path = _record_dir(handle) / "run.json"
-    transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
-    stale_transcript = transcript_path.read_bytes()
     stale_receipt = _receipt_path(handle).read_bytes()
     event = module.DelegationEvent(
         kind="approval_requested",
@@ -676,7 +802,6 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     )
     await owner.append_event(handle, event)
     run_path.write_bytes(stale_run)
-    transcript_path.write_bytes(stale_transcript)
     _receipt_path(handle).write_bytes(stale_receipt)
 
     if fresh_event:
@@ -686,9 +811,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     assert _read_json(run_path)["event_count"] == 2 + fresh_event
     assert _read_json(run_path)["status"] == "paused"
     assert _read_json(_receipt_path(handle))["status"] == "paused"
-    transcript = transcript_path.read_text(encoding="utf-8")
-    assert "Status: paused" in transcript
-    assert "approval_requested" in transcript
+    assert not (_record_dir(handle) / "transcript.md").exists()
 
 
 @pytest.mark.asyncio
@@ -706,11 +829,10 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
     run_path = _record_dir(handle) / "run.json"
     transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
-    stale_transcript = transcript_path.read_bytes()
     stale_receipt = _receipt_path(handle).read_bytes()
     await owner.finish(handle, status="completed", output="durable result", usage={"output_tokens": 4})
     run_path.write_bytes(stale_run)
-    transcript_path.write_bytes(stale_transcript)
+    transcript_path.write_text("stale\n", encoding="utf-8")
     _receipt_path(handle).write_bytes(stale_receipt)
 
     if reject_fresh_event:
@@ -933,7 +1055,7 @@ async def test_record_mutation_never_follows_a_symlinked_leaf(
         delegation_id=f"symlink-{leaf_name.replace('.', 'dot')}",
     )
     target = _receipt_path(handle) if leaf_name == "receipt" else _record_dir(handle) / leaf_name
-    target.unlink()
+    target.unlink(missing_ok=leaf_name == "transcript.md")
     outside = tmp_path / f"outside-{leaf_name.replace('.', 'dot')}"
     outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     target.symlink_to(outside)
@@ -941,6 +1063,9 @@ async def test_record_mutation_never_follows_a_symlinked_leaf(
     async def mutate_record() -> None:
         if leaf_name == "run.json":
             await owner.reopen(handle.locator)
+            return
+        if leaf_name == "transcript.md":
+            await owner.finish(handle, status="completed", output="blocked")
             return
         await owner.append_event(
             handle,
@@ -1055,6 +1180,7 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
         child_execution_identity=identity,
         delegation_id="self-call",
     )
+    await owner.finish(handle, status="completed", output="Done")
 
     workspace = runtime_paths.storage_root / "agents" / "caller" / "workspace"
     assert list(workspace.rglob("transcript.md")) == [_record_dir(handle) / "transcript.md"]
