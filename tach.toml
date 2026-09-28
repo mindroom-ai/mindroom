@@ -6376,6 +6376,7 @@ expose = [
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
+    "runner_config_snapshot",
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
