@@ -881,6 +881,27 @@ def test_chat_finds_only_skill_directories_loading_reads(tmp_path: Path) -> None
     assert directories == [f"s-{index:03d}" for index in range(count - 1)]
 
 
+def test_a_pass_that_reads_a_proposed_change_logs_no_budget_warning(tmp_path: Path) -> None:
+    """A pass that checks a change describes nothing that happened, so only loading itself warns about its budgets."""
+    root = tmp_path / "skills"
+    for index in range(130):
+        _write_skill(root, f"s-{index:03d}", "d" * 1000)
+    proposed = workspace_skills_module.ProposedSkill(
+        "zz-new",
+        "---\nname: zz-new\ndescription: d\n---\nbody\n",
+        scripts=[],
+        references=[],
+    )
+    with capture_logs() as logs:
+        assert workspace_skills_module.workspace_skill_load(root, proposed).stop == "parse"
+    assert not [entry for entry in logs if entry["event"].endswith("skipping the rest")]
+    with capture_logs() as logs:
+        assert workspace_skills_module.workspace_skill_load(root).stop == "parse"
+    assert [entry["event"] for entry in logs if entry["event"].endswith("skipping the rest")] == [
+        "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
+    ]
+
+
 def test_json5_metadata_counts_at_its_parse_weight() -> None:
     """JSON5 parses slower per byte than YAML, so a skill's JSON5 metadata counts more toward the parse budget."""
     metadata = "{openclaw: {requires: {bins: [git]}}}"

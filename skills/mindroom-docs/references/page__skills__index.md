@@ -88,8 +88,8 @@ They do not appear in the global skills API or dashboard listing because those v
 Workspace skills are read through no-follow descriptors because worker code can share the workspace.
 Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed, with one warning for each support directory that holds any.
 A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
-`skill_manage` refuses a change that would cross one of these limits, so a skill it writes always loads.
-It decides by running skill loading on the workspace as the change would leave it, so in a workspace already past a budget, for example from hand edits, it accepts a change only when loading would still load every skill it loads now.
+`skill_manage` refuses a change that would cross one of these limits, so these limits never make loading skip a skill it writes.
+It decides by running skill loading on the workspace as the change would leave it, so in a workspace already past a budget, for example from hand edits, it accepts a change only when loading would still load every skill it loads now, and its refusal names the skills loading would skip.
 The primary parses workspace frontmatter, which worker code can write, with bounded work: at most 8 KiB of frontmatter per skill and 128 KiB per workspace, with JSON5 metadata counting three times its size because it parses that much slower, so a skill with larger frontmatter is refused and skills past the workspace budget are skipped, each with a warning.
 Frontmatter counts toward the workspace budget once it is parsed, including for a skill that loading then refuses, such as one whose name is too long, and `skill_manage` refuses a change that would push the workspace over it.
 A pass stops reading `SKILL.md` files once it has read more than 16 MiB, counting refused and non-UTF-8 ones, and `skill_manage` refuses a change that would cross that limit.

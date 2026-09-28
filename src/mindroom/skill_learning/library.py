@@ -77,20 +77,16 @@ class SkillEditError(ValueError):
     """A refused skill edit, worded for the model that asked for it."""
 
 
-_LOADING_STOPS: dict[BudgetStop, str] = {
-    "prompt": (
-        f"After this change, skill loading would stop at the workspace's {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
-        "budget and skip skills; shorten skills instead."
-    ),
-    "read": (
-        f"After this change, skill loading would stop at the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB of SKILL.md "
-        "files it reads and skip skills; shorten skills instead."
-    ),
+# Each budget loading can stop at, and what shrinks a skill's share of it.
+_LOADING_BUDGETS: dict[BudgetStop, tuple[str, str]] = {
+    "prompt": (f"the workspace's {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt budget", "shorten skills"),
+    "read": (f"the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB of SKILL.md files it reads", "shorten skills"),
     "parse": (
-        f"After this change, skill loading would stop at the workspace's {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} KiB "
-        "frontmatter parse budget and skip skills; move detail from frontmatter into skill bodies."
+        f"the workspace's {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} KiB frontmatter parse budget",
+        "move detail from frontmatter into skill bodies",
     ),
 }
+_NAMED_SKILLS = 5
 
 
 @dataclass(frozen=True)
@@ -373,17 +369,31 @@ def _require_loadable(
     if added is not None:
         kind, filename = added
         listings[kind] = [*listings[kind], filename]
-    required = set(workspace_skill_load(skills_root).skills)
-    if added is None:
-        required.add(name)
+    before = workspace_skill_load(skills_root)
+    required = set(before.skills) | ({name} if added is None else set())
     proposed = ProposedSkill(name, markdown, scripts=listings["scripts"], references=listings["references"])
     after = workspace_skill_load(skills_root, proposed)
-    if required <= set(after.skills):
+    missing = sorted(required - set(after.skills))
+    if not missing:
         return
     if after.stop is None:
-        msg = f"Skill loading would not load {name!r} after this change."
+        msg = f"Skill loading would not load {_skill_names(missing)} after this change."
         raise SkillEditError(msg)
-    raise SkillEditError(_LOADING_STOPS[after.stop])
+    budget, remedy = _LOADING_BUDGETS[after.stop]
+    if missing == [name] and name not in before.skills and before.stop == after.stop:
+        # The skills ahead of this one already spend the budget, so no change to this skill alone can make it load.
+        msg = (
+            f"Skill loading already stops at {budget} before it reaches {name!r}, because the skills it loads first "
+            f"spend it; {remedy} among those first."
+        )
+        raise SkillEditError(msg)
+    msg = f"After this change, skill loading would stop at {budget} and skip {_skill_names(missing)}; {remedy} instead."
+    raise SkillEditError(msg)
+
+
+def _skill_names(names: list[str]) -> str:
+    shown = ", ".join(repr(name) for name in names[:_NAMED_SKILLS])
+    return shown if len(names) <= _NAMED_SKILLS else f"{shown} and {len(names) - _NAMED_SKILLS} more"
 
 
 def write_skill_file(

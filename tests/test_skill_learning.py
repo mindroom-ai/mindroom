@@ -2789,7 +2789,8 @@ def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_parse_bud
     loaded = set(workspace_skills_module.workspace_skill_load(root).skills)
     assert names[0] in loaded
     assert names[-1] not in loaded
-    with pytest.raises(library.SkillEditError, match="parse budget"):
+    # Loading stops before skills that sort after the stop, whatever they say, so the refusal points at the others.
+    with pytest.raises(library.SkillEditError, match=r"already stops at .* parse budget before it reaches 'zz-new'"):
         library.create_skill(
             root,
             "zz-new",
@@ -2798,10 +2799,14 @@ def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_parse_bud
             learner=False,
         )
     grown = f"---\nname: {names[0]}\ndescription: {'d' * 1000}\nmetadata: {{note: {'n' * 3000}}}\n---\nSteps.\n"
-    for name, content in ((names[0], grown), (names[-1], f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n")):
+    smallest = f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n"
+    for name, content, refusal in (
+        (names[0], grown, r"would stop at .* parse budget and skip 's-12\d'"),
+        (names[-1], smallest, rf"already stops at .* parse budget before it reaches '{names[-1]}'"),
+    ):
         current = library.read_skill_file(root, name)
         assert current is not None
-        with pytest.raises(library.SkillEditError, match="parse budget"):
+        with pytest.raises(library.SkillEditError, match=refusal):
             library.write_skill_file(root, name, "SKILL.md", content, expected_digest=current.digest, learner=False)
     for name, content in (
         (names[0], f"---\nname: {names[0]}\ndescription: {'d' * 1000}\n---\nSteps to follow, carefully.\n"),
