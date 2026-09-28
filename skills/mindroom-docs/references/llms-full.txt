@@ -3599,7 +3599,7 @@ Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
 Codex is included across ChatGPT plans, including Free and Go, but model access and usage limits depend on the logged-in account and current rollout.
 See the [current Codex model catalog](https://developers.openai.com/codex/models) instead of assuming every account exposes the same slugs.
-MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through unchanged.
+MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs through unchanged.
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
@@ -8358,7 +8358,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
-- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
+- The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.

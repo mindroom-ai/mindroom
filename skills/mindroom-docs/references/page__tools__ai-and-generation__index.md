@@ -410,7 +410,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
-- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
+- The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.

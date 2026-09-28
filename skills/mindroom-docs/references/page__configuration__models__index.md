@@ -318,7 +318,7 @@ Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
 Codex is included across ChatGPT plans, including Free and Go, but model access and usage limits depend on the logged-in account and current rollout.
 See the [current Codex model catalog](https://developers.openai.com/codex/models) instead of assuming every account exposes the same slugs.
-MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through unchanged.
+MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs through unchanged.
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
