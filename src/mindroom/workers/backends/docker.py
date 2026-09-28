@@ -218,22 +218,6 @@ def _container_root_filesystem_read_only(container: _DockerContainer | None) -> 
     return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
 
 
-def _container_bind_destinations(container: _DockerContainer) -> list[str]:
-    """Return the bind destinations Docker mounts again each time it starts this container."""
-    mounts = container.attrs.get("Mounts")
-    if not isinstance(mounts, list):
-        return []
-    destinations: list[str] = []
-    for mount in cast("list[object]", mounts):
-        if not isinstance(mount, dict):
-            continue
-        mount_data = cast("dict[str, object]", mount)
-        destination = mount_data.get("Destination")
-        if mount_data.get("Type") == "bind" and isinstance(destination, str):
-            destinations.append(destination)
-    return destinations
-
-
 def _docker_security_options_match(value: object) -> bool:
     if not isinstance(value, list) or not all(isinstance(option, str) for option in value):
         return False
@@ -1184,36 +1168,40 @@ class DockerWorkerBackend:
             return True
         if container is None:
             return True
-        if not self._container_matches_config(
-            metadata,
-            container,
-            paths,
-            private_agent_names=private_agent_names,
-            state_scope_worker_key=state_scope_worker_key,
-            launch_config=launch_config,
+        if (
+            self._current_container_mounts(
+                metadata,
+                container,
+                paths,
+                private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
+                launch_config=launch_config,
+            )
+            is None
         ):
             return True
         return not self._container_is_running(container)
 
-    def _container_matches_config(
+    def _current_container_mounts(
         self,
         metadata: _DockerWorkerMetadata,
-        container: _DockerContainer | None,
+        container: _DockerContainer,
         paths: _DockerWorkerPaths,
         *,
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None,
         launch_config: _DockerLaunchConfig,
-    ) -> bool:
+    ) -> list[tuple[Path, str, bool]] | None:
+        """Return the bind mounts of a container that matches the current config, or None when it must be replaced."""
         compatible_launch_config_hashes = self._compatible_launch_config_hashes(container, launch_config)
         if metadata.launch_config_hash not in compatible_launch_config_hashes:
-            return False
+            return None
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
-            return False
+            return None
         if not _container_root_filesystem_read_only(container) or (
             self.config.security_policy == "computer" and not self._container_runtime_security_matches(container)
         ):
-            return False
+            return None
 
         storage_mounts = self._scoped_storage_mount_specs(
             metadata.worker_key,
@@ -1231,18 +1219,18 @@ class DockerWorkerBackend:
             )
         )
         if projection is not None and not projection.ready:
-            return False
+            return None
 
         if not self._container_env_matches(
             container,
             expected_env=self._container_env(metadata.worker_key),
         ):
-            return False
+            return None
 
         mount_checks = list(self._worker_root_mount_specs(paths.state))
         mount_checks.extend(storage_mounts)
         mount_checks.extend(config_mount_specs)
-        return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
+        return mount_checks if self._container_mount_layout_matches(container, expected_mounts=mount_checks) else None
 
     def _container_runtime_security_matches(self, container: _DockerContainer | None) -> bool:
         if container is None:
@@ -1273,16 +1261,26 @@ class DockerWorkerBackend:
         paths.state.root.mkdir(parents=True, exist_ok=True)
         container_name = self._container_name_for_worker(metadata.worker_key)
         container = self._require_owned_container(metadata.worker_key)
-        if container is not None and not self._container_matches_config(
-            metadata,
-            container,
-            paths,
-            private_agent_names=private_agent_names,
-            state_scope_worker_key=state_scope_worker_key,
-            launch_config=launch_config,
-        ):
-            self._remove_container(container)
-            container = None
+        if container is not None:
+            mounts = self._current_container_mounts(
+                metadata,
+                container,
+                paths,
+                private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
+                launch_config=launch_config,
+            )
+            if mounts is None:
+                self._remove_container(container)
+                container = None
+            elif not self._container_is_running(container):
+                # Docker resolves every bind destination again on start, through whatever worker code left in its root.
+                self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
+                try:
+                    container.start()
+                except self._docker_errors.DockerException as exc:
+                    msg = f"Failed to start Docker worker '{container_name}': {exc}"
+                    raise WorkerBackendError(msg) from exc
 
         if container is None:
             self._write_startup_manifest(paths, worker_key=metadata.worker_key)
@@ -1319,14 +1317,6 @@ class DockerWorkerBackend:
                 tmpfs=_WORKER_TMPFS,
                 **security_kwargs,
             )
-        elif not self._container_is_running(container):
-            # Docker resolves every bind destination again on start, through whatever worker code left in its root.
-            self._prepare_nested_storage_mount_targets(paths, _container_bind_destinations(container))
-            try:
-                container.start()
-            except self._docker_errors.DockerException as exc:
-                msg = f"Failed to start Docker worker '{container_name}': {exc}"
-                raise WorkerBackendError(msg) from exc
 
         self._reload_container(container)
         if self._container_host_port(container) is None:
