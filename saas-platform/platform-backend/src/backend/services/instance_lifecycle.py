@@ -61,26 +61,29 @@ class LifecycleSummary:
 
 
 async def reconcile_subscription_instances(
-    subscription: dict[str, Any],
-    *,
-    instances: list[dict[str, Any]] | None = None,
-    now: datetime | None = None,
-    summary: LifecycleSummary | None = None,
+    subscription_id: str, *, now: datetime | None = None, summary: LifecycleSummary | None = None
 ) -> LifecycleSummary:
-    """Bring every instance of one subscription to the state its entitlement requires."""
+    """Bring every instance of one subscription to the state its entitlement requires.
+
+    The subscription and its instances are read inside the per-subscription lock, so a run never acts on
+    a snapshot that a concurrent webhook or nightly run already changed.
+    """
     summary = summary or LifecycleSummary()
     now = now or datetime.now(UTC)
     sb = ensure_supabase()
-    async with _subscription_locks[str(subscription["id"])]:
-        if instances is None:
-            instances = (
-                sb.table("instances")
-                .select(LIFECYCLE_INSTANCE_COLUMNS)
-                .eq("subscription_id", subscription["id"])
-                .execute()
-                .data
-                or []
-            )
+    async with _subscription_locks[str(subscription_id)]:
+        rows = sb.table("subscriptions").select("*").eq("id", subscription_id).limit(1).execute().data
+        if not rows:
+            return summary
+        subscription = rows[0]
+        instances = (
+            sb.table("instances")
+            .select(LIFECYCLE_INSTANCE_COLUMNS)
+            .eq("subscription_id", subscription_id)
+            .execute()
+            .data
+            or []
+        )
         entitled = is_subscription_service_active(subscription, now=now)
         for instance in instances:
             try:
@@ -108,23 +111,25 @@ async def reconcile_account_instances(account_id: str) -> None:
     """
     try:
         sb = ensure_supabase()
-        subscriptions = sb.table("subscriptions").select("*").eq("account_id", account_id).execute().data or []
+        subscriptions = sb.table("subscriptions").select("id").eq("account_id", account_id).execute().data or []
         for subscription in subscriptions:
-            await reconcile_subscription_instances(subscription)
+            await reconcile_subscription_instances(subscription["id"])
     except Exception:
         logger.exception("Instance lifecycle reconcile failed for account %s; the nightly job retries", account_id)
 
 
 async def reconcile_all_subscriptions(*, now: datetime | None = None) -> LifecycleSummary:
     """Reconcile every subscription that owns an instance."""
-    sb = ensure_supabase()
     summary = LifecycleSummary()
-    for subscription, instances in _subscriptions_with_instances(sb):
+    subscription_ids = dict.fromkeys(
+        row["subscription_id"] for row in _instance_rows(ensure_supabase(), "subscription_id")
+    )
+    for subscription_id in subscription_ids:
         try:
-            await reconcile_subscription_instances(subscription, instances=instances, now=now, summary=summary)
+            await reconcile_subscription_instances(subscription_id, now=now, summary=summary)
         except Exception as exc:
-            logger.exception("Instance lifecycle reconcile failed for subscription %s", subscription["id"])
-            summary.errors.append(f"subscription {subscription['id']}: {exc}")
+            logger.exception("Instance lifecycle reconcile failed for subscription %s", subscription_id)
+            summary.errors.append(f"subscription {subscription_id}: {exc}")
     return summary
 
 
@@ -193,16 +198,6 @@ def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
         rows.extend(page)
         if len(page) < _PAGE_SIZE:
             return rows
-
-
-def _subscriptions_with_instances(sb: Client) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
-    """Return each subscription that has instances, together with those instances."""
-    grouped: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
-    for row in _instance_rows(sb, f"{LIFECYCLE_INSTANCE_COLUMNS},subscription:subscriptions(*)"):
-        subscription = row.pop("subscription", None)
-        if subscription:
-            grouped.setdefault(str(subscription["id"]), (subscription, []))[1].append(row)
-    return list(grouped.values())
 
 
 async def _resume(

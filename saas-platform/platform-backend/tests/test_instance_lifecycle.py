@@ -209,7 +209,7 @@ async def test_resubscribe_after_teardown_reprovisions_instance(platform: Platfo
         )
     )
 
-    await reconcile_subscription_instances(platform.subscription())
+    await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
     platform.provision.assert_awaited_once()
     assert platform.provision.await_args.kwargs["data"] == {
@@ -272,7 +272,7 @@ async def test_past_due_subscription_keeps_instance_running(platform: Platform) 
     platform.db.tables["subscriptions"].append(_subscription("past_due"))
     platform.db.tables["instances"].append(_instance("running"))
 
-    summary = await reconcile_subscription_instances(platform.subscription())
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
     platform.kubectl.assert_not_awaited()
     platform.set_key_disabled.assert_not_awaited()
@@ -301,10 +301,10 @@ async def test_teardown_waits_for_grace_period(platform: Platform) -> None:
         )
     )
 
-    await reconcile_subscription_instances(platform.subscription(), now=now)
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
     platform.uninstall.assert_not_awaited()
 
-    summary = await reconcile_subscription_instances(platform.subscription(), now=now + timedelta(days=1, minutes=1))
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now + timedelta(days=1, minutes=1))
     platform.uninstall.assert_awaited_once_with(7)
     assert platform.instance()["status"] == "deprovisioned"
     assert summary.instances_torn_down == 1
@@ -313,8 +313,7 @@ async def test_teardown_waits_for_grace_period(platform: Platform) -> None:
 @pytest.mark.asyncio
 async def test_teardown_skipped_when_subscription_became_entitled(platform: Platform) -> None:
     now = datetime.now(UTC)
-    stale_subscription = _subscription("cancelled")
-    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
@@ -323,7 +322,13 @@ async def test_teardown_skipped_when_subscription_became_entitled(platform: Plat
         )
     )
 
-    await reconcile_subscription_instances(stale_subscription, now=now)
+    async def resubscribe_while_stopping(*_args: Any, **_kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
+        platform.subscription()["status"] = "active"
+        return 0, "scaled", ""
+
+    platform.kubectl.side_effect = resubscribe_while_stopping
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
 
     platform.uninstall.assert_not_awaited()
     assert platform.instance()["status"] == "stopped"

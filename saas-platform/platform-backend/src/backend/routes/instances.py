@@ -213,7 +213,7 @@ async def provision_user_instance(
 
         # An instance stopped or torn down because the subscription lapsed returns through the lifecycle owner.
         if existing.get("lifecycle_stopped_at"):
-            await instance_lifecycle.reconcile_subscription_instances(subscription)
+            await instance_lifecycle.reconcile_subscription_instances(subscription["id"])
             existing = instances_data.get_instance(sb, existing["instance_id"]) or existing
             if existing.get("lifecycle_stopped_at"):
                 return _existing_instance_response(
