@@ -55,6 +55,7 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot_room_lifecycle import BotRoomLifecycle
 from mindroom.coalescing import CoalescingDrainResult
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor
@@ -437,7 +438,7 @@ __all__ = [
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
-    "install_personal_room_shutdown_mock",
+    "install_lifecycle_shutdown_mocks",
     "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
@@ -2647,9 +2648,10 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
         yield
 
 
-def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
+def install_lifecycle_shutdown_mocks(bot: AgentBot) -> None:
     """Install lifecycle cancellation for partial shutdown fixtures through one seam."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    bot._room_lifecycle = MagicMock(spec=BotRoomLifecycle)
 
 
 def install_shutdown_drain_mocks(
