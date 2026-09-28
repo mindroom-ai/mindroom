@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -17,38 +16,13 @@ from backend.deps import client_ip_from_request
 from backend.utils.audit import redact_audit_details
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# Larger bodies are recorded by a marker instead of being buffered and parsed for the audit row.
-AUDIT_BODY_MAX_BYTES = 8 * 1024
-
-
-async def _audited_body(request: Request) -> bytes | None:
-    """Return the request body when its declared length fits the audit cap, or None when it is not captured."""
-    content_length = request.headers.get("content-length")
-    if content_length is None:
-        return None if "transfer-encoding" in request.headers else b""
-    if not (content_length.isascii() and content_length.isdigit()) or int(content_length) > AUDIT_BODY_MAX_BYTES:
-        return None
-    return await request.body()
-
-
-def _body_details(body: bytes | None) -> Any:  # noqa: ANN401
-    """Parse a buffered body for the audit row of an authenticated account."""
-    if body is None:
-        return {"body": "not-captured"}
-    if not body:
-        return {}
-    try:
-        return json.loads(body)
-    except (ValueError, RecursionError):
-        return {"body": "non-json"}
-
 
 class AuditLoggingMiddleware(BaseHTTPMiddleware):
     """Write an audit row for every state-changing request that a route accepted with a 2xx status.
 
-    The body is parsed and redacted only when an auth dependency recorded the account behind the request,
-    so unauthenticated, unrouted, redirected, and machine-to-machine requests cost no body work
-    beyond buffering at most `AUDIT_BODY_MAX_BYTES`, and their rows hold request metadata only.
+    Rows hold request metadata only: the method, path, status, the account an auth dependency verified,
+    and the client IP. Request bodies are never read here; routes that need their data in the audit log,
+    such as the admin routes, write explicit entries.
     """
 
     AUDIT_METHODS: ClassVar[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -71,7 +45,6 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         if request.method not in self.AUDIT_METHODS:
             return await call_next(request)
 
-        body = await _audited_body(request)
         request.state.audit_actor = None
         response = await call_next(request)
         if not 200 <= response.status_code < 300:
@@ -84,11 +57,13 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             action=self._get_action(request.method),
             resource_type=self._get_resource_type(path),
             resource_id=self._extract_resource_id(path),
-            details=_body_details(body) if actor else {},
             ip_address=client_ip_from_request(request),
-            user_email=actor.email if actor else None,
-            path=path,
-            status_code=response.status_code,
+            details={
+                "method": request.method,
+                "path": path,
+                "status_code": response.status_code,
+                "user_email": actor.email if actor else None,
+            },
         )
         return response
 
@@ -122,30 +97,25 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
 
     async def _create_audit_log(
         self,
+        *,
         account_id: str | None,
         action: str,
         resource_type: str,
         resource_id: str | None,
-        details: Any,  # noqa: ANN401
-        ip_address: str | None,
-        user_email: str | None = None,
-        path: str | None = None,
-        status_code: int | None = None,
+        ip_address: str,
+        details: dict[str, Any],
     ) -> None:
         """Create audit log entry in database."""
         try:
             if not supabase:
                 return
 
-            normalized_details = details if isinstance(details, dict) else {"body": details}
             log_entry = {
                 "account_id": account_id,
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
-                "details": redact_audit_details(
-                    {**normalized_details, "path": path, "status_code": status_code, "user_email": user_email}
-                ),
+                "details": redact_audit_details({key: value for key, value in details.items() if value is not None}),
                 "ip_address": ip_address,
                 "created_at": datetime.now(UTC).isoformat(),
             }

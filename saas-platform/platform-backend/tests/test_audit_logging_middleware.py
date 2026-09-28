@@ -11,9 +11,9 @@ import jwt
 import pytest
 from backend import auth_monitor, deps
 from backend.middleware import audit_logging
-from backend.middleware.audit_logging import AUDIT_BODY_MAX_BYTES, AuditLoggingMiddleware
+from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.routes import admin as admin_routes
-from backend.utils.audit import REDACTED, AuditActor, record_audit_actor
+from backend.utils.audit import AuditActor, record_audit_actor
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from main import app
@@ -28,14 +28,6 @@ def audit_table(monkeypatch: pytest.MonkeyPatch) -> Mock:
     supabase.table.return_value = table
     monkeypatch.setattr(audit_logging, "supabase", supabase)
     return table
-
-
-@pytest.fixture
-def redaction_spy(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    """Record every redaction the middleware performs."""
-    spy = Mock(side_effect=audit_logging.redact_audit_details)
-    monkeypatch.setattr(audit_logging, "redact_audit_details", spy)
-    return spy
 
 
 @pytest.fixture
@@ -54,37 +46,30 @@ def _inserted_rows(audit_table: Mock) -> list[dict]:
 
 
 @pytest.mark.usefixtures("real_auth")
-def test_unauthenticated_mutation_does_no_body_work(audit_table: Mock, redaction_spy: Mock) -> None:
-    """A rejected request to an admin route must not parse, redact, or audit its body."""
-    body = json.dumps({"status": "a" * 4096})
+@pytest.mark.parametrize(
+    ("method", "path", "status_code"),
+    [
+        pytest.param("PUT", "/admin/accounts/acc_1/status", 401, id="unauthenticated"),
+        pytest.param("POST", "/admin/no/such/route/here", 404, id="unrouted"),
+        pytest.param("POST", "/my/instances/provision/", 307, id="redirected-before-authentication"),
+        pytest.param("POST", "/webhooks/stripe/", 307, id="redirected-webhook"),
+    ],
+)
+def test_requests_no_route_accepted_are_not_audited(
+    method: str, path: str, status_code: int, audit_table: Mock
+) -> None:
+    """Only a 2xx answer from a route produces an audit row."""
+    response = TestClient(app).request(method, path, json={"a": "a" * 4096}, follow_redirects=False)
 
-    response = TestClient(app).put(
-        "/admin/accounts/acc_1/status", content=body, headers={"Content-Type": "application/json"}
-    )
-
-    assert response.status_code == 401
-    redaction_spy.assert_not_called()
-    audit_table.insert.assert_not_called()
-
-
-def test_unrouted_mutation_does_no_body_work(audit_table: Mock, redaction_spy: Mock) -> None:
-    """A request to a path no route serves must not parse, redact, or audit its body."""
-    body = json.dumps({"a": "a" * 4096})
-
-    response = TestClient(app).post(
-        "/admin/no/such/route/here", content=body, headers={"Content-Type": "application/json"}
-    )
-
-    assert response.status_code in {404, 405}
-    redaction_spy.assert_not_called()
+    assert response.status_code == status_code
     audit_table.insert.assert_not_called()
 
 
 def _app_with_mutation_routes(paths: list[str], actor: AuditActor | None = None) -> FastAPI:
-    def accept(request: Request) -> dict[str, bool]:
+    async def accept(request: Request) -> dict[str, int]:
         if actor is not None:
             record_audit_actor(request, actor)
-        return {"ok": True}
+        return {"received": len(await request.body())}
 
     test_app = FastAPI()
     test_app.add_middleware(AuditLoggingMiddleware)
@@ -97,79 +82,40 @@ MOUNTED_MUTATION_PATHS = ["/my/instances/provision", "/system/provision", "/webh
 ACCOUNT = AuditActor(account_id="user_123", email="user@example.test")
 
 
+@pytest.mark.parametrize("actor", [pytest.param(ACCOUNT, id="authenticated"), pytest.param(None, id="machine")])
 @pytest.mark.parametrize("path", MOUNTED_MUTATION_PATHS)
-def test_successful_mutations_are_audited_on_every_mounted_prefix(path: str, audit_table: Mock) -> None:
-    """Tenant, provisioner, and webhook mutations produce audit rows, not only admin ones."""
-    client = TestClient(_app_with_mutation_routes(MOUNTED_MUTATION_PATHS, actor=ACCOUNT))
-
-    response = client.post(path, json={"tier": "pro"})
-
-    assert response.status_code == 200
-    [row] = _inserted_rows(audit_table)
-    assert row["account_id"] == "user_123"
-    assert row["details"]["path"] == path
-    assert row["details"]["tier"] == "pro"
-
-
-def test_mutations_without_an_authenticated_account_are_audited_without_their_body(
-    audit_table: Mock, redaction_spy: Mock
+def test_accepted_mutations_are_audited_with_request_metadata_only(
+    path: str, actor: AuditActor | None, audit_table: Mock
 ) -> None:
-    """Provisioner, webhook, and anonymous rows hold request metadata only, so their bodies are never parsed."""
-    client = TestClient(_app_with_mutation_routes(["/webhooks/stripe"]))
+    """Tenant, provisioner, and webhook mutations are audited, and their bodies never reach the row."""
+    body = json.dumps({"customer_email": "payer@example.test", "payload": "a" * 100_000})
 
-    response = client.post("/webhooks/stripe", json={"customer_email": "payer@example.test"})
+    response = TestClient(_app_with_mutation_routes(MOUNTED_MUTATION_PATHS, actor=actor)).post(
+        path, content=body, headers={"Content-Type": "application/json", "X-Real-IP": "203.0.113.7"}
+    )
 
-    assert response.status_code == 200
+    assert response.json() == {"received": len(body)}
     [row] = _inserted_rows(audit_table)
-    assert "account_id" not in row
-    assert row["details"]["path"] == "/webhooks/stripe"
-    assert "customer_email" not in row["details"]
-    [(redacted,), _kwargs] = redaction_spy.call_args
-    assert "customer_email" not in redacted
-
-
-@pytest.mark.usefixtures("real_auth")
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [("POST", "/my/instances/provision/"), ("PUT", "/admin/accounts/acc_1/status/"), ("POST", "/webhooks/stripe/")],
-)
-def test_redirected_mutations_are_not_audited(method: str, path: str, audit_table: Mock, redaction_spy: Mock) -> None:
-    """A trailing-slash redirect answers before authentication, so it must not be parsed, redacted, or audited."""
-    response = TestClient(app).request(method, path, json={"a": "a" * 4096}, follow_redirects=False)
-
-    assert response.status_code == 307
-    redaction_spy.assert_not_called()
-    audit_table.insert.assert_not_called()
+    expected_details = {"method": "POST", "path": path, "status_code": 200}
+    if actor is not None:
+        expected_details["user_email"] = actor.email
+        assert row["account_id"] == actor.account_id
+    else:
+        assert "account_id" not in row
+    assert row["details"] == expected_details
+    assert row["ip_address"] == "203.0.113.7"
 
 
 @pytest.mark.usefixtures("real_auth")
 @pytest.mark.parametrize(("method", "path"), [("DELETE", "/my/sso-cookie"), ("POST", "/admin/auth/logout")])
-def test_anonymous_routes_do_not_parse_their_body(
-    method: str, path: str, audit_table: Mock, redaction_spy: Mock
-) -> None:
-    """Routes that answer anyone still produce a metadata row, but an unauthenticated body is never parsed."""
+def test_anonymous_routes_are_audited_without_their_body(method: str, path: str, audit_table: Mock) -> None:
+    """Routes that answer anyone produce an unattributed metadata row."""
     response = TestClient(app).request(method, path, json={"payload": "a" * 4096})
 
     assert response.status_code == 200
     [row] = _inserted_rows(audit_table)
     assert "account_id" not in row
-    [(redacted,), _kwargs] = redaction_spy.call_args
-    assert "payload" not in redacted
-
-
-def test_oversized_body_is_audited_without_being_captured(audit_table: Mock, redaction_spy: Mock) -> None:
-    """Bodies above the audit cap are recorded by a marker, never buffered or parsed for the audit row."""
-    client = TestClient(_app_with_mutation_routes(["/my/instances/provision"], actor=ACCOUNT))
-    body = json.dumps({"payload": "a" * (AUDIT_BODY_MAX_BYTES * 2)})
-
-    response = client.post("/my/instances/provision", content=body, headers={"Content-Type": "application/json"})
-
-    assert response.status_code == 200
-    [row] = _inserted_rows(audit_table)
-    assert row["details"]["body"] == "not-captured"
-    assert "payload" not in row["details"]
-    [(redacted,), _kwargs] = redaction_spy.call_args
-    assert "payload" not in redacted
+    assert row["details"] == {"method": method, "path": path, "status_code": 200}
 
 
 def _jwt_with_exp(expires_at: datetime) -> str:
@@ -196,7 +142,7 @@ def test_authenticated_mutation_is_attributed_to_the_account(
 
     response = TestClient(app).post(
         "/my/sso-cookie",
-        json={"password": "pw-secret", "note": "kept"},
+        json={"password": "pw-secret"},
         headers={"Authorization": f"Bearer {token}", "X-Real-IP": "203.0.113.7"},
     )
 
@@ -204,14 +150,19 @@ def test_authenticated_mutation_is_attributed_to_the_account(
     [row] = _inserted_rows(audit_table)
     assert row["account_id"] == "user_123"
     assert row["ip_address"] == "203.0.113.7"
-    assert row["details"]["user_email"] == "user@example.test"
-    assert row["details"]["password"] == REDACTED
-    assert row["details"]["note"] == "kept"
+    assert row["details"] == {
+        "method": "POST",
+        "path": "/my/sso-cookie",
+        "status_code": 200,
+        "user_email": "user@example.test",
+    }
 
 
 @pytest.mark.usefixtures("real_auth")
-def test_admin_mutation_is_attributed_to_the_admin(monkeypatch: pytest.MonkeyPatch, audit_table: Mock) -> None:
-    """Admin mutations name the verified administrator in the middleware's audit row."""
+def test_admin_mutation_is_attributed_and_its_data_audited_by_the_route(
+    monkeypatch: pytest.MonkeyPatch, audit_table: Mock
+) -> None:
+    """The middleware row names the administrator, and the admin route's own entry keeps the request data."""
     auth_user = Mock()
     auth_user.user.id = "admin_123"
     auth_user.user.email = "admin@example.test"
@@ -221,16 +172,22 @@ def test_admin_mutation_is_attributed_to_the_admin(monkeypatch: pytest.MonkeyPat
     sb.table().select().eq().single().execute.return_value = Mock(
         data={"is_admin": True, "status": "active", "deleted_at": None}
     )
+    route_audit = Mock()
     monkeypatch.setattr(deps, "_ensure_auth_client", lambda: auth_client)
     monkeypatch.setattr(deps, "ensure_supabase", lambda: sb)
     monkeypatch.setattr(admin_routes, "ensure_supabase", lambda: sb)
+    monkeypatch.setattr(admin_routes, "create_audit_log", route_audit)
 
     response = TestClient(app).put(
-        "/admin/accounts/acc_1/status", json={"status": "suspended"}, headers={"Authorization": "Bearer admin-token"}
+        "/admin/accounts/acc_1/status",
+        json={"status": "suspended", "reason": "abuse"},
+        headers={"Authorization": "Bearer admin-token"},
     )
 
     assert response.status_code == 200
     [row] = _inserted_rows(audit_table)
     assert row["account_id"] == "admin_123"
     assert row["resource_type"] == "account"
-    assert row["details"]["status"] == "suspended"
+    assert row["details"]["method"] == "PUT"
+    assert "status" not in row["details"]
+    assert route_audit.call_args.kwargs["details"] == {"status": "suspended", "reason": "abuse"}
