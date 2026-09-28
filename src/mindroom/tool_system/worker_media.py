@@ -21,6 +21,8 @@ from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
 
+# httpx timeouts apply per read, so each hop's body must also arrive within this total.
+_READ_URL_SECONDS = 60
 _AUDIO_FORMAT_BY_MIME_TYPE = {
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
@@ -78,7 +80,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                     request = response.next_request
                     continue
                 response.raise_for_status()
-                content = read_identity_body_prefix(response, max_bytes=limit)
+                content = read_identity_body_prefix(response, max_bytes=limit, timeout_seconds=_READ_URL_SECONDS)
                 if content.truncated:
                     msg = "Worker media exceeds the byte limit."
                     raise ValueError(msg)

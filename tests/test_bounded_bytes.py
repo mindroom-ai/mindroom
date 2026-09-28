@@ -2,10 +2,18 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Iterator
+from time import monotonic
 
 import pytest
 
-from mindroom.bounded_bytes import ByteLimitExceededError, BytePrefix, collect_bounded_bytes, collect_sync_byte_prefix
+from mindroom import bounded_bytes
+from mindroom.bounded_bytes import (
+    ByteLimitExceededError,
+    BytePrefix,
+    ByteStreamDeadlineError,
+    collect_bounded_bytes,
+    collect_sync_byte_prefix,
+)
 
 
 async def _chunks(values: list[bytes]) -> AsyncIterator[bytes]:
@@ -93,5 +101,27 @@ def test_sync_prefix_stops_reading_at_the_first_chunk_that_crosses_the_limit() -
         yield b"de"
         pytest.fail("Read past the overflowing chunk")
 
-    assert collect_sync_byte_prefix(iter([b"a", b"", b"bc", b""]), max_bytes=3) == BytePrefix(b"abc", truncated=False)
-    assert collect_sync_byte_prefix(stream(), max_bytes=4) == BytePrefix(b"abcd", truncated=True)
+    deadline = monotonic() + 60
+    assert collect_sync_byte_prefix(iter([b"a", b"", b"bc", b""]), max_bytes=3, deadline=deadline) == BytePrefix(
+        b"abc",
+        truncated=False,
+    )
+    assert collect_sync_byte_prefix(stream(), max_bytes=4, deadline=deadline) == BytePrefix(b"abcd", truncated=True)
+
+
+def test_sync_prefix_stops_a_trickling_stream_at_its_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream that keeps sending small chunks is abandoned at the deadline, however far below the limit it is."""
+    clock = iter(range(100))
+    monkeypatch.setattr(bounded_bytes, "monotonic", lambda: next(clock))
+    read_chunks = 0
+
+    def trickle() -> Iterator[bytes]:
+        nonlocal read_chunks
+        while True:
+            read_chunks += 1
+            yield b"x"
+
+    with pytest.raises(ByteStreamDeadlineError):
+        collect_sync_byte_prefix(trickle(), max_bytes=1024, deadline=3)
+
+    assert read_chunks == 5

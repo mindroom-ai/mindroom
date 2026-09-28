@@ -24,7 +24,11 @@ _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 def _read_response(response: httpx.Response, url: str, *, decode: bool) -> Response | None:
     """Buffer one uncompressed response body within Trafilatura's download size limit."""
     try:
-        body = read_identity_body_prefix(response, max_bytes=_MAX_FILE_SIZE)
+        body = read_identity_body_prefix(
+            response,
+            max_bytes=_MAX_FILE_SIZE,
+            timeout_seconds=_DOWNLOAD_TIMEOUT_SECONDS,
+        )
     except CompressedHttpBodyError:
         log_warning("Trafilatura download used an unrequested content encoding")
         return None

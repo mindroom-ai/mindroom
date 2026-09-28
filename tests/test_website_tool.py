@@ -15,6 +15,7 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
+from mindroom import bounded_bytes, bounded_http_body
 from mindroom.custom_tools.website import (
     _MAX_REDIRECTS,
     _TOO_MANY_REDIRECTS,
@@ -712,6 +713,26 @@ def test_website_fetch_reads_bodies_whose_encoding_names_no_compression(
 
     assert fetched.response.content == page
     assert fetched.truncated is False
+
+
+def test_website_fetch_abandons_a_trickling_body_at_its_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server sending a byte inside every per-read timeout cannot hold the fetching thread past the hop deadline."""
+    clock = iter(range(0, 10_000, 10))
+    monkeypatch.setattr(bounded_bytes, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(bounded_http_body, "monotonic", lambda: next(clock))
+    sent: list[int] = []
+
+    def trickle() -> Iterator[bytes]:
+        while True:
+            sent.append(1)
+            yield b"x"
+
+    _mock_server_fetch_transport(monkeypatch, lambda _request: httpx.Response(200, content=trickle()))
+
+    with pytest.raises(httpx.ReadTimeout):
+        _MindRoomWebsiteReader()._get_validated_response("https://example.test/")
+
+    assert len(sent) <= 4
 
 
 def test_website_read_url_parses_a_truncated_prefix_of_an_oversized_page(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -63,6 +63,8 @@ _MAX_REDIRECTS = 10
 # BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so only a prefix is parsed.
 _MAX_PAGE_BYTES = 1024 * 1024
 _NO_BODY = BytePrefix(b"", truncated=False)
+# httpx timeouts apply per read, so each hop's body must also arrive within this total.
+_PAGE_READ_SECONDS = 30
 _TRUNCATED_PAGE_NOTE = f"[Page truncated: only its first {_MAX_PAGE_BYTES // (1024 * 1024)} MiB was read.]"
 
 
@@ -195,7 +197,11 @@ def _server_fetch_get(url: str, *, timeout: int, proxy: str | None = None) -> _F
         httpx.Client(headers={"Accept-Encoding": "identity"}, timeout=timeout, **route) as client,
         client.stream("GET", url) as response,
     ):
-        body = _NO_BODY if response.is_redirect else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES)
+        body = (
+            _NO_BODY
+            if response.is_redirect
+            else read_identity_body_prefix(response, max_bytes=_MAX_PAGE_BYTES, timeout_seconds=_PAGE_READ_SECONDS)
+        )
         return _FetchedPage(
             httpx.Response(response.status_code, headers=response.headers, content=body.data, request=response.request),
             truncated=body.truncated,

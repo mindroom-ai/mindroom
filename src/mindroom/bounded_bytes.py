@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,6 +12,10 @@ if TYPE_CHECKING:
 
 class ByteLimitExceededError(ValueError):
     """A byte stream exceeded the caller's collection limit."""
+
+
+class ByteStreamDeadlineError(TimeoutError):
+    """A byte stream was still arriving at the caller's collection deadline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,9 +41,11 @@ async def collect_bounded_bytes(chunks: AsyncIterable[bytes], *, max_bytes: int)
     return bytes(body)
 
 
-def collect_sync_byte_prefix(chunks: Iterable[bytes], *, max_bytes: int) -> BytePrefix:
+def collect_sync_byte_prefix(chunks: Iterable[bytes], *, max_bytes: int, deadline: float) -> BytePrefix:
     """Collect a synchronous stream up to ``max_bytes`` and stop reading at the first chunk that crosses it.
 
+    ``deadline`` is a ``time.monotonic()`` instant: a stream still arriving after it raises, so a sender
+    trickling bytes inside each read timeout cannot hold the reading thread indefinitely.
     Iterator failures propagate unchanged.
     The caller owns the stream's lifetime.
     """
@@ -48,4 +55,7 @@ def collect_sync_byte_prefix(chunks: Iterable[bytes], *, max_bytes: int) -> Byte
             body.extend(chunk[: max_bytes - len(body)])
             return BytePrefix(bytes(body), truncated=True)
         body.extend(chunk)
+        if monotonic() > deadline:
+            message = f"Byte stream was still arriving after {len(body)} bytes at its deadline"
+            raise ByteStreamDeadlineError(message)
     return BytePrefix(bytes(body), truncated=False)
