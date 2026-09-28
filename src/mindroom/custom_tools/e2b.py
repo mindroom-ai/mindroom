@@ -15,10 +15,11 @@ from agno.tools.function import ToolResult
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.path_confinement import open_directory_within_root, relative_to_trusted_root, resolve_path_within_root
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
+    from mindroom.constants import RuntimePaths
 
 
 def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -> None:
@@ -48,25 +49,31 @@ class MindRoomE2BTools(E2BTools):
         sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
+        runtime_paths: RuntimePaths | None = None,
         file_access: FileAccess = "workspace",
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
+        self._output_root = runtime_paths.storage_root if runtime_paths is not None else tool_output_workspace_root
         self._file_access = file_access
         super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
-        """Return the canonical workspace root and the canonical relative path below it."""
+        """Return the trusted output root and a path retaining the original workspace components."""
         if self._workspace_root is None:
             msg = "E2B local file transfers require an agent workspace"
             raise ValueError(msg)
         requested = Path(path)
-        root = self._workspace_root.resolve()
+        root = self._workspace_root.expanduser().absolute()
         if not requested.is_absolute() and ".." not in requested.parts:
             with suppress(ValueError):
                 resolved = resolve_path_within_root(root, requested, symlinks="internal")
-                if resolved != root:
-                    return root, resolved.relative_to(root)
+                canonical_root = root.resolve()
+                if resolved != canonical_root:
+                    trusted_root = (self._output_root or root).expanduser().absolute()
+                    return trusted_root, relative_to_trusted_root(trusted_root, root) / resolved.relative_to(
+                        canonical_root,
+                    )
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)
 

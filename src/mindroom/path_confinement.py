@@ -89,6 +89,21 @@ def resolve_path_within_root(
     return resolved
 
 
+def relative_to_trusted_root(root: Path, path: Path) -> Path:
+    """Return an absolute path's lexical location below a trusted root without resolving links."""
+    trusted = root.expanduser().absolute()
+    requested = path.expanduser().absolute()
+    try:
+        relative = requested.relative_to(trusted)
+    except ValueError as exc:
+        msg = "Path must stay within its trusted root."
+        raise ValueError(msg) from exc
+    if ".." in relative.parts:
+        msg = "Path must stay within its trusted root."
+        raise ValueError(msg)
+    return relative
+
+
 def _relative_parts(path: str | Path) -> tuple[str, ...]:
     relative = Path(path)
     if relative.is_absolute() or ".." in relative.parts:

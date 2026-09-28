@@ -17,6 +17,7 @@ class ShellOutputDestination:
     workspace_root: str
     path: str
     max_bytes: int
+    trusted_root: str | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> ShellOutputDestination | None:
@@ -28,16 +29,18 @@ class ShellOutputDestination:
             raise TypeError(msg)
         data = cast("dict[str, object]", payload)
         workspace_root, path, max_bytes = data.get("workspace_root"), data.get("path"), data.get("max_bytes")
+        trusted_root = data.get("trusted_root")
         if (
             not isinstance(workspace_root, str)
             or not isinstance(path, str)
             or not isinstance(max_bytes, int)
             or isinstance(max_bytes, bool)
             or max_bytes <= 0
+            or (trusted_root is not None and not isinstance(trusted_root, str))
         ):
             msg = "Invalid shell output destination policy."
             raise ValueError(msg)
-        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes)
+        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, trusted_root=trusted_root)
 
 
 def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
@@ -123,6 +126,9 @@ class ShellOutputCapture:
                 ToolOutputFilePolicy(
                     workspace_root=Path(self.destination.workspace_root),
                     max_bytes=self.destination.max_bytes,
+                    trusted_root=Path(self.destination.trusted_root)
+                    if self.destination.trusted_root is not None
+                    else None,
                 ),
                 tool_name="run_shell_command",
                 output_path=self.destination.path,

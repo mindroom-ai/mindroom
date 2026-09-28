@@ -1638,6 +1638,31 @@ def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtim
     assert encryption_key not in json.dumps(captured_envelope)
 
 
+def test_resolve_entrypoint_output_uses_mounted_workspace_root(tmp_path: Path) -> None:
+    """Worker output stays usable when runtime state is outside the mounted workspace."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "worker_state",
+        process_env={},
+    )
+    workspace = tmp_path / "mounted_workspace"
+    workspace.mkdir()
+    (workspace / "input.txt").write_text("report")
+    _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="file",
+        function_name="read_file",
+        tool_init_overrides={"base_dir": str(workspace)},
+        tool_output_workspace_root=workspace,
+    )
+
+    result = entrypoint("input.txt", mindroom_output_path="result.txt")
+
+    assert result["mindroom_tool_output"]["status"] == "saved_to_file"
+    assert (workspace / "result.txt").read_text() == "report"
+
+
 def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:
     """Sandbox-side tool rebuilds should use persisted tool credentials."""
     config_path = tmp_path / "config.yaml"

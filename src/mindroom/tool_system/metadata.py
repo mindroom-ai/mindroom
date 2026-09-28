@@ -683,6 +683,7 @@ def _build_tool_instance(
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int,
+    tool_output_trusted_root: Path | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
@@ -762,6 +763,7 @@ def _build_tool_instance(
             tool_output_workspace_root,
             runtime_paths,
             auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+            trusted_root=tool_output_trusted_root,
         )
         if tool_output_workspace_root is not None
         else None
@@ -799,6 +801,7 @@ def get_tool_by_name(
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    tool_output_trusted_root: Path | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
@@ -823,6 +826,7 @@ def get_tool_by_name(
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=tool_output_workspace_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        tool_output_trusted_root=tool_output_trusted_root,
         worker_target=worker_target,
     )
 

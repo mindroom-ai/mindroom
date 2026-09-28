@@ -473,6 +473,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     workspace_root=str(output_request.policy.workspace_root),
                     path=output_request.path.requested_path,
                     max_bytes=output_request.policy.max_bytes,
+                    trusted_root=str(output_request.policy.trusted_root)
+                    if output_request.policy.trusted_root
+                    else None,
                 )
                 if output_request is not None and output_request.path is not None
                 else None

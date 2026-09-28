@@ -169,6 +169,7 @@ async def invoke_cli_shell(payload: CliShellRequest, request: Request) -> dict[s
             Path(launch.shell.workspace),
             max_bytes=launch.shell.output_max_bytes,
             auto_save_threshold_bytes=launch.shell.output_auto_save_threshold_bytes,
+            trusted_root=Path(launch.shell.workspace),
         ),
     )
     function = toolkit.async_functions.get(operation.function_name) or toolkit.functions[operation.function_name]
