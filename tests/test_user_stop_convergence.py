@@ -186,3 +186,28 @@ async def test_one_stop_delivered_concurrently_cancels_once(journal_store: Event
 
 async def _noop() -> None:
     """Stand in for the caller's post-finalization notification."""
+
+
+@pytest.mark.parametrize("stop_already_written", [False, True])
+async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
+    journal_store: EventJournalStore,
+    stop_already_written: bool,
+) -> None:
+    """A stop naming a visible voice echo has no response to finalize, so it must not write or raise.
+
+    The written case is the durable state an earlier release left behind before
+    it raised, which replays after an upgrade.
+    """
+    store = await _store(journal_store)
+    await store.record_visible_echo("$voice", "$echo")
+    if stop_already_written:
+        await store.record_user_stopped_response("$echo", 5)
+    before = store.get_turn_record("$voice")
+    runner, gateway = _SerializingRunner(), _CountingGateway()
+
+    finalized = await _reconciler(store, runner, gateway).finalize("$echo", _STOP_RECEIPT_ORDER, _noop)
+
+    assert finalized is False
+    assert store.get_turn_record("$voice") == before
+    assert gateway.finalized == []
+    assert runner.cancel_requests == 0
