@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -120,6 +121,47 @@ class TestExtractTeamMemberContributions:
             "Final team output",
         ]
         assert result == expected
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "| Model | Revenue |\n|---|---|\n| Per seat | predictable |",
+            "## Findings\nThree vendors price per seat.",
+            "- Per seat\n- Usage",
+            "1. Per seat\n2. Usage",
+            "> Quoted from the brief",
+            "```python\nprint(1)\n```",
+        ],
+    )
+    def test_member_content_that_opens_a_block_starts_its_own_paragraph(self, content: str) -> None:
+        """A table or other block right after the member's name would not render, so it gets its own paragraph."""
+        agent = MagicMock(spec=RunOutput)
+        agent.agent_name = "ledger"
+        agent.content = content
+        agent.messages = []
+
+        team = MagicMock(spec=TeamRunOutput)
+        team.team_name = "Team"
+        team.content = None
+        team.member_responses = [agent]
+        team.messages = []
+
+        assert format_team_response(team)[0] == f"**ledger**:\n\n{content}"
+
+    def test_member_prose_stays_on_the_name_line(self) -> None:
+        """Prose, including a sentence with a pipe or a number, reads best right after the name."""
+        agent = MagicMock(spec=RunOutput)
+        agent.agent_name = "scout"
+        agent.content = "2026 pricing: seat | usage, three vendors in four."
+        agent.messages = []
+
+        team = MagicMock(spec=TeamRunOutput)
+        team.team_name = "Team"
+        team.content = None
+        team.member_responses = [agent]
+        team.messages = []
+
+        assert format_team_response(team)[0] == "**scout**: 2026 pricing: seat | usage, three vendors in four."
 
     def test_team_without_consensus(self) -> None:
         """Test team that only has member responses, no consensus."""

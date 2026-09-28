@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import ExitStack, aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -263,6 +264,10 @@ def _format_team_header(agent_names: list[str]) -> str:
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
 
 
+# Markdown blocks that only render at the start of a line: tables, headings, lists, quotes, and code fences.
+_MARKDOWN_BLOCK_START = re.compile(r"\||#{1,6}\s|[-*+]\s|\d{1,9}[.)]\s|>|```|~~~")
+
+
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
     """Format a single team member's contribution.
 
@@ -277,7 +282,9 @@ def _format_member_contribution(agent_name: str, content: str, indent: int = 0) 
     """
     indent_str = "  " * indent
     first_line = content.lstrip().splitlines()[0] if content.strip() else ""
-    separator = "\n\n" if is_visible_tool_marker_line(first_line) else " "
+    # Content that opens with a tool marker or a block such as a table needs its own paragraph to render.
+    own_paragraph = is_visible_tool_marker_line(first_line) or _MARKDOWN_BLOCK_START.match(first_line) is not None
+    separator = "\n\n" if own_paragraph else " "
     return f"{indent_str}**{agent_name}**:{separator}{content}"
 
 
