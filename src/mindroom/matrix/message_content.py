@@ -67,11 +67,6 @@ class _UnavailableSidecar:
 _unavailable_sidecars: OrderedDict[tuple[str, str | None], _UnavailableSidecar] = OrderedDict()
 
 
-def reset_unavailable_sidecar_cache() -> None:
-    """Forget which sidecars could not be read, primarily for isolated tests."""
-    _unavailable_sidecars.clear()
-
-
 def _cached_unavailable_sidecar(key: tuple[str, str | None]) -> MxcUnavailable | None:
     entry = _unavailable_sidecars.get(key)
     if entry is None:
@@ -92,7 +87,7 @@ def _remember_unavailable_sidecar(key: tuple[str, str | None], unavailable: MxcU
 
 
 @dataclass(frozen=True, slots=True)
-class SidecarContent:
+class _SidecarContent:
     """One event's canonical content, or its preview and why the sidecar behind it could not be read."""
 
     content: dict[str, Any]
@@ -171,14 +166,14 @@ async def _resolve_event_content(
     return sidecar.content, sidecar.changed
 
 
-async def resolve_sidecar_content(content: object, client: nio.AsyncClient | None) -> SidecarContent:
+async def resolve_sidecar_content(content: object, client: nio.AsyncClient | None) -> _SidecarContent:
     """Resolve one event content's long-text sidecar chain and say whether an unresolved one can never resolve."""
     preview_content = _normalized_content_dict(content)
     chain = await _resolve_canonical_content(preview_content, client)
     resolved_content = (
         preview_content if chain.content is preview_content else _with_event_relation(chain.content, preview_content)
     )
-    return SidecarContent(
+    return _SidecarContent(
         content=resolved_content,
         changed=chain.content is not preview_content,
         permanently_unavailable=chain.unavailable is not None and chain.unavailable.permanent,

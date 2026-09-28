@@ -446,7 +446,7 @@ def _log_media_over_limit(mxc_url: str, *, stage: str, size_bytes: int | None, m
 
 
 @dataclass(frozen=True, slots=True)
-class MxcFetched:
+class _MxcFetched:
     """A whole MXC payload within the caller's byte limit."""
 
     data: bytes
@@ -459,7 +459,7 @@ class MxcUnavailable:
     permanent: bool
 
 
-type MxcDownload = MxcFetched | MxcUnavailable
+type _MxcDownload = _MxcFetched | MxcUnavailable
 
 
 def _unavailable_for_status(mxc_url: str, status: int) -> MxcUnavailable:
@@ -470,7 +470,7 @@ def _unavailable_for_status(mxc_url: str, status: int) -> MxcUnavailable:
     return MxcUnavailable(permanent=permanent)
 
 
-async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_bytes: int) -> MxcDownload:
+async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_bytes: int) -> _MxcDownload:
     if response.status != 200:
         return _unavailable_for_status(mxc_url, response.status)
     if response.content_length is not None and response.content_length > max_bytes:
@@ -484,7 +484,7 @@ async def _read_bounded_media_body(mxc_url: str, response: ClientResponse, max_b
     except ByteLimitExceededError:
         _log_media_over_limit(mxc_url, stage="download", size_bytes=None, max_bytes=max_bytes)
         return MxcUnavailable(permanent=True)
-    return MxcFetched(data)
+    return _MxcFetched(data)
 
 
 def _download_timeout_seconds(max_bytes: int) -> float:
@@ -492,7 +492,7 @@ def _download_timeout_seconds(max_bytes: int) -> float:
     return _MXC_DOWNLOAD_BASE_SECONDS + max_bytes / _MXC_DOWNLOAD_MIN_BYTES_PER_SECOND
 
 
-async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> MxcDownload:
+async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> _MxcDownload:
     """Download one MXC payload without buffering more than ``max_bytes``.
 
     nio's download reads the whole body before a caller can check its size, and any room member
@@ -537,7 +537,7 @@ async def download_media_bytes(
     except Exception:
         logger.exception("Error downloading media", event_id=_event_id_for_log(event))
         return None
-    if not isinstance(downloaded, MxcFetched):
+    if not isinstance(downloaded, _MxcFetched):
         return None
     downloaded_bytes = downloaded.data
 

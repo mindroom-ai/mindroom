@@ -43,7 +43,7 @@ from mindroom.matrix.conversation_reads import (
     projected_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
-from mindroom.matrix.message_content import reset_unavailable_sidecar_cache
+from mindroom.matrix.message_content import _unavailable_sidecars
 from tests.conftest import TEST_ACCESS_TOKEN
 from tests.matrix_media_helpers import FakeMediaResponse, media_response, requested_mxc
 
@@ -1760,7 +1760,7 @@ class TestSidecarResolution:
         reader = await self._reader(alice, client)
 
         first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
-        reset_unavailable_sidecar_cache()
+        _unavailable_sidecars.clear()
         second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
         assert client.downloads == ["mxc://s/bad"]
