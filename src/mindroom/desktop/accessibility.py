@@ -394,16 +394,23 @@ class MacAccessibilityBackend:
         return self._focused_fallback_state(app_id, state_id).public
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
-        """Focus a revalidated target and return a guard that keys still go to that exact app."""
+        """Focus a revalidated target and return a guard to call right before each keyboard input is posted."""
         application = self._focused_fallback_state(app_id, state_id).application
         if application is None:
             return _primary_screen_keyboard_guard
+        input_posted = False
 
         # Keyboard events go to whichever app is frontmost when they are posted, not to the validated one.
         def guard() -> None:
-            if not application.isActive():
-                msg = "The allowed application lost keyboard focus; input stopped and its outcome may be partial."
-                raise AccessibilityActionOutcomeUnknownError(msg)
+            nonlocal input_posted
+            if application.isActive():
+                input_posted = True
+                return
+            if not input_posted:
+                msg = "The allowed application lost keyboard focus before any input was sent; nothing was typed."
+                raise AccessibilityError(msg)
+            msg = "The allowed application lost keyboard focus; input stopped and its outcome may be partial."
+            raise AccessibilityActionOutcomeUnknownError(msg)
 
         return guard
 

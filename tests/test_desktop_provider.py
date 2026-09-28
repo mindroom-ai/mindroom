@@ -601,7 +601,7 @@ def test_untargeted_macos_typing_stops_once_the_allowed_app_loses_keyboard_focus
     accessibility.keyboard_focus_checks_left = 1
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
-        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 21 + "\n")
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41)
 
     assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
     assert accessibility.calls[0] == ("prepare_keyboard", ("com.example.Editor", "state-1"))
@@ -614,9 +614,31 @@ def test_untargeted_typing_checks_keyboard_focus_before_writing() -> None:
     accessibility.keyboard_focus_checks_left = 0
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
-        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="rm -rf ~\n")
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="rm -rf ~")
 
     assert pyautogui.calls == []
+
+
+@pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x1b", "\x7f"])
+def test_untargeted_typing_refuses_control_characters_before_any_input(control: str) -> None:
+    """Without an exact text field, a line break could submit or run the text in whatever has focus."""
+    provider, pyautogui, accessibility = _provider()
+
+    with pytest.raises(DesktopProviderError, match="control characters; send Enter or Tab with keypress"):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text=f"rm -rf ~{control}")
+
+    assert accessibility.calls == []
+    assert pyautogui.calls == []
+
+
+def test_element_targeted_typing_may_contain_line_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exact, focus-checked text field can take multi-line text."""
+    provider, pyautogui, accessibility = _provider()
+    monkeypatch.setattr(accessibility, "prepare_typing", lambda _app, _state, _index: lambda: None, raising=False)
+
+    provider.type_text(app_id="com.example.Editor", state_id="state-1", text="one\ntwo", element_index=4)
+
+    assert pyautogui.calls == [("write", ("one\ntwo", 0.01))]
 
 
 def test_keypress_is_not_sent_after_the_allowed_app_loses_keyboard_focus() -> None:

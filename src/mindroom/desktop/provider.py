@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -378,6 +379,13 @@ class PyAutoGuiDesktopProvider:
         """Type bounded text into a validated app or an exact focused text element."""
         if not text or len(text) > 2000:
             msg = "text must contain between 1 and 2000 characters."
+            raise DesktopProviderError(msg)
+        if element_index is None and any(unicodedata.category(character) == "Cc" for character in text):
+            # Without an exact text field, a line break could submit or run the text in whatever has focus.
+            msg = (
+                "Text without element_ref or element_index must not contain line breaks, tabs, or other control "
+                "characters; send Enter or Tab with keypress."
+            )
             raise DesktopProviderError(msg)
         self._check_emergency_stop()
         if element_index is None:
