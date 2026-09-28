@@ -13,6 +13,11 @@ from backend.config import supabase
 
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
+TRUNCATED = "... [truncated]"
+# Audit text is cut to this length; redaction scans a little further so a secret straddling the cut is still masked.
+MAX_AUDIT_TEXT_LENGTH = 4 * 1024
+_REDACTION_LOOKAHEAD_CHARS = 512
+MAX_AUDIT_DEPTH = 32
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
@@ -24,13 +29,15 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
     r"(?::\s*|\s+))(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
-_NEXT_ASSIGNMENT_PATTERN = r"\s+(?:and\s+)?[\"']?[A-Za-z0-9_.-]+[\"']?\s*[:=]"
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]+)[\"']?\s*[:=]\s*)"
-    rf"(?:(?P<quote>[\"'])(?P<quoted_value>.*?)(?P=quote)|(?P<value>.+?))"
-    rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
-    re.IGNORECASE,
+# Keys start only at a key-character boundary and quantifiers are possessive, so the scan never restarts inside a run.
+_ASSIGNMENT_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z0-9_.-])[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?\s*+[:=]\s*+")
+# An unquoted value ends at a delimiter or at the next assignment; one alternation finds the nearer without rescanning.
+_ASSIGNMENT_VALUE_END_PATTERN = re.compile(
+    r"[\r\n,&)\]}]|(?<!\s)\s++(?:and\s++)?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]", re.IGNORECASE
 )
+_ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+_CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALPHANUMERIC_RUN_PATTERN = re.compile(r"[^a-z0-9]+")
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -74,34 +81,22 @@ _URL_QUERY_SECRET_KEYS = frozenset(
     }
 )
 _QUERY_CONTAINER_KEYS = frozenset({"query", "query_params", "query_string", "callback_query"})
-_SECRET_KEY_VARIANTS = tuple(
-    (key, key.replace("_", ""), tuple(key.split("_"))) for key in sorted(_SECRET_KEYS, key=len, reverse=True)
-)
+# Each secret key as a whole-part window (`_api_key_`) and in compact spelling (`apikey`).
+_SECRET_KEY_VARIANTS = tuple((f"_{key}_", key.replace("_", "")) for key in _SECRET_KEYS)
 
 
 def _normalize_key(value: object) -> str:
-    key = str(value).strip()
-    key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
-    key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    key = _ACRONYM_BOUNDARY_PATTERN.sub("_", str(value).strip())
+    key = _CAMEL_BOUNDARY_PATTERN.sub(r"\1_\2", key)
+    return _NON_ALPHANUMERIC_RUN_PATTERN.sub("_", key.lower()).strip("_")
 
 
 def _is_secret_key(value: object) -> bool:
+    """Return whether a key names a secret: a secret key appears as whole parts, or its compact spelling ends one."""
     normalized = _normalize_key(value)
-    parts = tuple(part for part in normalized.split("_") if part)
+    parts = f"_{normalized}_"
     compact = normalized.replace("_", "")
-    for key, compact_key, key_parts in _SECRET_KEY_VARIANTS:
-        if (
-            normalized == key
-            or normalized.endswith(f"_{key}")
-            or compact == compact_key
-            or compact.endswith(compact_key)
-        ):
-            return True
-        for start in range(len(parts) - len(key_parts) + 1):
-            if parts[start : start + len(key_parts)] == key_parts:
-                return True
-    return False
+    return any(window in parts or compact.endswith(compact_key) for window, compact_key in _SECRET_KEY_VARIANTS)
 
 
 def _is_query_container(value: str | None) -> bool:
@@ -121,35 +116,71 @@ def _redact_matched_token(match: re.Match[str]) -> str:
     return full_match[:prefix_end] + REDACTED + full_match[suffix_start:]
 
 
-def _redact_nested_assignment_value(match: re.Match[str]) -> str:
-    quote = match.group("quote")
-    if quote is not None:
-        quoted_value = match.group("quoted_value")
-        if quoted_value is None:
-            return match.group(0)
-        return f"{match.group('prefix')}{quote}{redact_audit_text(quoted_value)}{quote}"
-    value = match.group("value")
-    if value is None:
-        return match.group(0)
-    return match.group("prefix") + redact_audit_text(value)
+def _closing_quote(value: str, quote: str, start: int) -> int | None:
+    """Return the index of the unescaped quote closing a value on its own line, or None."""
+    position = start
+    while (position := value.find(quote, position)) >= 0:
+        escape_start = position
+        while escape_start > start and value[escape_start - 1] == "\\":
+            escape_start -= 1
+        if (position - escape_start) % 2 == 0:
+            break
+        position += 1
+    if position < 0 or value.find("\n", start, position) >= 0 or value.find("\r", start, position) >= 0:
+        return None
+    return position
 
 
-def _redact_secret_assignment(match: re.Match[str]) -> str:
-    key = match.group("key")
-    normalized_key = _normalize_key(key)
-    if not _is_secret_key(key):
-        return _redact_nested_assignment_value(match)
-    value = match.group("value")
-    if (
-        normalized_key == "authorization"
-        and value is not None
-        and (value.lower() in {"basic", "bearer"} or value.lower().startswith(f"bearer {REDACTED}"))
-    ):
-        return match.group(0)
-    quote = match.group("quote")
-    if quote is not None:
-        return f"{match.group('prefix')}{quote}{REDACTED}{quote}"
-    return match.group("prefix") + REDACTED
+def _assignment_value_span(value: str, value_start: int) -> tuple[int, int] | None:
+    """Return the span of one assigned value, or None when it is empty.
+
+    A quoted value ends at its closing quote; an unquoted or unclosed one ends at a delimiter or the next assignment.
+    """
+    if value_start < len(value) and value[value_start] in {"'", '"'}:
+        closing = _closing_quote(value, value[value_start], value_start + 1)
+        if closing is not None:
+            return value_start + 1, closing
+    value_end_match = _ASSIGNMENT_VALUE_END_PATTERN.search(value, value_start)
+    value_end = value_end_match.start() if value_end_match else len(value)
+    return (value_start, value_end) if value_end > value_start else None
+
+
+def _redact_secret_assignments(value: str) -> str:
+    """Redact the values of secret key assignments in one forward scan.
+
+    Scanning resumes inside every value it keeps, so assignments nested there are still found without recursion.
+    """
+    parts: list[str] = []
+    copied_until = 0
+    search_start = 0
+    while prefix := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
+        search_start = prefix.end()
+        key = prefix.group("key")
+        if not _is_secret_key(key):
+            continue
+        span = _assignment_value_span(value, prefix.end())
+        if span is None:
+            continue
+        value_start, value_end = span
+        assigned = value[value_start:value_end].lower()
+        if _normalize_key(key) == "authorization" and (
+            assigned in {"basic", "bearer"} or assigned.startswith(f"bearer {REDACTED}")
+        ):
+            continue
+        parts.extend((value[copied_until:value_start], REDACTED))
+        copied_until = search_start = value_end
+    parts.append(value[copied_until:])
+    return "".join(parts)
+
+
+def _redaction_input(value: str) -> str:
+    return value[: MAX_AUDIT_TEXT_LENGTH + _REDACTION_LOOKAHEAD_CHARS]
+
+
+def _truncate_audit_text(value: str) -> str:
+    if len(value) <= MAX_AUDIT_TEXT_LENGTH:
+        return value
+    return value[: MAX_AUDIT_TEXT_LENGTH - len(TRUNCATED)] + TRUNCATED
 
 
 def _redact_url(value: str) -> str:
@@ -183,7 +214,7 @@ def _redact_url(value: str) -> str:
 def _redact_query_fragment(value: str) -> str:
     query_items: list[tuple[str, str]] = []
     changed = False
-    for key, item in parse_qsl(value, keep_blank_values=True):
+    for key, item in parse_qsl(_redaction_input(value), keep_blank_values=True):
         if _is_redacted_query_key(key):
             query_items.append((key, REDACTED))
             changed = True
@@ -191,28 +222,30 @@ def _redact_query_fragment(value: str) -> str:
             query_items.append((key, item))
     if not changed:
         return redact_audit_text(value)
-    return urlencode(query_items, doseq=True, safe="*")
+    return _truncate_audit_text(urlencode(query_items, doseq=True, safe="*"))
 
 
 def redact_audit_text(value: str) -> str:
-    """Redact credential-bearing values from free-form audit text."""
-    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
+    """Redact credential-bearing values from free-form audit text and cut it to `MAX_AUDIT_TEXT_LENGTH`."""
+    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), _redaction_input(value))
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
-    return _SECRET_ASSIGNMENT_PATTERN.sub(_redact_secret_assignment, redacted)
+    return _truncate_audit_text(_redact_secret_assignments(redacted))
 
 
-def _redact_audit_details(value: Any, parent_key: str | None) -> Any:  # noqa: ANN401
+def _redact_audit_details(value: Any, parent_key: str | None, depth: int) -> Any:  # noqa: ANN401
+    if depth >= MAX_AUDIT_DEPTH:
+        return TRUNCATED
     if isinstance(value, dict):
         return {
             str(key): REDACTED
             if _is_secret_key(key) or (_is_query_container(parent_key) and _is_redacted_query_key(key))
-            else _redact_audit_details(item, parent_key=str(key))
+            else _redact_audit_details(item, parent_key=str(key), depth=depth + 1)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact_audit_details(item, parent_key=parent_key) for item in value]
+        return [_redact_audit_details(item, parent_key=parent_key, depth=depth + 1) for item in value]
     if isinstance(value, str):
         if _is_query_container(parent_key):
             return _redact_query_fragment(value)
@@ -221,8 +254,8 @@ def _redact_audit_details(value: Any, parent_key: str | None) -> Any:  # noqa: A
 
 
 def redact_audit_details(value: Any) -> Any:  # noqa: ANN401
-    """Recursively redact credential-bearing fields from audit details."""
-    return _redact_audit_details(value, parent_key=None)
+    """Recursively redact credential-bearing fields from audit details, bounding text length and nesting depth."""
+    return _redact_audit_details(value, parent_key=None, depth=0)
 
 
 def create_audit_log(

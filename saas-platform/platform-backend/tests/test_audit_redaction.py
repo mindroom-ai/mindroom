@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import Mock
 
 import pytest
 from backend.middleware import audit_logging
 from backend.middleware.audit_logging import AuditLoggingMiddleware
-from backend.utils.audit import REDACTED, redact_audit_details
+from backend.utils.audit import (
+    MAX_AUDIT_DEPTH,
+    MAX_AUDIT_TEXT_LENGTH,
+    REDACTED,
+    TRUNCATED,
+    redact_audit_details,
+    redact_audit_text,
+)
 
 
 def test_redact_audit_details_recurses_and_matches_case_insensitive_headers() -> None:
@@ -100,3 +108,61 @@ async def test_audit_log_persists_non_object_json_bodies(monkeypatch: pytest.Mon
     assert inserted["details"]["body"] == [f"Authorization: Bearer {REDACTED}"]
     assert inserted["details"]["path"] == "/api/accounts"
     assert inserted["details"]["status_code"] == 200
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("a" * 1_000_000, id="delimiter-free-run"),
+        pytest.param("A" * 1_000_000, id="uppercase-run"),
+        pytest.param("a=" * 500_000, id="chained-assignments"),
+        pytest.param("a='" * 300_000, id="chained-quoted-assignments"),
+        pytest.param("token=x," * 125_000, id="many-secret-assignments"),
+    ],
+)
+def test_redact_audit_details_is_bounded_on_adversarial_strings(text: str) -> None:
+    """Redaction must stay fast on long attacker-controlled strings and keys."""
+    started = time.perf_counter()
+    redacted = redact_audit_details({"value": text, text: "key"})
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1
+    assert all(len(value) <= MAX_AUDIT_TEXT_LENGTH for value in redacted.values())
+
+
+def test_redact_audit_text_truncates_after_redacting_the_cut_region() -> None:
+    """Long audit text is truncated, and a secret that straddles the cut is still masked."""
+    text = "x" * (MAX_AUDIT_TEXT_LENGTH - 20) + " password=" + "s" * 100 + " tail"
+
+    redacted = redact_audit_text(text)
+
+    assert len(redacted) == MAX_AUDIT_TEXT_LENGTH
+    assert redacted.endswith(TRUNCATED)
+    assert "s" * 5 not in redacted
+
+
+def test_redact_audit_text_redacts_secret_assignments_after_non_secret_keys() -> None:
+    """Secret assignments nested behind ordinary keys are still masked without recursion."""
+    assert redact_audit_text("note: password=pw-secret") == f"note: password={REDACTED}"
+    assert "pw-secret" not in redact_audit_text('config="password=pw-secret", ok=1')
+    assert redact_audit_text('{"password": "pw-secret", "name": "kept"}') == (
+        f'{{"password": "{REDACTED}", "name": "kept"}}'
+    )
+    assert "tok-secret" not in redact_audit_text("a=" * 1_000 + "token=tok-secret")
+
+
+def test_redact_audit_details_bounds_nesting_depth() -> None:
+    """Deeply nested details are cut off instead of recursing without limit."""
+    nested: object = "leaf"
+    for _ in range(MAX_AUDIT_DEPTH * 4):
+        nested = [nested]
+
+    redacted = redact_audit_details({"nested": nested})
+
+    depth = 0
+    current = redacted["nested"]
+    while isinstance(current, list):
+        current = current[0]
+        depth += 1
+    assert current == TRUNCATED
+    assert depth < MAX_AUDIT_DEPTH
