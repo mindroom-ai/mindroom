@@ -367,7 +367,8 @@ BEGIN
         deletion_reason = reason,
         deletion_requested_by = COALESCE(requested_by, target_account_id),
         deletion_requested_at = NOW(),
-        status = 'deleted',
+        -- A suspension outlives the deletion request, so restoring the account cannot lift it.
+        status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END,
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NULL;
@@ -405,6 +406,8 @@ BEGIN
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NOT NULL
+    -- Only what soft delete set is undone; a suspended account stays suspended and pending deletion.
+    AND status = 'deleted'
     -- After the grace period, cleanup may already have uninstalled everything the account ran.
     AND deleted_at > NOW() - INTERVAL '7 days';
 

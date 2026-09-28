@@ -24835,6 +24835,7 @@ An account pending deletion never runs instances, whatever Stripe reports, so th
 Cancelling the deletion (`POST /my/gdpr/cancel-deletion`) restores only the account; its instances restart once a subscription is entitled again, which for a cancelled Stripe subscription means a new checkout.
 After the 7-day grace period, cancelling returns `409` and `restore_account` refuses, because the nightly job then cancels any remaining Stripe subscription and uninstalls every instance of the account (Helm release, PVCs, instance Secrets, and the platform OpenRouter key) before `hard_delete_account` deletes the account's rows.
 `hard_delete_account` skips an account that is no longer pending deletion.
+Soft delete keeps a `suspended` status and `restore_account` only restores a `deleted` one, so cancelling a deletion never lifts a suspension.
 If a teardown or the hard delete fails, the account keeps its rows, the run is recorded as failed with the error, and the next run retries.
 Payment and webhook-event rows still reference the account and make `hard_delete_account` fail for accounts that ever had them, so such accounts stay pending deletion with their instances already uninstalled.
 Keep `cleanupScheduler.teardownGraceDays` at 7 or more, because a held instance's teardown date also applies while its account is pending deletion.

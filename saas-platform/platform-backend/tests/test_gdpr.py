@@ -69,8 +69,8 @@ def _function_body(sql: str, name: str) -> str:
 
 
 def test_account_deletion_functions_change_only_the_account() -> None:
-    """Soft delete and restore change only the account, restore ends with the grace period, and hard delete
-    spares a restored account."""
+    """Soft delete and restore change only the account, restore ends with the grace period and never lifts a
+    suspension, and hard delete spares a restored account."""
     migration = (MIGRATIONS_DIR / "005_account_deletion_and_instance_uniqueness.sql").read_text(encoding="utf-8")
     baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
 
@@ -83,7 +83,13 @@ def test_account_deletion_functions_change_only_the_account() -> None:
             assert "UPDATE accounts" in body
             assert "subscriptions" not in body
             assert "instances" not in body
-        assert "AND deleted_at > NOW() - INTERVAL '7 days'" in _function_body(sql, "restore_account")
+        restore = _function_body(sql, "restore_account")
+        assert "AND deleted_at > NOW() - INTERVAL '7 days'" in restore
+        # A suspension is never lifted: soft delete keeps it, and restore only undoes its own 'deleted' status.
+        assert "AND status = 'deleted'" in restore
+        assert "status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END" in _function_body(
+            sql, "soft_delete_account"
+        )
         assert "deleted_at IS NOT NULL) THEN" in _function_body(sql, "hard_delete_account")
 
 

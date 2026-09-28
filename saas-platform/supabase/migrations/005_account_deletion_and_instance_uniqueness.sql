@@ -10,7 +10,8 @@ BEGIN;
 -- The backend cancels Stripe billing and the instance lifecycle stops the account's instances
 -- when deletion is requested; restoring the account resumes them only while Stripe or the
 -- lifecycle says the subscription is entitled. Restore is refused after the 7-day grace period,
--- because cleanup then uninstalls the account's instances before deleting its rows.
+-- because cleanup then uninstalls the account's instances before deleting its rows, and it only
+-- undoes what soft delete set, so a suspension that lands meanwhile is never lifted.
 CREATE OR REPLACE FUNCTION soft_delete_account(
     target_account_id UUID,
     reason TEXT DEFAULT 'user_request',
@@ -24,7 +25,8 @@ BEGIN
         deletion_reason = reason,
         deletion_requested_by = COALESCE(requested_by, target_account_id),
         deletion_requested_at = NOW(),
-        status = 'deleted',
+        -- A suspension outlives the deletion request, so restoring the account cannot lift it.
+        status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END,
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NULL;
@@ -60,6 +62,8 @@ BEGIN
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NOT NULL
+    -- Only what soft delete set is undone; a suspended account stays suspended and pending deletion.
+    AND status = 'deleted'
     -- After the grace period, cleanup may already have uninstalled everything the account ran.
     AND deleted_at > NOW() - INTERVAL '7 days';
 
