@@ -70,6 +70,14 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
     assert "exit 1" in steps[-1]["run"]
 
 
+def test_security_scan_installs_only_pinned_tools() -> None:
+    """A scan job must not pull whatever a PyPI name currently points to."""
+    steps = _load_workflow("security-scan.yml")["jobs"]["scan"]["steps"]
+    installs = [step["run"] for step in steps if step.get("run", "").startswith("pip install")]
+
+    assert installs == ["pip install pip-audit==2.10.0"]
+
+
 def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
     """The pull-request build job must not be able to mint an OIDC token or publish Pages."""
     workflow = _load_workflow("docs.yml")
