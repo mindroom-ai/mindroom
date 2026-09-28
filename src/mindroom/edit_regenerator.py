@@ -451,7 +451,10 @@ class EditRegenerator:
                 requester_id=requester,
             )
             if message is None:
-                updated = await self.deps.turn_store.mark_source_redacted(source)
+                updated = await self.deps.turn_store.mark_source_redacted(
+                    source,
+                    room_id=record.conversation_target.room_id,
+                )
                 assert updated is not None
                 record = updated
                 continue

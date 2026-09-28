@@ -1088,7 +1088,7 @@ async def test_redacted_pending_turn_settles_deferred_source_before_response(
     async def record_then_redact(turn_record: TurnRecord) -> TurnRecord | None:
         pending_turn = await real_record_pending(turn_record)
         assert pending_turn is not None
-        return await harness.turn_store.mark_source_redacted(event.event_id)
+        return await harness.turn_store.mark_source_redacted(event.event_id, room_id=room.room_id)
 
     monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_redact)
 
@@ -1143,7 +1143,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     real_generate_response = harness.runner.generate_response
 
     async def redact_before_locked_check(request: ResponseRequest) -> str | None:
-        await harness.turn_store.mark_source_redacted(relay_event_ids[0])
+        await harness.turn_store.mark_source_redacted(relay_event_ids[0], room_id=room.room_id)
         return await real_generate_response(request)
 
     monkeypatch.setattr(harness.runner, "generate_response", redact_before_locked_check)
@@ -4308,7 +4308,7 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
 
     async def send_ack_then_redact(request: SendTextRequest) -> str:
         harness.gateway.sent.append(request)
-        marked = await harness.turn_store.mark_source_redacted(selection_event_id)
+        marked = await harness.turn_store.mark_source_redacted(selection_event_id, room_id=room.room_id)
         assert marked is not None
         assert marked.conversation_target is not None
         assert marked.history_scope is not None

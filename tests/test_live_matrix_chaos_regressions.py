@@ -1457,8 +1457,9 @@ async def test_runtime_redaction_observer_records_before_original(
     cancelled = asyncio.CancelledError("original cancelled")
     result = TurnRecord.create(("$edit",), completed=False)
 
-    async def original(self: TurnStore, target: str) -> TurnRecord:
+    async def original(self: TurnStore, target: str, *, room_id: str) -> TurnRecord:
         assert self is store
+        assert room_id == "!room:example"
         assert json.loads(path.read_text())["target_event_id"] == target
         calls.append(target)
         if outcome == "error":
@@ -1475,10 +1476,10 @@ async def test_runtime_redaction_observer_records_before_original(
         if outcome == "append_failure":
             path.mkdir()
         with pytest.raises(SystemExit, match="redaction observation"):
-            store.mark_source_redacted("$edit").close()
+            store.mark_source_redacted("$edit", room_id="!room:example").close()
         assert not calls
         return
-    operation = store.mark_source_redacted("$edit")
+    operation = store.mark_source_redacted("$edit", room_id="!room:example")
     assert not calls
     assert json.loads(path.read_text()) == {
         "agent_name": "general",
@@ -1507,14 +1508,14 @@ def test_real_runtime_child_installs_observer_across_generations(
     store = _redaction_observer_store()
     generation = 0
 
-    async def original(self: TurnStore, target: str) -> None:
+    async def original(self: TurnStore, target: str, *, room_id: str) -> None:
         assert self is store
-        assert target == "$edit"
+        assert (target, room_id) == ("$edit", "!room:example")
 
     def app() -> None:
         assert TurnStore.mark_source_redacted is not original
         assert json.loads(attestation.read_text())["runtime_redaction_observer"]["path"] == str(path)
-        asyncio.run(store.mark_source_redacted("$edit"))
+        asyncio.run(store.mark_source_redacted("$edit", room_id="!room:example"))
 
     monkeypatch.setattr(cli_main, "app", app)
     monkeypatch.setattr(live_fuzz.sys, "argv", ["harness"])
@@ -1565,7 +1566,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
     path.touch()
     monkeypatch.setattr(TurnStore, "mark_source_redacted", TurnStore.mark_source_redacted)
     live_fuzz._install_runtime_redaction_observer(path)
-    await store.mark_source_redacted("$edit")
+    await store.mark_source_redacted("$edit", room_id="!room:example")
     assert json.loads(path.read_text())["already_redacted"] is True
     assert live_fuzz._runtime_redaction_cutoff(path, "general@@general:example", "$edit") is None
 
