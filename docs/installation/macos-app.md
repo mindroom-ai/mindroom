@@ -138,7 +138,7 @@ Replacing the signed release with a local build can invalidate the saved approva
 In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
 MindRoom itself is never offered in the application list, because its windows grant shell auto-approval and control leases.
-Controlling a terminal, a scripting or automation app, or the primary screen amounts to full account access without shell approval; see [Security Model](../tools/desktop.md#security-model).
+Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you hands the agent your own authority; see [Security Model](../tools/desktop.md#security-model).
 Application observation and control are separate choices.
 **Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
 **Revoke Now** immediately removes input authority while observation continues; **Stop Access** ends the bridge session.

@@ -69,10 +69,12 @@ MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
 
-!!! warning "Some allowlisted apps amount to full account access"
+!!! warning "Some allowlisted apps give an agent your own authority"
     Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
     The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
-    Allowlist these only when you would also approve every shell command the agent could send.
+    Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
+    Allowlist these only when you would also approve everything the agent could run or send as you.
+
 The local bridge executes actions serially and revalidates each target immediately before input.
 Matrix polling, durable admission, and response delivery continue independently during slow actions.
 Cloud configuration cannot enable control, extend a running lease, change any local allowlist or selected folder, enable shell commands, or approve one.
@@ -180,7 +182,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
 The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
-The macOS card starts each line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads.
+The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
 The cloud call waits up to 120 seconds, the command's lifetime, and a request that nobody approves in time expires without running.
@@ -484,7 +486,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 
 Add only the applications needed for the current task.
 Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
-Controlling `primary-screen`, a terminal emulator, or a scripting or automation app amounts to full account access without shell approval, as the [Security Model](#security-model) warning explains.
+Controlling `primary-screen`, a terminal emulator, a scripting or automation app, or a browser or Matrix client signed in as you hands the agent your own authority, as the [Security Model](#security-model) warning explains.
 `primary-screen` has no semantic elements.
 On Linux, `primary-screen` is currently the only usable state target.
 
