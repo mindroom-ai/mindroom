@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from backend.deps import ensure_supabase, verify_user, verify_user_allow_deleted
+from backend.deps import ensure_supabase, invalidate_account_auth_cache, verify_user, verify_user_allow_deleted
 from backend.models import (
     GdprCancelDeletionResponse,
     GdprConsentResponse,
@@ -161,6 +161,7 @@ async def request_account_deletion(
     sb.rpc(
         "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
     ).execute()
+    invalidate_account_auth_cache(account_id)
 
     return {
         "status": "deletion_scheduled",
