@@ -215,6 +215,32 @@ async def test_destination_policy_and_owned_tunnel_cleanup(private: bool, loopba
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("loopback", [False, True])
+async def test_ipv6_literal_domain_names_follow_destination_policy(loopback: bool) -> None:
+    """Chromium sends IPv6 URL hosts unbracketed as SOCKS domain names, which the policy then decides."""
+    try:
+        server = await asyncio.start_server(lambda _reader, writer: writer.close(), "::1", 0)
+    except OSError:
+        pytest.skip("IPv6 loopback is unavailable")
+    port = server.sockets[0].getsockname()[1]
+    proxy = BrowserDestinationProxy(allow_loopback=loopback)
+    await proxy.start()
+    try:
+        for host in ["::1", "0:0:0:0:0:0:0:1"]:
+            _reader, writer, status = await socks5_connect(proxy.endpoint, host, port)
+            assert (status == 0) is loopback
+            writer.close()
+            await writer.wait_closed()
+        for host in ["fe80::1%eth0", "[::1]", "::1/128"]:
+            with pytest.raises(asyncio.IncompleteReadError):
+                await socks5_connect(proxy.endpoint, host, port)
+    finally:
+        await proxy.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_validated_numeric_address_is_dialed_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """The proxy never resolves the original hostname again at connection time."""
     resolved = []

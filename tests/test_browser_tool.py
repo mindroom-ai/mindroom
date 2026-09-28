@@ -1528,6 +1528,30 @@ async def test_page_websockets_follow_browser_destination_policy(
         await tool.aclose()
 
 
+@pytest.mark.asyncio
+async def test_computer_browser_opens_ipv6_loopback_preview(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The relay accepts the unbracketed IPv6 host Chromium sends for an http://[v6]/ URL."""
+    app = web.Application()
+    app.router.add_get("/", lambda _request: web.Response(text="<title>IPv6 preview</title>", content_type="text/html"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "::1", 0)
+    try:
+        await site.start()
+    except OSError:
+        await runner.cleanup()
+        pytest.skip("IPv6 loopback is unavailable")
+    assert site._server is not None
+    port = site._server.sockets[0].getsockname()[1]
+    tool = _headless_real_browser("computer", monkeypatch, tmp_path)
+    try:
+        result = json.loads(await tool.browser(action="open", targetUrl=f"http://[::1]:{port}/"))
+        assert result["title"] == "IPv6 preview"
+    finally:
+        await tool.aclose()
+        await runner.cleanup()
+
+
 class _DatagramRecorder(asyncio.DatagramProtocol):
     """Record every datagram a page manages to send to a loopback UDP service."""
 

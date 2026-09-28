@@ -142,7 +142,14 @@ class BrowserDestinationProxy:
         if kind == 3:
             size = (await reader.readexactly(1))[0]
             host = (await reader.readexactly(size)).decode("ascii")
-            if not host or any(character in host for character in "/\\\x00:%[]"):
+            try:
+                # Chromium names IPv6 URL hosts unbracketed; zone-scoped addresses stay refused.
+                literal: ipaddress.IPv6Address | None = ipaddress.IPv6Address(host)
+            except ValueError:
+                literal = None
+            if literal is not None and literal.scope_id is None:
+                host = literal.compressed
+            elif not host or any(character in host for character in "/\\\x00:%[]"):
                 msg = "Invalid browser proxy hostname."
                 raise ValueError(msg)
         elif kind in (1, 4):
