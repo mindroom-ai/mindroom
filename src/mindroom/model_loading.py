@@ -370,10 +370,12 @@ def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> s
     return model_creds.get("api_key") if model_creds else None
 
 
-# Credentials the provider model classes accept in place of ``api_key``.
+# Settings the provider model classes accept in place of ``api_key``; Gemini with
+# ``vertexai: true`` authenticates with Google Cloud credentials instead.
 _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
     "anthropic": ("auth_token",),
     "azure": ("azure_ad_token", "azure_ad_token_provider"),
+    "google": ("vertexai",),
 }
 
 

@@ -107,6 +107,8 @@ def test_status_accepts_key_in_model_config(client: TestClient) -> None:
         {"provider": "anthropic", "id": "claude-sonnet-5", "extra_kwargs": {"auth_token": "anthropic-oauth-token"}},
         {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_ad_token": "azure-ad-token"}},
         {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_ad_token_provider": "token-provider"}},
+        {"provider": "gemini", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}},
+        {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}},
         {"provider": "bedrock_claude", "id": "anthropic.claude-sonnet-5"},
         {"provider": "vertexai_claude", "id": "claude-sonnet-5"},
         {"provider": "codex", "id": "gpt-6-astra"},
