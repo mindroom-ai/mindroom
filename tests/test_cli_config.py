@@ -1063,7 +1063,7 @@ class TestConfigInit:
         backend_match = re.search(r"^MINDROOM_API_KEY=(.+)$", content, flags=re.MULTILINE)
         assert backend_match is not None
         assert backend_match.group(1)
-        # VITE_API_KEY should NOT be in the template (auth is handled at proxy layer)
+        # VITE_API_KEY should NOT be in the template (the dashboard signs in through its login page)
         assert "VITE_API_KEY" not in content
 
     def test_init_force_overwrites_existing_env(self, tmp_path: Path) -> None:
@@ -1258,6 +1258,10 @@ class TestConfigInit:
         assert len(dashboard_keys) == 1
         assert len(dashboard_keys[0]) >= 32
         assert env_path.stat().st_mode & 0o777 == 0o600
+        # A MindRoom service already running without a key reads .env only at startup.
+        output = normalize_console_output(result.output)
+        assert f"Generated MINDROOM_API_KEY in {env_path}" in output
+        assert "restart" in output
 
     def test_init_keeps_explicitly_empty_dashboard_key(self, tmp_path: Path) -> None:
         """An empty MINDROOM_API_KEY is the operator's open-access choice, so setup leaves it empty."""
@@ -1272,6 +1276,7 @@ class TestConfigInit:
 
         assert result.exit_code == 0, result.output
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
+        assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
     def test_init_no_input_self_hosted_defaults_to_openai_without_prompting(self, tmp_path: Path) -> None:
         """Self-hosted config init --no-input skips the provider prompt and uses OpenAI."""
@@ -2712,23 +2717,25 @@ class TestRunApiFlags:
         assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
 
     @pytest.mark.parametrize(
-        ("args", "env", "warns"),
+        ("args", "env", "warning_address"),
         [
-            ((), {}, True),
-            (("--api-host", "192.0.2.10"), {}, True),
-            ((), {"MINDROOM_API_KEY": "dashboard-key"}, False),
-            ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, False),
+            ((), {}, "0.0.0.0:8765"),
+            (("--api-host", "192.0.2.10"), {}, "192.0.2.10:8765"),
+            (("--api-host", "::"), {}, "[::]:8765"),
+            ((), {"MINDROOM_API_KEY": "dashboard-key"}, None),
+            ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, None),
             (
                 (),
                 {
                     "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
                     "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-User",
                 },
-                False,
+                None,
             ),
-            (("--api-host", "127.0.0.1"), {}, False),
-            (("--api-host", "localhost"), {}, False),
-            (("--no-api",), {}, False),
+            (("--api-host", "127.0.0.1"), {}, None),
+            (("--api-host", "::1"), {}, None),
+            (("--api-host", "localhost"), {}, None),
+            (("--no-api",), {}, None),
         ],
     )
     def test_run_warns_when_dashboard_api_listens_beyond_loopback_without_credential(
@@ -2737,7 +2744,7 @@ class TestRunApiFlags:
         monkeypatch: pytest.MonkeyPatch,
         args: tuple[str, ...],
         env: dict[str, str],
-        warns: bool,
+        warning_address: str | None,
     ) -> None:
         """Without a dashboard credential, anyone who reaches a non-loopback bind address administers MindRoom."""
         for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
@@ -2750,10 +2757,9 @@ class TestRunApiFlags:
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
-        assert ("without MINDROOM_API_KEY" in output) is warns
-        if warns:
-            bind_host = args[1] if args else "0.0.0.0"  # noqa: S104
-            assert f"{bind_host}:8765" in output
+        assert ("without MINDROOM_API_KEY" in output) is (warning_address is not None)
+        if warning_address is not None:
+            assert f"listens on {warning_address} without" in output
             assert str((tmp_path / ".env").resolve()) in output
 
     def test_run_no_api_flag(self, tmp_path: Path) -> None:

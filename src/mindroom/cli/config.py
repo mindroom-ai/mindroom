@@ -207,15 +207,21 @@ def _write_env_file(
             _PUBLIC_HOSTED_ENV_DEFAULTS,
             title="Hosted Matrix defaults for mindroom.chat",
         )
+        if changed:
+            console.print(f"[green]Env file updated:[/green] {env_path}")
         # `mindroom run` serves the dashboard on every interface by default, so a kept
         # .env without a dashboard key gets one; an explicitly empty key stays empty.
-        changed |= _append_missing_env_defaults(
+        if _append_missing_env_defaults(
             env_path,
             (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
             title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
-        )
-        if changed:
-            console.print(f"[green]Env file updated:[/green] {env_path}")
+        ):
+            # A service already running without a key reads .env only at startup.
+            console.print(
+                f"[green]Generated MINDROOM_API_KEY in {env_path}[/green]; "
+                "restart MindRoom if it is already running to apply it.",
+            )
+            changed = True
         if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
             upsert_env_values(env_path, {env_key: provider_api_key})
             console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
@@ -1238,9 +1244,7 @@ MATRIX_HOMESERVER={matrix_homeserver}
 {storage_root_block}{provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
-# When set, all dashboard requests require: Authorization: Bearer <key>
-# The auth header is injected at the proxy layer (nginx / Vite dev server),
-# so the key never appears in the browser JS bundle.
+# The bundled dashboard's login page asks for it; API clients send `Authorization: Bearer <key>`.
 # Set it empty (MINDROOM_API_KEY=) to allow open access; `mindroom run` listens on
 # every interface by default, so do that only with `--api-host 127.0.0.1`.
 MINDROOM_API_KEY={api_key}

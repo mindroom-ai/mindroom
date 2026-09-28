@@ -247,12 +247,16 @@ class _ContextSwapLock:
         return None
 
 
+def _supabase_settings(url: str | None, anon_key: str | None) -> auth._ApiAuthSettings:
+    return auth._ApiAuthSettings(supabase_url=url, supabase_anon_key=anon_key, account_id=None, mindroom_api_key=None)
+
+
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
     """Supabase auth should stay disabled when credentials are incomplete."""
     runtime_paths = _runtime_paths(tmp_path)
-    assert auth._init_supabase_auth(runtime_paths, None, None) is None
-    assert auth._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
-    assert auth._init_supabase_auth(runtime_paths, None, "anon-key") is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, "anon-key")) is None
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -276,7 +280,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
 
@@ -299,7 +303,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
@@ -335,7 +339,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
 
-    supabase_auth = auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+    supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert isinstance(supabase_auth, FakeClient)
     assert imported_modules == ["supabase", "supabase"]

@@ -165,11 +165,21 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
     )
 
 
+def _platform_auth_credentials(settings: _ApiAuthSettings) -> tuple[str, str] | None:
+    """Return the Supabase URL and anon key when platform authentication owns dashboard requests."""
+    if settings.supabase_url and settings.supabase_anon_key:
+        return settings.supabase_url, settings.supabase_anon_key
+    return None
+
+
 def dashboard_requires_credential(runtime_paths: RuntimePaths) -> bool:
     """Return whether dashboard requests need a credential instead of being authorized by reachability alone."""
     settings = _build_auth_settings(runtime_paths)
-    platform_auth = bool(settings.supabase_url and settings.supabase_anon_key)
-    return bool(settings.mindroom_api_key) or platform_auth or settings.trusted_upstream.enabled
+    return (
+        settings.trusted_upstream.enabled
+        or _platform_auth_credentials(settings) is not None
+        or bool(settings.mindroom_api_key)
+    )
 
 
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
@@ -232,11 +242,7 @@ def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
         state = ApiAuthState(
             runtime_paths=snapshot.runtime_paths,
             settings=settings,
-            supabase_auth=_init_supabase_auth(
-                snapshot.runtime_paths,
-                settings.supabase_url,
-                settings.supabase_anon_key,
-            ),
+            supabase_auth=_init_supabase_auth(snapshot.runtime_paths, settings),
             trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
         )
         api_state.snapshot = replace(snapshot, auth_state=state)
@@ -245,11 +251,11 @@ def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
 
 def _init_supabase_auth(
     runtime_paths: RuntimePaths,
-    supabase_url: str | None,
-    supabase_anon_key: str | None,
+    settings: _ApiAuthSettings,
 ) -> _SupabaseClientProtocol | None:
     """Initialize Supabase auth client when credentials are configured."""
-    if not supabase_url or not supabase_anon_key:
+    credentials = _platform_auth_credentials(settings)
+    if credentials is None:
         return None
 
     try:
@@ -266,7 +272,7 @@ def _init_supabase_auth(
             raise ImportError(msg) from None
         create_client = importlib.import_module("supabase").create_client
 
-    return cast("_SupabaseClientProtocol", create_client(supabase_url, supabase_anon_key))
+    return cast("_SupabaseClientProtocol", create_client(*credentials))
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -684,11 +690,7 @@ def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
             auth_state = ApiAuthState(
                 runtime_paths=current.runtime_paths,
                 settings=settings,
-                supabase_auth=_init_supabase_auth(
-                    current.runtime_paths,
-                    settings.supabase_url,
-                    settings.supabase_anon_key,
-                ),
+                supabase_auth=_init_supabase_auth(current.runtime_paths, settings),
                 trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
             )
             current = replace(current, auth_state=auth_state)
@@ -789,8 +791,7 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
     if auth_settings.trusted_upstream.enabled:
         return None
     if (
-        auth_settings.supabase_url
-        and auth_settings.supabase_anon_key
+        _platform_auth_credentials(auth_settings) is not None
         and auth_settings.platform_sso_url
         and auth_settings.platform_sso_secret
     ):

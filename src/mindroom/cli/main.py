@@ -289,8 +289,9 @@ def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_
 
     if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
         return
+    address_host = f"[{api_host}]" if ":" in api_host else api_host
     console.print(
-        f"[yellow]Warning:[/yellow] The dashboard API listens on {api_host}:{api_port} without MINDROOM_API_KEY, "
+        f"[yellow]Warning:[/yellow] The dashboard API listens on {address_host}:{api_port} without MINDROOM_API_KEY, "
         "so anyone who can reach that address can administer MindRoom.",
     )
     console.print(f"  Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.")
