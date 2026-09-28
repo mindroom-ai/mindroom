@@ -167,6 +167,18 @@ def restart_service() -> None:
     _print_service_action_result(manager.restart_service())
 
 
+def _service_pairing_required() -> bool:
+    """Whether the service's runtime still waits for this machine to be paired, so its API is not up yet."""
+    from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    try:
+        return local_pairing_required(resolve_primary_runtime_paths())
+    except ValueError:
+        # Incomplete credentials or an unreadable secret file stop the service with its own error.
+        return False
+
+
 @service_app.command("status")
 def service_status(
     logs: int = typer.Option(10, "--logs", "-l", help="Number of recent log lines to show. Use 0 to hide logs."),
@@ -179,6 +191,11 @@ def service_status(
         _console.print("MindRoom service: [dim]not installed[/dim]")
     elif status.running:
         _console.print(f"MindRoom service: [green]running[/green] (pid {status.pid})")
+        if _service_pairing_required():
+            _console.print(
+                "pairing: [yellow]required[/yellow] "
+                "(open the approval link from `mindroom service logs`, or run `mindroom connect`)",
+            )
     else:
         _console.print("MindRoom service: [yellow]installed but not running[/yellow]")
 

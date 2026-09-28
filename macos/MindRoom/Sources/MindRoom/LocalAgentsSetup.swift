@@ -22,6 +22,7 @@ struct LocalAgentsSetupSnapshot: Equatable {
     var runtimeInstalled: Bool { runtimePath != nil }
 
     func nextStep(service: MindRoomServiceState, check: CommandResult?) -> LocalAgentsSetupStep {
+        if service == .pairing { return .configure }
         if service == .running || service == .stopped { return .start }
         if !runtimeInstalled { return .install }
         if !configurationExists { return .configure }
@@ -46,6 +47,7 @@ struct LocalAgentsSetupSnapshot: Equatable {
         case .start:
             switch service {
             case .running: return .complete("Running")
+            case .pairing: return .needsAction("Waiting for chat account")
             case .stopped: return .idle("Stopped")
             case .notInstalled: return .idle("Not installed")
             case .runtimeMissing: return .idle("Finish setup")

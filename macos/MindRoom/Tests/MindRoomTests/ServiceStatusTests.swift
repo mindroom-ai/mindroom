@@ -14,6 +14,15 @@ final class ServiceStatusTests: XCTestCase {
         XCTAssertEqual(status.message, "MindRoom is running")
     }
 
+    func testParsesServiceWaitingForPairing() {
+        let status = MindRoomServiceStatus.parse(
+            "MindRoom service: running (pid 12345)\npairing: required (open the approval link from `mindroom service logs`, or run `mindroom connect`)"
+        )
+
+        XCTAssertEqual(status.state, .pairing)
+        XCTAssertEqual(status.message, "Connect your chat account to finish starting MindRoom.")
+    }
+
     func testParsesStoppedServiceStatus() {
         let status = MindRoomServiceStatus.parse("MindRoom service: installed but not running")
 
@@ -54,10 +63,10 @@ final class ServiceStatusTests: XCTestCase {
 }
 
 final class MindRoomCommandTests: XCTestCase {
-    func testPairCodeIsUppercasedAndTrimmed() {
-        let command = MindRoomCommand.pairHosted(pairCode: " abcd-efgh ")
+    func testPairHostedMapsToRuntimeAction() {
+        let command = MindRoomCommand.pairHosted
 
-        XCTAssertEqual(command.runtimeAction, .pairHosted(pairCode: "ABCD-EFGH"))
+        XCTAssertEqual(command.runtimeAction, .pairHosted)
     }
 
     func testMenuCommandsExposeTitles() {
@@ -71,7 +80,7 @@ final class MindRoomCommandTests: XCTestCase {
         let commands: [MindRoomCommand] = [
             .installRuntime, .updateRuntime, .installService, .startService, .stopService,
             .restartService, .initializeHostedConfig, .initializeSelfHostedConfig,
-            .pairHosted(pairCode: "ABCD-EFGH"),
+            .pairHosted,
         ]
         for command in commands {
             XCTAssertNotNil(command.successMessage, "\(command.title) has no success message")

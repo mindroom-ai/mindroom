@@ -19,7 +19,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         let runtime = MindRoomRuntime(homeURL: home, bundleURL: home, environment: [:])
         XCTAssertEqual(runtime.command(for: .checkSetup).arguments, ["mindroom", "doctor", "--config", config.path])
         XCTAssertEqual(runtime.command(for: .checkSetup).environment["MINDROOM_STORAGE_PATH"], storage.path)
-        XCTAssertEqual(runtime.command(for: .pairHosted(pairCode: "TEST")).environment["MINDROOM_CONFIG_PATH"], config.path)
+        XCTAssertEqual(runtime.command(for: .pairHosted).environment["MINDROOM_CONFIG_PATH"], config.path)
         XCTAssertTrue(runtime.localSetupSnapshot().configurationExists)
         // Computer access keeps its independent configuration binding.
         XCTAssertEqual(runtime.desktopHelperInvocation().arguments, ["--config", home.appendingPathComponent(".mindroom/config.yaml").path])

@@ -47,7 +47,8 @@ last non-deferred tool.
 
 The hook's third job is history repair: replayed tool-search results are
 stripped down to the request schema, references to tools absent from the
-current request are removed, and search uses missing their result are removed.
+current request are removed, search uses missing their result are removed,
+and response citations are dropped from replayed assistant text blocks.
 These response shapes otherwise produce a 400 on the next request. This is why
 the client proxy is installed unconditionally — the ladder and defer tagging
 gate themselves per request, but a cache-disabled model with no deferred tools
@@ -59,6 +60,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.agno_compat_claude import request_kwargs_without_replayed_citations
 from mindroom.agno_compat_model_hooks import install_client_factories
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.hooks.enrichment import is_transient_context
@@ -670,6 +672,7 @@ def prepare_claude_request_kwargs(
 ) -> dict[str, Any]:
     """Apply MindRoom's wire transformations to one Claude request payload."""
     prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
         _model_deferred_tool_names(model),

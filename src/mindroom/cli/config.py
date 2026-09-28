@@ -285,11 +285,6 @@ def _print_config_init_next_steps(
     if env_changed:
         env_hint = _config_init_env_hint(matrix_server, selected_preset)
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
-    if matrix_server == "mindroom.chat":
-        console.print(
-            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
-            "Pair with hosted Matrix (get code from chat.mindroom.chat)",
-        )
     if selected_preset == "ollama":
         console.print(f"  [cyan]ollama pull {OLLAMA_GEMMA}[/cyan]         Pull the default local model")
         console.print(f"  [cyan]ollama pull {OLLAMA_QWEN}[/cyan]   Pull the larger local model option")
@@ -303,6 +298,8 @@ def _print_config_init_next_steps(
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
+    if matrix_server == "mindroom.chat":
+        console.print("  On first run, MindRoom prints a link to approve with your MindRoom Chat account.")
 
 
 def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
@@ -1106,12 +1103,12 @@ def _env_template(
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
-            "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
+            "# Hosted provisioning API; lets `mindroom run` pair with your MindRoom Chat account\n"
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
             "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
             "MINDROOM_NAMESPACE=\n\n"
-            "# Required for homeservers that gate bot registration (recommended for mindroom.chat)\n"
-            "# Keep this secret; do not commit real values.\n"
+            "# Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat; pairing replaces it.\n"
+            "# Setting any token skips pairing. Keep real values secret; do not commit them.\n"
             "MATRIX_REGISTRATION_TOKEN="
         )
     else:

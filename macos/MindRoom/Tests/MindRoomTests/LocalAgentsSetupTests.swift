@@ -62,4 +62,11 @@ final class LocalAgentsSetupTests: XCTestCase {
         try Data("SYNTHETIC_TEST=true\n".utf8).write(to: home.appendingPathComponent(".mindroom/.env"))
         XCTAssertNotEqual(after.configurationStamp, runtime.localSetupSnapshot().configurationStamp)
     }
+
+    func testServiceWaitingForPairingLeadsToConnectAccount() {
+        let setup = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", configurationExists: true)
+        XCTAssertEqual(setup.nextStep(service: .pairing, check: nil), .configure)
+        XCTAssertEqual(setup.progress(for: .start, service: .pairing, check: nil), .needsAction("Waiting for chat account"))
+        XCTAssertFalse(setup.canStart(service: .pairing))
+    }
 }

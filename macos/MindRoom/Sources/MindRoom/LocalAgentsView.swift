@@ -6,8 +6,6 @@ struct LocalAgentsView: View {
     @State private var step = LocalAgentsSetupStep.install
     @State private var choseInitialStep = false
     @State private var showChatSetup = false
-    @State private var pairCode = ""
-    @FocusState private var pairCodeFocused: Bool
 
     private var state: MindRoomServiceState { runner.serviceStatus.state }
     private var setup: LocalAgentsSetupSnapshot { runner.localSetup }
@@ -73,6 +71,7 @@ struct LocalAgentsView: View {
         guard runner.hasRefreshedStatus else { return "Checking this Mac…" }
         switch state {
         case .running: return "Local agents service running"
+        case .pairing: return "Waiting for your chat account"
         case .stopped: return "Local agents service stopped"
         case .notInstalled: return "Runtime installed · Background service not installed"
         case .runtimeMissing: return "Install the local-agent runtime"
@@ -84,6 +83,7 @@ struct LocalAgentsView: View {
         guard runner.hasRefreshedStatus else { return "Looking for the runtime, configuration, and background service." }
         switch state {
         case .running: return "The process is running on this Mac. Open Chat or Dashboard to check your agents."
+        case .pairing: return "The service is waiting for approval. Choose Connect Account in step 2 to approve this Mac in MindRoom Chat."
         case .stopped: return "The service is installed. Choose Start when you want your agents to run."
         case .notInstalled:
             return setup.configurationExists
@@ -130,15 +130,10 @@ struct LocalAgentsView: View {
                 if setup.configurationExists {
                     DisclosureGroup("Connect or reconnect your chat account", isExpanded: $showChatSetup) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Open MindRoom Chat, sign in, then open Local MindRoom in the chat sidebar to generate a pair code. Skip pairing if this configuration is already connected.")
-                            Button("Open MindRoom Chat") { runner.run(.openHostedChat) }
-                            HStack {
-                                SecureField("Pair code", text: $pairCode).textFieldStyle(.roundedBorder)
-                                    .focused($pairCodeFocused)
-                                    .frame(maxWidth: 240).onSubmit(pair)
-                                Button("Pair Account", action: pair)
-                                    .disabled(busy || !setup.runtimeInstalled || !setup.configurationExists || pairCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
+                            Text("Your browser opens MindRoom Chat. Sign in if needed and click Approve; this finishes when you do, or after 10 minutes. Skip this if this configuration is already connected.")
+                            Button("Connect Account") { runner.run(.pairHosted) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(busy || !setup.runtimeInstalled || !setup.configurationExists)
                         }.padding(.top, 8)
                     }
                     Divider()
@@ -192,7 +187,14 @@ struct LocalAgentsView: View {
         AppSectionCard {
             Label("Background service on this Mac", systemImage: "cpu").font(.headline)
             Text(runner.serviceStatus.message)
-            if state == .running {
+            if state == .pairing {
+                Text(MindRoomServiceState.dashboardAfterPairingHint).font(.callout).foregroundStyle(.secondary)
+                HStack {
+                    Button("Connect Account") { runner.run(.pairHosted) }.buttonStyle(.borderedProminent).disabled(busy)
+                    Spacer()
+                    Button("Stop Agents") { runner.run(.stopService) }.disabled(busy)
+                }
+            } else if state == .running {
                 HStack {
                     Button("Open Chat") { runner.run(.openHostedChat) }.buttonStyle(.borderedProminent)
                     Button("Open Dashboard") { runner.run(.openDashboard) }
@@ -236,13 +238,5 @@ struct LocalAgentsView: View {
             Text("Configuration: \(path)").font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary).textSelection(.enabled)
         }
-    }
-
-    private func pair() {
-        let code = pairCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !code.isEmpty, !busy, setup.runtimeInstalled, setup.configurationExists else { return }
-        pairCodeFocused = false
-        pairCode = ""
-        runner.run(.pairHosted(pairCode: code))
     }
 }

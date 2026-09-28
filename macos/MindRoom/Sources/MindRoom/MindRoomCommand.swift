@@ -11,7 +11,7 @@ enum MindRoomCommand: Equatable {
     case checkSetup
     case initializeHostedConfig
     case initializeSelfHostedConfig
-    case pairHosted(pairCode: String)
+    case pairHosted
     case openDashboard
     case openHostedChat
     case openConfigFolder
@@ -67,7 +67,7 @@ enum MindRoomCommand: Equatable {
         case .restartService:
             return "The MindRoom service was restarted."
         case .initializeHostedConfig:
-            return "Configuration is ready. Existing files were kept. Open MindRoom Chat, sign in, and use Local MindRoom in the chat sidebar to generate a pair code."
+            return "Configuration is ready. Existing files were kept. Click Connect Account to approve this Mac in MindRoom Chat."
         case .initializeSelfHostedConfig:
             return "Configuration is ready. Edit your configuration and .env for your Matrix server and model provider, then install and start agents."
         case .pairHosted:
@@ -101,8 +101,8 @@ enum MindRoomCommand: Equatable {
             return .initializeHostedConfig
         case .initializeSelfHostedConfig:
             return .initializeSelfHostedConfig
-        case let .pairHosted(pairCode):
-            return .pairHosted(pairCode: pairCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
+        case .pairHosted:
+            return .pairHosted
         case .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }

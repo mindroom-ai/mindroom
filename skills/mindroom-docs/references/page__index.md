@@ -38,12 +38,10 @@ uvx mindroom config init
 # Add model auth (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)
 $EDITOR ~/.mindroom/.env
 
-# Generate pair code in https://chat.mindroom.chat:
-# Settings -> Local MindRoom -> Generate Pair Code
-uvx mindroom connect --pair-code ABCD-EFGH
-
-# Start MindRoom
+# Start MindRoom (pairing happens automatically on first run)
 uvx mindroom run
+# Open the printed link or scan the QR code to approve pairing,
+# or enter the code in MindRoom Chat → Settings → Local MindRoom
 ```
 
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.

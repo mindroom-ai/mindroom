@@ -49,7 +49,8 @@ The app detects the command-line runtime separately from the background service:
 2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
    The configuration path is shown in the panel.
    **Prepare Configuration** creates missing files and keeps existing configuration and credentials.
-   Expand **Connect or reconnect your chat account**, open MindRoom Chat, and use **Local MindRoom** in the chat sidebar to generate a pair code when pairing is needed.
+   Expand **Connect or reconnect your chat account** and choose **Connect Account** to open your browser on MindRoom Chat.
+   Sign in if needed and click **Approve**; this completes when you approve or after 10 minutes.
    Add AI provider credentials to the adjacent `.env`, or configure a local model, using **Open Config Folder**.
 3. **Check** runs `mindroom doctor` against the displayed configuration and the installed service's saved storage path.
    It checks configuration, providers, Matrix connectivity, and storage.
@@ -60,6 +61,7 @@ The app detects the command-line runtime separately from the background service:
 4. **Start** offers **Install and Start Agents** when the launchd service is missing, **Start Agents** when it is stopped, and stop/restart/chat/dashboard controls when running.
    A check is recommended, but existing working configuration can be started without rerunning Doctor.
    Already installed services use their saved configuration path, including a custom path chosen in the terminal.
+   If the service starts before your account is connected, Local agents shows **Waiting for your chat account** until you choose **Connect Account** and approve.
 
 An existing running or stopped service opens directly at **Start**.
 Existing configuration without a service opens at **Check**.
@@ -209,7 +211,7 @@ The service appends to its existing logs, so records written by older versions m
 Failed local-agent actions show their output in the window with a copy action.
 If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.
 After changing its URL or API key in `.env`, select **Reload** in Dashboard to read the updated values.
-If pairing expires, generate a new code in the relevant chat flow.
+Pairing codes expire after 10 minutes; the background service shows a new link in its logs automatically, or click **Connect Account** again.
 
 Homebrew users can also update the app with:
 

@@ -7,56 +7,11 @@ from typing import Literal, NoReturn
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
-
-
-def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
-    """Get hosted provisioning API base URL from environment if configured."""
-    url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
-    return url.rstrip("/") or None
-
-
-def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
-    """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
-    return token or None
-
-
-def registration_shared_secret_from_env(runtime_paths: RuntimePaths) -> str | None:
-    """Get Synapse shared-secret registration credentials from env or file."""
-    secret = (runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET") or "").strip()
-    if secret:
-        return secret
-
-    file_path = runtime_env_path(runtime_paths, "MATRIX_REGISTRATION_SHARED_SECRET_FILE")
-    if file_path is None:
-        return None
-    try:
-        return file_path.read_text(encoding="utf-8").strip() or None
-    except OSError as exc:
-        msg = f"MATRIX_REGISTRATION_SHARED_SECRET_FILE is not readable: {file_path}"
-        raise matrix_startup_error(msg, permanent=True) from exc
-
-
-def _local_provisioning_client_credentials_from_env(
-    runtime_paths: RuntimePaths,
-) -> tuple[str, str] | None:
-    """Get local provisioning client credentials from environment if configured."""
-    client_id = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") or "").strip()
-    client_secret = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET") or "").strip()
-    if not client_id and not client_secret:
-        return None
-    if not client_id or not client_secret:
-        msg = (
-            "Provisioning credentials are incomplete. "
-            "Set both MINDROOM_LOCAL_CLIENT_ID and MINDROOM_LOCAL_CLIENT_SECRET, "
-            "or run `mindroom connect --pair-code ...` again."
-        )
-        raise matrix_startup_error(msg, permanent=True)
-    return client_id, client_secret
+from mindroom.matrix.provisioning_env import local_provisioning_client_credentials_from_env
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -69,12 +24,9 @@ def required_local_provisioning_client_credentials_for_registration(
     if registration_token or not provisioning_url:
         return None
 
-    creds = _local_provisioning_client_credentials_from_env(runtime_paths)
+    creds = local_provisioning_client_credentials_from_env(runtime_paths)
     if creds is None:
-        msg = (
-            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
-            "Run `mindroom connect --pair-code ...` first."
-        )
+        msg = "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. Run `mindroom connect` first."
         raise matrix_startup_error(msg, permanent=True)
     return creds
 
@@ -98,17 +50,14 @@ def _raise_for_register_agent_error(response: httpx.Response, *, username: str) 
     """Raise the appropriate error for a failed register-agent response."""
     detail = error_detail_from_response(response)
     if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
-        msg = (
-            f"Provisioning credentials are invalid or revoked (server said: {detail}). "
-            "Run `mindroom connect --pair-code ...` again."
-        )
+        msg = f"Provisioning credentials are invalid or revoked (server said: {detail}). Run `mindroom connect` again."
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 403:
         msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
         if detail == _NAMESPACE_MISMATCH_DETAIL:
             msg += (
                 ". Usernames must match mindroom_<entity>_<namespace>; check that MINDROOM_NAMESPACE "
-                "matches this connection's namespace or re-run `mindroom connect --pair-code ...`."
+                "matches this connection's namespace or re-run `mindroom connect`."
             )
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 404:

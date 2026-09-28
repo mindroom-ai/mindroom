@@ -643,7 +643,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -702,7 +702,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -785,7 +785,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
             patch(
@@ -843,7 +843,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -870,7 +870,7 @@ class TestMatrixRegistration:
         """Provisioning URL without local client creds should fail with actionable guidance."""
         runtime_paths = _runtime_paths(tmp_path, MINDROOM_PROVISIONING_URL="https://provisioning.example")
 
-        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect --pair-code"):
+        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect"):
             await _register_user(
                 "http://localhost:8008",
                 "test_user",

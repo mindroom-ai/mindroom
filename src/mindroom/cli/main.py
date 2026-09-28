@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import shlex
 import socket
 import sys
 from pathlib import Path  # noqa: TC003
@@ -34,8 +32,6 @@ from .trigger import trigger_app
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    import httpx
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -77,19 +73,6 @@ app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
 app.command()(check_active_responses)
-
-
-def _httpx_post(
-    url: str,
-    *,
-    json: Mapping[str, object],
-    timeout: float,
-    verify: bool,
-) -> httpx.Response:
-    """Call httpx.post without importing httpx during CLI help rendering."""
-    import httpx  # noqa: PLC0415
-
-    return httpx.post(url, json=json, timeout=timeout, verify=verify)
 
 
 @app.command()
@@ -150,6 +133,7 @@ def run(
     """Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
+    - Pairs hosted installs with your MindRoom Chat account on first run
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
@@ -160,6 +144,30 @@ def run(
         raise typer.Exit(2)
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
+
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    # Report a broken config or missing model keys before any pairing waits for a human.
+    check_env_keys(_load_active_config_or_exit(runtime_paths), runtime_paths=runtime_paths)
+    try:
+        if local_pairing_required(runtime_paths):
+            import mindroom.cli.connect as cli_connect  # noqa: PLC0415
+
+            cli_connect.pair_local_install(
+                runtime_paths,
+                console=console,
+                # `mindroom connect` or the macOS app may pair this machine while the run waits.
+                stop_waiting=lambda: (
+                    not local_pairing_required(
+                        activate_cli_runtime(path=config_path, storage_path=storage_path),
+                    )
+                ),
+            )
+    except (TypeError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
+
     asyncio.run(
         _run(
             log_level=log_level.upper(),
@@ -209,10 +217,8 @@ async def _run(
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
-
-    # Check for missing API keys
-    check_env_keys(config, runtime_paths=runtime_paths)
+    # Validate again: pairing may have rewritten owner placeholders in the config.
+    _load_active_config_or_exit(runtime_paths)
 
     console.print(make_banner())
     console.print()
@@ -563,11 +569,6 @@ async def _threads_export(
 
 @app.command()
 def connect(
-    pair_code: str = typer.Option(
-        ...,
-        "--pair-code",
-        help="Pair code shown in chat UI (format: ABCD-EFGH).",
-    ),
     provisioning_url: str | None = typer.Option(
         None,
         "--provisioning-url",
@@ -583,6 +584,11 @@ def connect(
         "--persist-env/--no-persist-env",
         help="Persist local provisioning credentials to .env next to config.yaml.",
     ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open-browser",
+        help="Open the approval link in the default browser.",
+    ),
     path: Path | None = typer.Option(  # noqa: B008
         None,
         "--path",
@@ -590,125 +596,42 @@ def connect(
         help="Override auto-detection and use this config file path for .env persistence.",
     ),
 ) -> None:
-    """Pair this local MindRoom install with the hosted provisioning service."""
+    """Connect this local MindRoom to your MindRoom Chat account by approving a link."""
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
-    from mindroom import constants  # noqa: PLC0415
 
-    normalized_pair_code = pair_code.strip().upper()
-    if not cli_connect.is_valid_pair_code(normalized_pair_code):
-        console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
-        raise typer.Exit(1)
-
-    runtime_paths = activate_cli_runtime(path)
-    resolved_provisioning_url = (
-        provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
-    ).strip()
-    if not resolved_provisioning_url:
-        console.print("[red]Error:[/red] Invalid provisioning URL.")
-        raise typer.Exit(1)
-
-    resolved_config_path = runtime_paths.config_path
-    normalized_client_name = client_name.strip() or socket.gethostname()
     try:
-        credentials = cli_connect.complete_local_pairing(
-            provisioning_url=resolved_provisioning_url,
-            pair_code=normalized_pair_code,
-            client_name=normalized_client_name,
-            client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
-            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
-            post_request=_httpx_post,
+        runtime_paths = activate_cli_runtime(path)
+        if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
+            "MINDROOM_LOCAL_CLIENT_SECRET",
+        ):
+            console.print(
+                "[yellow]Warning:[/yellow] This machine is already connected. "
+                "Pairing again creates a new connection and a new agent namespace: "
+                "existing agents keep working, and new agents get the new namespace.",
+            )
+            if _stdin_is_interactive():
+                typer.confirm("Pair again?", abort=True)
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=console,
+            provisioning_url=provisioning_url,
+            client_name=client_name,
+            persist_env=persist_env,
+            open_browser=open_browser,
+            renew_expired=False,
         )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
+    console.print("\nNext step:\n  mindroom run")
 
-    if credentials.owner_user_id_invalid:
-        console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
-        )
-    if credentials.namespace_invalid:
-        console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
-        )
 
-    if persist_env:
-        env_path = cli_connect.persist_local_provisioning_env(
-            provisioning_url=resolved_provisioning_url,
-            client_id=credentials.client_id,
-            client_secret=credentials.client_secret,
-            namespace=credentials.namespace,
-            owner_user_id=credentials.owner_user_id,
-            config_path=resolved_config_path,
-        )
-        console.print("[green]Paired successfully.[/green]")
-        console.print(f"  Saved credentials to: {env_path}")
-        if credentials.owner_user_id and cli_connect.replace_owner_placeholders_in_config(
-            config_path=resolved_config_path,
-            owner_user_id=credentials.owner_user_id,
-        ):
-            console.print(f"  Updated owner placeholder(s) in: {resolved_config_path}")
-        console.print("\nNext step:")
-        console.print("  uv run mindroom run")
-        return
-
-    _print_pairing_success_with_exports(
-        provisioning_url=resolved_provisioning_url,
-        client_id=credentials.client_id,
-        client_secret=credentials.client_secret,
-        namespace=credentials.namespace,
-        owner_user_id=credentials.owner_user_id,
-    )
+def _stdin_is_interactive() -> bool:
+    """Whether a person can answer prompts; the macOS app and services run without a terminal."""
+    return sys.stdin.isatty()
 
 
 app.command("local-stack-setup")(local_stack_setup)
-
-
-def _print_pairing_success_with_exports(
-    *,
-    provisioning_url: str,
-    client_id: str,
-    client_secret: str,
-    namespace: str,
-    owner_user_id: str | None,
-) -> None:
-    """Print non-persisted exports for local provisioning credentials."""
-    console.print("[green]Paired successfully.[/green]")
-    console.print("\nExport these variables before running MindRoom:")
-    console.print(
-        f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(client_id)}", markup=False, soft_wrap=True)
-    console.print(
-        f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(client_secret)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(namespace)}", markup=False, soft_wrap=True)
-    if owner_user_id:
-        console.print(
-            f"  export MINDROOM_OWNER_USER_ID={shlex.quote(owner_user_id)}",
-            markup=False,
-            soft_wrap=True,
-        )
-        console.print(
-            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
-            markup=False,
-        )
-        console.print(
-            "Update your config.yaml owner placeholder(s) manually if you rely on membership access settings.",
-        )
-    console.print("\nThen run:")
-    console.print("  uv run mindroom run")
-
-
-def _local_client_fingerprint(*, config_path: Path) -> str:
-    """Return a stable, non-secret local fingerprint."""
-    resolved_config_path = config_path.expanduser().resolve()
-    raw = f"{socket.gethostname()}:{resolved_config_path}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
 
 
 # ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
-│ connect                  Pair this local MindRoom install with the hosted provisioning │
-│                          service.                                                      │
+│ connect                  Connect this local MindRoom to your MindRoom Chat account by  │
+│                          approving a link.                                             │
 │ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
 │ config                   Manage MindRoom configuration files.                          │
 │ plugins                  Validate and vendor external MindRoom plugins.                │
@@ -161,6 +161,7 @@ Start MindRoom with your configuration.
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
+ - Pairs hosted installs with your MindRoom Chat account on first run
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
  - Manages agent room memberships
@@ -1395,13 +1396,20 @@ If parsing fails before the include tree is known, the failure has no fingerprin
 
 ## connect
 
-Pair this local MindRoom install with a provisioning service.
+Pair this local MindRoom install with your MindRoom Chat account through a provisioning service.
 
 Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
 
 ```bash
-mindroom connect --pair-code ABCD-EFGH
+mindroom connect
 ```
+
+The command prints an approval link, a pair code, and (in a terminal) a QR code of the link.
+Open the link or scan the QR code while signed in to MindRoom Chat and approve the machine, or enter the code in MindRoom Chat → Settings → Local MindRoom.
+Add `--open-browser` to open the approval link in your default browser.
+
+`connect` makes one attempt: if nobody approves within 10 minutes, it exits with `Approval timed out. Run the command again to get a new link.`
+You usually do not need `connect` at all, because `mindroom run` pairs automatically when hosted pairing is required and prints a new link whenever the previous one expires.
 
 On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
 
@@ -1415,15 +1423,13 @@ If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 
 ```bash
-mindroom connect --pair-code ABCD-EFGH --no-persist-env
+mindroom connect --no-persist-env
 ```
 
 Use `--provisioning-url` for non-default deployments:
 
 ```bash
-mindroom connect \
-  --pair-code ABCD-EFGH \
-  --provisioning-url https://matrix.example.com
+mindroom connect --provisioning-url https://matrix.example.com
 ```
 
 ## local-stack-setup
@@ -1656,8 +1662,10 @@ mindroom run --storage-path /data/mindroom
 
 ### Pair local install with hosted provisioning
 
+`mindroom run` pairs automatically; use `connect` to pair without starting MindRoom.
+
 ```bash
-mindroom connect --pair-code ABCD-EFGH
+mindroom connect --open-browser
 ```
 
 ### Start local Synapse + MindRoom Chat (development)

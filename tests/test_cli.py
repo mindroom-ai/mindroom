@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
+from typer.testing import CliRunner
 
 from mindroom import constants as constants_mod
+from mindroom.cli import main as main_module
+from mindroom.cli.config import activate_cli_runtime
+from mindroom.cli.main import app
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
@@ -18,8 +24,10 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+runner = CliRunner()
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 DEFAULT_INTERNAL_DISPLAY_NAME = MindRoomUserConfig().display_name
 
@@ -482,3 +490,232 @@ def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_n
 
     with pytest.raises(ValueError, match=f"reserved internal entity names: {entity_name}"):
         Config(**config_data)
+
+
+def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
+    """Run command initiates pairing when MINDROOM_PROVISIONING_URL is set without credentials."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+
+    pair_called = []
+
+    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:  # noqa: ARG001
+        pair_called.append(True)
+        # Write credentials to .env to simulate successful pairing
+        env_content = env_path.read_text(encoding="utf-8")
+        env_content += "\nMINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n"
+        env_path.write_text(env_content, encoding="utf-8")
+
+    seen_credentials = []
+
+    async def fake_run(*, config_path: Path | None, storage_path: Path | None, **_kwargs: object) -> None:
+        runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+        seen_credentials.append(
+            (
+                runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID"),
+                runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET"),
+            ),
+        )
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", side_effect=fake_run),
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert pair_called, "pair_local_install should have been called"
+    assert seen_credentials == [("test_id", "test_secret")]
+
+
+def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
+    """A waiting run notices credentials written by `mindroom connect` or the macOS app."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    observed: list[bool] = []
+
+    def fake_pair_local_install(_runtime_paths: object, *, console: object, stop_waiting: Callable[[], bool]) -> None:  # noqa: ARG001
+        observed.append(stop_waiting())
+        with env_path.open("a", encoding="utf-8") as env_file:
+            env_file.write("MINDROOM_LOCAL_CLIENT_ID=other_id\nMINDROOM_LOCAL_CLIENT_SECRET=other_secret\n")
+        observed.append(stop_waiting())
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert observed == [False, True]
+    mock_run.assert_called_once()
+
+
+def test_run_exits_with_printed_credentials_when_env_is_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credentials that cannot be saved are printed once and the run stops instead of starting without them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "pair_code": "ABCD-EFGH",
+                "device_secret": "device-secret",
+                "approve_url": "https://chat.example/connect?code=ABCD-EFGH",
+                "poll_interval_seconds": 3,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={"status": "connected", "client_id": "client-123", "client_secret": "secret-123", "namespace": ""},
+        ),
+    ]
+    monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
+
+    def read_only(*_args: object, **_kwargs: object) -> Path:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr("mindroom.cli.connect.upsert_env_values", read_only)
+
+    with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
+    assert "Could not save credentials" in result.output
+    mock_run.assert_not_called()
+
+
+def test_run_warns_about_missing_model_keys_before_pairing(tmp_path: Path) -> None:
+    """Missing provider keys are reported before the run waits for a human to approve pairing, and only once."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    events: list[str] = []
+
+    with (
+        patch("mindroom.cli.main.check_env_keys", side_effect=lambda *_a, **_kw: events.append("keys")),
+        patch("mindroom.cli.connect.pair_local_install", side_effect=lambda *_a, **_kw: events.append("pair")),
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["keys", "pair"]
+    mock_run.assert_called_once()
+
+
+def test_run_warns_about_missing_model_keys_once_without_pairing(tmp_path: Path) -> None:
+    """Runs that need no pairing still check provider keys exactly once."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+
+    with (
+        patch("mindroom.cli.main.check_env_keys") as mock_check,
+        patch("mindroom.cli.connect.pair_local_install") as mock_pair,
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    mock_check.assert_called_once()
+    mock_pair.assert_not_called()
+    mock_run.assert_called_once()
+
+
+def test_run_body_does_not_repeat_the_missing_key_warning(tmp_path: Path) -> None:
+    """The async run body leaves the provider key check to the command."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+
+    with (
+        patch("mindroom.cli.main.check_env_keys") as mock_check,
+        patch("mindroom.orchestrator.main", new_callable=AsyncMock),
+    ):
+        asyncio.run(
+            main_module._run(
+                log_level="INFO",
+                config_path=config_path,
+                storage_path=tmp_path / "data",
+                api=False,
+                api_port=8765,
+                api_host="127.0.0.1",
+            ),
+        )
+
+    mock_check.assert_not_called()
+
+
+def test_run_reports_incomplete_pairing_credentials_without_traceback(tmp_path: Path) -> None:
+    """Half-configured local credentials print a friendly error instead of a traceback."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMINDROOM_LOCAL_CLIENT_ID=test_id\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install") as mock_pair,
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Error:" in result.output
+    assert "Provisioning credentials are incomplete" in result.output
+    mock_pair.assert_not_called()
+    mock_run.assert_not_called()
+
+
+def test_run_rejects_broken_config_before_pairing(tmp_path: Path) -> None:
+    """A broken config.yaml fails before the user is asked to approve pairing."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: [\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install") as mock_pair,
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    mock_pair.assert_not_called()
+    mock_run.assert_not_called()
+
+
+def test_run_skips_pairing_with_registration_token(tmp_path: Path) -> None:
+    """Run command skips pairing when MATRIX_REGISTRATION_TOKEN is set."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "MINDROOM_PROVISIONING_URL=https://mindroom.chat\nMATRIX_REGISTRATION_TOKEN=test_token\n",
+        encoding="utf-8",
+    )
+
+    pair_called = []
+
+    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:  # noqa: ARG001
+        pair_called.append(True)
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+        assert not pair_called, "pair_local_install should not have been called when MATRIX_REGISTRATION_TOKEN is set"
+        mock_run.assert_called_once()
+        assert result.exit_code == 0

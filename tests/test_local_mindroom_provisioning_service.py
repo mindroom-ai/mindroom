@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import TYPE_CHECKING, Self
+from urllib.parse import urlparse
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
+from mindroom.cli import connect as cli_connect
 from mindroom.matrix import provisioning as matrix_provisioning
+from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
-
-    import httpx
 
 
 def _service_config(
@@ -66,20 +71,44 @@ def test_service_config_rejects_partial_google_oauth_client(
         provisioning._load_service_config_from_env()
 
 
-def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+OPENID_TOKEN_HEADER = "X-Matrix-OpenID-Token"  # noqa: S105
+ALICE_OPENID_HEADERS = {OPENID_TOKEN_HEADER: "openid-alice"}
+BOB_OPENID_HEADERS = {OPENID_TOKEN_HEADER: "openid-bob"}
+
+
+def _patch_legacy_access_token_auth(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     token_to_user = {
         "token-alice": "@alice:mindroom.chat",
         "token-bob": "@bob:mindroom.chat",
     }
+    calls: list[str] = []
 
     async def _fake_matrix_whoami(config: provisioning.ServiceConfig, access_token: str) -> str:
         del config
+        calls.append(access_token)
         user_id = token_to_user.get(access_token)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid Matrix access token")
         return user_id
 
     monkeypatch.setattr(provisioning, "_matrix_whoami", _fake_matrix_whoami)
+    return calls
+
+
+def _patch_openid_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    token_to_user = {
+        "openid-alice": "@alice:mindroom.chat",
+        "openid-bob": "@bob:mindroom.chat",
+    }
+
+    async def _fake_matrix_openid_userinfo(config: provisioning.ServiceConfig, openid_token: str) -> str:
+        del config
+        user_id = token_to_user.get(openid_token)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid Matrix OpenID token")
+        return user_id
+
+    monkeypatch.setattr(provisioning, "_matrix_openid_userinfo", _fake_matrix_openid_userinfo)
 
 
 def _managed_agent_username(entity_name: str, namespace: str) -> str:
@@ -163,7 +192,7 @@ def _post_register_agent(client: TestClient, complete: dict[str, str], username:
 
 def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end happy path: pair -> complete -> register agent -> revoke."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     async def _fake_register(
@@ -268,7 +297,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
 
 def test_paired_client_fetches_google_oauth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only an authenticated paired runtime receives the installed-app client."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(
         _service_config(
             tmp_path / "state.json",
@@ -299,7 +328,7 @@ def test_paired_client_fetches_google_oauth_client(tmp_path: Path, monkeypatch: 
 
 def test_google_oauth_client_endpoint_requires_server_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A paired client receives an explicit error when the server has no Google app."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     with TestClient(app) as client:
@@ -321,7 +350,7 @@ def test_pair_status_accepts_session_header_without_pair_code_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pair status polling should not require putting the pair code in the URL."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     with TestClient(app) as client:
@@ -349,7 +378,7 @@ def test_pair_status_rejects_pair_code_query_without_session_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pair status polling should not accept the short pair code in the URL."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     with TestClient(app) as client:
@@ -374,7 +403,7 @@ def test_pair_status_rejects_missing_session_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pair status should require the opaque session header."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     with TestClient(app) as client:
@@ -404,7 +433,7 @@ def test_register_agent_rejects_username_outside_connection_namespace(
     expected_status: int,
 ) -> None:
     """A local client must not register Matrix users outside its assigned namespace."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
     register_calls: list[str] = []
 
@@ -463,7 +492,7 @@ def test_register_agent_allows_plain_username_for_namespace_exempt_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A connection with operator-set namespace "" may register plain mindroom_<entity> usernames."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     state_path = tmp_path / "state.json"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
@@ -497,7 +526,7 @@ def test_register_agent_namespace_exempt_connection_still_requires_managed_prefi
     expected_status: int,
 ) -> None:
     """Namespace-exempt connections still only get mindroom_-prefixed valid localparts."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     state_path = tmp_path / "state.json"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
@@ -521,7 +550,7 @@ def test_state_load_fails_closed_for_missing_or_blank_namespace(
     corrupt_namespace: str | None,
 ) -> None:
     """Only a literal "" exempts; missing, null, or whitespace namespaces must fail closed to a derived one."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     state_path = tmp_path / "state.json"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
@@ -552,7 +581,7 @@ def test_state_load_fails_closed_for_missing_or_blank_namespace(
 
 def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator-set empty namespace must survive load and re-persist cycles."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     state_path = tmp_path / "state.json"
     register_calls: list[str] = []
     _install_fake_register(monkeypatch, register_calls)
@@ -582,7 +611,7 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
 
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Register-agent should reject homeserver mismatches."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     async def _fake_register(
@@ -626,7 +655,7 @@ def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest
 
 def test_browser_auth_required_for_pair_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pair start should reject requests without browser Matrix auth token."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
     with TestClient(app) as client:
@@ -636,7 +665,7 @@ def test_browser_auth_required_for_pair_start(tmp_path: Path, monkeypatch: pytes
 
 def test_state_persists_between_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Connections should survive process restarts via JSON state file."""
-    _patch_matrix_auth(monkeypatch)
+    _patch_legacy_access_token_auth(monkeypatch)
     state_path = tmp_path / "state.json"
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
@@ -733,3 +762,733 @@ def test_client_error_detail_constants_match_service() -> None:
     """The runtime client classifies register-agent 403s by these exact strings."""
     assert matrix_provisioning._CONNECTION_REVOKED_DETAIL == provisioning.CONNECTION_REVOKED_DETAIL
     assert matrix_provisioning._NAMESPACE_MISMATCH_DETAIL == provisioning.NAMESPACE_MISMATCH_DETAIL
+
+
+def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> None:
+    """The CLI's device-pairing requests and its response fixtures satisfy the service schemas."""
+    calls: list[tuple[str, dict[str, object]]] = []
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], calls)
+
+    cli_connect.run_device_pairing(
+        provisioning_url="https://provisioning.example",
+        client_name="devbox",
+        client_fingerprint=cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml"),
+        matrix_ssl_verify=True,
+        announce=lambda _session: None,
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    (start_url, start_payload), (poll_url, poll_payload) = calls
+    service_paths = {route.path for route in provisioning.create_app(_service_config(tmp_path / "state.json")).routes}
+    assert urlparse(start_url).path in service_paths
+    assert urlparse(poll_url).path in service_paths
+    provisioning.DevicePairStartRequest.model_validate(start_payload)
+    provisioning.DevicePairPollRequest.model_validate(poll_payload)
+    provisioning.DevicePairStartResponse.model_validate(_START)
+    provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
+
+
+def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generated pair code already held by a live session is replaced before it is handed out."""
+    codes = iter(["AAAA-BBBB", "AAAA-BBBB", "CCCC-DDDD"])
+    monkeypatch.setattr(provisioning, "_generate_pair_code", lambda: next(codes))
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        first = _start_device_pairing(client)
+        second = _start_device_pairing(client)
+
+    assert first["pair_code"] == "AAAA-BBBB"
+    assert second["pair_code"] == "CCCC-DDDD"
+
+
+def _start_device_pairing(client: TestClient, client_name: str = "alice-macbook") -> dict[str, object]:
+    response = client.post(
+        "/v1/local-mindroom/pair/device/start",
+        json={"client_name": client_name, "client_pubkey_or_fingerprint": "sha256:abc123"},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_device_pairing_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local client starts, a browser user approves, and the first poll returns credentials once."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        pair_code = started["pair_code"]
+        assert started["approve_url"] == f"https://chat.mindroom.chat/connect?code={pair_code}"
+        assert started["poll_interval_seconds"] == 3
+
+        pending = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        assert pending.json()["status"] == "pending"
+
+        inspected = client.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": pair_code},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        assert inspected.status_code == 200
+        assert inspected.json()["client_name"] == "alice-macbook"
+        assert inspected.json()["status"] == "pending"
+
+        approved = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": pair_code},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "approved"
+
+        connected = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        body = connected.json()
+        assert body["status"] == "connected"
+        assert body["owner_user_id"] == "@alice:mindroom.chat"
+        assert body["client_id"] == body["connection"]["id"]
+        assert body["connection"]["client_name"] == "alice-macbook"
+
+        claimed_again = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        )
+        assert claimed_again.status_code == 410
+        assert claimed_again.json()["detail"] == "Pair session already claimed"
+
+        listed = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS)
+        assert [item["id"] for item in listed.json()["connections"]] == [body["client_id"]]
+
+
+def test_device_pairing_credentials_register_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentials from device pairing authenticate register-agent like browser-issued ones."""
+    _patch_openid_auth(monkeypatch)
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        response = _post_register_agent(client, body, _managed_agent_username("code", body["namespace"]))
+
+    assert response.status_code == 200
+    assert register_calls == [_managed_agent_username("code", body["namespace"])]
+
+
+def test_device_approve_requires_matrix_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a signed-in Matrix user may inspect or approve a device code."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        for path in ("inspect", "approve"):
+            response = client.post(f"/v1/local-mindroom/pair/device/{path}", json={"pair_code": started["pair_code"]})
+            assert response.status_code == 401
+
+
+def test_device_code_approved_by_one_user_cannot_be_taken_by_another(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second user cannot re-approve a code another user already approved."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        code = {"pair_code": started["pair_code"]}
+        assert (
+            client.post(
+                "/v1/local-mindroom/pair/device/approve",
+                json=code,
+                headers=ALICE_OPENID_HEADERS,
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/v1/local-mindroom/pair/device/approve",
+                json=code,
+                headers=ALICE_OPENID_HEADERS,
+            ).status_code
+            == 200
+        )
+        taken = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json=code,
+            headers=BOB_OPENID_HEADERS,
+        )
+        assert taken.status_code == 409
+        assert taken.json()["detail"] == "Pair code already approved"
+
+
+def test_device_code_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expired device codes can neither be approved nor polled into credentials."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        later = provisioning._now_utc() + provisioning.timedelta(seconds=601)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+
+        approve = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        assert approve.status_code == 410
+        poll = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+        assert poll.json()["status"] == "expired"
+
+
+def test_device_code_cannot_complete_through_browser_initiated_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy pair/complete endpoint must not hand out credentials for a device code."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={
+                "pair_code": started["pair_code"],
+                "client_name": "attacker",
+                "client_pubkey_or_fingerprint": "sha256:evil",
+            },
+        )
+        assert complete.status_code == 404
+
+
+def test_browser_initiated_code_cannot_be_approved_as_device_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Device approval only accepts codes created by the device flow."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        pair_code = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers=ALICE_OPENID_HEADERS,
+        ).json()["pair_code"]
+        response = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": pair_code},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        assert response.status_code == 404
+
+
+def test_device_poll_rejects_unknown_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Polling with a secret the service never issued fails without revealing sessions."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        response = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": "not-issued"})
+        assert response.status_code == 404
+
+
+def test_device_start_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unauthenticated device starts are limited per client address."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        for _ in range(10):
+            _start_device_pairing(client)
+        response = client.post(
+            "/v1/local-mindroom/pair/device/start",
+            json={"client_name": "x", "client_pubkey_or_fingerprint": "sha256:x"},
+        )
+        assert response.status_code == 429
+
+
+def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An approval persisted before a restart can still be claimed after it."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert started["device_secret"] not in json.dumps(persisted)
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        body = restarted.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "connected"
+        assert body["owner_user_id"] == "@alice:mindroom.chat"
+
+
+def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can point approval links at their own chat client."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.setenv("MINDROOM_PROVISIONING_APPROVE_URL", "https://chat.example.org/connect/")
+    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
+
+
+def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sessions expired for longer than one more code lifetime are removed when new pairing starts."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    app = provisioning.create_app(_service_config(state_path))
+
+    with TestClient(app) as client:
+        old_browser = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers=ALICE_OPENID_HEADERS,
+        ).json()
+        old_device = _start_device_pairing(client, "old-machine")
+
+        later = provisioning._now_utc() + provisioning.timedelta(seconds=2 * 600 + 1)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+
+        _start_device_pairing(client, "new-machine")
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    session_ids = [s["id"] for s in persisted["pair_sessions"]]
+    assert old_browser["pair_session_id"] not in session_ids
+    assert len(persisted["pair_sessions"]) == 1
+    assert persisted["pair_sessions"][0]["client_name"] == "new-machine"
+
+    with TestClient(app) as restarted:
+        assert (
+            restarted.post(
+                "/v1/local-mindroom/pair/complete",
+                json={"pair_code": old_browser["pair_code"], "client_name": "x", "client_pubkey_or_fingerprint": "x"},
+            ).status_code
+            == 404
+        )
+        assert (
+            restarted.post(
+                "/v1/local-mindroom/pair/device/poll",
+                json={"device_secret": old_device["device_secret"]},
+            ).status_code
+            == 404
+        )
+
+
+def test_recently_expired_device_code_still_reports_expired_after_another_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renewed CLI start keeps the old code answering 410 and the old poll answering expired for one more TTL."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    started_at = provisioning._now_utc()
+
+    with TestClient(app) as client:
+        old = _start_device_pairing(client, "old-code")
+
+        just_expired = started_at + provisioning.timedelta(seconds=601)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: just_expired)
+        _start_device_pairing(client, "renewed-code")
+
+        for action in ("inspect", "approve"):
+            response = client.post(
+                f"/v1/local-mindroom/pair/device/{action}",
+                json={"pair_code": old["pair_code"]},
+                headers=ALICE_OPENID_HEADERS,
+            )
+            assert response.status_code == 410
+            assert response.json()["detail"] == "Pair code expired"
+        poll = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": old["device_secret"]})
+        assert poll.status_code == 200
+        assert poll.json()["status"] == "expired"
+
+        long_expired = started_at + provisioning.timedelta(seconds=2 * 600 + 1)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: long_expired)
+        _start_device_pairing(client, "renewed-again")
+
+        inspect = client.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": old["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        assert inspect.status_code == 404
+        poll = client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": old["device_secret"]})
+        assert poll.status_code == 404
+
+
+def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Approval near expiry extends the window so CLI can still claim credentials."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        near_expiry = provisioning._now_utc() + provisioning.timedelta(seconds=595)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: near_expiry)
+
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+
+        after_original_ttl = near_expiry + provisioning.timedelta(seconds=10)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: after_original_ttl)
+
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "connected"
+
+
+def test_poll_expires_after_grace_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll after grace period returns expired."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        near_expiry = provisioning._now_utc() + provisioning.timedelta(seconds=595)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: near_expiry)
+
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+
+        past_grace = near_expiry + provisioning.timedelta(seconds=70)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: past_grace)
+
+        body = client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+        assert body["status"] == "expired"
+
+
+def test_approve_and_inspect_reject_connected_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After credentials are claimed, approve and inspect return 409."""
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+        client.post("/v1/local-mindroom/pair/device/poll", json={"device_secret": started["device_secret"]})
+
+        for endpoint in ("approve", "inspect"):
+            response = client.post(
+                f"/v1/local-mindroom/pair/device/{endpoint}",
+                json={"pair_code": started["pair_code"]},
+                headers=ALICE_OPENID_HEADERS,
+            )
+            assert response.status_code == 409
+            assert response.json()["detail"] == "Pair code already used"
+
+
+def test_legacy_state_loads_browser_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """State files written before device pairing load sessions as browser-initiated."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+
+    legacy_payload = {
+        "pair_sessions": [
+            {
+                "id": "legacy-session-id",
+                "user_id": "@alice:mindroom.chat",
+                "pair_code_hash": provisioning._hash_token("AAAA-BBBB"),
+                "status": "pending",
+                "created_at": provisioning._as_utc_iso(provisioning._now_utc()),
+                "expires_at": provisioning._as_utc_iso(provisioning._now_utc() + provisioning.timedelta(seconds=600)),
+                "completed_at": None,
+                "connection_id": None,
+            },
+        ],
+        "connections": [],
+    }
+    state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    app = provisioning.create_app(_service_config(state_path))
+    with TestClient(app):
+
+        async def _get_state() -> provisioning.ProvisioningState:
+            return app.state.runtime_state
+
+        state = asyncio.run(_get_state())
+        session = state.pair_sessions["legacy-session-id"]
+        assert session.user_id == "@alice:mindroom.chat"
+        assert session.device_secret_hash is None
+        assert session.client_name is None
+        assert session.fingerprint is None
+        assert session.approved_at is None
+
+
+def _install_homeserver(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    real_async_client = httpx.AsyncClient
+
+    def _client(*, timeout: float, verify: bool) -> httpx.AsyncClient:
+        assert verify is True
+        return real_async_client(timeout=timeout, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _client)
+
+
+@pytest.mark.asyncio
+async def test_openid_userinfo_returns_local_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service asks its own homeserver who owns the OpenID token and never sends an access token."""
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"sub": "@alice:mindroom.chat"})
+
+    _install_homeserver(monkeypatch, _handler)
+
+    user_id = await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+
+    assert user_id == "@alice:mindroom.chat"
+    [request] = requests
+    assert request.method == "GET"
+    assert request.url.copy_with(query=None) == "https://mindroom.chat/_matrix/federation/v1/openid/userinfo"
+    assert request.url.params["access_token"] == "openid-secret"  # noqa: S105
+    assert "authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sub",
+    ["@alice:evil.example", "@alice:mindroom.chat.evil", "alice:mindroom.chat", "@:mindroom.chat", "@alice", None],
+)
+async def test_openid_userinfo_rejects_users_of_other_servers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sub: str | None,
+) -> None:
+    """Only a well-formed user ID on the service's own server name is accepted."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(200, json={"sub": sub}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "body"),
+    [
+        (401, {"errcode": "M_UNKNOWN_TOKEN", "error": "Access Token unknown or expired"}),
+        (403, {"errcode": "M_FORBIDDEN", "error": "Forbidden"}),
+        (400, {"errcode": "M_UNKNOWN_TOKEN", "error": "Invalid token"}),
+    ],
+)
+async def test_openid_userinfo_rejects_invalid_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    body: dict[str, str],
+) -> None:
+    """Unknown or expired OpenID tokens are an authentication failure, not a server error."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(status_code, json=body))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid Matrix OpenID token"
+
+
+@pytest.mark.asyncio
+async def test_openid_userinfo_reports_unreachable_homeserver_without_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transport failures map to 502, and the token in the query string never reaches the error detail."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        msg = f"connection refused for {request.url}"
+        raise httpx.ConnectError(msg, request=request)
+
+    _install_homeserver(monkeypatch, _handler)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+
+    assert exc_info.value.status_code == 502
+    assert "openid-secret" not in str(exc_info.value.detail)
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [httpx.Response(500, json={"errcode": "M_UNKNOWN"}), httpx.Response(200, text="not json")],
+)
+async def test_openid_userinfo_reports_homeserver_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+) -> None:
+    """Other homeserver failures are gateway errors."""
+    _install_homeserver(monkeypatch, lambda _request: response)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.json"), "openid-secret")
+
+    assert exc_info.value.status_code == 502
+
+
+def test_device_endpoints_reject_access_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device inspect and approve accept only OpenID tokens, never Matrix access tokens."""
+    whoami_calls = _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        started = _start_device_pairing(client)
+        for path in ("inspect", "approve"):
+            for headers in ({"Authorization": "Bearer token-alice"}, {"X-Matrix-Access-Token": "token-alice"}):
+                response = client.post(
+                    f"/v1/local-mindroom/pair/device/{path}",
+                    json={"pair_code": started["pair_code"]},
+                    headers=headers,
+                )
+                assert response.status_code == 401
+                assert response.json()["detail"] == "Missing Matrix OpenID token"
+
+    assert whoami_calls == []
+
+
+def test_browser_endpoints_accept_openid_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pair start, status, connection listing, and revocation authenticate with OpenID tokens."""
+    whoami_calls = _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        start = client.post("/v1/local-mindroom/pair/start", headers=ALICE_OPENID_HEADERS)
+        assert start.status_code == 200
+        status = client.get(
+            "/v1/local-mindroom/pair/status",
+            headers={**ALICE_OPENID_HEADERS, provisioning.PAIR_STATUS_SESSION_HEADER: start.json()["pair_session_id"]},
+        )
+        assert status.json()["status"] == "pending"
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={"pair_code": start.json()["pair_code"], "client_name": "x", "client_pubkey_or_fingerprint": "x"},
+        ).json()
+        listed = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS)
+        assert [item["id"] for item in listed.json()["connections"]] == [complete["client_id"]]
+        revoked = client.delete(f"/v1/local-mindroom/connections/{complete['client_id']}", headers=ALICE_OPENID_HEADERS)
+        assert revoked.json()["revoked"] is True
+
+    assert whoami_calls == []
+
+
+def test_browser_endpoints_still_accept_legacy_access_token_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployed chat client still sends access tokens to the browser-initiated endpoints."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        for headers in ({"Authorization": "Bearer token-alice"}, {"X-Matrix-Access-Token": "token-alice"}):
+            listed = client.get("/v1/local-mindroom/connections", headers=headers)
+            assert [item["id"] for item in listed.json()["connections"]] == [complete["client_id"]]
+        revoked = client.delete(
+            f"/v1/local-mindroom/connections/{complete['client_id']}",
+            headers={"X-Matrix-Access-Token": "token-alice"},
+        )
+        assert revoked.json()["revoked"] is True
+
+
+def test_openid_token_wins_over_legacy_access_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When both are sent, only the OpenID token authenticates, even if it is invalid."""
+    whoami_calls = _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        _pair_local_client(client)
+        whoami_calls.clear()
+        as_bob = client.get(
+            "/v1/local-mindroom/connections",
+            headers={**BOB_OPENID_HEADERS, "Authorization": "Bearer token-alice"},
+        )
+        assert as_bob.json()["connections"] == []
+        invalid = client.get(
+            "/v1/local-mindroom/connections",
+            headers={OPENID_TOKEN_HEADER: "openid-unknown", "X-Matrix-Access-Token": "token-alice"},
+        )
+        assert invalid.status_code == 401
+
+    assert whoami_calls == []
+
+
+def test_cors_allows_openid_token_header(tmp_path: Path) -> None:
+    """Browsers may send the OpenID token header cross-origin from the chat client."""
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        response = client.options(
+            "/v1/local-mindroom/pair/device/approve",
+            headers={
+                "Origin": "https://chat.mindroom.chat",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-matrix-openid-token",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "x-matrix-openid-token" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_app_silences_httpx_request_url_logging(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The httpx logger stays above INFO because request URLs carry the OpenID token."""
+    httpx_logger = logging.getLogger("httpx")
+    original_level = httpx_logger.level
+    httpx_logger.setLevel(logging.NOTSET)
+    # An operator enabling INFO logging globally must still not see request URLs.
+    caplog.set_level(logging.INFO)
+    try:
+        provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+        assert httpx_logger.level >= logging.WARNING
+        assert not httpx_logger.isEnabledFor(logging.INFO)
+    finally:
+        httpx_logger.setLevel(original_level)

@@ -122,10 +122,9 @@ def _make_voice_event(
 
 
 def _make_room(*user_ids: str) -> nio.MatrixRoom:
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:example.com"
-    room.canonical_alias = None
-    room.users = {user_id: MagicMock() for user_id in user_ids}
+    room = nio.MatrixRoom("!test:example.com", user_ids[0] if user_ids else "@mindroom_router:localhost")
+    for user_id in user_ids:
+        room.add_member(user_id, None, None)
     room.members_synced = True
     return room
 

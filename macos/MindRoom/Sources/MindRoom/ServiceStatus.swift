@@ -2,6 +2,7 @@ import Foundation
 
 enum MindRoomServiceState: Equatable {
     case running
+    case pairing
     case stopped
     case notInstalled
     case runtimeMissing
@@ -19,6 +20,9 @@ struct MindRoomServiceStatus: Equatable {
         if lowercased.hasPrefix("env: mindroom:") &&
             (lowercased.contains("no such file") || lowercased.contains("not found")) {
             return MindRoomServiceStatus(state: .runtimeMissing, message: "MindRoom runtime is not installed")
+        }
+        if lowercased.contains("service: running") && lowercased.contains("pairing: required") {
+            return MindRoomServiceStatus(state: .pairing, message: "Connect your chat account to finish starting MindRoom.")
         }
         if lowercased.contains("service: running") {
             return MindRoomServiceStatus(state: .running, message: "MindRoom is running")

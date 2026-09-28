@@ -215,7 +215,7 @@ async def test_root_space_reuses_one_fresh_snapshot(tmp_path: Path, monkeypatch:
     client.homeserver = "https://example.com"
     space_id = "!space:example.com"
     monkeypatch.setattr(matrix_rooms, "_ensure_root_space_exists", AsyncMock(return_value=space_id))
-    monkeypatch.setattr(matrix_rooms, "_set_room_avatar_if_available", AsyncMock())
+    monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
     client.room_get_state.return_value = nio.RoomGetStateResponse(
         [
             {"type": "m.room.name", "state_key": "", "content": {"name": config.matrix_space.name}},
