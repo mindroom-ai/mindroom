@@ -16,7 +16,7 @@ resource "kubernetes_namespace" "mindroom_instances" {
   metadata {
     name = "mindroom-instances"
     # Tenant pods run tenant code on the node that hosts the control plane, so admission rejects
-    # privileged containers, host namespaces, hostPath volumes, and added capabilities.
+    # privileged containers, host namespaces, hostPath volumes, and capabilities beyond the default set.
     labels = {
       "pod-security.kubernetes.io/enforce" = "baseline"
     }

@@ -110,8 +110,6 @@ module "kube-hetzner" {
 
   # Ingress controller - nginx
   ingress_controller = "nginx"
-  # Instance NetworkPolicies admit the controller by namespace; keep in sync with ingressControllerNamespace in cluster/k8s/instance/values.yaml.
-  ingress_target_namespace = "ingress-nginx"
 
   # Enable cert-manager for SSL
   enable_cert_manager = true

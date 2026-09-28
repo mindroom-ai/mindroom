@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -318,15 +317,9 @@ def _ingress_controller_peers(policy: dict[str, Any]) -> list[dict[str, Any]]:
     return [peer for peer in peers if "namespaceSelector" in peer]
 
 
-@pytest.mark.parametrize("namespace", [None, "nginx"])
-def test_instance_chart_admits_the_ingress_controller_namespace_terraform_installs(namespace: str | None) -> None:
-    """Both controller rules follow one chart value, whose default is the namespace the cluster installs into."""
-    kube_tf = Path("cluster/terraform/terraform-k8s/kube.tf").read_text(encoding="utf-8")
-    terraform_namespace = re.search(r'^\s*ingress_target_namespace\s*=\s*"([^"]+)"', kube_tf, re.MULTILINE)
-    assert terraform_namespace is not None, "kube.tf must pin the ingress controller namespace"
-    chart_values = yaml.safe_load(Path("cluster/k8s/instance/values.yaml").read_text(encoding="utf-8"))
-    assert chart_values["ingressControllerNamespace"] == terraform_namespace.group(1)
-    expected = namespace or terraform_namespace.group(1)
+@pytest.mark.parametrize(("namespace", "expected"), [(None, "ingress-nginx"), ("nginx", "nginx")])
+def test_instance_chart_admits_the_configured_ingress_controller_namespace(namespace: str | None, expected: str) -> None:
+    """Both controller rules follow one chart value, whose default keeps the namespace existing releases admit."""
     set_args = () if namespace is None else (f"ingressControllerNamespace={namespace}",)
     policy = _resource(
         _render_chart(Path("cluster/k8s/instance"), *set_args),
