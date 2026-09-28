@@ -49,7 +49,8 @@ if TYPE_CHECKING:
             required=False,
             description=(
                 "Optional host target directory for browser screenshots, PDFs, and downloads. "
-                "Defaults to the active storage path's browser/ directory. "
+                "Defaults to the browser/ directory in the agent's state root, which is requester-scoped for "
+                "private agents. "
                 "The desktop target instead uses its local storage path's desktop-browser/ directory."
             ),
         ),

@@ -567,8 +567,9 @@ class BrowserTools(Toolkit):
         super().__init__(name="browser", tools=[self.browser])
         apply_toolkit_function_aliases(self, {"browser": "browser_control"})
         self._runtime_paths = runtime_paths
-        # Signed-in profiles are agent state: an agent's toolkit keeps them in its resolved state root,
-        # which is requester-scoped for private agents. Worker runtimes own their whole storage root.
+        # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
+        # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
+        self._agent_state_root = agent_state_root
         self._profiles_root = (agent_state_root or runtime_paths.storage_root) / "browser-profiles"
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
@@ -1952,6 +1953,8 @@ class BrowserTools(Toolkit):
             return self._worker_workspace
         if self._configured_output_dir is not None:
             return self._configured_output_dir
+        if self._agent_state_root is not None:
+            return self._agent_state_root.resolve()
         context = get_tool_runtime_context()
         storage_root = (
             context.storage_path

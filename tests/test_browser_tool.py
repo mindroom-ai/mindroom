@@ -381,7 +381,7 @@ def test_browser_metadata_documents_default_output_dir() -> None:
 
     assert output_dir_field.description is not None
     assert "host target" in output_dir_field.description
-    assert "storage path's browser/ directory" in output_dir_field.description
+    assert "browser/ directory in the agent's state root" in output_dir_field.description
     assert "desktop-browser" in output_dir_field.description
 
 
@@ -2064,6 +2064,66 @@ async def test_agent_browser_profiles_live_in_each_agent_state_root(
 
     assert len(profile_dirs) == 4
     assert not (runtime_paths.storage_root / "browser-profiles").exists()
+
+
+def test_agent_browser_artifacts_are_uploadable_only_by_their_agent(tmp_path: Path) -> None:
+    """Screenshots and PDFs stay in the agent state root, so other agents and private requesters cannot upload them."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                "research": {"display_name": "Research", "role": "Browse", "tools": ["browser"]},
+                "writer": {"display_name": "Writer", "role": "Browse", "tools": ["browser"]},
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Browse",
+                    "tools": ["browser"],
+                    "private": {"per": "user"},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    artifacts: list[tuple[BrowserTools, Path]] = []
+    for agent_name, requester_id in [
+        ("research", "@alice:example.org"),
+        ("writer", "@alice:example.org"),
+        ("assistant", "@alice:example.org"),
+        ("assistant", "@bob:example.org"),
+    ]:
+        identity = _matrix_identity(agent_name, requester_id)
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+            create=True,
+        )
+        toolkit = build_agent_toolkit(
+            "browser",
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            worker_tools=[],
+            runtime_overrides=None,
+            agent_runtime=agent_runtime,
+            execution_identity=identity,
+        )
+        assert isinstance(toolkit, BrowserTools)
+        artifact = toolkit._next_output_path("png")
+        toolkit._publish_browser_artifact(artifact, PNG_BYTES)
+        assert artifact.parent == agent_runtime.state_root / "browser"
+        artifacts.append((toolkit, artifact))
+
+    for owner, artifact in artifacts:
+        for toolkit, _own_artifact in artifacts:
+            if toolkit is owner:
+                assert toolkit._resolve_upload_path(str(artifact)).display_path == str(artifact)
+            else:
+                with pytest.raises(ValueError, match="agent workspace"):
+                    toolkit._resolve_upload_path(str(artifact))
+    assert not (runtime_paths.storage_root / "browser").exists()
 
 
 @pytest.mark.asyncio

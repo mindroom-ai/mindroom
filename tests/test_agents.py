@@ -4909,6 +4909,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("agent_modes.json", "private.root must not use reserved runtime directory 'agent_modes.json'"),
         ("agent_modes.lock", "private.root must not use reserved runtime directory 'agent_modes.lock'"),
         (".sessions-recovery.lock", "private.root must not use reserved runtime directory '.sessions-recovery.lock'"),
+        ("browser", "private.root must not use reserved runtime directory 'browser'"),
         ("browser-profiles", "private.root must not use reserved runtime directory 'browser-profiles'"),
         ("browser-profiles/mindroom", "private.root must not use reserved runtime directory 'browser-profiles'"),
     ],
