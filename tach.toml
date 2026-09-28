@@ -5757,7 +5757,6 @@ expose = [
     "SupportsVisibleThreadMessage",
     "latest_visible_thread_event_id_by_thread",
     "ordered_event_ids_from_scanned_event_sources",
-    "resolve_thread_ids_for_event_infos",
     "sort_thread_event_sources_root_first",
     "sort_thread_messages_root_first",
 ]

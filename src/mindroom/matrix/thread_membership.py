@@ -54,6 +54,7 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -67,6 +68,8 @@ type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
 type _ThreadRootProofLookup = Callable[[str, str], Awaitable["_ThreadRootProof"]]
 type _ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
+# A batch resolution over one scanned room hands the event loop back this often.
+_LOCAL_GRAPH_YIELD_INTERVAL = 256
 
 
 class _SupportsEventId(Protocol):
@@ -160,11 +163,6 @@ class ThreadResolution:
             error=error,
             thread_history=thread_history,
         )
-
-    @property
-    def is_threaded(self) -> bool:
-        """Return whether the event was proven to belong to a thread."""
-        return self.state is ThreadResolutionState.THREADED
 
 
 class ThreadMembershipLookupError(RuntimeError):
@@ -358,16 +356,7 @@ def map_backed_thread_membership_access(
     ``event_infos`` is a fixed snapshot: root proofs answer from one index of
     the roots its events prove, so proving every candidate costs one sweep.
     """
-    proven_root_ids = frozenset(
-        event_info.thread_id
-        for event_id, event_info in event_infos.items()
-        if event_info.thread_id is not None
-        and _page_event_info_counts_as_thread_child_proof(
-            event_info.thread_id,
-            event_id=event_id,
-            event_info=event_info,
-        )
-    )
+    proven_root_ids = _proven_thread_root_ids(event_infos)
 
     async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
         return resolved_thread_ids.get(event_id)
@@ -387,6 +376,106 @@ def map_backed_thread_membership_access(
             prove_thread_root=prove_thread_root,
         ),
     )
+
+
+def _proven_thread_root_ids(event_infos: Mapping[str, EventInfo]) -> frozenset[str]:
+    """Return every root that one fixed event snapshot proves has a real threaded child."""
+    return frozenset(
+        event_info.thread_id
+        for event_id, event_info in event_infos.items()
+        if event_info.thread_id is not None
+        and _page_event_info_counts_as_thread_child_proof(
+            event_info.thread_id,
+            event_id=event_id,
+            event_info=event_info,
+        )
+    )
+
+
+def _walk_local_relations(
+    start_event_id: str,
+    *,
+    event_infos: Mapping[str, EventInfo],
+    proven_root_ids: frozenset[str],
+    related_results: dict[str, str | None],
+) -> str | None:
+    """Return the thread a related-event walk from one event reaches, remembering it for every event visited.
+
+    Applies ``resolve_related_event_thread_membership``'s rules over a fixed
+    snapshot: a native thread relation or a proven relation-free root ends the
+    walk threaded; a missing event, one that cannot carry thread membership, a
+    relation-free event without threaded children, or a cycle ends it
+    unthreaded. Every event on one walk reaches the same end, so recording the
+    answer for each of them means no event is walked twice.
+    """
+    path: list[str] = []
+    on_path: set[str] = set()
+    current_event_id = start_event_id
+    while True:
+        if current_event_id in related_results:
+            thread_id = related_results[current_event_id]
+            break
+        if current_event_id in on_path:
+            thread_id = None
+            break
+        path.append(current_event_id)
+        on_path.add(current_event_id)
+        event_info = event_infos.get(current_event_id)
+        if event_info is None or not event_type_supports_thread_relations(event_info.event_type):
+            thread_id = None
+            break
+        if event_info.thread_id is not None:
+            thread_id = event_info.thread_id
+            break
+        next_target = _next_related_event_target(event_info, current_event_id=current_event_id)
+        if next_target is None:
+            proven = event_info.can_be_thread_root and current_event_id in proven_root_ids
+            thread_id = current_event_id if proven else None
+            break
+        current_event_id = next_target
+    for event_id in path:
+        related_results[event_id] = thread_id
+    return thread_id
+
+
+async def resolve_local_event_graph_thread_ids(
+    *,
+    event_infos: Mapping[str, EventInfo],
+    ordered_event_ids: Sequence[str],
+) -> dict[str, str]:
+    """Return the thread of every threaded event in one fixed local event graph.
+
+    Gives each event the answer ``resolve_event_thread_membership`` reaches
+    over ``map_backed_thread_membership_access`` iterated to a fixpoint,
+    including relation chains longer than the per-walk hop bound, but walks
+    each event's relations once, so the cost grows with the number of events
+    whatever order their timestamps put them in. It hands the event loop back
+    every few hundred events.
+    """
+    proven_root_ids = _proven_thread_root_ids(event_infos)
+    related_results: dict[str, str | None] = {}
+    resolved: dict[str, str] = {}
+    for index, event_id in enumerate(ordered_event_ids):
+        if index and index % _LOCAL_GRAPH_YIELD_INTERVAL == 0:
+            await asyncio.sleep(0)
+        event_info = event_infos.get(event_id)
+        if event_info is None:
+            continue
+        if event_info.thread_id is not None:
+            resolved[event_id] = event_info.thread_id
+            continue
+        related_event_id = event_info.next_related_event_id("")
+        if related_event_id is None:
+            continue
+        thread_id = _walk_local_relations(
+            related_event_id,
+            event_infos=event_infos,
+            proven_root_ids=proven_root_ids,
+            related_results=related_results,
+        )
+        if thread_id is not None:
+            resolved[event_id] = thread_id
+    return resolved
 
 
 def _page_event_info_counts_as_thread_child_proof(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 import pytest
@@ -13,12 +15,12 @@ from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     _ThreadRootProof,
     resolve_event_thread_membership,
+    resolve_local_event_graph_thread_ids,
     resolve_related_event_thread_id_best_effort,
     resolve_related_event_thread_membership,
     room_scan_thread_membership_access,
     thread_messages_thread_membership_access,
 )
-from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
 )
@@ -141,7 +143,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
-    async def test_resolve_thread_ids_for_event_infos_reaches_fixpoint_across_transitive_chain(
+    async def test_batch_resolution_derives_transitive_membership_when_children_come_first(
         self,
     ) -> None:
         """Map-backed resolution should derive thread IDs even when children are visited before parents."""
@@ -198,8 +200,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         }
 
-        resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-            room_id,
+        resolved_thread_ids = await resolve_local_event_graph_thread_ids(
             event_infos=event_infos,
             ordered_event_ids=[
                 plain_reply_2_id,
@@ -996,3 +997,84 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolved_thread_id is None
+
+
+class _CountingEventInfos(Mapping[str, EventInfo]):
+    """An event map that counts every lookup the resolver makes."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, EventInfo] = {}
+        self.lookups = 0
+
+    def __setitem__(self, key: str, value: EventInfo) -> None:
+        self._events[key] = value
+
+    def __getitem__(self, key: str) -> EventInfo:
+        self.lookups += 1
+        return self._events[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._events)
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+
+def _reply_chain(length: int) -> _CountingEventInfos:
+    """A thread child followed by ``length`` plain replies, each replying to the one before."""
+
+    def message(event_id: str, relates_to: dict[str, object]) -> EventInfo:
+        return EventInfo.from_event(
+            {
+                "content": {"body": event_id, "msgtype": "m.text", "m.relates_to": relates_to},
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+    infos = _CountingEventInfos()
+    infos["$child"] = message("$child", {"rel_type": "m.thread", "event_id": "$root"})
+    previous = "$child"
+    for index in range(length):
+        event_id = f"$reply-{index}"
+        infos[event_id] = message(event_id, {"m.in_reply_to": {"event_id": previous}})
+        previous = event_id
+    return infos
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length", [500, 2000])
+async def test_batch_resolution_cost_grows_linearly_with_attacker_ordered_timestamps(length: int) -> None:
+    """A reply chain whose timestamps run backwards resolves with a bounded number of lookups per event."""
+    infos = _reply_chain(length)
+
+    resolved = await resolve_local_event_graph_thread_ids(
+        event_infos=infos,
+        ordered_event_ids=list(reversed(list(infos))),
+    )
+
+    assert resolved == dict.fromkeys(infos, "$root")
+    assert infos.lookups <= 4 * len(infos)
+
+
+@pytest.mark.asyncio
+async def test_batch_resolution_lets_other_tasks_run() -> None:
+    """Resolving a large scanned room yields to the event loop along the way."""
+    ticks = 0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    ticks = 0
+    infos = _reply_chain(5000)
+    await resolve_local_event_graph_thread_ids(event_infos=infos, ordered_event_ids=list(infos))
+    stop = True
+    await task
+    assert ticks > 1

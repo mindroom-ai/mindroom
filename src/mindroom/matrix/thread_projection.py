@@ -7,10 +7,9 @@ Ordering and projection invariants:
 2. Within one equal-timestamp group, relation ancestors precede their descendants (topological order
    seeded by input order); events outside any relation chain keep their plain sort position.
 
-3. ``resolve_thread_ids_for_event_infos`` derives membership for a local event graph by iterating the
-   canonical resolver (``thread_membership``) to a fixpoint, so transitive implied membership (reply to
-   a reply to a threaded event) resolves regardless of input order.
-   It is the only sanctioned way to batch-resolve membership; it adds no rules of its own.
+3. Batch membership for a local event graph comes from ``thread_membership.resolve_local_event_graph_thread_ids``,
+   which applies the canonical rules with a memoized walk, so transitive implied membership (reply to a
+   reply to a threaded event) resolves regardless of input order, in time linear in the number of events.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import heapq
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import map_backed_thread_membership_access, resolve_event_thread_membership
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -262,46 +260,8 @@ def ordered_event_ids_from_scanned_event_sources(
     ]
 
 
-async def resolve_thread_ids_for_event_infos(
-    room_id: str,
-    *,
-    event_infos: Mapping[str, EventInfo],
-    ordered_event_ids: Sequence[str],
-    resolved_thread_ids: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """Resolve canonical thread membership for one local event-info graph."""
-    resolved = {} if resolved_thread_ids is None else resolved_thread_ids
-    access = map_backed_thread_membership_access(
-        event_infos=event_infos,
-        resolved_thread_ids=resolved,
-    )
-
-    progress_made = True
-    while progress_made:
-        progress_made = False
-        for event_id in ordered_event_ids:
-            if event_id in resolved:
-                continue
-            event_info = event_infos.get(event_id)
-            if event_info is None:
-                continue
-            resolution = await resolve_event_thread_membership(
-                room_id,
-                event_info,
-                access=access,
-            )
-            if not resolution.is_threaded:
-                continue
-            assert resolution.thread_id is not None
-            resolved[event_id] = resolution.thread_id
-            progress_made = True
-
-    return resolved
-
-
 __all__ = [
     "ordered_event_ids_from_scanned_event_sources",
-    "resolve_thread_ids_for_event_infos",
     "sort_thread_event_sources_root_first",
     "sort_thread_messages_root_first",
 ]

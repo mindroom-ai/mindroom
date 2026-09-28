@@ -10,6 +10,7 @@ here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import Counter
@@ -48,10 +49,10 @@ from mindroom.matrix.thread_membership import (
     ThreadRoomScanRootNotFoundError,
     map_backed_thread_membership_access,
     resolve_event_thread_membership,
+    resolve_local_event_graph_thread_ids,
 )
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
-    resolve_thread_ids_for_event_infos,
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
@@ -70,6 +71,8 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 # Reading a thread from source walks room history back to its root, and anyone
 # who can post in the room decides how old that root is.
 _MAX_THREAD_ROOM_SCAN_PAGES = 100
+# Checking a scanned room's opaque relations hands the event loop back this often.
+_OPAQUE_RELATION_CHECK_YIELD_INTERVAL = 256
 
 
 class ThreadRoomScanBoundError(RuntimeError):
@@ -490,7 +493,9 @@ async def _unresolved_opaque_relation_event_ids(
         resolved_thread_ids=resolved_thread_ids,
     )
     unresolved_event_ids: set[str] = set()
-    for event_id, event_source in scanned_message_sources.items():
+    for index, (event_id, event_source) in enumerate(scanned_message_sources.items()):
+        if index and index % _OPAQUE_RELATION_CHECK_YIELD_INTERVAL == 0:
+            await asyncio.sleep(0)
         if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
             continue
         resolution = await resolve_event_thread_membership(
@@ -530,8 +535,7 @@ async def _group_scanned_sources_by_thread(
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
     ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
-    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        room_id,
+    resolved_thread_ids = await resolve_local_event_graph_thread_ids(
         event_infos=event_infos,
         ordered_event_ids=ordered_event_ids,
     )
