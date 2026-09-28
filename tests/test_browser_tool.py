@@ -11,6 +11,7 @@ import shutil
 import socket
 import stat
 import threading
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -1331,7 +1332,7 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
         await tool.aclose()
 
 
-_PROXY_ENV_NAMES = ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server")
+_PROXY_ENV_NAMES = ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server")
 _REBINDING_HOST = "rebind.test"
 _WEBRTC_STUN_PROBE_JS = """
 async () => {
@@ -1654,6 +1655,79 @@ async def test_host_browser_keeps_configured_upstream_proxy_for_every_destinatio
         assert launch_kwargs["proxy"] == {"server": "http://127.0.0.1:3128", "bypass": "<-loopback>"}
     finally:
         await tool.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["unbound", "runner"])
+async def test_ambiguous_proxy_env_uses_the_relay_only_outside_sandbox_runners(
+    binding: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary falls back to the policy-enforcing relay, while a runner refuses to bypass its egress proxy."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://one:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://two:3128")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"} if binding == "runner" else {},
+    )
+    tool = BrowserTools(runtime_paths)
+    launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext(pages=[]))
+    try:
+        if binding == "runner":
+            with pytest.raises(ValueError, match="cannot choose one egress proxy"):
+                await tool._ensure_profile("mindroom")
+            assert not launch_kwargs
+        else:
+            state = await tool._ensure_profile("mindroom")
+            assert state.destination_proxy is not None
+            assert launch_kwargs["proxy"] == {"server": state.destination_proxy.endpoint, "bypass": "<-loopback>"}
+    finally:
+        await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_private_network_browser_reaches_loopback_directly_beside_an_egress_proxy(
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A trusted private-network browser keeps loopback and NO_PROXY hosts off the operator's egress proxy."""
+    executable = _chromium_executable()
+    _clear_proxy_env(monkeypatch)
+    port, hits = loopback_service
+    proxied: list[bytes] = []
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with suppress(ConnectionError, asyncio.IncompleteReadError):
+            proxied.append(await reader.readuntil(b"\r\n\r\n"))
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+        writer.close()
+
+    proxy = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    monkeypatch.setenv("ALL_PROXY", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
+    monkeypatch.setenv("NO_PROXY", "internal.example")
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    tool = BrowserTools(paths, allow_private_networks=True)
+    try:
+        result = json.loads(await tool.browser(action="open", targetUrl=f"http://127.0.0.1:{port}/app"))
+        assert result["title"] == "Internal service"
+        assert hits == ["/app"]
+        # Chromium's own background requests still use the proxy; the loopback page never does.
+        assert not any(b"127.0.0.1" in request or b"/app" in request for request in proxied)
+        state = tool._profiles["mindroom"]
+        assert state.destination_proxy is None
+    finally:
+        await tool.aclose()
+        proxy.close()
+        await proxy.wait_closed()
 
 
 def _recording_validation(threads: list[str]) -> Callable[..., str]:

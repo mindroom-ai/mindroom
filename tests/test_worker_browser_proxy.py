@@ -17,9 +17,11 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.worker_computer import browser_proxy, mcp_provider
-from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy_url
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy
 from tests.browser_lifecycle_helpers import LifecycleBrowser
 from tests.browser_socks_helpers import socks5_connect
+
+_LOOPBACK_RULES = "localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
 
 
 @pytest.mark.parametrize(
@@ -41,34 +43,103 @@ from tests.browser_socks_helpers import socks5_connect
         ({"all_proxy": "http://old:3128"}, {"ALL_PROXY": "http://worker:3128"}, "http://worker:3128"),
         ({}, {"all_proxy": "http://worker:3128", "https_proxy": "http://other:3128"}, "http://worker:3128"),
         ({}, {"HTTP_PROXY": "http://worker:3128", "HTTPS_PROXY": "http://worker:3128"}, "http://worker:3128"),
+        # One configured proxy carries every connection, whichever variable names it.
+        ({}, {"HTTPS_PROXY": "http://worker:3128"}, "http://worker:3128"),
+        ({}, {"http_proxy": "http://worker:3128"}, "http://worker:3128"),
+        # Trivially different spellings of one proxy are the same proxy.
+        ({}, {"http_proxy": "http://worker:3128", "https_proxy": "http://worker:3128/"}, "http://worker:3128"),
+        ({}, {"http_proxy": "HTTP://Worker:3128", "https_proxy": "http://worker:3128"}, "http://worker:3128"),
+        ({}, {"http_proxy": "http://worker", "https_proxy": "http://worker:80"}, "http://worker:80"),
+        ({}, {"http_proxy": "worker:3128"}, "http://worker:3128"),
+        ({}, {"https_proxy": "https://[fd00::1]:3128"}, "https://[fd00::1]:3128"),
     ],
 )
+@pytest.mark.parametrize("egress_control", [False, True])
 def test_browser_proxy_settings_preserve_worker_route(
     runtime_env: dict[str, str],
     worker_env: dict[str, str],
     expected: str | None,
+    egress_control: bool,
 ) -> None:
     """Case aliases cannot let primary settings shadow the worker's egress route."""
-    assert browser_upstream_proxy_url(runtime_env, worker_env) == expected
+    upstream = browser_upstream_proxy(runtime_env, worker_env, egress_control=egress_control)
+    assert (upstream.server if upstream is not None else None) == expected
+
+
+@pytest.mark.parametrize(
+    ("worker_env", "message"),
+    [
+        ({"ALL_PROXY": "socks5://worker:1080"}, "all_proxy names a SOCKS proxy"),
+        ({"https_proxy": "socks5h://worker:1080"}, "https_proxy names a SOCKS proxy"),
+        ({"SOCKS_SERVER": "socks5://worker:1080"}, "socks_server names a SOCKS proxy"),
+        ({"ALL_PROXY": "http://user:pass@worker:3128"}, "proxy credentials inside the URL are not supported"),
+        ({"ALL_PROXY": "http://worker:3128/path"}, "must not include a path"),
+        ({"ALL_PROXY": "ftp://worker:21"}, "http:// or https:// proxy URL"),
+        ({"ALL_PROXY": "http://worker:port"}, "not a valid proxy URL"),
+    ],
+)
+@pytest.mark.parametrize("egress_control", [False, True])
+def test_browser_proxy_settings_reject_unsupported_proxies(
+    worker_env: dict[str, str],
+    message: str,
+    egress_control: bool,
+) -> None:
+    """A configured proxy the browser cannot use is refused with its actual problem, never ignored."""
+    with pytest.raises(ValueError, match=message) as refused:
+        browser_upstream_proxy({}, worker_env, egress_control=egress_control)
+    assert "pass" not in str(refused.value)
 
 
 @pytest.mark.parametrize(
     "worker_env",
     [
-        {"HTTPS_PROXY": "http://worker:3128"},
-        {"http_proxy": "http://worker:3128"},
         {"http_proxy": "http://one:3128", "https_proxy": "http://two:3128"},
+        {"http_proxy": "http://proxy:3128", "https_proxy": "http://proxy:3129"},
         {"auto_proxy": ""},
-        {"SOCKS_SERVER": "socks5://worker:1080"},
-        {"ALL_PROXY": "socks5://worker:1080"},
-        {"ALL_PROXY": "http://user:pass@worker:3128"},
-        {"ALL_PROXY": "http://worker:3128/path"},
+        {"auto_proxy": "http://wpad/proxy.pac", "all_proxy": "http://worker:3128"},
     ],
 )
-def test_browser_proxy_settings_never_silently_bypass_unsupported_routes(worker_env: dict[str, str]) -> None:
-    """Unsupported browser proxy modes fail before any direct traffic can escape."""
-    with pytest.raises(ValueError, match="Browser requires"):
-        browser_upstream_proxy_url({}, worker_env)
+def test_ambiguous_proxy_settings_fail_closed_only_where_a_proxy_can_be_egress_control(
+    worker_env: dict[str, str],
+) -> None:
+    """A sandbox runner refuses to guess; elsewhere the browser falls back to the policy-enforcing relay."""
+    with pytest.raises(ValueError, match="cannot choose one egress proxy"):
+        browser_upstream_proxy({}, worker_env, egress_control=True)
+    assert browser_upstream_proxy({}, worker_env, egress_control=False) is None
+
+
+def test_no_proxy_wildcard_means_no_upstream_proxy() -> None:
+    """NO_PROXY=* keeps every destination off the proxy, so the relay carries them."""
+    env = {"ALL_PROXY": "http://worker:3128", "NO_PROXY": "*"}
+    assert browser_upstream_proxy({}, env, egress_control=True) is None
+
+
+@pytest.mark.parametrize(
+    ("allow_loopback", "allow_private_networks", "expected"),
+    [
+        (False, False, "<-loopback>"),
+        (True, False, f"<-loopback>,{_LOOPBACK_RULES}"),
+        (False, True, f"<-loopback>,{_LOOPBACK_RULES},corp.example,*.corp.example,10.0.0.0/8,192.168.1.5,[fd00::5]"),
+        (True, True, f"<-loopback>,{_LOOPBACK_RULES},corp.example,*.corp.example,10.0.0.0/8,192.168.1.5,[fd00::5]"),
+    ],
+)
+def test_only_destinations_the_policy_allows_bypass_the_upstream_proxy(
+    allow_loopback: bool,
+    allow_private_networks: bool,
+    expected: str,
+) -> None:
+    """Loopback and NO_PROXY hosts go direct only when the policy already allows them, and never to metadata."""
+    no_proxy = (
+        ".corp.example, 10.0.0.0/8, 192.168.1.5, [fd00::5], 169.254.169.254, 169.254.0.0/16, "
+        "fe80::/10, 0.0.0.0/0, ::/0, host.example:8080, bad/entry"
+    )
+    upstream = browser_upstream_proxy(
+        {},
+        {"HTTPS_PROXY": "http://worker:3128", "NO_PROXY": no_proxy},
+        egress_control=True,
+    )
+    assert upstream is not None
+    assert upstream.bypass(allow_loopback=allow_loopback, allow_private_networks=allow_private_networks) == expected
 
 
 @pytest.mark.asyncio
@@ -160,9 +231,7 @@ async def test_computer_binding_uses_worker_local_browser_proxy(
         server, bypass = args[args.index("--proxy-server") + 1], args[args.index("--proxy-bypass") + 1]
     try:
         assert server == proxy_url
-        assert bypass == (
-            "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
-        )
+        assert bypass == (f"<-loopback>,{_LOOPBACK_RULES}")
     finally:
         await toolkit.aclose()
 

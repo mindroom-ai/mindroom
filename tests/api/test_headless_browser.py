@@ -271,9 +271,12 @@ async def test_headless_environment_rotation_closes_old_profile(
     """Prepared proxy changes replace the browser and its egress route without exposing ambient secrets."""
     client, payload, _root, _config = headless_client
     monkeypatch.setenv("UNRELATED_CONTROL_SECRET", "must-stay-in-runner")
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     for proxy in ("http://first:3128", "http://second:3128"):
+        # A lone HTTP_PROXY is the worker's single egress route for every browser connection.
         monkeypatch.setenv("HTTP_PROXY", proxy)
-        monkeypatch.setenv("HTTPS_PROXY", proxy)
         await _call(client, payload, action="start")
         launch = browser_processes[-1].launch
         assert launch["headless"] is True

@@ -76,6 +76,7 @@ from tests.browser_socks_helpers import socks5_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
+_CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -347,7 +348,7 @@ def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.Monk
         msg = "unsafe crawl4ai URL should be rejected before crawling starts"
         raise AssertionError(msg)
 
-    tool = crawl4ai_tools()()
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
     monkeypatch.setattr(tool, "_async_crawl", forbidden_crawl)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
@@ -396,7 +397,7 @@ async def test_crawl4ai_returns_filtered_markdown_before_raw_markdown(
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
 
-    assert await crawl4ai_tools()()._async_crawl("https://example.com") == expected
+    assert await crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)._async_crawl("https://example.com") == expected
 
 
 @pytest.mark.asyncio
@@ -416,7 +417,7 @@ async def test_crawl4ai_context_guard_runs_under_playwright_route_dispatch() -> 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
-    tool = crawl4ai_tools()()
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
     try:
         await site.start()
         assert site._server is not None
@@ -443,7 +444,7 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every Crawl4AI browser connection passes the connect-time relay, and every context page the route guard."""
-    for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
     installed_hook = None
@@ -509,7 +510,7 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
             return _crawl_result("public content")
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
-    tool = crawl4ai_tools()()
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
 
     try:
         result = await tool._async_crawl("https://example.com")
@@ -527,12 +528,27 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
 
 
 @pytest.mark.asyncio
-async def test_crawl4ai_browser_keeps_configured_upstream_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator egress proxy stays Crawl4AI's only browser route."""
-    for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+@pytest.mark.parametrize(
+    ("proxy_env", "runner", "expected"),
+    [
+        ({"ALL_PROXY": "http://127.0.0.1:3128"}, False, "http://127.0.0.1:3128"),
+        ({"HTTP_PROXY": "http://127.0.0.1:3128/"}, True, "http://127.0.0.1:3128"),
+        ({"HTTP_PROXY": "http://one:3128", "HTTPS_PROXY": "http://two:3128"}, False, "socks5://127.0.0.1:"),
+        ({"HTTP_PROXY": "http://one:3128", "HTTPS_PROXY": "http://two:3128"}, True, None),
+    ],
+)
+async def test_crawl4ai_browser_egress_route(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_env: dict[str, str],
+    runner: bool,
+    expected: str | None,
+) -> None:
+    """One operator egress proxy is Crawl4AI's only route; an ambiguous one falls back to the relay only off runners."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
-    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:3128")
+    for name, value in proxy_env.items():
+        monkeypatch.setenv(name, value)
     servers: list[str] = []
 
     class FakeAsyncWebCrawler:
@@ -551,9 +567,20 @@ async def test_crawl4ai_browser_keeps_configured_upstream_proxy(monkeypatch: pyt
             return _crawl_result("public content")
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    runtime_paths = resolve_runtime_paths(
+        config_path=Path("config.yaml"),
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"} if runner else {},
+    )
 
-    assert await crawl4ai_tools()()._async_crawl("https://example.com") == "public content"
-    assert servers == ["http://127.0.0.1:3128"]
+    result = await crawl4ai_tools()(runtime_paths=runtime_paths)._async_crawl("https://example.com")
+
+    if expected is None:
+        assert "cannot choose one egress proxy" in result
+        assert servers == []
+    else:
+        assert result == "public content"
+        assert len(servers) == 1
+        assert servers[0].startswith(expected)
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
@@ -646,11 +673,16 @@ def test_research_url_tools_declare_their_fetch_path() -> None:
         ),
     ],
 )
-def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str) -> None:
+def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str, tmp_path: Path) -> None:
     """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
     if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
         pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
-    toolkit = BUILTIN_TOOL_REGISTRY[tool_name]()()
+    toolkit = get_tool_by_name(
+        tool_name,
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
 
     with _recording_loopback_server() as (url, connections):
         for function_name, parameter in _url_functions(tool_name):

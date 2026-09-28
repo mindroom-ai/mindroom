@@ -62,7 +62,7 @@ This is a local crawler rather than a hosted API, so it does not need an API key
 Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
 Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
 WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings fail the crawl.
+When the environment names one HTTP(S) egress proxy, through `all_proxy` or through `http_proxy` and `https_proxy` alone or together, that proxy carries every browser connection instead and owns destination enforcement, as the [browser](#browser) notes describe.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -710,7 +710,10 @@ Every requester of a shared agent therefore shares its signed-in browser session
 A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
 The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because they all go through a loopback relay that resolves each destination itself and dials only an address the policy allows.
 WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings stop the browser from starting.
+When the environment names one HTTP(S) egress proxy, through `all_proxy` or through `http_proxy` and `https_proxy` alone or together, that proxy carries every browser connection instead and owns destination enforcement; spellings of one proxy that differ only in letter case, a trailing slash, or an omitted default port count as one proxy.
+With `allow_private_networks`, loopback and the `no_proxy` hosts go direct instead, because that policy already allows them, and the route guard still checks their page requests but not their WebSockets; `no_proxy` address ranges that include link-local or metadata addresses keep using the proxy.
+A SOCKS proxy URL, credentials inside a proxy URL, or a proxy URL with a path is refused with an error that names the variable.
+When the environment is ambiguous, because `http_proxy` and `https_proxy` name different proxies or `auto_proxy` selects a proxy script, a browser in a sandbox runner refuses to start, since its egress proxy may be what enforces approved egress, while the primary logs a warning and uses the relay, which still enforces the browser's destination policy.
 
 #### Configuration
 

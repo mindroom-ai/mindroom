@@ -255,6 +255,9 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
 Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
 A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
+Host and headless worker browsers and `crawl4ai` no longer let Chromium read proxy settings from the environment; MindRoom selects one HTTP(S) egress proxy for every connection, or its destination relay when none is configured.
+If the environment set `http_proxy` and `https_proxy` to different proxies or set `auto_proxy`, the primary now connects without a proxy through the relay and sandbox runners refuse to start the browser, so set `all_proxy` to the one proxy to use.
+SOCKS proxy URLs and proxy URLs with credentials are refused, and `no_proxy` applies only to browsers with `allow_private_networks`.
 
 ### Workspace-only worker mounts
 

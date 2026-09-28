@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from mindroom.browser_fetch_guard import run_browser_dns_lookup
-from mindroom.server_fetch_url import validated_connect_addresses
+from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import ServerFetchUrlError, validated_connect_addresses
 
 if TYPE_CHECKING:
     from asyncio import StreamReader, StreamWriter
@@ -17,47 +20,157 @@ if TYPE_CHECKING:
 
 _SETUP_DEADLINE = 10.0
 _MAX_CONNECTIONS = 128
-COMPUTER_PROXY_BYPASS = (
-    "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
-)
 _REPLY_ADDRESS = b"\x00\x01\x00\x00\x00\x00\x00\x00"
 # The proxy carries only TCP, so WebRTC must not send UDP (STUN, TURN, or media) around it.
 # Chromium ignores the --force-webrtc-ip-handling-policy spelling.
 PROXIED_WEBRTC_ONLY_ARG = "--webrtc-ip-handling-policy=disable_non_proxied_udp"
+_LOOPBACK_PROXY_BYPASS = (
+    "localhost",
+    "localhost.",
+    "*.localhost",
+    "*.localhost.",
+    "127.0.0.0/8",
+    "[::1]",
+    "::ffff:127.0.0.0/104",
+)
+_LINK_LOCAL_NETWORKS = (ipaddress.ip_network("169.254.0.0/16"), ipaddress.ip_network("fe80::/10"))
+_NO_PROXY_HOSTNAME = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?")
+
+logger = get_logger(__name__)
 
 
-def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mapping[str, str]) -> str | None:
-    """Keep one configured browser egress route, failing closed on unsupported modes."""
-    settings: dict[str, str] = {}
-    for env in (runtime_env, worker_env):
-        for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
-            value = env.get(name) or env.get(name.upper(), env.get(name))
-            if value is not None:
-                settings[name] = value
-    if "auto_proxy" in settings:
-        msg = "Browser requires all_proxy instead of automatic proxy configuration."
+@dataclass(frozen=True)
+class BrowserUpstreamProxy:
+    """One operator egress proxy that carries every browser connection Chromium does not bypass."""
+
+    server: str
+    no_proxy: tuple[str, ...] = ()
+
+    def bypass(self, *, allow_loopback: bool, allow_private_networks: bool) -> str:
+        """Return Chromium bypass rules; only destinations the browser policy already allows go direct."""
+        rules = ["<-loopback>"]
+        if allow_loopback or allow_private_networks:
+            rules.extend(_LOOPBACK_PROXY_BYPASS)
+        if allow_private_networks:
+            rules.extend(self.no_proxy)
+        return ",".join(rules)
+
+
+def _env_setting(envs: tuple[Mapping[str, str], ...], name: str) -> str | None:
+    """Return one proxy variable, letting later mappings and lowercase spellings win like curl."""
+    setting: str | None = None
+    for env in envs:
+        value = env.get(name) or env.get(name.upper(), env.get(name))
+        if value is not None:
+            setting = value
+    return setting
+
+
+def _normalized_proxy_url(name: str, value: str) -> str:
+    """Return one comparable HTTP(S) proxy URL; the error never repeats the value, which may hold secrets."""
+    raw = value.strip()
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+        port = parsed.port
+    except ValueError:
+        msg = f"Browser cannot use {name}: it is not a valid proxy URL."
+        raise ValueError(msg) from None
+    scheme = parsed.scheme.lower()
+    if scheme.startswith("socks"):
+        msg = f"Browser supports only HTTP(S) egress proxies, but {name} names a SOCKS proxy."
         raise ValueError(msg)
-    proxy = settings.get("all_proxy")
-    http, https = settings.get("http_proxy"), settings.get("https_proxy")
-    if not proxy and http and http == https:
-        proxy = http
-    if not proxy and (http or https or settings.get("socks_server")):
-        msg = "Browser requires all_proxy or matching http_proxy and https_proxy settings."
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        msg = f"Browser requires {name} to be an http:// or https:// proxy URL."
         raise ValueError(msg)
-    if proxy:
-        parsed = urlsplit(proxy)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-        ):
-            msg = "Browser requires an HTTP(S) proxy URL without embedded credentials."
+    if parsed.username is not None or parsed.password is not None:
+        msg = f"Browser cannot use {name}: proxy credentials inside the URL are not supported."
+        raise ValueError(msg)
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        msg = f"Browser cannot use {name}: a proxy URL must not include a path, query, or fragment."
+        raise ValueError(msg)
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"{scheme}://{host}:{port or (443 if scheme == 'https' else 80)}"
+
+
+def _bypass_network_allowed(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+    """Return whether every address a literal NO_PROXY entry covers is one private browsing may dial."""
+    if any(network.version == local.version and network.overlaps(local) for local in _LINK_LOCAL_NETWORKS):
+        return False
+    try:
+        for address in {network.network_address, network.broadcast_address}:
+            validated_connect_addresses(address.compressed, port=80, allow_private_networks=True)
+    except ServerFetchUrlError:
+        return False
+    return True
+
+
+def _no_proxy_bypass_rules(no_proxy: str) -> tuple[str, ...]:
+    """Translate NO_PROXY into Chromium bypass rules, dropping literal ranges the policy denies."""
+    rules: list[str] = []
+    for raw_entry in no_proxy.split(","):
+        entry = raw_entry.strip().lower()
+        try:
+            network = ipaddress.ip_network(entry.removeprefix("[").removesuffix("]"), strict=False)
+        except ValueError:
+            # NO_PROXY names match their subdomains too; entries with ports or other syntax keep the proxy.
+            host = entry.removeprefix("*").removeprefix(".")
+            if _NO_PROXY_HOSTNAME.fullmatch(host):
+                rules.extend((host, f"*.{host}"))
+            continue
+        if not _bypass_network_allowed(network):
+            continue
+        address = network.network_address.compressed
+        if network.prefixlen != network.max_prefixlen:
+            rules.append(f"{address}/{network.prefixlen}")
+        else:
+            rules.append(f"[{address}]" if network.version == 6 else address)
+    return tuple(rules)
+
+
+def browser_upstream_proxy(
+    runtime_env: Mapping[str, str],
+    browser_env: Mapping[str, str],
+    *,
+    egress_control: bool,
+) -> BrowserUpstreamProxy | None:
+    """Return the operator egress proxy every browser connection must use, or None for the destination relay.
+
+    One HTTP(S) proxy, from ``all_proxy`` or from ``http_proxy`` and ``https_proxy`` naming the same proxy, carries
+    every connection. ``egress_control`` marks a sandbox runner, where such a proxy may be what enforces approved
+    egress: there an environment that names no single proxy fails closed. Elsewhere no MindRoom egress policy depends
+    on the proxy, so the browser uses the destination relay, which still enforces the browser's own policy.
+    """
+    envs = (runtime_env, browser_env)
+    no_proxy = _env_setting(envs, "no_proxy") or ""
+    if any(entry.strip() == "*" for entry in no_proxy.split(",")):
+        return None
+    proxies = {
+        name: _normalized_proxy_url(name, value)
+        for name in ("all_proxy", "http_proxy", "https_proxy")
+        if (value := _env_setting(envs, name))
+    }
+    ambiguity: str | None = None
+    server: str | None = None
+    if _env_setting(envs, "auto_proxy") is not None:
+        ambiguity = "auto_proxy selects proxies through a script"
+    elif "all_proxy" in proxies:
+        server = proxies["all_proxy"]
+    elif len(set(proxies.values())) == 1:
+        server = next(iter(proxies.values()))
+    elif proxies:
+        ambiguity = "http_proxy and https_proxy name different proxies"
+    elif _env_setting(envs, "socks_server"):
+        msg = "Browser supports only HTTP(S) egress proxies, but socks_server names a SOCKS proxy."
+        raise ValueError(msg)
+    if ambiguity is not None:
+        if egress_control:
+            msg = f"Browser cannot choose one egress proxy because {ambiguity}; set all_proxy to the proxy to use."
             raise ValueError(msg)
-        _ = parsed.port  # Validate malformed ports before launching either provider.
-    return proxy or None
+        logger.warning("browser_egress_proxy_ambiguous_using_destination_relay", reason=ambiguity)
+        return None
+    if server is None:
+        return None
+    return BrowserUpstreamProxy(server=server, no_proxy=_no_proxy_bypass_rules(no_proxy))
 
 
 class BrowserDestinationProxy:

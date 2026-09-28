@@ -24,12 +24,14 @@ from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_MCP_SERVER,
 )
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
-from mindroom.worker_computer.browser_proxy import COMPUTER_PROXY_BYPASS, BrowserDestinationProxy
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
     from agno.tools.function import ToolResult
     from mcp.types import CallToolResult
+
+    from mindroom.worker_computer.browser_proxy import BrowserUpstreamProxy
 
 
 class WorkerBrowserMCP:
@@ -43,7 +45,7 @@ class WorkerBrowserMCP:
         storage_root: Path,
         allow_private_networks: bool = False,
         allow_loopback: bool = False,
-        upstream_proxy_url: str | None = None,
+        upstream_proxy: BrowserUpstreamProxy | None = None,
     ) -> None:
         self._display = display
         self._workspace = workspace.resolve()
@@ -53,11 +55,15 @@ class WorkerBrowserMCP:
             allow_private_networks=allow_private_networks,
             allow_loopback=allow_loopback,
         )
-        self._upstream_proxy_url = upstream_proxy_url
-        self._proxy_bypass = COMPUTER_PROXY_BYPASS if upstream_proxy_url and allow_loopback else "<-loopback>"
+        self._upstream_proxy = upstream_proxy
+        self._proxy_bypass = (
+            upstream_proxy.bypass(allow_loopback=allow_loopback, allow_private_networks=allow_private_networks)
+            if upstream_proxy is not None
+            else "<-loopback>"
+        )
         self._proxy = (
             None
-            if upstream_proxy_url
+            if upstream_proxy is not None
             else BrowserDestinationProxy(allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
         )
         self._session: PlaywrightMCPSession | None = None
@@ -65,8 +71,11 @@ class WorkerBrowserMCP:
 
     def _server_parameters(self) -> StdioServerParameters:
         """Build fixed offline launch options; neither model nor workspace supplies code."""
-        proxy_server = self._proxy.endpoint if self._proxy is not None else self._upstream_proxy_url
-        assert proxy_server is not None
+        if self._proxy is not None:
+            proxy_server = self._proxy.endpoint
+        else:
+            assert self._upstream_proxy is not None
+            proxy_server = self._upstream_proxy.server
         env = get_default_environment()
         env.update(
             {

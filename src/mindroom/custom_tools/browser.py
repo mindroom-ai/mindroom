@@ -46,16 +46,16 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
 )
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
-    COMPUTER_PROXY_BYPASS,
     PROXIED_WEBRTC_ONLY_ARG,
     BrowserDestinationProxy,
-    browser_upstream_proxy_url,
+    browser_upstream_proxy,
 )
 
 if TYPE_CHECKING:
@@ -1730,15 +1730,20 @@ class BrowserTools(Toolkit):
                 ),
             )
             # A headless worker browser runs with its prepared environment, so that is where its route is set.
-            upstream = browser_upstream_proxy_url(
+            upstream = browser_upstream_proxy(
                 self._runtime_paths.process_env,
                 os.environ if self._worker_process_env is None else self._worker_process_env,
+                egress_control=self._worker_workspace is not None
+                or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
-            if upstream:
+            if upstream is not None:
                 # The operator's egress proxy owns every destination Chromium does not dial itself.
                 launch_kwargs["proxy"] = {
-                    "server": upstream,
-                    "bypass": COMPUTER_PROXY_BYPASS if allow_loopback else "<-loopback>",
+                    "server": upstream.server,
+                    "bypass": upstream.bypass(
+                        allow_loopback=allow_loopback,
+                        allow_private_networks=self._allow_private_networks,
+                    ),
                 }
             if self._worker_process_env is not None:
                 launch_kwargs["env"] = self._worker_process_env
@@ -1759,7 +1764,7 @@ class BrowserTools(Toolkit):
                 # The public manager cannot stop its transport during subprocess
                 # creation. Let acquisition settle before attempting cleanup.
                 playwright = await asyncio.shield(acquisition)
-                if not upstream:
+                if upstream is None:
                     # Page routes see neither WebSockets nor the address Chromium resolves for itself, so every
                     # TCP connection, including redirects and service-worker fetches, dials a validated address.
                     destination_proxy = BrowserDestinationProxy(

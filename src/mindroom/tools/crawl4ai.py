@@ -6,18 +6,28 @@ import os
 from typing import TYPE_CHECKING
 
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
     BrowserDestinationProxy,
-    browser_upstream_proxy_url,
+    browser_upstream_proxy,
 )
 
 if TYPE_CHECKING:
     from agno.tools.crawl4ai import Crawl4aiTools
     from playwright.async_api import BrowserContext, Page
+
+    from mindroom.constants import RuntimePaths
 
 
 @register_tool_with_metadata(
@@ -97,6 +107,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["crawl4ai"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("crawl",),
 )
 def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
@@ -107,6 +118,33 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
 
     class MindRoomCrawl4aiTools(Crawl4aiTools):
         """Crawl4AI toolkit with MindRoom server-fetch URL validation."""
+
+        # Mirror the authored upstream options; the upstream proxy_config mapping would bypass the egress route.
+        def __init__(
+            self,
+            runtime_paths: RuntimePaths,
+            max_length: int | None = 5000,
+            timeout: int = 60,
+            use_pruning: bool = False,
+            pruning_threshold: float = 0.48,
+            bm25_threshold: float = 1.0,
+            headless: bool = True,
+            wait_until: str = "domcontentloaded",
+            enable_crawl: bool = True,
+            all: bool = False,  # noqa: A002 - upstream option name
+        ) -> None:
+            super().__init__(
+                max_length=max_length,
+                timeout=timeout,
+                use_pruning=use_pruning,
+                pruning_threshold=pruning_threshold,
+                bm25_threshold=bm25_threshold,
+                headless=headless,
+                wait_until=wait_until,
+                enable_crawl=enable_crawl,
+                all=all,
+            )
+            self._runtime_paths = runtime_paths
 
         def crawl(self, url: str | list[str], search_query: str | None = None) -> str | dict[str, str]:
             """Crawl validated public HTTP(S) URLs."""
@@ -126,8 +164,14 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
             destination_proxy: BrowserDestinationProxy | None = None
             try:
                 # Chromium inherits this environment, so an operator egress proxy stays its only route.
-                proxy_server = browser_upstream_proxy_url({}, os.environ)
-                if proxy_server is None:
+                upstream = browser_upstream_proxy(
+                    self._runtime_paths.process_env,
+                    os.environ,
+                    egress_control=self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
+                )
+                if upstream is not None:
+                    proxy_server = upstream.server
+                else:
                     # Page routes see neither WebSockets, service-worker fetches, nor the address Chromium
                     # resolves for itself, so every TCP connection dials an address validated at connect time.
                     destination_proxy = BrowserDestinationProxy()
