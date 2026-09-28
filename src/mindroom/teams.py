@@ -2713,6 +2713,7 @@ async def _retrieve_team_job_results(
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     members: ResolvedExactTeamMembers,
+    progress: ProgressPublisher | None,
 ) -> TeamRunOutput:
     """Retrieve ready results through the reconstructed team's ordinary native stream."""
     events = drive_delegation_stream(
@@ -2734,7 +2735,7 @@ async def _retrieve_team_job_results(
         refresh_scheduler=refresh_scheduler,
         member_config_names=_delegation_member_names(members),
     )
-    return await _collect_team_continuation(events, presentation)
+    return await _collect_team_continuation(events, presentation, progress=progress)
 
 
 @partial(
@@ -2911,6 +2912,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                     execution_identity=execution_identity,
                     refresh_scheduler=refresh_scheduler,
                     members=members,
+                    progress=progress,
                 ),
                 presentation=lambda: StreamingPresentation(
                     response_text=presentation.render_body(),

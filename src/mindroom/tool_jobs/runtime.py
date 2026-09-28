@@ -702,7 +702,11 @@ class ToolJobRuntime:
         await run_coroutine_until_complete(release())
 
     async def acknowledge_wait(
-        self, job_id: str, claim: JobClaim | None, *, source_event_id: str | None = None
+        self,
+        job_id: str,
+        claim: JobClaim | None,
+        *,
+        source_event_id: str | None = None,
     ) -> None:
         """Mark the claimed generation consumed, only after the exact parent tool result has been durably saved."""
         async with self._lock:
@@ -939,7 +943,11 @@ class ToolJobRuntime:
         )
 
     async def outcome(
-        self, job_id: str, generation: int, *, source_event_id: str | None = None
+        self,
+        job_id: str,
+        generation: int,
+        *,
+        source_event_id: str | None = None,
     ) -> BackgroundJob | None:
         """Revalidate an unread generation, or one the reply of `source_event_id` already consumed, at its boundary."""
         async with self._lock:

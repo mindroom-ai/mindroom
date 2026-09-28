@@ -229,6 +229,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                         tool_trace_collector=[],
                         run_id_callback=None,
                         tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
+                        progress=None,
                     )
                 assert isinstance(response, CompletedApprovalRun)
                 return response.response_text

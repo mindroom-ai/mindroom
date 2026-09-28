@@ -241,7 +241,7 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
             yield ToolCallCompletedEvent(tool=tool)
         yield RunOutput(run_id="current-run", session_id="session-1", status=RunStatus.completed, tools=[tool])
 
-    await _collect_agent_continuation(events(), presentation)
+    await _collect_agent_continuation(events(), presentation, progress=None)
 
     assert presentation.final_text().startswith(prefix)
     assert presentation.tool_trace[0] == ToolTraceEntry(type="tool_call_started", tool_name="inspect")
