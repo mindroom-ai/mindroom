@@ -1,8 +1,6 @@
 """Test GDPR endpoints functionality."""
 
-import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,8 +11,6 @@ from main import app
 from backend.deps import verify_user
 
 from tests.fake_supabase import FakeSupabase
-
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 
 
 @pytest.fixture
@@ -62,12 +58,14 @@ def mock_lifecycle():
         patch(f"{lifecycle}.end_account_billing_at_period_end", new=AsyncMock(return_value=[])) as end_billing,
         patch(f"{lifecycle}.resume_account_billing", new=AsyncMock()) as resume_billing,
         patch(f"{lifecycle}.resume_subscriptions", new=AsyncMock()) as resume_subscriptions,
+        patch(f"{lifecycle}.cancel_unpaid_subscriptions", new=AsyncMock()) as cancel_unpaid,
         patch(f"{lifecycle}.reconcile_account_instances", new=AsyncMock(return_value=[])) as reconcile,
     ):
         yield MagicMock(
             end_account_billing_at_period_end=end_billing,
             resume_account_billing=resume_billing,
             resume_subscriptions=resume_subscriptions,
+            cancel_unpaid_subscriptions=cancel_unpaid,
             reconcile_account_instances=reconcile,
         )
 
@@ -78,87 +76,11 @@ def _account_deleted_at(mock_supabase: MagicMock, deleted_at: str | None) -> Non
     lookup.execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
 
 
-def _function_body(sql: str, name: str) -> str:
-    match = re.search(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(.*?\$\$(.*?)\$\$", sql, re.DOTALL)
-    assert match is not None, name
-    return match.group(1)
-
-
-def test_account_deletion_functions_change_only_the_account() -> None:
-    """Soft delete and restore change only the account, restore ends with the grace period or a cleanup claim and
-    never lifts a suspension, and hard delete only removes a claimed account.
-    """
-    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
-    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
-
-    assert migration.lstrip().startswith("--")
-    assert "BEGIN;" in migration
-    assert migration.rstrip().endswith("COMMIT;")
-    for sql in (migration, baseline):
-        for name in ("soft_delete_account", "restore_account"):
-            body = _function_body(sql, name)
-            assert "UPDATE accounts" in body
-            assert "subscriptions" not in body
-            assert "instances" not in body
-        restore = _function_body(sql, "restore_account")
-        assert "AND deleted_at > NOW() - INTERVAL '7 days'" in restore
-        assert "AND hard_delete_started_at IS NULL;" in restore
-        assert "RETURN FALSE;" in restore
-        assert "RETURN TRUE;" in restore
-        assert re.search(r"FUNCTION restore_account\(\s*target_account_id UUID\s*\) RETURNS BOOLEAN", sql)
-        # A suspension is never lifted: soft delete keeps it, and restore only undoes its own 'deleted' status.
-        assert "AND status = 'deleted'" in restore
-        assert "status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END" in _function_body(
-            sql, "soft_delete_account"
-        )
-        hard_delete = _function_body(sql, "hard_delete_account")
-        assert "hard_delete_started_at IS NOT NULL" in hard_delete
-        # The accounts row goes with its auth user, which the backend deletes last, so a failure there is retried.
-        assert "DELETE FROM accounts" not in hard_delete
-        claim = _function_body(sql, "claim_account_hard_delete")
-        assert "AND deleted_at <= NOW() - INTERVAL '7 days';" in claim
-        assert "RETURN FOUND;" in claim
-
-
-def test_upgrade_restarts_the_grace_period_of_old_deletion_requests_once() -> None:
-    """Older releases left such accounts running and billed, so the first cleanup must not tear them down unwarned.
-
-    Adding the claim column marks the first run, so rerunning the migration never restarts a grace period again.
-    """
-    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
-
-    assert re.search(
-        r"IF NOT EXISTS \(\s*SELECT 1 FROM information_schema\.columns\s*"
-        r"WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'hard_delete_started_at'\s*"
-        r"\) THEN\s*ALTER TABLE accounts ADD COLUMN hard_delete_started_at TIMESTAMPTZ NULL;\s*"
-        r"UPDATE accounts SET deleted_at = NOW\(\) WHERE deleted_at < NOW\(\) - INTERVAL '7 days';\s*END IF;",
-        migration,
-    )
-    assert "ADD COLUMN IF NOT EXISTS hard_delete_started_at" not in migration
-
-
-def test_hard_delete_keeps_payment_and_webhook_records_without_their_account_link() -> None:
-    """Every subscriber has payment or webhook rows, so they must not block the account's hard delete."""
-    migration = (MIGRATIONS_DIR / "005_account_deletion.sql").read_text(encoding="utf-8")
-    baseline = (MIGRATIONS_DIR / "000_consolidated_complete_schema.sql").read_text(encoding="utf-8")
-
-    for table in ("payments", "webhook_events"):
-        assert re.search(
-            rf"CREATE TABLE {table} \(.*?account_id UUID REFERENCES accounts\(id\) ON DELETE SET NULL",
-            baseline,
-            re.DOTALL,
-        ), table
-        assert (
-            f"ADD CONSTRAINT {table}_account_id_fkey FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL"
-            in migration
-        ), table
-
-
 def test_delete_and_cancel_round_trip_never_makes_an_unpaid_subscription_provisionable() -> None:
     """A pro checkout whose card failed stays incomplete through a deletion and its cancellation.
 
-    The fake RPCs apply only the account changes that `test_account_deletion_functions_change_only_the_account`
-    pins for the real functions, so the subscription and instance rows keep whatever Stripe last reported.
+    The fake RPCs apply only the account changes that `test_account_deletion_sql.py` checks the real functions
+    make, so the subscription and instance rows keep whatever Stripe last reported.
     """
     account_id = "00000000-0000-0000-0000-000000000002"
     db = FakeSupabase(
@@ -390,6 +312,37 @@ class TestGDPREndpoints:
         mock_lifecycle.resume_subscriptions.assert_awaited_once_with(["sub_a"])
         mock_lifecycle.resume_account_billing.assert_not_awaited()
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
+
+    def test_failed_soft_delete_whose_outcome_cannot_be_checked_reports_that(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """When even the follow-up lookup fails, nothing is undone and the customer is told the state is unknown."""
+        mock_lifecycle.end_account_billing_at_period_end.return_value = ["sub_a"]
+        mock_supabase.rpc.return_value.execute.side_effect = RuntimeError("connection reset")
+        lookup = mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value
+        lookup.execute.side_effect = RuntimeError("connection reset")
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 500
+        assert "could not confirm whether your deletion request was recorded" in response.json()["detail"]
+        assert "may be set to end at the end of its billing period" in response.json()["detail"]
+        mock_lifecycle.resume_subscriptions.assert_not_awaited()
+
+    def test_unpaid_subscription_cancel_failure_keeps_the_recorded_deletion(
+        self, client, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """The nightly cleanup retries the cancellation, so the deletion request still succeeds."""
+        mock_lifecycle.cancel_unpaid_subscriptions.side_effect = stripe.APIConnectionError("stripe unavailable")
+
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "deletion_scheduled"
 
     def test_soft_delete_that_committed_before_its_response_was_lost_stands(
         self, client, mock_verify_user, mock_user, mock_supabase, mock_lifecycle

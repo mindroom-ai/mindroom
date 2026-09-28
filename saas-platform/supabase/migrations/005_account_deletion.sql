@@ -156,7 +156,11 @@ GRANT EXECUTE ON FUNCTION claim_account_hard_delete(UUID) TO service_role;
 CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
+DECLARE
+    deleted_rows INTEGER := 0;
+    step_rows INTEGER;
 BEGIN
+    -- Only an account cleanup claimed is deleted, so a restored account keeps its rows.
     IF NOT EXISTS (
         SELECT 1 FROM accounts WHERE id = target_account_id AND hard_delete_started_at IS NOT NULL
     ) THEN
@@ -165,21 +169,29 @@ BEGIN
 
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
+    GET DIAGNOSTICS step_rows = ROW_COUNT;
+    deleted_rows := deleted_rows + step_rows;
     DELETE FROM subscriptions WHERE account_id = target_account_id;
+    GET DIAGNOSTICS step_rows = ROW_COUNT;
+    deleted_rows := deleted_rows + step_rows;
     DELETE FROM audit_logs WHERE account_id = target_account_id;
+    GET DIAGNOSTICS step_rows = ROW_COUNT;
+    deleted_rows := deleted_rows + step_rows;
 
     -- The accounts row goes last, with its auth user (ON DELETE CASCADE), which the backend deletes through the
     -- Supabase admin API; until then the claimed row is what lets the next cleanup run finish the deletion.
 
-    -- Audit entry for hard delete (system action)
-    INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
-    VALUES (
-        'gdpr_account_hard_deleted',
-        'account',
-        target_account_id::text,
-        jsonb_build_object('source', 'hard_delete_account'),
-        TRUE
-    );
+    -- Audit entry for hard delete (system action), once: a retry after a failed auth deletion deletes nothing.
+    IF deleted_rows > 0 THEN
+        INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
+        VALUES (
+            'gdpr_account_hard_deleted',
+            'account',
+            target_account_id::text,
+            jsonb_build_object('source', 'hard_delete_account'),
+            TRUE
+        );
+    END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 

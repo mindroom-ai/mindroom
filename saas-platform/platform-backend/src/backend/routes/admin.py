@@ -579,10 +579,14 @@ async def admin_delete_account_complete(
         f"Admin {admin['user_id']} initiating complete deletion of account {account_id} ({account.get('email')})"
     )
 
-    # 1. Mark the account pending deletion, so nothing provisions, starts, or bills it again during teardown.
+    # 1. Mark the account pending deletion, so nothing provisions, starts, or bills it again during teardown, and
+    # claim it for teardown, so the customer can no longer restore it and hard_delete_account accepts it.
     sb.rpc(
         "soft_delete_account",
         {"target_account_id": account_id, "reason": "admin_complete_deletion", "requested_by": admin["user_id"]},
+    ).execute()
+    sb.table("accounts").update({"hard_delete_started_at": datetime.now(UTC).isoformat()}).eq("id", account_id).is_(
+        "hard_delete_started_at", "null"
     ).execute()
 
     # 2. Cancel Stripe billing and uninstall every instance; the rows are the only record of what to tear down,
@@ -598,14 +602,15 @@ async def admin_delete_account_complete(
         )
         raise HTTPException(status_code=500, detail=detail) from e
 
-    # 3. Delete the login; its account row and every row that cascades from it go with it.
+    # 3. Delete the account's instance, subscription, and audit rows, then the login, whose account row goes with it.
     try:
+        sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
         await instance_lifecycle.delete_auth_user(account_id)
     except Exception as e:
-        logger.exception("Deleting the auth user of account %s failed; its account row is kept", account_id)
+        logger.exception("Deleting the rows or auth user of account %s failed; its account row is kept", account_id)
         detail = (
-            "Billing and instances are torn down, but deleting the login failed, so the account row was kept; "
-            f"retry the deletion: {e!s}"
+            "Billing and instances are torn down, but deleting the account's rows or login failed, so the account "
+            f"row was kept; retry the deletion: {e!s}"
         )
         raise HTTPException(status_code=500, detail=detail) from e
 

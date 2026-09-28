@@ -27,8 +27,8 @@ class TestStripeRoutesEndpoints:
     @pytest.fixture(autouse=True)
     def account_pending_deletion(self):
         """Accounts are not pending deletion unless a test says so."""
-        with patch("backend.services.provisioner_service.account_may_run_instances", return_value=True) as may_run:
-            yield may_run
+        with patch("backend.services.provisioner_service.account_pending_deletion", return_value=False) as pending:
+            yield pending
 
     @pytest.mark.parametrize("path", ["/stripe/checkout", "/stripe/portal"])
     def test_account_pending_deletion_cannot_change_billing(
@@ -41,7 +41,7 @@ class TestStripeRoutesEndpoints:
         path: str,
     ):
         """Teardown cancels any subscription without refund, so a pending account must cancel the deletion first."""
-        account_pending_deletion.return_value = False
+        account_pending_deletion.return_value = True
 
         response = client.post(path, json={"tier": "pro", "billing_cycle": "monthly"})
 

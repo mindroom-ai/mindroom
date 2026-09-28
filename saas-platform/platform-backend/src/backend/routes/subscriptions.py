@@ -71,7 +71,7 @@ async def cancel_subscription(
     """Cancel subscription."""
     sb = ensure_supabase()
     account_id = user["account_id"]
-    provisioner_service.assert_account_may_run_instances(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
+    provisioner_service.refuse_pending_deletion(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
 
     # Get current subscription
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
@@ -120,7 +120,7 @@ async def reactivate_subscription(request: Request, user: Annotated[dict, Depend
     """Reactivate a cancelled subscription (if still in billing period)."""
     sb = ensure_supabase()
     account_id = user["account_id"]
-    provisioner_service.assert_account_may_run_instances(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
+    provisioner_service.refuse_pending_deletion(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
 
     # Get current subscription
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()

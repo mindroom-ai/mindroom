@@ -27,10 +27,10 @@ class TestSubscriptionsEndpoints:
             yield sb
 
     @pytest.fixture(autouse=True)
-    def account_may_run(self):
+    def account_pending_deletion(self):
         """Accounts are not pending deletion unless a test says so."""
-        with patch("backend.services.provisioner_service.account_may_run_instances", return_value=True) as may_run:
-            yield may_run
+        with patch("backend.services.provisioner_service.account_pending_deletion", return_value=False) as pending:
+            yield pending
 
     @pytest.fixture
     def mock_verify_user(self):
@@ -267,11 +267,11 @@ class TestSubscriptionsEndpoints:
         mock_supabase: MagicMock,
         mock_stripe: Mock,
         mock_verify_user: Mock,
-        account_may_run: Mock,
+        account_pending_deletion: Mock,
         path: str,
     ):
         """Teardown cancels the subscription without a refund, so the deletion has to be cancelled first."""
-        account_may_run.return_value = False
+        account_pending_deletion.return_value = True
 
         response = client.post(path, json={"cancel_at_period_end": False})
 

@@ -41,9 +41,14 @@ from backend.entitlements import (
 from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
 from backend.services.instances_data import get_instance, update_instance
+from backend.services.legacy_instance_lifecycle import (
+    adopt_legacy_soft_deleted_instance,
+    legacy_soft_deleted_deployment_exists,
+)
 from backend.services.provisioner_service import (
     CLEARED_OPENROUTER_KEY_METADATA,
-    account_may_run_instances,
+    account_pending_deletion,
+    account_row_pending_deletion,
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
@@ -66,15 +71,25 @@ _STRIPE_REFRESH_ATTEMPTS = 3
 _INSTANCES_NAMESPACE = "mindroom-instances"
 # Stripe subscriptions in these states no longer bill and cannot be cancelled again.
 ENDED_STRIPE_STATUSES = frozenset({"canceled", "incomplete_expired"})
-# Stripe subscriptions in these states have no paid period to finish, so an account deletion cancels them at once;
+# Stripe subscriptions in these states have no paid period to finish, so a recorded account deletion cancels them;
 # otherwise a customer could still pay an open first invoice or resume a paused trial during the grace period.
 _UNBILLED_STRIPE_STATUSES = frozenset({"incomplete", "paused"})
-# Metadata on the Stripe subscriptions an account deletion set to end, so cancelling it resumes only those.
+# Metadata on the Stripe subscriptions an account deletion set to end, so cancelling it resumes only those. Its value
+# is the later end date the customer had chosen, as a Unix timestamp, or this word when there was none.
 DELETION_BILLING_MARKER = "mindroom_ends_for_account_deletion"
+_NO_EARLIER_END = "none"
 # Teardown cancels every subscription without a refund, so billing changes wait until a deletion is cancelled.
 PENDING_DELETION_BILLING_DETAIL = "Cancel the account deletion before changing billing"
 # Serializes webhook-triggered and nightly runs for the same subscription within this process.
 _subscription_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+@dataclass(frozen=True)
+class ScheduledBillingEnd:
+    """A Stripe subscription an account deletion set to end with its paid period, and the end it had before."""
+
+    subscription_id: str
+    marker: str  # The DELETION_BILLING_MARKER value, which says how to undo the change
 
 
 @dataclass
@@ -120,7 +135,7 @@ async def reconcile_subscription_instances(
             .data
             or []
         )
-        account_may_run = account_may_run_instances(sb, subscription["account_id"])
+        account_may_run = not account_pending_deletion(sb, subscription["account_id"])
         entitled = account_may_run and is_subscription_service_active(subscription, now=now)
         # Looking for legacy soft-deleted deployments costs a Kubernetes call per torn-down instance, so only the
         # nightly run and accounts pending deletion, which a legacy soft delete left running, look for them.
@@ -136,8 +151,8 @@ async def reconcile_subscription_instances(
             entitled = is_subscription_service_active(subscription, now=now)
         for instance in instances:
             try:
-                if find_legacy and await _legacy_soft_deleted_deployment_exists(instance):
-                    instance = _adopt_legacy_soft_deleted_instance(sb, instance)  # noqa: PLW2901
+                if find_legacy and await legacy_soft_deleted_deployment_exists(instance):
+                    instance = adopt_legacy_soft_deleted_instance(sb, instance)  # noqa: PLW2901
                 if not entitled:
                     await _hold(sb, instance, subscription, now, summary)
                 elif instance.get("lifecycle_stopped_at"):
@@ -174,18 +189,27 @@ async def reconcile_account_instances(account_id: str) -> list[str]:
     return summary.errors
 
 
-async def end_account_billing_at_period_end(account_id: str) -> list[str]:
-    """Let each Stripe subscription of the account's customer end with its paid period, for an account deletion.
+async def end_account_billing_at_period_end(account_id: str) -> list[ScheduledBillingEnd]:
+    """Let each renewing Stripe subscription of the account's customer end with its paid period, for a deletion.
 
-    Subscriptions the customer already set to end keep their schedule, and ones without a paid period (`incomplete`,
-    `paused`) are cancelled at once; the ones this sets to end are marked so `resume_account_billing` undoes only
-    those, and their ids are returned. Repeating it changes nothing. A Stripe error propagates after this call's
-    changes are undone where Stripe allows, so the request can simply be retried. A no-op without a Stripe customer
-    or without Stripe.
+    A subscription the customer already set to end within that period keeps its schedule, and one set to end later
+    is moved to the period end. The changed ones are marked so `resume_account_billing` undoes only those, and are
+    returned; repeating it changes nothing. A Stripe error propagates after this call's changes are undone, so the
+    request can simply be retried. Nothing is cancelled here: `cancel_unpaid_subscriptions` runs once the deletion is
+    recorded. A no-op without a Stripe customer or without Stripe.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
         return await anyio.to_thread.run_sync(partial(_end_customer_billing_at_period_end, customer_id))
     return []
+
+
+async def cancel_unpaid_subscriptions(account_id: str) -> None:
+    """Cancel the account's subscriptions without a paid period (`incomplete`, `paused`), once its deletion is recorded.
+
+    A Stripe error propagates; the nightly cleanup repeats this for every account inside its grace period.
+    """
+    if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
+        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id, _UNBILLED_STRIPE_STATUSES))
 
 
 async def resume_account_billing(account_id: str) -> None:
@@ -194,10 +218,10 @@ async def resume_account_billing(account_id: str) -> None:
         await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
 
 
-async def resume_subscriptions(subscription_ids: list[str]) -> None:
+async def resume_subscriptions(scheduled: list[ScheduledBillingEnd]) -> None:
     """Undo the end that `end_account_billing_at_period_end` set on exactly these subscriptions."""
-    for subscription_id in subscription_ids:
-        await anyio.to_thread.run_sync(_resume_subscription, subscription_id)
+    for scheduled_end in scheduled:
+        await anyio.to_thread.run_sync(_resume_subscription, scheduled_end)
 
 
 async def tear_down_account(account_id: str) -> None:
@@ -251,18 +275,6 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
     return summary
 
 
-def _account_may_run(account: dict[str, Any] | None) -> bool:
-    """Return whether an account may run instances at all: it exists and is not pending deletion."""
-    return account is not None and account.get("deleted_at") is None
-
-
-def _may_run_instances(
-    subscription: dict[str, Any], account: dict[str, Any] | None, *, now: datetime | None = None
-) -> bool:
-    """Return whether a subscription may run its instances: it is entitled and its account is not pending deletion."""
-    return _account_may_run(account) and is_subscription_service_active(subscription, now=now)
-
-
 def _account_instances(sb: Client, account_id: str) -> list[dict[str, Any]]:
     """Return every instance the account's rows own, by account or by subscription."""
     columns = "instance_id,subscription_id"
@@ -293,50 +305,63 @@ def _customer_subscriptions(customer_id: str) -> list[Any]:
     return [subscription for subscription in subscriptions if subscription.status not in ENDED_STRIPE_STATUSES]
 
 
-def _cancel_customer_subscriptions(customer_id: str) -> None:
+def _cancel_customer_subscriptions(customer_id: str, statuses: frozenset[str] | None = None) -> None:
+    """Cancel the customer's subscriptions that have not ended, or only those in `statuses`."""
     for subscription in _customer_subscriptions(customer_id):
-        stripe.Subscription.cancel(subscription.id)
-        logger.info("Cancelled Stripe subscription %s of customer %s", subscription.id, customer_id)
+        if statuses is None or subscription.status in statuses:
+            stripe.Subscription.cancel(subscription.id)
+            logger.info("Cancelled Stripe subscription %s of customer %s", subscription.id, customer_id)
 
 
-def _end_customer_billing_at_period_end(customer_id: str) -> list[str]:
-    subscriptions = _customer_subscriptions(customer_id)
-    scheduled: list[str] = []
+def _current_period_end(subscription: Any) -> int | None:  # noqa: ANN401
+    """Return when the subscription's paid period ends; since API 2025-03-31.basil that lives on its items."""
+    items = subscription["items"]["data"]
+    return max(item["current_period_end"] for item in items) if items else None
+
+
+def _end_customer_billing_at_period_end(customer_id: str) -> list[ScheduledBillingEnd]:
+    scheduled: list[ScheduledBillingEnd] = []
     try:
-        for subscription in subscriptions:
-            # Stripe sets cancel_at for a subscription already ending, whether at its period end or a chosen date.
-            if subscription.status in _UNBILLED_STRIPE_STATUSES or subscription.cancel_at is not None:
+        for subscription in _customer_subscriptions(customer_id):
+            if subscription.status in _UNBILLED_STRIPE_STATUSES or subscription.metadata.get(DELETION_BILLING_MARKER):
                 continue
+            chosen_end = subscription.cancel_at
+            if chosen_end is not None:
+                period_end = _current_period_end(subscription)
+                if period_end is None or chosen_end <= period_end:
+                    continue  # It already ends within its paid period, as the customer chose.
+            marker = _NO_EARLIER_END if chosen_end is None else str(chosen_end)
             stripe.Subscription.modify(
-                subscription.id, cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "true"}
+                subscription.id, cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: marker}
             )
-            scheduled.append(subscription.id)
+            scheduled.append(ScheduledBillingEnd(subscription.id, marker))
             logger.info("Stripe subscription %s ends at its period end for an account deletion", subscription.id)
-        # Cancelling cannot be undone, so it comes after every change that can.
-        for subscription in subscriptions:
-            if subscription.status in _UNBILLED_STRIPE_STATUSES:
-                stripe.Subscription.cancel(subscription.id)
-                logger.info("Cancelled unpaid Stripe subscription %s for an account deletion", subscription.id)
     except stripe.StripeError:
-        for subscription_id in scheduled:
+        for scheduled_end in scheduled:
             try:
-                _resume_subscription(subscription_id)
+                _resume_subscription(scheduled_end)
             except stripe.StripeError:
-                logger.exception("Could not undo the scheduled end of Stripe subscription %s", subscription_id)
+                logger.exception(
+                    "Could not undo the scheduled end of Stripe subscription %s", scheduled_end.subscription_id
+                )
         raise
     return scheduled
 
 
 def _resume_customer_billing(customer_id: str) -> None:
     for subscription in _customer_subscriptions(customer_id):
-        if subscription.metadata.get(DELETION_BILLING_MARKER):
-            _resume_subscription(subscription.id)
+        if marker := subscription.metadata.get(DELETION_BILLING_MARKER):
+            _resume_subscription(ScheduledBillingEnd(subscription.id, marker))
             logger.info("Resumed Stripe subscription %s after a cancelled account deletion", subscription.id)
 
 
-def _resume_subscription(subscription_id: str) -> None:
-    # An empty metadata value removes the key.
-    stripe.Subscription.modify(subscription_id, cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""})
+def _resume_subscription(scheduled_end: ScheduledBillingEnd) -> None:
+    """Put back the end a subscription had before the deletion: none, or the later date the customer chose."""
+    cleared = {DELETION_BILLING_MARKER: ""}  # An empty metadata value removes the key.
+    if scheduled_end.marker == _NO_EARLIER_END:
+        stripe.Subscription.modify(scheduled_end.subscription_id, cancel_at_period_end=False, metadata=cleared)
+    else:
+        stripe.Subscription.modify(scheduled_end.subscription_id, cancel_at=int(scheduled_end.marker), metadata=cleared)
 
 
 async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[str, Any] | None:
@@ -429,7 +454,11 @@ def _lifecycle_problem(
     if status == "deprovisioned":
         return None
     held = instance.get("lifecycle_stopped_at") is not None
-    entitled = bool(subscription) and _may_run_instances(subscription, account, now=now)
+    entitled = (
+        bool(subscription)
+        and not account_row_pending_deletion(account)
+        and is_subscription_service_active(subscription, now=now)
+    )
     if held and entitled:
         return "Subscription is entitled again but the instance is still held"
     if held and status != "stopped":
@@ -477,7 +506,7 @@ async def _resume(
         or failed_before
         or not await check_deployment_exists(str(instance_id))
     ):
-        await _reprovision(sb, instance_id, subscription)
+        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
     # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
@@ -487,7 +516,7 @@ async def _resume(
     except OpenRouterKeyNotFoundError:
         # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one.
         update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
-        await _reprovision(sb, instance_id, subscription)
+        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=True)
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
@@ -528,7 +557,7 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     alignment = _plan_alignment(instance, subscription["tier"])
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
-        await _reprovision(sb, instance_id, subscription)
+        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=False)
     elif alignment == "revoke":
         logger.info("Revoking the OpenRouter key of instance %s, which its tier does not include", instance_id)
         await revoke_instance_openrouter_key(sb, instance_id)
@@ -537,7 +566,14 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
 
 
-async def _reprovision(sb: Client, instance_id: Any, subscription: dict[str, Any]) -> None:
+async def _reprovision(
+    sb: Client, instance_id: Any, subscription: dict[str, Any], *, resume_lifecycle_hold: bool
+) -> None:
+    """Redeploy an instance for its subscription's tier.
+
+    Only resuming a hold passes `resume_lifecycle_hold`; any other redeploy stays stopped when a hold, or an account
+    deletion, lands while it runs.
+    """
     await provision_instance(
         sb,
         data={
@@ -547,7 +583,7 @@ async def _reprovision(sb: Client, instance_id: Any, subscription: dict[str, Any
             "instance_id": instance_id,
         },
         background_tasks=None,
-        resume_lifecycle_hold=True,
+        resume_lifecycle_hold=resume_lifecycle_hold,
     )
 
 
@@ -582,32 +618,16 @@ async def _hold(
         await _teardown(sb, instance_id, subscription, summary)
 
 
-# LEGACY_COMPAT: Instances a soft delete marked deprovisioned while their deployment kept running.
-# Legacy format: an `instances` row with status `deprovisioned`, no `lifecycle_stopped_at`, and a live deployment,
-#   written by `soft_delete_account` for every running instance of an account whose deletion was requested.
-# Last legacy release: every release before the one that ships migration 005, whose soft delete changes only the
-#   account while this module holds the instances.
-# Handling: the nightly run, and any run for an account pending deletion, marks such a row running again, since
-#   its deployment still runs; the lifecycle then holds it, or keeps it running for an entitled subscription.
-#   A deprovisioned row without a deployment is already torn down and is left alone.
-# Coverage: saas-platform/platform-backend/tests/test_instance_lifecycle.py::test_legacy_soft_deleted_instance_that_kept_running_is_held,
-#   saas-platform/platform-backend/tests/test_instance_lifecycle.py::test_legacy_soft_deleted_instance_of_a_paying_restored_account_runs
-async def _legacy_soft_deleted_deployment_exists(instance: dict[str, Any]) -> bool:
-    if instance.get("status") != "deprovisioned" or instance.get("lifecycle_stopped_at") is not None:
-        return False  # A lifecycle teardown sets the hold first.
-    return await check_deployment_exists(str(instance["instance_id"]))
-
-
-def _adopt_legacy_soft_deleted_instance(sb: Client, instance: dict[str, Any]) -> dict[str, Any]:
-    logger.warning("Instance %s was marked deprovisioned but still runs; marking it running", instance["instance_id"])
-    update_instance(sb, instance["instance_id"], {"status": "running"})
-    return {**instance, "status": "running"}
-
-
 async def _teardown(sb: Client, instance_id: Any, subscription: dict[str, Any], summary: LifecycleSummary) -> None:
-    """Uninstall an instance whose grace period ended, unless its subscription became entitled meanwhile."""
+    """Uninstall an instance whose grace period ended, unless its subscription became entitled or its account is
+    pending deletion meanwhile."""
     fresh = sb.table("subscriptions").select("*").eq("id", subscription["id"]).limit(1).execute().data
-    if fresh and account_may_run_instances(sb, fresh[0]["account_id"]) and is_subscription_service_active(fresh[0]):
+    if fresh and account_pending_deletion(sb, fresh[0]["account_id"]):
+        # The account's own cleanup tears it down once its restore window ends, even when a short teardown grace
+        # period would come first.
+        logger.info("Skipping teardown of instance %s: its account is pending deletion", instance_id)
+        return
+    if fresh and is_subscription_service_active(fresh[0]):
         logger.warning(
             "Skipping teardown of instance %s: subscription %s is entitled again", instance_id, fresh[0]["id"]
         )

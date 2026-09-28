@@ -67,7 +67,7 @@ class TestAdminAccountDeletion:
     def test_delete_account_complete_success(
         self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
     ):
-        """The account is marked pending deletion, torn down, and only then loses its login and rows."""
+        """The account is marked pending deletion and claimed, torn down, and only then loses its rows and login."""
         self._account_tables(
             mock_supabase, [{"instance_id": 1, "status": "running"}, {"instance_id": 2, "status": "deprovisioned"}]
         )
@@ -80,11 +80,14 @@ class TestAdminAccountDeletion:
 
         assert response.status_code == 200
         assert response.json() == {"data": {"id": "account_123"}}
-        assert steps == ["soft_delete_account", "tear down", "delete auth user"]
-        mock_supabase.rpc.assert_called_once_with(
+        assert steps == ["soft_delete_account", "tear down", "hard_delete_account", "delete auth user"]
+        assert mock_supabase.rpc.call_args_list[0].args == (
             "soft_delete_account",
             {"target_account_id": "account_123", "reason": "admin_complete_deletion", "requested_by": "admin_123"},
         )
+        # The claim ends the customer's restore window and lets hard_delete_account act on the account.
+        claim = mock_supabase.table("accounts").update.call_args.args[0]
+        assert set(claim) == {"hard_delete_started_at"}
         mock_tear_down.delete_auth_user.assert_awaited_once_with("account_123")
 
     def test_delete_account_not_found(
@@ -126,7 +129,7 @@ class TestAdminAccountDeletion:
         response = client.delete("/admin/accounts/account_123/complete")
 
         assert response.status_code == 500
-        assert "deleting the login failed, so the account row was kept" in response.json()["detail"]
+        assert "deleting the account's rows or login failed, so the account row was kept" in response.json()["detail"]
 
     def test_generic_delete_blocks_account_deletion(
         self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock

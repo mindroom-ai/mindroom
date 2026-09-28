@@ -182,8 +182,14 @@ async def request_account_deletion(
     except Exception as exc:
         logger.exception("Could not record the deletion request of account %s", account_id)
         # The soft delete may have committed before its response was lost; then the deletion stands.
-        if instance_lifecycle.account_may_run_instances(sb, account_id):
+        if not _deletion_recorded_after_all(sb, account_id, scheduled):
             raise HTTPException(status_code=500, detail=await _undo_scheduled_billing_end(scheduled)) from exc
+    # Cancelling cannot be undone, so subscriptions without a paid period are cancelled only now; the nightly cleanup
+    # repeats it for accounts inside their grace period.
+    try:
+        await instance_lifecycle.cancel_unpaid_subscriptions(account_id)
+    except stripe.StripeError:
+        logger.exception("Could not cancel the unpaid subscriptions of account %s; cleanup retries", account_id)
     # An account pending deletion never runs instances, so this holds them until cleanup.
     hold_errors = await instance_lifecycle.reconcile_account_instances(account_id)
     instances = (
@@ -226,12 +232,28 @@ async def request_account_deletion(
     }
 
 
-async def _undo_scheduled_billing_end(subscription_ids: list[str]) -> str:
+def _deletion_recorded_after_all(
+    sb: Any, account_id: str, scheduled: list[instance_lifecycle.ScheduledBillingEnd]
+) -> bool:
+    """Return whether a deletion whose recording raised was stored anyway; answer 500 when that is unknown."""
+    try:
+        return instance_lifecycle.account_pending_deletion(sb, account_id)
+    except Exception as lookup_error:
+        logger.exception("Could not check whether the deletion of account %s was recorded", account_id)
+        billing = "is unchanged" if not scheduled else "may be set to end at the end of its billing period"
+        detail = (
+            "We could not confirm whether your deletion request was recorded, and your subscription "
+            f"{billing}. Reload your settings: cancel the deletion if it is pending, or request it again."
+        )
+        raise HTTPException(status_code=500, detail=detail) from lookup_error
+
+
+async def _undo_scheduled_billing_end(scheduled: list[instance_lifecycle.ScheduledBillingEnd]) -> str:
     """Resume the billing a failed deletion request had set to end, and describe what the customer is left with."""
     try:
-        await instance_lifecycle.resume_subscriptions(subscription_ids)
+        await instance_lifecycle.resume_subscriptions(scheduled)
     except stripe.StripeError:
-        logger.exception("Could not resume Stripe subscriptions %s after a failed deletion request", subscription_ids)
+        logger.exception("Could not resume the Stripe subscriptions a failed deletion request set to end")
         return (
             "Your account was not deleted, but your subscription is still set to end at the end of its billing "
             "period; resume it from the billing page or try the deletion again."
@@ -291,7 +313,7 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     account_id = user["account_id"]
     sb = ensure_supabase()
 
-    if instance_lifecycle.account_may_run_instances(sb, account_id):
+    if not instance_lifecycle.account_pending_deletion(sb, account_id):
         return {"status": "not_pending", "message": "No deletion request found for this account"}
 
     # The RPC restores the account and records the cancellation in one transaction. It refuses after the grace

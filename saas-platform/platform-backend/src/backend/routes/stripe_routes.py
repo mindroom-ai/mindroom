@@ -58,7 +58,7 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail=f"No price found for {payload.tier} ({payload.billing_cycle})")
 
     sb = ensure_supabase()
-    provisioner_service.assert_account_may_run_instances(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
+    provisioner_service.refuse_pending_deletion(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
     if result.data and result.data.get("stripe_customer_id"):
         customer_id = result.data["stripe_customer_id"]
@@ -120,7 +120,7 @@ async def create_portal_session(request: Request, user: Annotated[dict, Depends(
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
     sb = ensure_supabase()
-    provisioner_service.assert_account_may_run_instances(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
+    provisioner_service.refuse_pending_deletion(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
 
     # Stripe customer ID is stored on the accounts table
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()

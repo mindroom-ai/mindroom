@@ -102,7 +102,7 @@ class TestCheckoutEndpoint:
         app.dependency_overrides[verify_user] = override_verify_user
         with (
             patch("backend.routes.stripe_routes.ensure_supabase") as mock,
-            patch("backend.services.provisioner_service.account_may_run_instances", return_value=True),
+            patch("backend.services.provisioner_service.account_pending_deletion", return_value=False),
         ):
             sb = Mock()
             sb.table().select().eq().single().execute.return_value = Mock(data={"stripe_customer_id": "cus_test_123"})

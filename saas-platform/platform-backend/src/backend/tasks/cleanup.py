@@ -13,7 +13,8 @@ from backend.config import ACCOUNT_DELETION_GRACE_DAYS
 from backend.deps import ensure_supabase
 from backend.entitlements import parse_timestamp
 from backend.services.instance_lifecycle import (
-    account_may_run_instances,
+    account_pending_deletion,
+    cancel_unpaid_subscriptions,
     delete_auth_user,
     end_account_billing_at_period_end,
     reconcile_all_subscriptions,
@@ -22,24 +23,26 @@ from backend.services.instance_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+_PAGE_SIZE = 1000
 
 
-async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETION_GRACE_DAYS) -> dict:
+async def cleanup_soft_deleted_accounts() -> dict:
     """
-    Hard delete accounts that have been soft-deleted for longer than grace period.
+    Hard delete accounts whose deletion grace period has ended.
     This ensures GDPR compliance while giving users time to recover accounts.
 
     Each account is first claimed, which ends its restore window, then its Stripe billing is cancelled and its
     hosted instances are uninstalled before its rows go, because those rows are the only record of what to tear
     down; its auth user goes last and takes the account row with it. An account whose teardown or delete fails keeps
-    its account row, is reported in `errors`, and is retried by the next run. An account still inside its grace
-    period has its renewing Stripe subscriptions set to end with their period again, which covers accounts whose
-    deletion was requested before a release that did this at request time.
+    its account row, is reported in `errors`, and is retried by the next run.
+    An account still inside its grace period gets the Stripe steps of its deletion request again: renewing
+    subscriptions set to end with their period and unpaid ones cancelled. That retries a step the request could not
+    finish, such as a failed cancellation, and also covers requests made before these steps existed.
     """
     sb = ensure_supabase()
-    cutoff_date = datetime.now(UTC) - timedelta(days=grace_period_days)
+    cutoff_date = datetime.now(UTC) - timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)
 
-    pending = sb.table("accounts").select("id,deleted_at").not_.is_("deleted_at", "null").execute().data or []
+    pending = _pending_deletion_accounts(sb)
 
     accounts_deleted = 0
     errors: list[str] = []
@@ -63,19 +66,40 @@ async def cleanup_soft_deleted_accounts(grace_period_days: int = ACCOUNT_DELETIO
             errors.append(f"account {account_id}: {exc}")
             continue
         accounts_deleted += 1
-        logger.info(f"Hard deleted account {account_id} after {grace_period_days} day grace period")
+        logger.info("Hard deleted account %s after its grace period", account_id)
 
     return {"accounts_deleted": accounts_deleted, "errors": errors, "timestamp": datetime.now(UTC).isoformat()}
 
 
+def _pending_deletion_accounts(sb: Any) -> list[dict[str, Any]]:  # noqa: ANN401
+    """Return every account pending deletion, paged past PostgREST's row limit."""
+    rows: list[dict[str, Any]] = []
+    while True:
+        page = (
+            sb.table("accounts")
+            .select("id,deleted_at")
+            .not_.is_("deleted_at", "null")
+            .order("id")
+            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        if not page:
+            return rows
+        rows.extend(page)
+
+
 async def _end_billing_unless_restored(sb: Any, account_id: str) -> None:  # noqa: ANN401
-    """Set the account's renewing billing to end, unless the customer restored the account since it was listed."""
-    if account_may_run_instances(sb, account_id):
+    """Repeat the deletion's Stripe steps, unless the customer restored the account since it was listed."""
+    if not account_pending_deletion(sb, account_id):
         return
     scheduled = await end_account_billing_at_period_end(account_id)
     # A restore that landed during the Stripe calls resumed only what it saw marked, so undo this run's own marks.
-    if scheduled and account_may_run_instances(sb, account_id):
+    if not account_pending_deletion(sb, account_id):
         await resume_subscriptions(scheduled)
+        return
+    await cancel_unpaid_subscriptions(account_id)
 
 
 def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
