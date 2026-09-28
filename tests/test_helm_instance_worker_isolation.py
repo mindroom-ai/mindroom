@@ -1141,6 +1141,14 @@ def test_platform_chart_exposes_instance_image_pull_secret_names() -> None:
     assert config["data"]["INSTANCE_IMAGE_PULL_SECRET_NAMES"] == "ghcr-pull,backup-pull"  # noqa: S105
 
 
+def test_platform_backend_cannot_create_service_accounts_in_the_tenant_namespace() -> None:
+    """The instance chart renders no ServiceAccount, so the provisioner needs no way to mint tenant identities."""
+    role = _resource(_render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform"), "Role", "platform-backend")
+
+    assert role["metadata"]["namespace"] == "mindroom-instances"
+    assert all("serviceaccounts" not in rule["resources"] for rule in role["rules"])
+
+
 def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:
     """Platform services should be deployable without forcing identical image tags."""
     docs = _render_chart(

@@ -58,7 +58,7 @@ Hosted tenants share the `mindroom-instances` namespace, and a tenant can run co
 The boundary between tenants is the cluster configuration around those pods.
 
 - No tenant pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers, because RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in a shared namespace.
-- The namespace enforces the Pod Security `baseline` profile, so tenant pods cannot be privileged or use host namespaces, `hostPath` volumes, or added capabilities.
+- The namespace enforces the Pod Security `baseline` profile, so tenant pods cannot be privileged or use host namespaces, `hostPath` volumes, or added capabilities; Terraform creates it with that label, the provisioner reapplies it and refuses to deploy when it cannot, and a direct install must add it.
 - Tenant pods reach TCP 80 and 443 only on public addresses and the ingress controller, never metadata services, node or private networks, or other pods.
 
 ## File access

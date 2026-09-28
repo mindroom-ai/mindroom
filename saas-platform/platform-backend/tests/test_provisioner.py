@@ -1209,7 +1209,6 @@ class TestProvisionerEndpoints:
                         "secret",
                         "mindroom-api-keys-123",
                         "mindroom-primary-api-key-123",
-                        "mindroom-worker-auth-123",
                         "--ignore-not-found",
                         "--wait=false",
                     ],

@@ -110,6 +110,8 @@ _RESOURCE_PROFILE_HELM_VALUES = {
 }
 
 _INSTANCES_NAMESPACE = "mindroom-instances"
+# Tenant pods run tenant code, so admission must reject privileged and host-reaching pods in their namespace.
+_POD_SECURITY_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce=baseline"
 
 
 def _env_flag_enabled(value: str) -> bool:
@@ -279,8 +281,15 @@ def _instance_secret_names(instance_id: str | int) -> list[str]:
     return [
         _instance_secret_name(str(instance_id)),
         f"mindroom-primary-api-key-{instance_id}",
-        f"mindroom-worker-auth-{instance_id}",
     ]
+
+
+async def _enforce_pod_security_baseline(namespace: str) -> None:
+    """Label the tenant namespace for the Pod Security baseline profile before deploying into it."""
+    code, _out, err = await run_kubectl(["label", "namespace", namespace, _POD_SECURITY_ENFORCE_LABEL, "--overwrite"])
+    if code != 0:
+        logger.error("Failed to enforce Pod Security on namespace %s: %s", namespace, err)
+        raise HTTPException(status_code=500, detail="Failed to enforce Pod Security on the instance namespace")
 
 
 def _instance_secret_hash(secret_data: dict[str, str]) -> str:
@@ -657,6 +666,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         raise HTTPException(status_code=503, detail=error_msg) from None
     except Exception as e:
         logger.warning("Could not create namespace (may already exist): %s", e)
+    await _enforce_pod_security_baseline(namespace)
 
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 

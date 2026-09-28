@@ -88,11 +88,14 @@ Deleting the local file or changing future values does not remove credentials fr
 The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
 The provisioner supplies this token automatically, while a direct install must provide it.
 Browser dashboard login through the platform also needs `platformSsoSecret` set to the key the platform derives for that instance; without it the instance accepts only Supabase bearer tokens.
+Tenant pods run tenant code, so the namespace must enforce the Pod Security `baseline` profile.
+Terraform creates it with that label and the provisioner reapplies the label before every deployment; a direct install labels it first:
 
 ```bash
+kubectl create namespace mindroom-instances
+kubectl label namespace mindroom-instances pod-security.kubernetes.io/enforce=baseline --overwrite
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
-  --create-namespace \
   -f instance-secrets.yaml \
   --set customer=1 \
   --set accountId="your-account-uuid" \
@@ -311,6 +314,7 @@ When `workers.backend: kubernetes` is enabled, the runtime chart creates:
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
 
 That Role reaches every Deployment and Service in its namespace, so give each runtime release a namespace of its own.
+Label that namespace with `pod-security.kubernetes.io/enforce=baseline`, so admission rejects privileged containers, host namespaces, and `hostPath` volumes in pods created there; the chart's runtime and worker pods satisfy that profile.
 
 ### Operations
 
@@ -531,7 +535,7 @@ Each customer instance gets:
 Tenants share the namespace, so their isolation comes from these controls:
 
 - Tool code runs in the instance pod's sandbox-runner sidecar, no instance pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers.
-- The Terraform-managed namespace enforces the Pod Security `baseline` profile, which rejects privileged containers, host namespaces, `hostPath` volumes, and added capabilities.
+- The namespace enforces the Pod Security `baseline` profile, which rejects privileged containers, host namespaces, `hostPath` volumes, and added capabilities; Terraform creates it with that label, and the provisioner reapplies the label before every deployment.
 - Each instance's NetworkPolicy admits service traffic only from the ingress controller and the same instance, and allows HTTP and HTTPS egress only to public addresses and the ingress controller, so metadata services, node and private networks, and other pods are unreachable on those ports.
 
 Platform services run in `mindroom-{environment}` namespace.
