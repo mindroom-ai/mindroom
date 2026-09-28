@@ -132,7 +132,33 @@ def _retain_metered_message(messages: list[Message], assistant_message: Message)
         messages.append(assistant_message)
 
 
+# AGNO_COMPAT: Request messages omit the model that incurred their usage.
+# Reason: Run-level model details can span multiple models after continuation,
+# so request timestamps and counters alone cannot be attributed to one model.
+# Upstream issue: None identified; per-request attribution is an extension gap.
+# Upstream PR: None identified.
+# Remove when: Agno persists each assistant request's model and provider.
+# Coverage: tests/test_request_usage.py::test_mixed_model_requests_keep_models_and_actual_dates;
+# tests/test_openai_responses_stream.py::test_mixed_model_failed_stream_keeps_request_attribution.
+def _record_request_model(model: Model, assistant_message: Message) -> None:
+    assistant_message.provider_data = {
+        **(assistant_message.provider_data or {}),
+        "mindroom_model": {"id": model.id, "provider": model.get_provider()},
+    }
+
+
+def _with_request_model[T](original: Callable[..., T]) -> Callable[..., T]:
+    @wraps(original)
+    def populate(model: Model, assistant_message: Message, *args: object, **kwargs: object) -> T:
+        result = original(model, assistant_message, *args, **kwargs)
+        _record_request_model(model, assistant_message)
+        return result
+
+    return populate
+
+
 def _begin_request(request: _ModelRequest) -> None:
+    _record_request_model(request.model, request.assistant_message)
     if request.run_response is not None:
         _ACTIVE_REQUESTS[id(request.run_response)] = request
 
@@ -243,4 +269,9 @@ def install_patch() -> None:
         )
         Model.process_response_stream = cast("Any", _with_metered_messages(Model.process_response_stream))
         Model.aprocess_response_stream = cast("Any", _with_metered_messages_async(Model.aprocess_response_stream))
+        Model._populate_assistant_message = cast("Any", _with_request_model(Model._populate_assistant_message))
+        Model._populate_assistant_message_from_stream_data = cast(
+            "Any",
+            _with_request_model(Model._populate_assistant_message_from_stream_data),
+        )
         _PATCHED = True

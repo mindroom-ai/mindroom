@@ -122,7 +122,12 @@ class TestProvisionerIntegration:
             # Verify status was updated to error
             assert "error" in status_updates
 
-    def test_instance_lifecycle_start_stop_restart(self, client: TestClient, valid_auth: dict):
+    def test_instance_lifecycle_start_stop_restart(
+        self,
+        client: TestClient,
+        valid_auth: dict,
+        stub_uninstall_cleanup: Mock,  # noqa: ARG002
+    ):
         """Test complete instance lifecycle: provision -> stop -> start -> restart -> uninstall."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
             mock_db = MagicMock()
@@ -492,7 +497,12 @@ class TestProvisionerIntegration:
                 assert response.status_code == 500
                 assert "kubectl command failed" in response.json()["detail"]
 
-    def test_uninstall_with_helm_errors(self, client: TestClient, valid_auth: dict):
+    def test_uninstall_with_helm_errors(
+        self,
+        client: TestClient,
+        valid_auth: dict,
+        stub_uninstall_cleanup: Mock,  # noqa: ARG002
+    ):
         """Test uninstall handling when helm encounters various errors."""
         with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             # Helm uninstall fails with specific error

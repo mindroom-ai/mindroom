@@ -19,6 +19,7 @@ from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.client_session import (
+    MindRoomAsyncClient,
     PermanentMatrixStartupError,
     create_matrix_http_client,
     login_flows,
@@ -112,17 +113,26 @@ def desktop_session_path(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "desktop_bridge" / "matrix_session.json"
 
 
-def save_desktop_session(path: Path, session: DesktopMatrixSession) -> None:
-    """Durably persist a Matrix access token with owner-only permissions."""
-    write_json_file_durable(
-        path,
-        session.to_payload(),
-        strict_atomic_replace=True,
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
-    path.chmod(0o600)
+def save_desktop_session(
+    path: Path,
+    session: DesktopMatrixSession,
+    *,
+    expected_session: DesktopMatrixSession | None = None,
+) -> None:
+    """Persist a private session, optionally requiring an unchanged saved snapshot."""
+    with advisory_file_lock(path.with_suffix(".lock")):
+        if expected_session is not None and load_desktop_session(path) != expected_session:
+            msg = "The saved Desktop Matrix session changed; retry setup with the current login."
+            raise DesktopSessionError(msg)
+        write_json_file_durable(
+            path,
+            session.to_payload(),
+            strict_atomic_replace=True,
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
+        path.chmod(0o600)
 
 
 def load_desktop_session(path: Path) -> DesktopMatrixSession:
@@ -381,7 +391,8 @@ async def _open_owned_session(
     store_path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
         store_path.chmod(0o700)
-    client = nio.AsyncClient(
+    # MindRoomAsyncClient prepares dynamic Cloudflare Access headers before every request.
+    client = MindRoomAsyncClient(
         session.homeserver,
         session.user_id,
         device_id=session.device_id,

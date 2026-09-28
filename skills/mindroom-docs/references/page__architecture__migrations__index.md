@@ -36,6 +36,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
 | `src/mindroom/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
+| `src/mindroom/legacy_usage_storage.py` | A retained request snapshot has no model or provider fields; current single-model compaction snapshots also use this shape. | Inherit a single known run model only when every request counter reconciles with the run and per-model totals; ambiguous mixed-model history remains unavailable. |
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
@@ -51,6 +52,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
 | [`src/mindroom/tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | Authored tool override validation sees a retired per-tool field such as `restrict_to_base_dir`. | `tool_system/metadata.py` keeps authored-override validation and raises the directed replacement error the helper names. |
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
+| [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | Opening a conversation database whose archive tables do not exist yet finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary. | `migrate_compaction_database` creates the archive and, in the same transaction, records one content-free legacy generation per such scope with its tombstones, plus the summary and its seen ids for the scope that owns the summary, then strips the retired keys; the legacy summary keeps replaying, `history/storage.py` prunes tombstoned runs by archive membership, and it owns legacy redaction invalidation. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction cleanup encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `turn_store.py`, and source-only summary ownership applies only to labeled historical replay. |
 | [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or a current approval generation has executable calls without toolkit origins. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
@@ -62,6 +64,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
+| [`src/mindroom/workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | Primary startup, before anything is served, finds a running Kubernetes worker Deployment whose template hash differs from the `mindroom.ai/workspace-template-hash` this release records, including a template an older release rewrote after a downgrade, or a Docker worker container without the `mindroom.ai/storage-layout` label, created when workers mounted whole agent state roots. | Kubernetes scales such Deployments to zero and waits up to 60 seconds for their pods to exit, and Docker removes such containers, addressed only by the runtime's ownership labels, so the next ensure recreates them with workspace-only mounts; any failure fails startup after the other workers were attempted, so the primary restarts until none remain. One warning asks the operator to check agent state roots for links those workers may have planted. |
 
 ## Python provenance and regression coverage
 
@@ -92,11 +95,15 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
+| [`history/legacy_compaction_state.py`][legacy-compaction-state] | [Legacy compaction tests][legacy-compaction-state-tests] cover recognition, one-time migration, summary attribution, tombstone pruning, and malformed metadata; [compaction redaction tests][compaction-redaction-tests] cover legacy invalidation. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load pair sessions persisted before device pairing as browser-initiated sessions without device fields. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
+| [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -148,7 +155,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
 | S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
 | S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
-| S14 | Current behavior | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1. |
+| S14 | Isolated | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1; [`history/legacy_compaction_state.py`][legacy-compaction-state] migrates, once when the conversation database opens, state written before compacted runs were archived. |
 | S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |
 | S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
 | S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |
@@ -176,6 +183,8 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
 | C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
+| C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads pair sessions persisted before device pairing, which lack device fields, as browser-initiated sessions. |
+| C15 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still resolves Matrix access tokens through whoami on browser-initiated pairing and connection endpoints when the deployed chat client sends no OpenID token. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -238,6 +247,30 @@ Usage discovery ignores verified historical primary and session aliases because 
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
 
+### Workspace-only worker mounts
+
+v2026.9.327 mounts only agent workspaces into dedicated Docker and Kubernetes workers.
+Drain worker activity before upgrading, because primary startup stops every worker from an older release before it serves anything, which ends its tool calls, shells, background scripts, and CLI sessions.
+Until every such worker is stopped, startup fails and the primary restarts, so the Docker daemon or Kubernetes API must be reachable when it starts.
+Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
+Rolling back to v2026.9.326 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
+
+Before upgrading, check two new limits:
+
+- A `private.root` may no longer start with a name the primary writes beside the private workspace: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock`; such a configuration now fails validation, so rename the root first.
+- Knowledge files above 64 MiB are left out of every knowledge base, including operator-managed ones, and the next refresh removes their existing vectors; find them with `find <knowledge folder> -type f -size +64M`.
+
+Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, running each command once with GNU find:
+
+```bash
+find "$STORAGE/agents" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/agents/[^/]*/workspace" -prune
+find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/\([^/]*\)/\1_data" -prune
+find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
+```
+
+The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, pair every private agent with its root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/\(notes/notes_data\|mail/inbox\)"`, because a run per root would print the other agents' own workspace links, and roots listed without their agents would also skip a directory of that name under any other agent.
+The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
+
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
@@ -284,11 +317,13 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
+[legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
+[legacy-state-root-mounts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_state_root_mounts.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
 [legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
@@ -310,6 +345,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
 [private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
 [private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
+[provisioning-service]: https://github.com/mindroom-ai/mindroom/blob/main/scripts/local_mindroom_provisioning_service.py
 [python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
@@ -357,6 +393,9 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [journal-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_journal_upgrade_boundary.py
 [knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
 [legacy-revision-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_revision_replay.py
+[legacy-compaction-state-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_compaction_state.py
+[legacy-state-root-mounts-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_state_root_mounts.py
+[compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
@@ -365,6 +404,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py
 [native-history-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_native_compaction_history.py
 [partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
+[provisioning-service-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_local_mindroom_provisioning_service.py
 [private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
 [report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
 [response-runner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_runner_focused.py

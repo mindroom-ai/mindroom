@@ -185,19 +185,19 @@ agents:
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
 - **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, `timeout_seconds`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
-Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
+Automatic text compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
 `replay_window_tokens` can cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 If the active model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Each primary, retry, and fallback summary request uses `timeout_seconds`, which defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
-Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
+Compaction moves the oldest runs into the conversation's compaction archive and replays them through `session.summary`, while only recent raw runs remain in `session.runs`.
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
 - **max_tool_calls_per_turn**: Max tool calls one turn may execute (per-agent override of `defaults.max_tool_calls_per_turn`, 1000); later calls return a tool error, and the turn ends with its text so far after this many plus two model requests
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata

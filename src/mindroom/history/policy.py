@@ -71,7 +71,7 @@ def resolve_history_execution_plan(
 
     return ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
-        destructive_compaction_available=unavailable_reason is None,
+        text_compaction_available=unavailable_reason is None,
         explicit_compaction_model=compaction_config.model is not None,
         compaction_model_name=compaction_runtime.model_name,
         compaction_context_window=compaction_context_window,
@@ -100,7 +100,7 @@ def classify_compaction_decision(  # noqa: PLR0911
     resolved_hard_budget = plan.hard_replay_budget_tokens
 
     if force_compact_before_next_run:
-        if plan.destructive_compaction_available:
+        if plan.text_compaction_available:
             return CompactionDecision(
                 mode="required",
                 reason="forced",
@@ -127,7 +127,7 @@ def classify_compaction_decision(  # noqa: PLR0911
             trigger_budget_tokens=resolved_trigger_budget,
             hard_budget_tokens=resolved_hard_budget,
         )
-    if not plan.destructive_compaction_available:
+    if not plan.text_compaction_available:
         return CompactionDecision(
             mode="none",
             reason="compaction_unavailable",
@@ -180,7 +180,7 @@ def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) ->
 
 
 def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:
-    """Return a short description for one unavailable destructive-compaction reason."""
+    """Return a short description for one unavailable text-compaction reason."""
     reason = plan.unavailable_reason
     if reason == "no_context_window":
         if plan.explicit_compaction_model:

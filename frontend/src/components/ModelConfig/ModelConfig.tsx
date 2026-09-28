@@ -65,6 +65,9 @@ interface KeyStatus {
   hasKey: boolean;
   source: string | null;
   maskedKey: string | null;
+  // Stored service the key resolved from when it differs from the requested
+  // one, e.g. a provider key saved under its env var name (ANTHROPIC_API_KEY).
+  credentialService: string | null;
 }
 
 interface KeyDisplayInfo {
@@ -137,10 +140,7 @@ function providerToService(provider: string): string {
   return provider === "gemini" ? "google" : provider;
 }
 
-function sourceToLabel(source: string | null, hasKey: boolean): string {
-  if (!hasKey) {
-    return "Not set";
-  }
+function sourceToLabel(source: string | null): string {
   if (source === "env") {
     return ".env";
   }
@@ -151,6 +151,16 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
     return source;
   }
   return ".env";
+}
+
+function keySourceLabel(key: KeyStatus | null): string {
+  if (!key?.hasKey) {
+    return "Not set";
+  }
+  const label = sourceToLabel(key.source);
+  return key.credentialService
+    ? `${label}, saved as ${key.credentialService}`
+    : label;
 }
 
 function getOpenAIBaseUrl(modelConfig: {
@@ -192,23 +202,36 @@ function parseOptionalPositiveInteger(value: string): number | null {
   return parsed;
 }
 
+const MISSING_KEY_STATUS: KeyStatus = {
+  hasKey: false,
+  source: null,
+  maskedKey: null,
+  credentialService: null,
+};
+
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key`,
     );
     if (!res.ok) {
-      return { hasKey: false, source: null, maskedKey: null };
+      return MISSING_KEY_STATUS;
     }
 
     const data = await res.json();
+    const credentialService =
+      typeof data.credential_service === "string" &&
+      data.credential_service !== service
+        ? data.credential_service
+        : null;
     return {
       hasKey: data.has_key,
       source: data.source || null,
       maskedKey: data.masked_key || null,
+      credentialService,
     };
   } catch {
-    return { hasKey: false, source: null, maskedKey: null };
+    return MISSING_KEY_STATUS;
   }
 }
 
@@ -254,56 +277,13 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return copied;
 }
 
-/** Providers whose model loading drops API keys because they authenticate another way. */
-const PROVIDERS_WITHOUT_API_KEYS = new Set([
-  "codex",
-  "openai_codex",
-  "kimi",
-  "kimi_code",
-  "bedrock_claude",
-  "vertexai_claude",
-  "synthetic",
-]);
-
-/** Ollama needs no key, and the providers above drop any key model loading would pass. */
-function usesNoApiKey(provider: string): boolean {
-  return provider === "ollama" || PROVIDERS_WITHOUT_API_KEYS.has(provider);
-}
-
-/**
- * The model's own key from config.yaml (api_key or extra_kwargs.api_key) as used with `provider`,
- * which may be an unsaved draft; blank values count as unset.
- */
-function getConfiguredApiKey(
-  modelConfig: ModelConfigType | undefined,
-  provider: string,
-): string | null {
-  if (!modelConfig || PROVIDERS_WITHOUT_API_KEYS.has(provider)) {
-    return null;
-  }
-  const configured = [modelConfig.api_key, modelConfig.extra_kwargs?.api_key]
-    .filter((value): value is string => typeof value === "string")
-    .map((value) => value.trim())
-    .find(Boolean);
-  return configured ?? null;
-}
-
-/** Same masking as the credentials API, so equal keys share a badge colour. */
-function maskApiKey(apiKey: string): string {
-  return apiKey.length > 8
-    ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`
-    : "****";
-}
-
-/** Mirrors the runtime order: saved model key, then config.yaml key, then provider key. */
 function getKeyStatusDisplay(
   modelName: string,
   provider: string,
-  configuredApiKey: string | null,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (usesNoApiKey(provider)) {
+  if (provider === "ollama") {
     return null;
   }
 
@@ -316,18 +296,7 @@ function getKeyStatusDisplay(
       keyId: modelKey.maskedKey
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
-      sourceLabel: sourceToLabel(modelKey.source, true),
-    };
-  }
-
-  if (configuredApiKey) {
-    const maskedKey = maskApiKey(configuredApiKey);
-    return {
-      hasKey: true,
-      label: "Config key",
-      maskedKey,
-      keyId: `key:${maskedKey}`,
-      sourceLabel: "config.yaml",
+      sourceLabel: keySourceLabel(modelKey),
     };
   }
 
@@ -340,7 +309,7 @@ function getKeyStatusDisplay(
       keyId: providerKey.maskedKey
         ? `key:${providerKey.maskedKey}`
         : `provider:${provider}`,
-      sourceLabel: sourceToLabel(providerKey.source, true),
+      sourceLabel: keySourceLabel(providerKey),
     };
   }
 
@@ -349,7 +318,7 @@ function getKeyStatusDisplay(
     label: "No API key",
     maskedKey: null,
     keyId: null,
-    sourceLabel: sourceToLabel(null, false),
+    sourceLabel: keySourceLabel(null),
   };
 }
 
@@ -575,18 +544,11 @@ export function ModelConfig() {
   };
 
   const copyApiKeyForRow = async (modelName: string, provider: string) => {
-    const configuredApiKey = getConfiguredApiKey(models[modelName], provider);
-    const usesConfiguredKey =
-      !modelKeys[modelName]?.hasKey && configuredApiKey !== null;
     const service = modelKeys[modelName]?.hasKey
       ? `model:${modelName}`
-      : usesConfiguredKey
-        ? "config.yaml"
-        : providerToService(provider);
+      : providerToService(provider);
 
-    const apiKey = usesConfiguredKey
-      ? configuredApiKey
-      : await fetchApiKeyValue(service);
+    const apiKey = await fetchApiKeyValue(service);
     if (!apiKey) {
       toast({
         title: "Error",
@@ -789,7 +751,7 @@ export function ModelConfig() {
 
     let keyOperationOk = true;
 
-    if (!usesNoApiKey(rowDraft.provider)) {
+    if (rowDraft.provider !== "ollama") {
       if (hasKeyReuseSource) {
         keyOperationOk = await copyModelApiKey(
           targetModelName,
@@ -812,14 +774,7 @@ export function ModelConfig() {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
-    // Keyless providers already deleted the saved key above.
-    if (
-      keyOperationOk &&
-      renamed &&
-      hadCustomKey &&
-      !rowDraft.clearCustomKey &&
-      !usesNoApiKey(rowDraft.provider)
-    ) {
+    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
@@ -933,7 +888,7 @@ export function ModelConfig() {
     setIsSavingNewRow(true);
 
     let keyOperationOk = true;
-    if (!usesNoApiKey(newRowDraft.provider)) {
+    if (newRowDraft.provider !== "ollama") {
       if (newRowDraft.selectedKeySourceModel) {
         keyOperationOk = await copyModelApiKey(
           modelName,
@@ -1019,7 +974,6 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
-        getConfiguredApiKey(modelConfig, modelConfig.provider),
         modelKeys,
         providerKeys,
       );
@@ -1111,13 +1065,6 @@ export function ModelConfig() {
         </span>
       );
     }
-    if (PROVIDERS_WITHOUT_API_KEYS.has(draft.provider)) {
-      return (
-        <span className="text-xs text-muted-foreground">
-          No API key used; this provider authenticates another way
-        </span>
-      );
-    }
 
     const providerKeyOptions = getProviderScopedKeyModels(
       draft.provider,
@@ -1135,14 +1082,10 @@ export function ModelConfig() {
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
-    const configuredApiKey = currentModelName
-      ? getConfiguredApiKey(models[currentModelName], draft.provider)
-      : null;
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
           draft.provider,
-          configuredApiKey,
           modelKeys,
           providerKeys,
         )
@@ -1258,16 +1201,11 @@ export function ModelConfig() {
 
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
-            {hasCustomKey && !isClearingCustomKey
-              ? "No new key provided. This model will keep its saved key."
-              : configuredApiKey
-                ? "No custom key provided. This model will use its key from config.yaml."
-                : providerFallbackKey?.hasKey
-                  ? `No custom key provided. This model will use the provider key (${sourceToLabel(
-                      providerFallbackKey.source,
-                      true,
-                    )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
-                  : "No custom key provided. This model will use the provider key (for example from .env) when available."}
+            {providerFallbackKey?.hasKey
+              ? `No custom key provided. This model will use the provider key (${keySourceLabel(
+                  providerFallbackKey,
+                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
+              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
           </p>
         )}
       </div>
@@ -1437,9 +1375,8 @@ export function ModelConfig() {
                         baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
-                        clearCustomKey: usesNoApiKey(provider)
-                          ? true
-                          : current.clearCustomKey,
+                        clearCustomKey:
+                          provider === "ollama" ? true : current.clearCustomKey,
                       }
                     : current,
                 );

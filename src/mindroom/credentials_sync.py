@@ -14,7 +14,7 @@ credentials can opt in with explicit credential seed declarations.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -23,7 +23,7 @@ from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
-from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
+from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
 
 if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
@@ -32,6 +32,11 @@ logger = get_logger(__name__)
 
 # Reverse view: env-var → provider (derived from the canonical mapping).
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
+
+# Provider API-key services that also accept a dashboard credential saved under
+# the env var name (for example ``OPENROUTER_API_KEY`` for ``openrouter``).
+_PROVIDER_SERVICE_ENV_ALIASES = {k: v for k, v in PROVIDER_ENV_KEYS.items() if k != "ollama"}
+_ENV_NAMED_PROVIDER_SERVICES = {v: k for k, v in _PROVIDER_SERVICE_ENV_ALIASES.items()}
 
 # Dedicated credential service for the semantic-search embedder. Deliberately
 # not part of PROVIDER_ENV_KEYS: that map means "model provider" and feeds
@@ -58,32 +63,51 @@ class _CredentialSeedDeclaration:
     seed: Mapping[str, Any]
 
 
-def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Read a secret from NAME or NAME_FILE.
+def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
+    """Read a secret from NAME or NAME_FILE and return it with the variable that supplied it.
 
-    If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
-    a readable file, return its stripped contents. Else return None.
+    A usable `NAME` wins without touching `NAME_FILE`. Otherwise, if `NAME_FILE`
+    points to a readable file with usable contents, return its stripped contents.
+    Else return None. Blank values and unedited starter-template placeholders
+    count as unset in both places.
     """
     val = runtime_paths.env_value(name)
-    if val:
-        return val
+    if val is not None and not is_unset_env_value(name, val):
+        return val, name
     file_var = f"{name}_FILE"
     file_path = runtime_env_path(runtime_paths, file_var)
     if file_path is not None and file_path.exists():
         try:
-            return file_path.read_text(encoding="utf-8").strip()
+            content = file_path.read_text(encoding="utf-8").strip()
         except Exception:
             # Avoid noisy logs here; callers can handle None gracefully
             return None
+        return None if is_unset_env_value(name, content) else (content, file_var)
     return None
+
+
+def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Read a secret from NAME or NAME_FILE; None when neither supplies a usable (non-blank, non-placeholder) value."""
+    secret = _read_secret_from_env(name, runtime_paths)
+    return secret[0] if secret else None
+
+
+def _env_source(name: str, runtime_paths: RuntimePaths) -> str:
+    """Classify where the runtime reads one environment variable from."""
+    if name not in runtime_paths.process_env:
+        return "env_file"
+    if name in runtime_paths.env_file_values:
+        return "process_env_overrides_env_file"
+    return "process_env"
 
 
 def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
-    github_token = get_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
-    if not github_token:
+    secret = _read_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
+    if secret is None:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
+    github_token, env_var = secret
 
     return _sync_service_credentials(
         service="github_private",
@@ -92,22 +116,23 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
             "token": github_token,
         },
         runtime_paths=runtime_paths,
-        env_var="GITHUB_TOKEN",
+        env_var=env_var,
     )
 
 
 def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update the dedicated embedder credential from EMBEDDER_API_KEY."""
-    embedder_api_key = get_secret_from_env("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
-    if not embedder_api_key:
+    secret = _read_secret_from_env("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
+    if secret is None:
         logger.debug("No value found for EMBEDDER_API_KEY or EMBEDDER_API_KEY_FILE")
         return False
+    embedder_api_key, env_var = secret
 
     return _sync_service_credentials(
         service=_EMBEDDER_CREDENTIAL_SERVICE,
         credentials={"api_key": embedder_api_key},
         runtime_paths=runtime_paths,
-        env_var="EMBEDDER_API_KEY",
+        env_var=env_var,
     )
 
 
@@ -116,9 +141,9 @@ def _sync_service_credentials(
     service: str,
     credentials: dict[str, Any],
     runtime_paths: RuntimePaths,
-    env_var: str | None = None,
+    env_var: str,
 ) -> bool:
-    """Seed or update one env-backed named service."""
+    """Seed or update one env-backed named service, logging a notice when the stored value changes."""
     if is_oauth_token_service(service):
         logger.warning(
             "credential_env_sync_rejected_lifecycle_owned_service",
@@ -142,14 +167,22 @@ def _sync_service_credentials(
             logger.debug("credential_env_sync_skipped", service=service, source=source)
             return False
 
-    creds_manager.save_credentials(service, {**credentials, "_source": "env"})
-    log_context = {"service": service}
-    if env_var is not None:
-        log_context["env_var"] = env_var
-    if existing is None:
-        logger.info("credential_seeded_from_env", **log_context)
-    else:
-        logger.info("credential_updated_from_env", **log_context)
+    stored = {**credentials, "_source": "env"}
+    if existing == stored:
+        logger.debug("credential_env_sync_unchanged", service=service, env_var=env_var)
+        return False
+
+    creds_manager.save_credentials(service, stored)
+    logger.info(
+        "credential_imported_from_env" if existing is None else "credential_updated_from_env",
+        service=service,
+        env_var=env_var,
+        source=_env_source(env_var, runtime_paths),
+        to_stop=(
+            "remove the variable (and any _FILE variant) from the process environment and .env, "
+            f"or this service's entry from every seed declaration that lists it, then DELETE /api/credentials/{service}"
+        ),
+    )
     return True
 
 
@@ -353,20 +386,21 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
-        env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
+        secret = _read_secret_from_env(env_var, runtime_paths=runtime_paths)
 
-        if not env_value:
+        if secret is None:
             logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 
-        logger.debug("credential_env_value_found", env_var=env_var, value_length=len(env_value))
+        env_value, supplying_var = secret
+        logger.debug("credential_env_value_found", env_var=supplying_var, value_length=len(env_value))
 
         credentials = {"host": env_value} if service == "ollama" else {"api_key": env_value}
         if _sync_service_credentials(
             service=service,
             credentials=credentials,
             runtime_paths=runtime_paths,
-            env_var=env_var,
+            env_var=supplying_var,
         ):
             synced_count += 1
 
@@ -418,12 +452,51 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     if provider == "gemini":
         provider = "google"
 
-    return get_api_key_for_service(provider, runtime_paths)
+    return _get_provider_service_api_key(provider, runtime_paths)
+
+
+def canonical_provider_service(service: str) -> str:
+    """Return the canonical provider service for an env-var-named provider service.
+
+    For example ``ANTHROPIC_API_KEY`` maps to ``anthropic``; any other service
+    name is returned unchanged.
+    """
+    return _ENV_NAMED_PROVIDER_SERVICES.get(service, service)
+
+
+def resolve_provider_service_api_key(
+    service: str,
+    load_api_key: Callable[[str], str | None],
+) -> tuple[str, str | None]:
+    """Resolve a provider key from its canonical service, else its env-var-named service.
+
+    Users following env-var docs often save provider keys in the dashboard under
+    the env var name (for example ``OPENROUTER_API_KEY``) instead of the canonical
+    service (``openrouter``). The canonical service always wins; the env-var-named
+    service is only a fallback for provider API-key services.
+
+    Returns the service the key was read from together with the key, so callers
+    such as the dashboard can report where the runtime actually finds it.
+    """
+    api_key = load_api_key(service)
+    env_named_service = _PROVIDER_SERVICE_ENV_ALIASES.get(service)
+    if env_named_service is None or (api_key and api_key.strip()):
+        return service, api_key
+    env_named_api_key = load_api_key(env_named_service)
+    if env_named_api_key:
+        return env_named_service, env_named_api_key
+    return service, api_key
+
+
+def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> str | None:
+    """Get a provider key from the shared store using runtime alias resolution."""
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    return resolve_provider_service_api_key(service, creds_manager.get_api_key)[1]
 
 
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get an API key from one explicitly named shared credential service."""
-    return get_runtime_shared_credentials_manager(runtime_paths).get_api_key(service)
+    """Get an API key from one explicitly named shared credential service or its env-var-named twin."""
+    return _get_provider_service_api_key(service, runtime_paths)
 
 
 def get_model_api_key(
@@ -473,7 +546,9 @@ def get_embedder_api_key(
     Resolution order:
     1. The explicit ``memory.embedder.config.api_key`` value from config.
     2. An explicitly configured credential service, when present. This is a
-       strict binding: a missing key does not fall through to another service.
+       strict binding: a missing key does not fall through to another service,
+       except that a provider service (for example ``openrouter``) also accepts
+       its env-var-named alias (``OPENROUTER_API_KEY``).
     3. Otherwise, the legacy dedicated ``embedder`` service (seeded from
        ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
     4. Otherwise, the shared ``openai`` provider key (backward-compat fallback).
@@ -490,7 +565,7 @@ def get_embedder_api_key(
         return explicit_api_key.strip()
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     if credentials_service is not None:
-        service_api_key = creds_manager.get_api_key(credentials_service)
+        service_api_key = _get_provider_service_api_key(credentials_service, runtime_paths)
         if service_api_key and service_api_key.strip():
             return service_api_key.strip()
         return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY

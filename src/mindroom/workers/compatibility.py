@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-WORKER_PROTOCOL_VERSION = 1
+# 2: workers mount only agent workspaces and never write private-instance identity records.
+WORKER_PROTOCOL_VERSION = 2
 
 
 @dataclass(frozen=True)

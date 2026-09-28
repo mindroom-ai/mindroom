@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
 _CLOSED_MESSAGE = "The event-journal store is closed"
+_WRITER_STOPPED_MESSAGE = "The event-journal writer stopped before running this write"
 # How long to wait between attempts at the one statement SQLite's own busy
 # handler will not retry. Short enough that a contended open is not noticeably
 # slower than an uncontended one, long enough not to spin.
@@ -177,6 +178,13 @@ class SqliteBackend:
                 self._drain_writes(queue),
                 name=f"event_journal_sqlite_writer_{self.database_path.name}",
             )
+            # Nothing else will run what the task leaves queued, and ``close()``
+            # is not its only canceller: a loop shutting down cancels every task
+            # at once. A write left queued holds its caller forever, because
+            # ``settled`` outlives the caller's own cancellation. A callback
+            # rather than a ``finally``, since a task cancelled before its first
+            # step never enters its coroutine.
+            self._writer_task.add_done_callback(lambda _task: self._refuse_queued_writes(queue))
         return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
@@ -229,6 +237,13 @@ class SqliteBackend:
             with self._reader_lock:
                 self._open_readers.append(connection)
         return connection
+
+    def _refuse_queued_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
+        """Answer every write a stopped writer task will never run."""
+        message = _CLOSED_MESSAGE if self._closed else _WRITER_STOPPED_MESSAGE
+        while not queue.empty():
+            _deliver(queue.get_nowait().future, _WriteOutcome(error=RuntimeError(message)))
+            queue.task_done()
 
     async def _drain_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
         while True:
@@ -376,10 +391,11 @@ class SqliteBackend:
         Reads are not the writer task's to finish, so they are drained
         separately before the connections they run on are closed.
 
-        Draining the queue once is enough because raising ``_closed`` under the
-        admission lock also claims and refuses every pending handoff. Every
-        write already admitted is in the queue, and callbacks for claimed
-        handoffs later see that they no longer own an admission and do nothing.
+        The writer task refuses what is still queued as it exits, and that is
+        enough because raising ``_closed`` under the admission lock also claims
+        and refuses every pending handoff. Every write already admitted is in
+        the queue, and callbacks for claimed handoffs later see that they no
+        longer own an admission and do nothing.
         """
         close_task = self._close_task
         if close_task is None:
@@ -401,16 +417,12 @@ class SqliteBackend:
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
+            # Its exit refuses every write still queued.
             writer_task.cancel()
             try:  # noqa: SIM105 - the task may already be finished
                 await writer_task
             except asyncio.CancelledError:
                 pass
-        queue = self._queue
-        while queue is not None and not queue.empty():
-            queued = queue.get_nowait()
-            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
-            queue.task_done()
         try:
             await asyncio.gather(
                 self._offload.drain(),

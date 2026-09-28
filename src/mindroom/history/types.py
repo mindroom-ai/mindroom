@@ -99,17 +99,12 @@ class ResolvedHistorySettings:
 
 @dataclass(frozen=True)
 class HistoryScopeState:
-    """Persisted compaction control/audit state stored in session metadata.
+    """Persisted compaction control state stored in session metadata.
 
-    ``compacted_run_ids`` are tombstones for runs already folded into the durable
-    summary; they let the state owner prune runs that a stale session write
-    reintroduced after compaction progress was persisted.
+    Compaction history itself (summary generations and archived runs) lives in
+    the compaction archive owned by ``history/storage.py``.
     """
 
-    last_compacted_at: str | None = None
-    last_summary_model: str | None = None
-    last_compacted_run_count: int | None = None
-    compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
 
 
@@ -118,7 +113,7 @@ class ResolvedHistoryExecutionPlan:
     """Single source of truth for history-budget policy in one run scope."""
 
     authored_compaction_enabled: bool
-    destructive_compaction_available: bool
+    text_compaction_available: bool
     explicit_compaction_model: bool
     compaction_model_name: str
     compaction_context_window: int | None

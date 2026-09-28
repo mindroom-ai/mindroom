@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import traceback
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
@@ -1844,21 +1845,19 @@ def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path
     assert "not allowed" in result.stderr
 
 
-def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
-    """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
+def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path) -> None:
+    """A ".." listing target, which pathlib's lexical ``relative_to`` lets through, yields nothing.
 
-    This is the containment control that replaced ``resolve(strict=True)``. Without
-    it a "../*.md" include pattern yields a listing target at the parent directory
-    whose candidates pass every remaining per-file safety check.
+    Without this a "../*.md" include pattern that bypassed config validation yields a
+    listing target at the parent directory.
     """
     root = tmp_path / "docs"
     root.mkdir()
-    guard = knowledge_file_listing_module._DirectoryGuard(root=root)
+    (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
+    target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    assert guard.is_safe(root) is True
-    assert guard.is_safe(root / "..") is False
-    assert guard.is_safe(root / ".." / "..") is False
-    assert guard.is_safe(root / "nested" / ".." / ".." / "outside") is False
+    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+        assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 
 def test_tracked_path_listing_rejects_parent_traversal_escape(tmp_path: Path) -> None:
@@ -1958,14 +1957,14 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    original_signature = KnowledgeManager._file_signature
+    original_signature = knowledge_manager_module._file_signature
 
-    def vanishing_signature(self: KnowledgeManager, file_path: Path) -> object:
+    def vanishing_signature(file_path: Path, snapshot: Path | None = None) -> object:
         if file_path == doomed:
             doomed.unlink(missing_ok=True)
-        return original_signature(self, file_path)
+        return original_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", vanishing_signature)
 
     assert await manager.reindex_all() == RefreshOutcome(indexed_count=1, published=True, error=None)
     assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
@@ -2018,18 +2017,18 @@ def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
     )
 
     walked_roots: list[Path] = []
-    original_walk = knowledge_file_listing_module.os.walk
+    original_walk = knowledge_file_listing_module._walk_relative_files
 
-    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
-        walked_roots.append(Path(top))
-        return original_walk(top, *args, **kwargs)
+    def recording_walk(root_fd: int, base: Path) -> list[Path]:
+        walked_roots.append(base)
+        return original_walk(root_fd, base)
 
-    monkeypatch.setattr(knowledge_file_listing_module.os, "walk", recording_walk)
+    monkeypatch.setattr(knowledge_file_listing_module, "_walk_relative_files", recording_walk)
 
     files = list_knowledge_files(config, "docs", docs_path)
 
     assert files == [memory_file.resolve()]
-    assert walked_roots == [memory_dir.resolve()]
+    assert walked_roots == [Path("memory")]
 
 
 def test_extra_extensions_extend_default_semantic_set(tmp_path: Path) -> None:
@@ -5995,7 +5994,8 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
-    path_overrides = ({}, {"PATH": str(runtime_bin)})[explicit_runtime_path]
+    runtime_overrides = {"PATH": str(runtime_bin), "TMPDIR": str(tmp_path / "runtime-tmp")}
+    path_overrides = ({}, runtime_overrides)[explicit_runtime_path]
     runtime_paths = replace(
         runtime_paths,
         process_env={**runtime_paths.process_env, **path_overrides},
@@ -6058,6 +6058,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["TMPDIR"] == tempfile.gettempdir()
     assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
@@ -8683,16 +8684,16 @@ async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
     )
     _install_git_revisions(monkeypatch, ["rev-a"])
 
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
     remaining_failures = {"flaky.md": 1}
 
-    def _flaky_signature(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _flaky_signature(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         if remaining_failures.get(file_path.name):
             remaining_failures[file_path.name] -= 1
             raise OSError(116, "Stale file handle")
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _flaky_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _flaky_signature)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -9382,13 +9383,13 @@ async def test_candidate_indexing_hashes_content_off_event_loop(
     runtime_paths = runtime_paths_for(config)
     event_loop_thread = get_ident()
     signature_threads: list[int] = []
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
 
-    def _record_signature_thread(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _record_signature_thread(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         signature_threads.append(get_ident())
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _record_signature_thread)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _record_signature_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -9623,7 +9624,8 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
 
     def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
         nonlocal source_reads
-        if path == source_path:
+        # Readers open a private same-name snapshot of the listed source.
+        if path.name == source_path.name:
             source_reads += 1
         return original_read_text(path, *args, **kwargs)
 

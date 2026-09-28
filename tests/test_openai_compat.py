@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import re
+import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
 from contextvars import Context
@@ -96,7 +97,11 @@ def _make_test_team(
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=Path(__file__), process_env=process_env or {})
+    return resolve_runtime_paths(
+        config_path=Path(__file__),
+        storage_path=Path(tempfile.mkdtemp()),
+        process_env=process_env or {},
+    )
 
 
 def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None = None) -> RuntimePaths:

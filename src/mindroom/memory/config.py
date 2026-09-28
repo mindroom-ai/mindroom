@@ -6,11 +6,11 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mindroom.credentials_sync import get_memory_llm_api_key, get_ollama_host
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embedding_factory import resolve_embedder_settings
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -140,7 +140,51 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901
+def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Build the Mem0 LLM config from ``memory.llm``, defaulting to local Ollama."""
+    memory_llm = config.memory.llm
+    if memory_llm is None:
+        logger.warning(f"No memory LLM configured, using default ollama/{MEMORY_OLLAMA_LLM}")
+        return {
+            "provider": "ollama",
+            "config": {
+                "model": MEMORY_OLLAMA_LLM,
+                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
+                "temperature": 0.1,
+                "top_p": 1,
+            },
+        }
+
+    llm_provider = memory_llm.provider
+    llm_provider_config: dict[str, Any] = {}
+    # Copy config but handle provider-specific field names
+    for key, value in memory_llm.config.items():
+        if key == "host" and llm_provider == "ollama":
+            llm_provider_config["ollama_base_url"] = (
+                get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
+            )
+        elif key != "host":  # Skip host for other fields
+            llm_provider_config[key] = value
+
+    if llm_provider in {"openai", "anthropic", "openrouter"}:
+        api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)
+        if api_key:
+            llm_provider_config["api_key"] = api_key
+
+    if llm_provider == "openrouter":
+        # Mem0's OpenAI LLM reads openrouter_base_url instead when OPENROUTER_API_KEY is exported.
+        llm_provider_config.setdefault("openai_base_url", OPENROUTER_BASE_URL_DEFAULT)
+        llm_provider_config.setdefault("openrouter_base_url", OPENROUTER_BASE_URL_DEFAULT)
+
+    logger.info("Configured memory LLM", provider=llm_provider, model=memory_llm.config.get("model"))
+    return {
+        # Mem0 has no OpenRouter provider; its OpenAI LLM speaks the same API.
+        "provider": "openai" if llm_provider == "openrouter" else llm_provider,
+        "config": llm_provider_config,
+    }
+
+
+def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -184,52 +228,9 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     elif embedder_provider == "sentence_transformers" and resolved_embedder.dimensions is not None:
         embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
 
-    # Build LLM config from memory configuration
-    if app_config.memory.llm:
-        llm_config: dict[str, Any] = {
-            "provider": app_config.memory.llm.provider,
-            "config": {},
-        }
-
-        # Copy config but handle provider-specific field names
-        for key, value in app_config.memory.llm.config.items():
-            if key == "host" and app_config.memory.llm.provider == "ollama":
-                llm_config["config"]["ollama_base_url"] = (
-                    get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
-                )
-            elif key != "host":  # Skip host for other fields
-                llm_config["config"][key] = value
-
-        api_key = get_memory_llm_api_key(
-            app_config.memory.llm.provider,
-            app_config.memory.llm.config,
-            runtime_paths,
-        )
-        if api_key is not None:
-            llm_config["config"]["api_key"] = api_key.value
-
-        logger.info(
-            "Configured memory LLM",
-            provider=app_config.memory.llm.provider,
-            model=app_config.memory.llm.config.get("model"),
-        )
-    else:
-        # Fallback if no LLM configured
-        logger.warning(f"No memory LLM configured, using default ollama/{MEMORY_OLLAMA_LLM}")
-
-        llm_config = {
-            "provider": "ollama",
-            "config": {
-                "model": MEMORY_OLLAMA_LLM,
-                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
-                "temperature": 0.1,
-                "top_p": 1,
-            },
-        }
-
     return {
         "embedder": embedder_config,
-        "llm": llm_config,
+        "llm": _mem0_llm_config(app_config, runtime_paths),
         "vector_store": {
             "provider": "chroma",
             "config": {

@@ -174,6 +174,9 @@ class FakeClient:
     # event missing from here is one whose room key never reached this device,
     # which is the ordinary way decryption fails against a real homeserver.
     room_keys: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Events the server refuses to this account, by event ID, with the errcode
+    # it refuses them with.
+    hidden_events: dict[str, str] = field(default_factory=dict)
 
     def decrypt_event(self, event: nio.MegolmEvent) -> nio.Event:
         """Decrypt one event, or refuse the way nio refuses.
@@ -204,6 +207,9 @@ class FakeClient:
     ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
         """Return one stored event."""
         del room_id
+        if event_id in self.hidden_events:
+            errcode = self.hidden_events[event_id]
+            return nio.RoomGetEventError(f"{errcode}: Event not found.", errcode)
         source = self.events.get(event_id)
         if source is None:
             return nio.RoomGetEventError("M_NOT_FOUND")
@@ -2085,6 +2091,44 @@ class TestEncryptedRelations:
 
         assert await bodies(alice, "$root") == ["a reply"]
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    @pytest.mark.parametrize("errcode", ["M_NOT_FOUND", "M_FORBIDDEN"])
+    async def test_a_thread_whose_root_is_hidden_keeps_its_visible_replies(
+        self,
+        alice: PrincipalStore,
+        errcode: str,
+    ) -> None:
+        """An agent invited after a thread began may not see its root, ever.
+
+        Failing the walk on that refusal failed every message in the thread
+        for as long as the agent stayed in the room, and silently. The replies
+        the agent may see are still the thread, missing its root the way an
+        undecryptable one is.
+        """
+        client = FakeClient(
+            relations={"$root": [raw("$reply", "a reply", ts=2_000, thread_id="$root")]},
+            hidden_events={"$root": errcode},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["a reply"]
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_root_the_server_failed_to_return_still_fails_the_walk(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only a refusal about the event is permanent; anything else is retried."""
+        client = FakeClient(
+            relations={"$root": [raw("$reply", "a reply", ts=2_000, thread_id="$root")]},
+            hidden_events={"$root": "M_LIMIT_EXCEEDED"},
+        )
+
+        with pytest.raises(_HydrationError, match="Could not fetch thread root"):
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_a_room_walk_that_could_not_read_a_page_is_not_complete(
         self,

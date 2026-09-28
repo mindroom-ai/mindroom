@@ -11,6 +11,7 @@ from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 from mem0.llms.openai import OpenAILLM
+from mem0.utils.factory import LlmFactory
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -27,7 +28,15 @@ from mindroom.memory.config import (
     _memory_collection_name,
     create_memory_instance,
 )
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENAI_GPT_LUNA, OPENAI_GPT_TERRA
+from mindroom.model_defaults import (
+    MEMORY_OLLAMA_LLM,
+    OLLAMA_HOST_DEFAULT,
+    OPENAI_GPT_LUNA,
+    OPENAI_GPT_TERRA,
+    OPENROUTER_BASE_URL_DEFAULT,
+    OPENROUTER_OPENAI_EMBEDDING_SMALL,
+    OPENROUTER_OPENAI_LUNA,
+)
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
@@ -492,6 +501,83 @@ class TestMemoryConfig:
             "openai_base_url": "http://embeddings.local/v1",
             "embedding_dims": 1024,
         }
+
+    @pytest.mark.parametrize("blank_host", ["", "   "])
+    def test_blank_openai_embedder_host_uses_client_default_url(self, tmp_path: Path, blank_host: str) -> None:
+        """A cleared dashboard host must not become an empty base URL."""
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "text-embedding-3-small", "host": blank_host, "api_key": "key"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+
+        assert config.memory.embedder.config.host is None
+        embedder = create_configured_embedder(config, runtime_paths)
+        assert str(embedder.client.base_url) == "https://api.openai.com/v1/"
+        mem0_embedder_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]
+        assert "openai_base_url" not in mem0_embedder_config
+
+    def test_openrouter_only_memory_uses_openrouter_for_llm_and_embedder(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Memory must work with only an OpenRouter key, even one saved under its env var name."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "OPENROUTER_API_KEY",
+            {"api_key": "openrouter-key"},
+        )
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "model": OPENROUTER_OPENAI_EMBEDDING_SMALL,
+                        "host": OPENROUTER_BASE_URL_DEFAULT,
+                        "credentials_service": "openrouter",
+                        "dimensions": 1536,
+                    },
+                },
+                "llm": {"provider": "openrouter", "config": {"model": OPENROUTER_OPENAI_LUNA, "temperature": 0.1}},
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["llm"] == {
+            "provider": "openai",
+            "config": {
+                "model": OPENROUTER_OPENAI_LUNA,
+                "temperature": 0.1,
+                "api_key": "openrouter-key",
+                "openai_base_url": OPENROUTER_BASE_URL_DEFAULT,
+                "openrouter_base_url": OPENROUTER_BASE_URL_DEFAULT,
+            },
+        }
+        mem0_llm = LlmFactory.create(result["llm"]["provider"], result["llm"]["config"])
+        assert str(mem0_llm.client.base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
+        assert mem0_llm.client.api_key == "openrouter-key"
+
+        assert result["embedder"]["config"] == {
+            "model": OPENROUTER_OPENAI_EMBEDDING_SMALL,
+            "api_key": "openrouter-key",
+            "openai_base_url": OPENROUTER_BASE_URL_DEFAULT,
+            "embedding_dims": 1536,
+        }
+        embedder = create_configured_embedder(config, runtime_paths)
+        assert embedder.api_key == "openrouter-key"
+        assert str(embedder.client.base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
+        assert embedder.embedding_request_parameters("hi")["dimensions"] == 1536
 
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""

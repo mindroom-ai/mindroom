@@ -79,13 +79,13 @@ def macos_displays() -> tuple[DisplayGeometry, ...]:
     """Read the active Quartz display topology without guessing unavailable geometry."""
     import Quartz  # noqa: PLC0415
 
-    error, identifiers, count = Quartz.CGGetActiveDisplayList(32, None, None)
+    error, identifiers, count = Quartz.CGGetActiveDisplayList(32, None, None)  # ty: ignore[unresolved-attribute]
     if error or not identifiers or count != len(identifiers) or count >= 32:
         msg = "macOS display mapping is unavailable; reconnect displays and request fresh app state."
         raise DisplayMappingError(msg)
     displays = []
     for display_id in identifiers:
-        bounds = Quartz.CGDisplayBounds(display_id)
+        bounds = Quartz.CGDisplayBounds(display_id)  # ty: ignore[unresolved-attribute]
         values = (bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height)
         if any(not math.isfinite(value) or value != round(value) for value in values):
             msg = "macOS display mapping has uncertain logical bounds."
@@ -94,8 +94,8 @@ def macos_displays() -> tuple[DisplayGeometry, ...]:
             DisplayGeometry(
                 str(display_id),
                 DesktopRect(*(round(value) for value in values)),
-                int(Quartz.CGDisplayPixelsWide(display_id)),
-                int(Quartz.CGDisplayPixelsHigh(display_id)),
+                int(Quartz.CGDisplayPixelsWide(display_id)),  # ty: ignore[unresolved-attribute]
+                int(Quartz.CGDisplayPixelsHigh(display_id)),  # ty: ignore[unresolved-attribute]
             ),
         )
     return tuple(displays)

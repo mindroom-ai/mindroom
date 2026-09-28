@@ -12,7 +12,7 @@ from agno.models.message import Message
 
 from mindroom import ai_runtime
 from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -721,7 +721,7 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     """Return currently persisted seen IDs for one open prepared scope."""
     if scope_context is None or scope_context.session is None:
         return set()
-    return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
+    return read_scope_seen_event_ids(scope_context.storage, scope_context.session, scope_context.scope)
 
 
 def _prepared_history_with_scheduled_limit(
@@ -796,7 +796,8 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
-    seen_event_ids = _scope_seen_event_ids(scope_context)
+    # Compacted history's seen ids are read from the archive; keep that SQLite read off the loop.
+    seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
         thread_history = _thread_history_with_scheduled_budget(
@@ -851,7 +852,7 @@ async def _prepare_execution_context_common(
             prompt,
             thread_history,
             transient_context_messages=transient_context_messages,
-            seen_event_ids=_scope_seen_event_ids(scope_context),
+            seen_event_ids=await run_blocking_until_complete(_scope_seen_event_ids, scope_context),
             current_event_id=history_boundary_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,

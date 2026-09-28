@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 import pytest_asyncio
@@ -46,6 +47,7 @@ import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
+import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -119,6 +121,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -429,6 +432,7 @@ __all__ = [
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
+    "install_personal_room_shutdown_mock",
     "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
@@ -826,9 +830,15 @@ def _postgres_container_name(run_id: str, prefix: str) -> str:
     return f"{prefix}{run_id}"
 
 
+# The controller creates the pipe and every worker mounts it, so they must agree
+# on its directory. Captured at import, before pytest-shm points each process's
+# temp root into that process's own pytest base directory at session start.
+_OWNER_PIPE_ROOT = Path(tempfile.gettempdir())
+
+
 def _owner_pipe_dir(run_id: str) -> Path:
     """Return the host directory holding one run's owner pipe."""
-    return Path(tempfile.gettempdir()) / f"mindroom-pytest-owner-{run_id}"
+    return _OWNER_PIPE_ROOT / f"mindroom-pytest-owner-{run_id}"
 
 
 def _hold_owner_pipe(run_id: str) -> None:
@@ -2152,6 +2162,18 @@ def write_config_yaml(config: Config, config_path: Path) -> None:
     safe_replace(tmp_path, path)
 
 
+def plant_workspace_entry(path: Path, kind: str, victim: Path | None = None) -> None:
+    """Put what worker code could plant at ``path``: a ``link`` to ``victim`` or a ``fifo``."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        assert victim is not None
+        path.symlink_to(victim, target_is_directory=victim.is_dir())
+
+
 def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -2620,6 +2642,11 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
         yield
 
 
+def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam."""
+    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+
+
 def install_shutdown_drain_mocks(
     bot: RuntimeBot,
     *,
@@ -2826,6 +2853,21 @@ def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     including the ones that cover the auto-build itself -- are unaffected.
     """
     monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
+
+
+@pytest.fixture(autouse=True)
+def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep bot startup and room creation from fetching stock avatars over the network.
+
+    Tests behave like an offline machine, which leaves entities without a stock avatar.
+    `tests/test_managed_avatars.py` installs its own downloader to cover the real behavior.
+    """
+
+    async def offline(url: str) -> bytes:
+        message = "network disabled in tests"
+        raise httpx.ConnectError(message, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
 
 
 @pytest.fixture(autouse=True)

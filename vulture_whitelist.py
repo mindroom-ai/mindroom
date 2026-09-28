@@ -175,6 +175,7 @@ _.normalize_shorthand  # unused method (src/mindroom/config/memory.py)
 _.validate_include_patterns  # unused method (src/mindroom/config/memory.py)
 _._check_history_config  # unused method (src/mindroom/config/models.py)
 _._validate_credentials_service  # Pydantic field validator (src/mindroom/config/models.py)
+_._normalize_blank_host  # Pydantic field validator (src/mindroom/config/models.py)
 _._normalize_display_name  # Pydantic field validator (src/mindroom/config/models.py)
 _._normalize_api_key  # Pydantic field validators (src/mindroom/config/models.py, src/mindroom/config/memory.py)
 _._normalize_extra_api_key  # Pydantic field validator (src/mindroom/config/models.py)
@@ -408,6 +409,10 @@ icon_url  # ModelCatalogEntry optional Matrix wire field, accessed through JSON 
 
 _.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
 control  # FastAPI endpoint (src/mindroom/api/worker_computer.py)
+
+# Provider setup routes are invoked by FastAPI.
+get_provider_setup_status  # FastAPI endpoint
+connect_provider  # FastAPI endpoint
 
 # Computer routes are invoked by FastAPI; dataclass equality binds config identity.
 create_session  # FastAPI Computer endpoint

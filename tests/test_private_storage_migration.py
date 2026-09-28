@@ -34,7 +34,7 @@ from mindroom.private_instance_identity_store import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.workspace_sync import _private_targets
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, private_instance_scope_root_path
-from mindroom.workers.backends._dedicated_worker_common import plan_scoped_visible_state_roots
+from mindroom.workers.backends._dedicated_worker_common import plan_scoped_workspace_mounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -757,21 +757,20 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
     assert len(targets) == 1
     assert targets[0].output_dir == runtime.state_root / "workspace/thread_exports"
     assert _REQUESTER in targets[0].required_member_user_ids
-    mounts = plan_scoped_visible_state_roots(
+    mounts = plan_scoped_workspace_mounts(
         worker_key=runtime.execution.worker_key,
         local_shared_storage_root=paths.storage_root,
         worker_visible_shared_storage_root=Path("/app/worker"),
         private_agent_names=frozenset({"writer"}),
-        allow_unknown_worker_key=False,
+        resolved_agent_policies=config.get_agent_policies(),
     )
-    private_mounts = [mount for mount in mounts if mount.local_path == runtime.state_root.parent]
-    assert {(mount.local_path, mount.worker_visible_path) for mount in private_mounts} == {
-        (runtime.state_root.parent, Path("/app/worker/private_instances") / runtime.state_root.parent.name),
-        (runtime.state_root.parent, Path("/app/worker/private_instances") / source.name),
+    assert runtime.workspace is not None
+    workspace = runtime.workspace.root
+    assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == {
+        (workspace, Path("/app/worker") / workspace.relative_to(paths.storage_root)),
+        (workspace, Path("/app/worker/private_instances") / source.name / "writer" / "workspace"),
     }
-    assert (
-        private_mounts[0].local_path / "writer/workspace/notes.txt"
-    ).read_bytes() == b"private workspace\x00retained"
+    assert (mounts[0].local_path / "notes.txt").read_bytes() == b"private workspace\x00retained"
     assert source.is_symlink()
 
 
@@ -783,11 +782,13 @@ def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state:
     """Canonical-only scopes remain usable without granting unverified historical destinations."""
     worker_key = "v1:default:user:~alice_bob"
     canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    workspace = canonical / "writer" / "workspace"
     if state == "ownerless":
-        canonical.mkdir(parents=True)
-        (canonical / "notes.txt").write_text("existing unowned workspace")
+        workspace.mkdir(parents=True)
+        (workspace / "notes.txt").write_text("existing unowned workspace")
     elif state in {"owned_without_alias", "foreign_collision", "unowned_historical"}:
         ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="alice_bob")
+        workspace.mkdir(parents=True)
     if state == "unowned_historical":
         historical = private_instance_scope_root_path(tmp_path, "v1:default:user:alice_bob")
         historical.mkdir()
@@ -799,17 +800,24 @@ def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state:
         foreign = private_instance_scope_root_path(tmp_path, foreign_key)
         private_instance_scope_root_path(tmp_path, historical_key).symlink_to(foreign.name)
 
-    mounts = plan_scoped_visible_state_roots(
+    config = Config(
+        agents={"writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user", root="workspace"))},
+    )
+    mounts = plan_scoped_workspace_mounts(
         worker_key=worker_key,
         local_shared_storage_root=tmp_path,
         worker_visible_shared_storage_root=Path("/app/worker"),
         private_agent_names=frozenset(),
-        allow_unknown_worker_key=False,
+        resolved_agent_policies=config.get_agent_policies(),
     )
 
-    assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == {
-        (canonical, Path("/app/worker/private_instances") / canonical.name),
-    }
+    expected = (
+        set()
+        if state == "fresh"
+        else {(workspace, Path("/app/worker/private_instances") / canonical.name / "writer" / "workspace")}
+    )
+    assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == expected
+    assert canonical.exists() == (state != "fresh")
 
 
 @pytest.mark.asyncio

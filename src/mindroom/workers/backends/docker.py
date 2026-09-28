@@ -32,6 +32,7 @@ from mindroom.constants import (
     write_startup_manifest,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -48,7 +49,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
-    plan_scoped_visible_state_roots,
+    plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
@@ -157,6 +158,14 @@ _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
 _DEDICATED_WORKER_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]
 _SHARED_STORAGE_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]
 
+# Worker containers get a read-only root filesystem. The image's /app tree stays
+# owned by the runtime user so trusted primaries can install tool extras into it,
+# but in a worker that would let tool code replace runner code the runner imports
+# later, and a stopped container keeps its writable layer across restarts. Only the
+# bind mounts and this private /tmp stay writable. The tmpfs is RAM-backed and
+# workers have no memory limit, so its size is capped.
+_WORKER_TMPFS = {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
+
 # Backend-owned control state lives beside the worker roots, never inside one.
 # Each worker root is bind-mounted read-write into its own container, so any
 # lifecycle state kept there would be rewritable by the untrusted tool code the
@@ -172,15 +181,21 @@ _LABEL_NAME_VALUE = "mindroom-docker-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
 _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
+# Containers that mount only workspaces; earlier releases mounted whole state roots.
+LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
+LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
 
 _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
 
 __all__ = [
+    "LABEL_STORAGE_LAYOUT",
+    "LABEL_STORAGE_LAYOUT_VALUE",
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "docker_backend_config_signature",
     "ensure_docker_dependencies",
+    "list_docker_worker_containers",
 ]
 
 
@@ -194,6 +209,13 @@ def _docker_seccomp_profile_matches(options: list[str]) -> bool:
         return json.loads(actual_profile_json) == json.loads(expected_profile_json)
     except (json.JSONDecodeError, TypeError):
         return False
+
+
+def _container_root_filesystem_read_only(container: _DockerContainer | None) -> bool:
+    if container is None:
+        return False
+    host_config = container.attrs.get("HostConfig")
+    return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
 
 
 def _docker_security_options_match(value: object) -> bool:
@@ -450,6 +472,16 @@ def check_docker_workers_absent_for_storage_upgrade(
         raise WorkerBackendError(msg)
 
 
+def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_DockerContainer]:
+    """List every container, running or stopped, in this runtime's namespace."""
+    workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
+    client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
+    return client.containers.list(
+        all=True,
+        filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _DockerLaunchConfig:
     image_reference: str
@@ -612,6 +644,15 @@ class DockerWorkerBackend:
             )
 
         with self._worker_lock(spec.worker_key):
+            # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
+            plan_scoped_workspace_mounts(
+                worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
+                local_shared_storage_root=self._storage_path,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                private_agent_names=spec.private_agent_names,
+                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+                create_shared=True,
+            )
             launch_config = self._resolve_launch_config()
             paths = self._worker_paths(spec.worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key) or self._default_metadata(
@@ -894,7 +935,14 @@ class DockerWorkerBackend:
                 msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
         with self._worker_lock(worker_key):
@@ -903,6 +951,9 @@ class DockerWorkerBackend:
                 paths,
                 expected_worker_key=worker_key,
             ) or self._default_metadata(worker_key, timestamp)
+            if startup_count is not None and metadata.startup_count != startup_count:
+                # The request failed on a container this worker has since replaced.
+                return self._to_handle(metadata, None, now=timestamp, paths=paths)
             return self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
 
     def _adopt_legacy_worker_records(self) -> None:
@@ -1143,8 +1194,8 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
-        if self.config.security_policy == "computer" and not self._container_runtime_security_matches(
-            container,
+        if not _container_root_filesystem_read_only(container) or (
+            self.config.security_policy == "computer" and not self._container_runtime_security_matches(container)
         ):
             return False
 
@@ -1248,6 +1299,8 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                read_only=True,
+                tmpfs=_WORKER_TMPFS,
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
@@ -1428,23 +1481,16 @@ class DockerWorkerBackend:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
         # ensure_worker's CLI profile validation guarantees CLI workers have no extra env.
         env.update(self.config.extra_env)
-        if self._tool_validation_snapshot is not None or cli_worker:
-            env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
-                Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
-            )
+        env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(sandbox_startup_manifest_path(dedicated_root))
         return env
 
     def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, worker_key: str) -> None:
-        """Persist primary validation state before starting one Docker worker."""
-        cli_worker = is_cli_worker_key(worker_key)
-        if self._tool_validation_snapshot is None and not cli_worker:
-            sandbox_startup_manifest_path(paths.state.root).unlink(missing_ok=True)
-            return
+        """Persist primary validation state before creating one Docker worker."""
         dedicated_root = Path(self.config.storage_mount_path)
         write_startup_manifest(
             paths.state.root,
             self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
-            tool_validation_snapshot={} if cli_worker else self._tool_validation_snapshot,
+            tool_validation_snapshot={} if is_cli_worker_key(worker_key) else self._tool_validation_snapshot,
             public_runtime=True,
         )
 
@@ -1510,18 +1556,25 @@ class DockerWorkerBackend:
         return str(Path(self.config.storage_mount_path) / "agents" / agent_name / "workspace")
 
     def _worker_root_mount_specs(self, paths: LocalWorkerStatePaths) -> list[tuple[Path, str, bool]]:
-        """Return the worker-root binds, keeping the shared-credential mirror read-only.
+        """Return the worker-root binds, keeping primary-written directories read-only.
 
         The worker root is writable so tools can persist state, but the primary keeps
-        mirroring credentials into ``.shared_credentials`` on every ensure. Mounting that
-        directory read-only stops worker code from deleting it or replacing it with a link
-        into the deployment-wide credential store.
+        mirroring credentials into ``.shared_credentials`` on every ensure and writes the
+        startup manifest the runner boots from into ``.runtime``. Mounting those
+        directories read-only stops worker code from rewriting them or replacing them
+        with links elsewhere.
         """
+        storage_mount_path = Path(self.config.storage_mount_path)
         return [
             (paths.root, self.config.storage_mount_path, False),
             (
                 paths.root / WORKER_SHARED_CREDENTIALS_DIRNAME,
                 f"{self.config.storage_mount_path}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+                True,
+            ),
+            (
+                sandbox_startup_manifest_path(paths.root).parent,
+                str(sandbox_startup_manifest_path(storage_mount_path).parent),
                 True,
             ),
         ]
@@ -1575,13 +1628,13 @@ class DockerWorkerBackend:
             if ".." in relative_path.parts:
                 msg = f"Docker worker mount target escapes the worker storage root: {container_path}"
                 raise WorkerBackendError(msg)
-            current = paths.state.root
-            for segment in relative_path.parts:
-                current /= segment
-                if current.is_symlink() or (current.exists() and not current.is_dir()):
-                    msg = f"Docker worker mount target must be a real directory: {current}"
-                    raise WorkerBackendError(msg)
-                current.mkdir(exist_ok=True)
+            # The worker root is worker-writable, so the walk never follows a planted link.
+            try:
+                with open_directory_within_root(paths.state.root, Path(*relative_path.parts), create=True):
+                    pass
+            except OSError as exc:
+                msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
+                raise WorkerBackendError(msg) from exc
 
     def _scoped_storage_mount_specs(
         self,
@@ -1591,13 +1644,12 @@ class DockerWorkerBackend:
         state_scope_worker_key: str | None = None,
     ) -> list[tuple[Path, str, bool]]:
         mount_specs = [
-            (planned_root.local_path, str(planned_root.worker_visible_path), False)
-            for planned_root in plan_scoped_visible_state_roots(
+            (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
+            for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,
-                allow_unknown_worker_key=False,
                 resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
             )
         ]
@@ -1621,6 +1673,7 @@ class DockerWorkerBackend:
             _LABEL_WORKER_ID: container_name,
             _LABEL_LAUNCH_CONFIG_HASH: launch_config_hash,
             _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
+            LABEL_STORAGE_LAYOUT: LABEL_STORAGE_LAYOUT_VALUE,
         }
         labels.update(self.config.extra_labels)
         return labels

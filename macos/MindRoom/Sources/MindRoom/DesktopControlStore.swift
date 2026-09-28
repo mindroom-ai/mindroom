@@ -4,49 +4,70 @@ import Foundation
 
 @MainActor
 final class DesktopControlStore: ObservableObject {
+    typealias Request = (String, [String: Any], Duration) async throws -> [String: Any]
+
     static let shared = DesktopControlStore()
 
     @Published private(set) var status = DesktopStatus.stopped
     @Published private(set) var isBusy = false
-    @Published private(set) var errorMessage: String?
+    @Published private(set) var errorMessage: String? {
+        didSet { errorCode = nil }
+    }
+    @Published private(set) var errorCode: String?
     @Published private(set) var recovery: String?
     @Published private(set) var verification = ""
     @Published private(set) var confirmationCommand = ""
+    @Published private(set) var setupImported = false
     @Published private(set) var leaseRemainingSeconds = 0
 
-    @Published var homeserver = "https://mindroom.chat"
-    @Published var matrixUserID = ""
+    @Published var homeserver = "https://mindroom.chat" {
+        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
+    }
+    @Published var matrixUserID = "" {
+        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
+    }
     @Published var matrixPassword = ""
     @Published var pairingCode = ""
     @Published var setupDescriptor = ""
     @Published private(set) var accessGatewayRequired = false
-    @Published var controllerUserID = "" { didSet { invalidateConfirmation() } }
-    @Published var controllerDeviceID = "" { didSet { invalidateConfirmation() } }
-    @Published var controllerFingerprint = "" { didSet { invalidateConfirmation() } }
-    @Published var requesterIDs = "" { didSet { invalidateConfirmation() } }
-    @Published var agentNames = "" { didSet { invalidateConfirmation() } }
-    @Published var selectedAppIDs = Set<String>()
-    @Published var browserEnabled = false
-    @Published var browserExecutable = ""
-    @Published var browserProfile = ""
+    @Published var controllerUserID = "" { didSet { configurationFieldChanged(\.controllerUserID) } }
+    @Published var controllerDeviceID = "" { didSet { configurationFieldChanged(\.controllerDeviceID) } }
+    @Published var controllerFingerprint = "" { didSet { configurationFieldChanged(\.controllerFingerprint) } }
+    @Published var requesterIDs = "" { didSet { configurationFieldChanged(\.requesterIDs) } }
+    @Published var agentNames = "" { didSet { configurationFieldChanged(\.agentNames) } }
+    @Published var selectedAppIDs = Set<String>() { didSet { configurationFieldChanged(\.selectedAppIDs) } }
+    @Published var browserEnabled = false { didSet { configurationFieldChanged(\.browserEnabled) } }
+    @Published var browserExecutable = "" { didSet { configurationFieldChanged(\.browserExecutable) } }
+    @Published var browserProfile = "" { didSet { configurationFieldChanged(\.browserProfile) } }
+    @Published var fileRoots: [String] = [] { didSet { configurationFieldChanged(\.fileRoots) } }
+    @Published var shellEnabled = false { didSet { configurationFieldChanged(\.shellEnabled) } }
     @Published var controlMinutes = 15
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
     private let helper: DesktopBridgeProcess
+    private let request: Request
     private var subscriptions = Set<AnyCancellable>()
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
     private var observedConfigRevision = 0
-    private var observedBrowserConfiguration: DesktopBrowserStatus?
+    private var observedConfiguration: DesktopStatus?
+    private var observedSession: DesktopPairingStatus?
+    // A draft can return to its default value before any saved baseline arrives.
+    private var initialConfigurationEdits = Set<PartialKeyPath<DesktopControlStore>>()
+    private var hasInitialSessionEdits = false
     private var addedApplicationURLs = Set<URL>()
-    private var didHydrateSession = false
     private var pendingOperationCount = 0
+    private var pendingSetup: DesktopSetupSnapshot?
 
-    init(helper: DesktopBridgeProcess? = nil) {
+    init(helper: DesktopBridgeProcess? = nil, request: Request? = nil) {
         let helper = helper ?? DesktopBridgeProcess()
         self.helper = helper
+        self.request = request ?? { action, parameters, timeout in
+            try await helper.request(action: action, parameters: parameters, timeout: timeout)
+        }
         helper.$status
-            .receive(on: RunLoop.main)
+            // The helper publishes on MainActor already. Rescheduling on RunLoop.main stalls
+            // approval/status updates while a folder picker runs in modal mode.
             .sink { [weak self] value in
                 self?.status = value
                 self?.hydrateConfiguration(from: value)
@@ -65,16 +86,7 @@ final class DesktopControlStore: ObservableObject {
     }
 
     var desktopStatusLabel: String {
-        switch status.bridge.state {
-        case "control":
-            return "Control · \(leaseRemainingSeconds / 60)m \(leaseRemainingSeconds % 60)s"
-        case "observe_only":
-            return "Observe only"
-        case "faulted":
-            return "Attention required"
-        default:
-            return "Stopped"
-        }
+        status.accessModeLabel(controlRemainingSeconds: leaseRemainingSeconds)
     }
 
     var identityConfirmed: Bool {
@@ -90,16 +102,102 @@ final class DesktopControlStore: ObservableObject {
         perform("status")
     }
 
-    func saveConfiguration() {
+    func dashboardConfiguration() async throws -> LocalDashboardConfiguration {
+        let result: [String: Any]
+        do {
+            result = try await request("dashboard_configuration", [:], .seconds(35))
+        } catch let DesktopBridgeProcessError.helper(error) where error.code == "dashboard_configuration_invalid" {
+            throw LocalDashboardError.invalidConfiguration
+        } catch {
+            throw LocalDashboardError.connectionFailed
+        }
+        guard let url = result["url"] as? String,
+              result["api_key"] == nil || result["api_key"] is NSNull || result["api_key"] is String else {
+            throw LocalDashboardError.invalidConfiguration
+        }
+        return try LocalDashboardConfiguration(url: url, apiKey: result["api_key"] as? String)
+    }
+
+    var savedSessionMatchesSetup: Bool {
+        status.pairing.sessionState == .ready
+            && status.pairing.homeserver?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                == homeserver.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            && (matrixUserID.isEmpty || status.pairing.userID == matrixUserID)
+    }
+
+    var needsPairing: Bool { setupImported || !confirmationCommand.isEmpty }
+
+    var connectionStatusLabel: String {
+        if status.isBridgeOnline {
+            return "Connected · \(desktopStatusLabel)"
+        }
+        if needsPairing && !status.canStopBridge {
+            return confirmationCommand.isEmpty ? "Finish connecting" : "Confirm connection in chat"
+        }
+        return status.connectionTitle
+    }
+
+    func finishChatConfirmation(completion: @escaping () -> Void = {}) {
+        guard let pendingSetup, pendingSetup.matches(status), !confirmationCommand.isEmpty else {
+            errorMessage = DesktopSetupError.changed.localizedDescription
+            recovery = nil
+            return
+        }
+        perform(
+            "finish_setup", parameters: [
+                "expected_revision": pendingSetup.config.revision,
+                "expected_session": pendingSetup.sessionParameters,
+            ],
+            then: { result in
+                guard pendingSetup.matches(
+                    try Self.responseStatus(result), revision: pendingSetup.config.revision + 1, enabled: true
+                ) else { throw DesktopSetupError.changed }
+                return result
+            },
+            completion: { [weak self] _ in
+                self?.confirmationCommand = ""
+                self?.pairingCode = ""
+                self?.setupImported = false
+                self?.pendingSetup = nil
+                completion()
+            }
+        )
+    }
+
+    func cancelSetupImport() {
+        setupImported = false
+        pairingCode = ""
+        confirmationCommand = ""
+        verification = ""
+        pendingSetup = nil
+        homeserver = status.pairing.homeserver ?? "https://mindroom.chat"
+        matrixUserID = status.pairing.userID ?? ""
+        matrixPassword = ""
+        controllerUserID = status.config.controllerUserID ?? ""
+        controllerDeviceID = status.config.controllerDeviceID ?? ""
+        controllerFingerprint = status.pairing.controllerFingerprint ?? ""
+        requesterIDs = (status.config.allowedRequesterIDs ?? []).joined(separator: ", ")
+        agentNames = (status.config.allowedAgentNames ?? []).joined(separator: ", ")
+        accessGatewayRequired = false
+        hasInitialSessionEdits = false
+        identityConfirmed = false
+    }
+
+    func saveAndConnect() {
         guard identityConfirmed else {
             errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            recovery = nil
+            return
+        }
+        if !savedSessionMatchesSetup || pairingCode.isEmpty {
+            errorMessage = "Import fresh setup data and sign in with the account shown before connecting."
             recovery = nil
             return
         }
         let config: [String: Any] = [
             "v": 1,
             "revision": status.config.revision,
-            "enabled": true,
+            "enabled": false,
             "controller": [
                 "user_id": controllerUserID,
                 "device_id": controllerDeviceID,
@@ -116,24 +214,173 @@ final class DesktopControlStore: ObservableObject {
                 "timeout_seconds": 90,
             ],
         ]
-        perform("configure", parameters: ["expected_revision": status.config.revision, "config": config])
+        let code = pairingCode
+        let accessGateway = accessGatewayRequired
+        let expected = DesktopSetupSnapshot(
+            config: DesktopConfigStatus(
+                state: "ready", revision: status.config.revision + 1, enabled: false,
+                controllerUserID: controllerUserID, controllerDeviceID: controllerDeviceID,
+                allowedRequesterIDs: split(requesterIDs), allowedAgentNames: split(agentNames),
+                allowedAppIDs: selectedAppIDs.sorted()
+            ),
+            session: status.pairing, controllerFingerprint: controllerFingerprint
+        )
+        let pair: ([String: Any]) async throws -> [String: Any] = { [request] result in
+            guard expected.matches(try Self.responseStatus(result)) else {
+                throw DesktopSetupError.changed
+            }
+            let claimed = try await request(
+                "pair",
+                ["code": code, "expected_revision": expected.config.revision, "cloudflare_access": accessGateway],
+                .seconds(180)
+            )
+            guard expected.matches(try Self.responseStatus(claimed)) else {
+                throw DesktopSetupError.changed
+            }
+            guard let verification = claimed["verification"] as? String, !verification.isEmpty,
+                  let command = claimed["confirmation_command"] as? String, !command.isEmpty else {
+                throw DesktopBridgeProcessError.malformedResponse
+            }
+            return claimed
+        }
+        pendingSetup = nil
+        perform(
+            "configure", parameters: ["expected_revision": status.config.revision, "config": config],
+            then: pair
+        ) { [weak self] result in
+            self?.pendingSetup = expected
+            self?.verification = result["verification"] as? String ?? ""
+            self?.confirmationCommand = result["confirmation_command"] as? String ?? ""
+        }
     }
 
-    var hasAppSelectionChanges: Bool {
-        selectedAppIDs != Set(status.config.allowedAppIDs ?? [])
+    func saveBrowserConfiguration() {
+        guard status.hasSavedConnection, !needsPairing else {
+            errorMessage = "Complete connection setup before saving browser settings."
+            recovery = nil
+            return
+        }
+        perform("set_browser_config", parameters: [
+            "expected_revision": status.config.revision,
+            "browser": [
+                "enabled": browserEnabled,
+                "executable_path": browserExecutable.nilIfBlank,
+                "user_data_dir": browserProfile.nilIfBlank,
+            ],
+        ])
     }
 
-    func saveAllowedApplications() {
-        guard status.config.state == "ready" else {
+    /// Compares one access draft with the current status, or with a status a save just returned.
+    func hasChanges(for capability: DesktopAccessCapability, comparedTo saved: DesktopStatus? = nil) -> Bool {
+        let config = (saved ?? status).config
+        switch capability {
+        case .applications: return selectedAppIDs != Set(config.allowedAppIDs ?? [])
+        case .folders: return fileRoots != config.fileRoots
+        case .shell: return shellEnabled != config.shellEnabled
+        }
+    }
+
+    var hasAppSelectionChanges: Bool { hasChanges(for: .applications) }
+
+    var hasLocalAccessChanges: Bool { hasChanges(for: .folders) || hasChanges(for: .shell) }
+
+    var hasAccessChanges: Bool { hasAccessChanges(comparedTo: status) }
+
+    func hasAccessChanges(comparedTo saved: DesktopStatus) -> Bool {
+        DesktopAccessCapability.allCases.contains { hasChanges(for: $0, comparedTo: saved) }
+    }
+
+    func saveAllowedApplications(completion: @escaping (DesktopStatus) -> Void = { _ in }) {
+        guard status.hasSavedConnection, !needsPairing else {
             errorMessage = "Complete connection setup before saving app access."
             recovery = nil
             return
         }
-        perform(
+        saveAccess(
             "set_allowed_apps",
             parameters: ["expected_revision": status.config.revision, "allowed_app_ids": selectedAppIDs.sorted()],
-            stopFirst: status.canStopBridge
+            completion: completion
         )
+    }
+
+    /// Saves only folder and shell settings; approvals and auto-approval are never part of saved config.
+    func saveLocalAccess(completion: @escaping (DesktopStatus) -> Void = { _ in }) {
+        guard status.hasSavedConnection, !needsPairing else {
+            errorMessage = "Complete connection setup before saving folder and shell access."
+            recovery = nil
+            return
+        }
+        saveAccess(
+            "set_local_access",
+            parameters: [
+                "expected_revision": status.config.revision,
+                "files": ["roots": fileRoots],
+                "shell": ["enabled": shellEnabled],
+            ]
+        ) { [weak self] saved in
+            // The helper saves canonical folder paths; adopt them so the saved draft is clean.
+            self?.fileRoots = saved.config.fileRoots
+            self?.shellEnabled = saved.config.shellEnabled
+            completion(saved)
+        }
+    }
+
+    /// Stops a running bridge first, then continues only with a saved status that decodes; otherwise it reports an error.
+    private func saveAccess(
+        _ action: String, parameters: [String: Any], completion: @escaping (DesktopStatus) -> Void
+    ) {
+        var saved: DesktopStatus?
+        perform(
+            action, parameters: parameters, stopFirst: status.canStopBridge,
+            then: { result in
+                saved = try Self.responseStatus(result)
+                return result
+            },
+            completion: { _ in saved.map(completion) }
+        )
+    }
+
+    func discardLocalAccessChanges() {
+        fileRoots = status.config.fileRoots
+        shellEnabled = status.config.shellEnabled
+    }
+
+    func addFileRoot(at url: URL) {
+        guard let path = Self.canonicalDirectoryPath(url) else {
+            errorMessage = "Choose a folder that exists on this Mac."
+            recovery = nil
+            return
+        }
+        guard !fileRoots.contains(path) else {
+            errorMessage = "\(path) is already a read-only folder."
+            recovery = nil
+            return
+        }
+        fileRoots.append(path)
+    }
+
+    func removeFileRoot(_ path: String) {
+        fileRoots.removeAll { $0 == path }
+    }
+
+    /// Answers only the exact request the person reviewed; a newer request needs its own review.
+    func decideShell(_ request: DesktopShellRequest, _ decision: DesktopShellDecision) {
+        guard status.shell.pending == request else {
+            errorMessage = "That command is no longer waiting for approval. Nothing was approved."
+            recovery = "Review the current request, if any, before answering it."
+            return
+        }
+        perform("decide_shell", parameters: decision.parameters(commandID: request.requestID), urgent: true)
+    }
+
+    func grantShell(_ approval: DesktopShellAutoApproval) {
+        perform("grant_shell", parameters: approval.grantParameters, urgent: true)
+    }
+
+    func revokeShell() { perform("revoke_shell", urgent: true) }
+
+    func killShellHandle(_ handle: String) {
+        perform("kill_shell_handle", parameters: ["handle": handle], urgent: true)
     }
 
     func discardAppSelectionChanges() {
@@ -173,7 +420,7 @@ final class DesktopControlStore: ObservableObject {
             recovery = "Copy the complete setup descriptor from the same MindRoom chat."
             return
         }
-        perform("import_setup", parameters: ["descriptor": descriptor]) { [weak self] result in
+        perform("import_setup", parameters: ["descriptor": descriptor], completion: { [weak self] result in
             self?.homeserver = result["homeserver"] as? String ?? ""
             self?.matrixUserID = result["user_id"] as? String ?? ""
             self?.pairingCode = result["code"] as? String ?? ""
@@ -183,41 +430,34 @@ final class DesktopControlStore: ObservableObject {
             self?.requesterIDs = result["requester_id"] as? String ?? ""
             self?.agentNames = result["agent_name"] as? String ?? ""
             self?.accessGatewayRequired = result["cloudflare_access"] as? Bool ?? false
+            self?.setupImported = true
+            self?.verification = ""
+            self?.confirmationCommand = ""
+            self?.pendingSetup = nil
             self?.setupDescriptor = ""
             self?.confirmedIdentity = nil
-        }
+        })
     }
 
-    func login(replace: Bool = false) {
+    func login(replace: Bool = false, usePassword: Bool = false) {
         var parameters: [String: Any] = [
             "homeserver": homeserver,
             "method": "password",
             "user_id": matrixUserID,
             "password": matrixPassword,
             "replace": replace,
+            "cloudflare_access": accessGatewayRequired,
         ]
-        if matrixPassword.isEmpty {
+        if !usePassword {
             parameters["method"] = "sso"
             parameters.removeValue(forKey: "password")
             if matrixUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 parameters.removeValue(forKey: "user_id")
             }
         }
-        perform("login", parameters: parameters) { [weak self] _ in
+        perform("login", parameters: parameters, timeout: .seconds(300), completion: { [weak self] _ in
             self?.matrixPassword = ""
-        }
-    }
-
-    func pair() {
-        guard identityConfirmed, configurationMatchesCurrentIdentity else {
-            errorMessage = "Confirm the current identities after saving this configuration."
-            recovery = "Review the controller fingerprint, requester, and agent, then confirm again."
-            return
-        }
-        perform("pair", parameters: ["code": pairingCode]) { [weak self] result in
-            self?.verification = result["verification"] as? String ?? ""
-            self?.confirmationCommand = result["confirmation_command"] as? String ?? ""
-        }
+        })
     }
 
     func start() { perform("start") }
@@ -240,7 +480,7 @@ final class DesktopControlStore: ObservableObject {
         }
     }
 
-    func copyDiagnostics() {
+    var diagnosticsText: String {
         let diagnostics: [String: Any] = [
             "helper_version": status.helper.version,
             "helper_state": status.helper.state,
@@ -248,18 +488,23 @@ final class DesktopControlStore: ObservableObject {
             "config_state": status.config.state,
             "config_revision": status.config.revision,
             "allowed_app_count": status.config.allowedAppIDs?.count ?? status.apps.count,
+            "file_root_count": status.config.fileRoots.count,
+            "shell_enabled": status.config.shellEnabled,
             "accessibility": status.permissions.accessibility.state,
             "screen_recording": status.permissions.screenRecording.state,
             "browser_runtime": status.browser.runtime,
             "browser_extension": status.browser.extensionState,
             "control_available": status.authority.controlAvailable,
             "emergency_stop_latched": status.authority.emergencyStopLatched,
-            "last_error_code": status.bridge.lastError.map { $0.code as Any } ?? NSNull(),
+            "last_error_code": (errorCode ?? status.bridge.lastError?.code).map { $0 as Any } ?? NSNull(),
         ]
         let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys])
-        let statusText = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+
+    func copyDiagnostics() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(statusText, forType: .string)
+        NSPasteboard.general.setString(diagnosticsText, forType: .string)
     }
 
     @discardableResult
@@ -273,6 +518,7 @@ final class DesktopControlStore: ObservableObject {
         timeout: Duration = .seconds(35),
         urgent: Bool = false,
         stopFirst: Bool = false,
+        then continuation: (([String: Any]) async throws -> [String: Any])? = nil,
         completion: (([String: Any]) -> Void)? = nil
     ) {
         guard urgent || !isBusy else { return }
@@ -283,12 +529,14 @@ final class DesktopControlStore: ObservableObject {
         Task {
             do {
                 if stopFirst {
-                    _ = try await helper.request(action: "stop", timeout: .seconds(120))
+                    _ = try await request("stop", [:], .seconds(120))
                 }
-                let result = try await helper.request(action: action, parameters: parameters, timeout: timeout)
+                var result = try await request(action, parameters, timeout)
+                if let continuation { result = try await continuation(result) }
                 completion?(result)
             } catch let DesktopBridgeProcessError.helper(error) {
                 errorMessage = error.message
+                errorCode = error.code
                 recovery = error.recovery
             } catch {
                 errorMessage = error.localizedDescription
@@ -307,37 +555,71 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func hydrateConfiguration(from value: DesktopStatus) {
-        if !didHydrateSession, value.pairing.sessionState == .ready {
-            didHydrateSession = true
-            if matrixUserID.isEmpty, homeserver == "https://mindroom.chat" {
+        if value.pairing.sessionState == .ready {
+            if observedSession?.homeserver != value.pairing.homeserver
+                || observedSession?.userID != value.pairing.userID
+                || observedSession?.deviceID != value.pairing.deviceID {
+                confirmedIdentity = nil
+            }
+            // Keep the login identity together so a prepared SSO login cannot switch accounts or servers.
+            if !hasInitialSessionEdits,
+               homeserver == (observedSession?.homeserver ?? "https://mindroom.chat"),
+               matrixUserID == (observedSession?.userID ?? "") {
                 homeserver = value.pairing.homeserver ?? homeserver
                 matrixUserID = value.pairing.userID ?? ""
             }
+            observedSession = value.pairing
+            hasInitialSessionEdits = false
         }
-        let shouldHydrateConfiguration = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil
         }
         observedConfigRevision = value.config.revision
-        if controllerUserID.isEmpty { controllerUserID = value.config.controllerUserID ?? "" }
-        if controllerDeviceID.isEmpty { controllerDeviceID = value.config.controllerDeviceID ?? "" }
-        if requesterIDs.isEmpty { requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? "" }
-        if agentNames.isEmpty { agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? "" }
-        if shouldHydrateConfiguration { selectedAppIDs = Set(value.config.allowedAppIDs ?? []) }
-        if controllerFingerprint.isEmpty {
+        guard value.config.state == "ready" else { return }
+
+        // Merge persisted changes only into fields that still match the last saved values.
+        // Empty fields and app selections can be intentional unsaved edits.
+        let previous = observedConfiguration ?? .stopped
+        let initialEdits = initialConfigurationEdits
+        observedConfiguration = value
+        initialConfigurationEdits.removeAll()
+        if !initialEdits.contains(\.controllerUserID),
+           controllerUserID == (previous.config.controllerUserID ?? "") {
+            controllerUserID = value.config.controllerUserID ?? ""
+        }
+        if !initialEdits.contains(\.controllerDeviceID),
+           controllerDeviceID == (previous.config.controllerDeviceID ?? "") {
+            controllerDeviceID = value.config.controllerDeviceID ?? ""
+        }
+        if !initialEdits.contains(\.requesterIDs),
+           requesterIDs == (previous.config.allowedRequesterIDs?.joined(separator: ", ") ?? "") {
+            requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? ""
+        }
+        if !initialEdits.contains(\.agentNames),
+           agentNames == (previous.config.allowedAgentNames?.joined(separator: ", ") ?? "") {
+            agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? ""
+        }
+        if !initialEdits.contains(\.selectedAppIDs), selectedAppIDs == Set(previous.config.allowedAppIDs ?? []) {
+            selectedAppIDs = Set(value.config.allowedAppIDs ?? [])
+        }
+        if !initialEdits.contains(\.controllerFingerprint),
+           controllerFingerprint == (previous.pairing.controllerFingerprint ?? "") {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
         }
-        if shouldHydrateConfiguration {
-            if observedBrowserConfiguration == nil || browserEnabled == observedBrowserConfiguration?.configured {
-                browserEnabled = value.browser.configured
-            }
-            if observedBrowserConfiguration == nil || browserExecutable == (observedBrowserConfiguration?.executablePath ?? "") {
-                browserExecutable = value.browser.executablePath ?? ""
-            }
-            if observedBrowserConfiguration == nil || browserProfile == (observedBrowserConfiguration?.userDataDirectory ?? "") {
-                browserProfile = value.browser.userDataDirectory ?? ""
-            }
-            observedBrowserConfiguration = value.browser
+        if !initialEdits.contains(\.browserEnabled), browserEnabled == previous.browser.configured {
+            browserEnabled = value.browser.configured
+        }
+        if !initialEdits.contains(\.browserExecutable), browserExecutable == (previous.browser.executablePath ?? "") {
+            browserExecutable = value.browser.executablePath ?? ""
+        }
+        if !initialEdits.contains(\.browserProfile), browserProfile == (previous.browser.userDataDirectory ?? "") {
+            browserProfile = value.browser.userDataDirectory ?? ""
+        }
+        if !initialEdits.contains(\.fileRoots), fileRoots == previous.config.fileRoots {
+            fileRoots = value.config.fileRoots
+        }
+        if !initialEdits.contains(\.shellEnabled), shellEnabled == previous.config.shellEnabled {
+            shellEnabled = value.config.shellEnabled
         }
     }
 
@@ -346,15 +628,8 @@ final class DesktopControlStore: ObservableObject {
             .joined(separator: "\u{1F}")
     }
 
-    private var configurationMatchesCurrentIdentity: Bool {
-        status.config.controllerUserID == controllerUserID
-            && status.config.controllerDeviceID == controllerDeviceID
-            && status.pairing.controllerFingerprint == controllerFingerprint
-            && Set(status.config.allowedRequesterIDs ?? []) == Set(split(requesterIDs))
-            && Set(status.config.allowedAgentNames ?? []) == Set(split(agentNames))
-    }
-
-    private func invalidateConfirmation() {
+    private func configurationFieldChanged(_ field: PartialKeyPath<DesktopControlStore>) {
+        if observedConfiguration == nil { initialConfigurationEdits.insert(field) }
         if confirmedIdentity != nil, confirmedIdentity != currentIdentity {
             confirmedIdentity = nil
         }
@@ -364,6 +639,61 @@ final class DesktopControlStore: ObservableObject {
         value.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    private static func canonicalDirectoryPath(_ url: URL) -> String? {
+        // Match the helper's canonical form so a linked or repeated folder is caught before saving.
+        guard let resolved = url.withUnsafeFileSystemRepresentation({ $0.flatMap { realpath($0, nil) } }) else {
+            return nil
+        }
+        defer { free(resolved) }
+        let path = String(cString: resolved)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        return path
+    }
+
+    private static func responseStatus(_ result: [String: Any]) throws -> DesktopStatus {
+        guard let status = result["status"] as? [String: Any] else {
+            throw DesktopBridgeProcessError.malformedResponse
+        }
+        return try JSONDecoder().decode(DesktopStatus.self, from: JSONSerialization.data(withJSONObject: status))
+    }
+}
+
+private enum DesktopSetupError: LocalizedError {
+    case changed
+
+    var errorDescription: String? {
+        "The saved setup or login changed. Import fresh setup data and connect again."
+    }
+}
+
+private struct DesktopSetupSnapshot {
+    let config: DesktopConfigStatus
+    let session: DesktopPairingStatus
+    let controllerFingerprint: String?
+
+    var sessionParameters: [String: String] {
+        ["homeserver": session.homeserver ?? "", "user_id": session.userID ?? "", "device_id": session.deviceID ?? ""]
+    }
+
+    func matches(_ status: DesktopStatus, revision: Int? = nil, enabled: Bool? = nil) -> Bool {
+        status.config.state == "ready"
+            && status.config.revision == (revision ?? config.revision)
+            && status.config.enabled == (enabled ?? config.enabled)
+            && status.config.controllerUserID == config.controllerUserID
+            && status.config.controllerDeviceID == config.controllerDeviceID
+            && status.config.allowedRequesterIDs == config.allowedRequesterIDs
+            && status.config.allowedAgentNames == config.allowedAgentNames
+            && status.config.allowedAppIDs == config.allowedAppIDs
+            && status.pairing.controllerFingerprint == controllerFingerprint
+            && status.pairing.sessionState == .ready
+            && status.pairing.homeserver == session.homeserver
+            && status.pairing.userID == session.userID
+            && status.pairing.deviceID == session.deviceID
     }
 }
 

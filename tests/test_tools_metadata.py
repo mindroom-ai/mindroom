@@ -83,6 +83,14 @@ def _clear_module_origin_caches() -> None:
     metadata_module._module_directory_within_root.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _restore_tool_registry() -> Iterator[None]:
+    """Drop test-only registrations, which otherwise outlive the test in the built-in registry."""
+    snapshot = capture_tool_registry_snapshot()
+    yield
+    restore_tool_registry_snapshot(snapshot)
+
+
 def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
     """Dynamic registry reconciliation should preserve unrelated tools and remove stale owned entries."""
     factory = TOOL_REGISTRY["shell"]
@@ -177,23 +185,19 @@ def test_oauth_connections_requires_live_room_context() -> None:
 
 def test_registration_preserves_primary_runtime_requirement() -> None:
     """The registration surface must carry the non-overridable routing declaration into the catalog."""
-    snapshot = capture_tool_registry_snapshot()
-    try:
 
-        @register_tool_with_metadata(
-            name="test_primary_runtime_registration",
-            file_access=ToolFileAccess.NONE,
-            display_name="Primary Runtime Registration",
-            description="Test-only primary-runtime declaration.",
-            category=ToolCategory.DEVELOPMENT,
-            requires_primary_runtime=True,
-        )
-        def _primary_runtime_registration() -> type[Toolkit]:
-            return Toolkit
+    @register_tool_with_metadata(
+        name="test_primary_runtime_registration",
+        file_access=ToolFileAccess.NONE,
+        display_name="Primary Runtime Registration",
+        description="Test-only primary-runtime declaration.",
+        category=ToolCategory.DEVELOPMENT,
+        requires_primary_runtime=True,
+    )
+    def _primary_runtime_registration() -> type[Toolkit]:
+        return Toolkit
 
-        assert TOOL_METADATA["test_primary_runtime_registration"].requires_primary_runtime is True
-    finally:
-        restore_tool_registry_snapshot(snapshot)
+    assert TOOL_METADATA["test_primary_runtime_registration"].requires_primary_runtime is True
 
 
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
@@ -214,17 +218,12 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     def leaked_tool_factory() -> type[Toolkit]:
         return LeakedTool
 
-    try:
-        assert tool_name in TOOL_METADATA
+    assert tool_name in TOOL_METADATA
 
-        _restore_builtin_tool_metadata_state()
+    _restore_builtin_tool_metadata_state()
 
-        exported_names = {tool["name"] for tool in export_tools_metadata()}
-        assert tool_name not in exported_names
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
-        _restore_builtin_tool_metadata_state()
+    exported_names = {tool["name"] for tool in export_tools_metadata()}
+    assert tool_name not in exported_names
 
 
 def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
@@ -793,17 +792,13 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
         process_env={},
     )
 
-    try:
-        with pytest.raises(TypeError, match="runtime_paths"):
-            get_tool_by_name(
-                tool_name,
-                runtime_paths,
-                runtime_overrides={"runtime_paths": runtime_paths},
-                worker_target=None,
-            )
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    with pytest.raises(TypeError, match="runtime_paths"):
+        get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            runtime_overrides={"runtime_paths": runtime_paths},
+            worker_target=None,
+        )
 
 
 def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> None:
@@ -844,35 +839,31 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         process_env={},
     )
 
-    try:
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@user:localhost",
-            room_id="!room:localhost",
-            thread_id="$thread:localhost",
-            resolved_thread_id="$thread:localhost",
-            session_id="session",
-        )
-        worker_target = resolve_worker_target(
-            "shared",
-            "general",
-            execution_identity=execution_identity,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        )
-        tool = get_tool_by_name(
-            tool_name,
-            runtime_paths,
-            worker_target=worker_target,
-        )
-        assert isinstance(tool, ExplicitRuntimeToolkit)
-        assert tool.runtime_paths == runtime_paths
-        assert tool.worker_target == worker_target
-        assert tool.current_room_id == execution_identity.room_id
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        resolved_thread_id="$thread:localhost",
+        session_id="session",
+    )
+    worker_target = resolve_worker_target(
+        "shared",
+        "general",
+        execution_identity=execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
+    tool = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        worker_target=worker_target,
+    )
+    assert isinstance(tool, ExplicitRuntimeToolkit)
+    assert tool.runtime_paths == runtime_paths
+    assert tool.worker_target == worker_target
+    assert tool.current_room_id == execution_identity.room_id
 
 
 def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() -> None:
@@ -899,25 +890,21 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    try:
-        assert _validate_authored_overrides(
-            tool_name,
-            {
-                "enabled": True,
-                "count": 3.5,
-                "label": None,
-                "endpoint": "https://example.com",
-            },
-            config_path_prefix="agents.code.tools[0]",
-        ) == {
+    assert _validate_authored_overrides(
+        tool_name,
+        {
             "enabled": True,
             "count": 3.5,
             "label": None,
             "endpoint": "https://example.com",
-        }
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+        },
+        config_path_prefix="agents.code.tools[0]",
+    ) == {
+        "enabled": True,
+        "count": 3.5,
+        "label": None,
+        "endpoint": "https://example.com",
+    }
 
 
 def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_fields() -> None:
@@ -941,15 +928,11 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    try:
-        assert _validate_authored_overrides(
-            tool_name,
-            {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
-            config_path_prefix="agents.code.tools[0]",
-        ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    assert _validate_authored_overrides(
+        tool_name,
+        {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
+        config_path_prefix="agents.code.tools[0]",
+    ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
 
 
 def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_agent_override_arrays() -> None:
@@ -976,15 +959,11 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    try:
-        assert _validate_authored_overrides(
-            tool_name,
-            {"patterns": ["GITEA_*", "WHISPER_URL"]},
-            config_path_prefix="agents.code.tools[0]",
-        ) == {"patterns": "GITEA_*, WHISPER_URL"}
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    assert _validate_authored_overrides(
+        tool_name,
+        {"patterns": ["GITEA_*", "WHISPER_URL"]},
+        config_path_prefix="agents.code.tools[0]",
+    ) == {"patterns": "GITEA_*, WHISPER_URL"}
 
 
 def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> None:
@@ -1010,40 +989,36 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    try:
-        with pytest.raises(
-            ToolConfigOverrideError,
-            match=r"agents.code.tools\[0\].test_authored_override_errors.flag",
-        ):
-            _validate_authored_overrides(
-                tool_name,
-                {"flag": "yes"},
-                config_path_prefix="agents.code.tools[0]",
-            )
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"agents.code.tools\[0\].test_authored_override_errors.flag",
+    ):
+        _validate_authored_overrides(
+            tool_name,
+            {"flag": "yes"},
+            config_path_prefix="agents.code.tools[0]",
+        )
 
-        with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
-            _validate_authored_overrides(
-                tool_name,
-                {"base_dir": "/workspace"},
-                config_path_prefix="agents.code.tools[0]",
-            )
+    with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"base_dir": "/workspace"},
+            config_path_prefix="agents.code.tools[0]",
+        )
 
-        with pytest.raises(ToolConfigOverrideError, match="password fields"):
-            _validate_authored_overrides(
-                tool_name,
-                {"api_key": "sk-test"},
-                config_path_prefix="agents.code.tools[0]",
-            )
+    with pytest.raises(ToolConfigOverrideError, match="password fields"):
+        _validate_authored_overrides(
+            tool_name,
+            {"api_key": "sk-test"},
+            config_path_prefix="agents.code.tools[0]",
+        )
 
-        with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
-            _validate_authored_overrides(
-                tool_name,
-                {"missing": True},
-                config_path_prefix="agents.code.tools[0]",
-            )
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"missing": True},
+            config_path_prefix="agents.code.tools[0]",
+        )
 
 
 def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
@@ -1340,23 +1315,19 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     config = load_config(runtime_paths)
-    try:
-        ensure_tool_registry_loaded(runtime_paths, config)
+    ensure_tool_registry_loaded(runtime_paths, config)
 
-        with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
-            get_tool_by_name(
-                "mcp_demo",
-                runtime_paths,
-                tool_config_overrides={
-                    "include_tools": ["echo"],
-                    "exclude_tools": ["echo"],
-                },
-                disable_sandbox_proxy=True,
-                worker_target=None,
-            )
-    finally:
-        TOOL_REGISTRY.pop("mcp_demo", None)
-        TOOL_METADATA.pop("mcp_demo", None)
+    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
+        get_tool_by_name(
+            "mcp_demo",
+            runtime_paths,
+            tool_config_overrides={
+                "include_tools": ["echo"],
+                "exclude_tools": ["echo"],
+            },
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
 
 
 def test_secret_like_config_fields_are_marked_password() -> None:
@@ -1581,15 +1552,11 @@ def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
         assert isinstance(tool, FileAccessToolkit)
         return tool.file_access
 
-    try:
-        assert build(config, _file_access_worker_target("admin")) == "unrestricted"
-        assert build(config, _file_access_worker_target("plain")) == "workspace"
-        assert build(None, _file_access_worker_target("admin")) == "workspace"
-        assert build(config, None) == "unrestricted"
-        assert build(config, _file_access_worker_target("stranger")) == "unrestricted"
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    assert build(config, _file_access_worker_target("admin")) == "unrestricted"
+    assert build(config, _file_access_worker_target("plain")) == "workspace"
+    assert build(None, _file_access_worker_target("admin")) == "workspace"
+    assert build(config, None) == "unrestricted"
+    assert build(config, _file_access_worker_target("stranger")) == "unrestricted"
 
 
 def test_file_access_on_code_tool_accepts_only_unconfined() -> None:

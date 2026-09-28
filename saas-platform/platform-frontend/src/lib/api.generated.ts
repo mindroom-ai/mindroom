@@ -104,6 +104,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/instance-lifecycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Instance Lifecycle
+         * @description Show the last nightly cleanup run, instances pending teardown, and stuck lifecycle states.
+         */
+        get: operations["get_instance_lifecycle_admin_instance_lifecycle_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/instances/{instance_id}/provision": {
         parameters: {
             query?: never;
@@ -1177,6 +1197,21 @@ export interface components {
             };
         };
         /**
+         * AdminInstanceLifecycleResponse
+         * @description Nightly cleanup health, instances pending teardown, and stuck lifecycle states.
+         */
+        AdminInstanceLifecycleResponse: {
+            /** Cleanup Scheduler Enabled */
+            cleanup_scheduler_enabled: boolean;
+            last_run: components["schemas"]["CleanupRunOut"] | null;
+            /** Pending Teardown */
+            pending_teardown: components["schemas"]["LifecycleInstanceOut"][];
+            /** Stuck */
+            stuck: components["schemas"]["LifecycleInstanceOut"][];
+            /** Teardown Grace Days */
+            teardown_grace_days: number;
+        };
+        /**
          * AdminListResponse
          * @description Admin list response for generic resources.
          */
@@ -1249,6 +1284,22 @@ export interface components {
             billing_cycle: string;
             /** Tier */
             tier: string;
+        };
+        /**
+         * CleanupRunOut
+         * @description One recorded run of the nightly cleanup job.
+         */
+        CleanupRunOut: {
+            /** Finished At */
+            finished_at: string;
+            /** Ok */
+            ok: boolean;
+            /** Started At */
+            started_at: string;
+            /** Summary */
+            summary: {
+                [key: string]: unknown;
+            };
         };
         /**
          * ConsentUpdate
@@ -1451,6 +1502,8 @@ export interface components {
             instance_id: number | string;
             /** Kubernetes Synced At */
             kubernetes_synced_at?: string | null;
+            /** Lifecycle Stopped At */
+            lifecycle_stopped_at?: string | null;
             /** Matrix Server Url */
             matrix_server_url?: string | null;
             /**
@@ -1464,6 +1517,8 @@ export interface components {
             subdomain?: string | null;
             /** Subscription Id */
             subscription_id: string;
+            /** Teardown After */
+            teardown_after?: string | null;
             /** Tier */
             tier?: string | null;
             /** Updated At */
@@ -1476,6 +1531,32 @@ export interface components {
         InstancesResponse: {
             /** Instances */
             instances: components["schemas"]["InstanceOut"][];
+        };
+        /**
+         * LifecycleInstanceOut
+         * @description An instance as seen by the subscription lifecycle.
+         */
+        LifecycleInstanceOut: {
+            /** Account Email */
+            account_email?: string | null;
+            /** Account Id */
+            account_id?: string | null;
+            /** Instance Id */
+            instance_id: number | string;
+            /** Lifecycle Error */
+            lifecycle_error?: string | null;
+            /** Lifecycle Error At */
+            lifecycle_error_at?: string | null;
+            /** Lifecycle Stopped At */
+            lifecycle_stopped_at?: string | null;
+            /** Problem */
+            problem?: string | null;
+            /** Status */
+            status: string;
+            /** Subscription Status */
+            subscription_status?: string | null;
+            /** Teardown After */
+            teardown_after?: string | null;
         };
         /**
          * PlanLimits
@@ -1658,7 +1739,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "active" | "cancelled" | "past_due" | "trialing" | "paused" | "incomplete";
+            status: "active" | "cancelled" | "past_due" | "trialing" | "paused" | "incomplete" | "incomplete_expired" | "unpaid";
             /** Stripe Customer Id */
             stripe_customer_id?: string | null;
             /** Stripe Subscription Id */
@@ -1967,6 +2048,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminLogoutResponse"];
+                };
+            };
+        };
+    };
+    get_instance_lifecycle_admin_instance_lifecycle_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminInstanceLifecycleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

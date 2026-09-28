@@ -33,7 +33,6 @@ from mindroom.agent_policy import (
     resolve_agent_policy_index,
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
-    user_scope_shared_agent_names,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
@@ -108,15 +107,15 @@ from mindroom.prompt_templates import render_prompt_template, validate_prompt_te
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
-from mindroom.workspaces import validate_workspace_template_dir
+from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -380,15 +379,6 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
     return any(
         _relative_paths_overlap(source_path.relative_to(template_dir), target_path)
         for source_path in template_dir.rglob("*")
-    )
-
-
-def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) -> bool:
-    """Return whether runtime-local workers should skip control-plane template validation."""
-    if runtime_paths is None:
-        return False
-    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
     )
 
 
@@ -1010,7 +1000,7 @@ class Config(BaseModel):
     def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
         """Ensure private template directories exist when runtime path resolution is available."""
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
-        if runtime_paths is None or _skip_private_template_dir_validation(runtime_paths):
+        if runtime_paths is None or control_plane_owns_private_templates(runtime_paths):
             return self
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private
@@ -1224,6 +1214,10 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}"
         raise ValueError(msg)
 
+    def entity_display_name(self, entity_name: str) -> str:
+        """Return the configured display name for one agent or team."""
+        return self._configured_entity(entity_name).display_name
+
     def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
         """Return effective replay settings for one configured agent or team."""
         entity = self._configured_entity(entity_name)
@@ -1261,17 +1255,17 @@ class Config(BaseModel):
         return agent_config.file_access
 
     def _default_compaction_config(self) -> CompactionConfig:
-        """Return the effective destructive compaction config for defaults-only scope."""
+        """Return the effective text compaction config for defaults-only scope."""
         base = self.defaults.compaction
         merged = base.model_dump() if base is not None else {}
         return CompactionConfig.model_validate(merged)
 
     def _has_authored_default_compaction_config(self) -> bool:
-        """Return whether defaults-only scope has authored destructive compaction config."""
+        """Return whether defaults-only scope has authored text compaction config."""
         return self.defaults.compaction is not None
 
     def _entity_compaction_config(self, entity_name: str) -> CompactionConfig:
-        """Return the effective destructive compaction config for one configured agent or team."""
+        """Return the effective text compaction config for one configured agent or team."""
         base = self.defaults.compaction
         defaults_enabled = base.enabled if base is not None else False
         merged = base.model_dump() if base is not None else {}
@@ -1300,7 +1294,7 @@ class Config(BaseModel):
         return CompactionConfig.model_validate(merged)
 
     def _has_authored_entity_compaction_config(self, entity_name: str) -> bool:
-        """Return whether destructive compaction was explicitly configured for one configured entity."""
+        """Return whether text compaction was explicitly configured for one configured entity."""
         override = self._configured_entity(entity_name).compaction
         return self.defaults.compaction is not None or override is not None
 
@@ -1349,10 +1343,13 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
-    def get_user_scope_shared_agent_names(self) -> frozenset[str]:
-        """Return the non-private agents whose canonical state roots every `user` worker sees."""
+    def get_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
+        """Return the canonical execution policy of every configured agent."""
         seeds = build_agent_policy_seeds(self.agents, default_worker_scope=self.defaults.worker_scope)
-        return user_scope_shared_agent_names(resolve_agent_policy_index(seeds).policies)
+        return resolve_agent_policy_index(
+            seeds,
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        ).policies
 
     def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

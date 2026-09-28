@@ -103,15 +103,31 @@ The memory system uses an LLM for extraction. Configure it with `memory.llm`:
 ```yaml
 memory:
   llm:
-    provider: ollama    # ollama, openai, or anthropic
+    provider: ollama    # ollama, openai, openrouter, or anthropic
     config:
       model: gemma4
 ```
 
-Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
-For `openai` and `anthropic`, MindRoom trims an `api_key` in `memory.llm.config` and uses it; a blank or missing key falls back to the provider's shared key.
-The `api_key` must be a string or `null`, which counts as unset; any other value is a validation error.
-Mem0's `openai` LLM client switches to OpenRouter whenever `OPENROUTER_API_KEY` is set in the process environment.
+Supported LLM providers: `ollama` (default), `openai`, `openrouter`, `anthropic`.
+
+OpenRouter-only example, where both the memory LLM and the embeddings use the `openrouter` key:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: openai/text-embedding-3-small
+      host: https://openrouter.ai/api/v1
+      credentials_service: openrouter
+      dimensions: 1536
+  llm:
+    provider: openrouter
+    config:
+      model: openai/gpt-5.6-luna
+```
+
+Provider keys resolve from the canonical credential service (for example `openrouter`), falling back to an existing dashboard credential stored under the env var name (for example `OPENROUTER_API_KEY`).
 
 ## Backend: `none`
 

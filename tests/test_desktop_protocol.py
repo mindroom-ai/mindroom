@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pytest
 
 from mindroom.desktop.protocol import (
     MAX_COMMAND_TTL_MS,
+    MAX_SHELL_OUTPUT_BYTES,
+    SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
     DesktopPairingAccepted,
     DesktopPairingClaim,
@@ -204,3 +209,48 @@ def test_encrypted_media_requires_matrix_uri_and_expected_key_algorithm() -> Non
 
     with pytest.raises(DesktopProtocolError, match="A256CTR"):
         EncryptedDesktopMedia.from_content(content)
+
+
+@pytest.mark.parametrize(
+    ("action", "parameters"),
+    [
+        ("run_shell", {"command": "make test", "timeout_seconds": 5}),
+        ("check_shell", {"handle": "shell:0123abcd"}),
+        ("kill_shell", {"handle": "shell:0123abcd", "force": True}),
+    ],
+)
+def test_shell_handle_actions_share_the_pinned_wire_protocol(action: str, parameters: dict[str, object]) -> None:
+    """Starting, polling, and stopping a local command all travel as ordinary replay-protected commands."""
+    command = replace(_command(), action=action, parameters=parameters)
+
+    assert DesktopCommand.from_content(command.to_content()) == command
+
+
+def test_shell_output_attachment_descriptor_is_distinct_from_screenshots() -> None:
+    """Output attachments carry bounded text only, and screenshot fields still carry images only."""
+    output = replace(_media(), mime_type=SHELL_OUTPUT_MIME_TYPE, size=MAX_SHELL_OUTPUT_BYTES)
+    content = output.to_content()
+
+    assert EncryptedDesktopMedia.from_content(content, kind="output_attachment") == output
+    with pytest.raises(DesktopProtocolError, match=r"screenshot\.mimetype"):
+        EncryptedDesktopMedia.from_content(content)
+    with pytest.raises(DesktopProtocolError, match=r"output_attachment\.mimetype"):
+        EncryptedDesktopMedia.from_content(_media().to_content(), kind="output_attachment")
+    with pytest.raises(DesktopProtocolError, match=r"output_attachment\.size"):
+        EncryptedDesktopMedia.from_content({**content, "size": MAX_SHELL_OUTPUT_BYTES + 1}, kind="output_attachment")
+    with pytest.raises(DesktopProtocolError, match=r"output_attachment\.url"):
+        EncryptedDesktopMedia.from_content({**content, "url": "https://example.org/x"}, kind="output_attachment")
+
+
+def test_response_content_bytes_match_the_olm_plaintext_serializer() -> None:
+    """The inline limit is measured with the ASCII-escaping serializer nio uses before Olm encryption."""
+    response = DesktopResponse(
+        request_id="request-1",
+        session_id="session-1",
+        ok=True,
+        result={"output": "\x01é😀\n"},
+    )
+
+    expected = len(json.dumps(response.to_content(), separators=(",", ":")).encode())
+    assert response.content_bytes() == expected
+    assert expected > len(json.dumps(response.to_content(), ensure_ascii=False, separators=(",", ":")).encode())

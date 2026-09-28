@@ -18,6 +18,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_runner_token,
+    app_runtime_config,
     app_runtime_paths,
     resolve_script_state_workspace,
     validate_runner_token,
@@ -246,6 +247,7 @@ def _prepare_worker(
             worker_key=normalized_worker_key,
             tool_init_overrides={},
             runtime_paths=runtime_paths,
+            agent_policies=app_runtime_config(request.app).get_agent_policies(),
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),
             runner_token=app_runner_token(request.app),
         )

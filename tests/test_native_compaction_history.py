@@ -25,6 +25,7 @@ from mindroom.agent_storage import get_agent_session
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
+from mindroom.history import archive
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
@@ -35,7 +36,7 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import write_scope_state
+from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
@@ -766,7 +767,7 @@ async def test_native_activation_respects_history_policy(
     session = _session("session", runs=[_completed_run("old")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":
-        write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     db = SqliteDb(db_file=str(tmp_path / "history.db"))
     seed_session(db, session)
     agent = _agent(model=model, db=db)
@@ -835,6 +836,62 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     )
     assert model.native_compaction is not None
     assert model.native_compaction.route != old_route
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_native_route_names_the_summary_reconciliation_repaired(tmp_path: Path) -> None:
+    """A stale replayed summary cannot name the route checkpoints are recorded under."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session("session", summary=SessionSummary(summary="Stale summary."))
+    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    seed_session(db, session)
+    archive.archive_runs(
+        db,
+        session_id="session",
+        scope_key=scope.key,
+        summary="Archived summary.",
+        summary_model="summary-model",
+        runs=[],
+        event_ids={},
+        seen_event_ids={},
+    )
+    agent = _agent(model=model, db=db)
+    resolved = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    await prepare_scope_history(
+        agent=agent,
+        agent_name="test_agent",
+        resolved_inputs=resolved,
+        runtime_paths=paths,
+        config=config,
+        scope_context=ScopeSessionContext(scope, db, session),
+    )
+
+    assert session.summary is not None
+    assert session.summary.summary == "Archived summary."
+    expected = configure_native_history(
+        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        plan=resolved.execution_plan,
+        history_settings=resolved.history_settings,
+        session=session,
+        allowed=True,
+    )
+    assert expected is not None
+    assert expected.native_compaction is not None
+    assert model.native_compaction is not None
+    assert model.native_compaction.route == expected.native_compaction.route
     db.close()
 
 

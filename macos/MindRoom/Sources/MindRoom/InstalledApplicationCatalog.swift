@@ -5,6 +5,25 @@ struct InstalledDesktopApplication: Identifiable, Hashable {
     let id: String
     let name: String
     let running: Bool
+
+    /// Matches every query token as a name subsequence or a literal bundle identifier substring.
+    func matches(search query: String) -> Bool {
+        let locale = Locale(identifier: "en_US_POSIX")
+        let tokens = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+            .split(whereSeparator: \.isWhitespace)
+        guard !tokens.isEmpty else { return true }
+        let normalizedName = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+        let normalizedID = id.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+        return tokens.allSatisfy { token in
+            if normalizedID.contains(token) { return true }
+            var index = token.startIndex
+            for character in normalizedName where character == token[index] {
+                index = token.index(after: index)
+                if index == token.endIndex { return true }
+            }
+            return false
+        }
+    }
 }
 
 @MainActor

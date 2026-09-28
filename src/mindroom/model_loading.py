@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_openai_base_url
-from mindroom.credentials_sync import get_api_key_for_provider, get_model_api_key, get_ollama_host, get_secret_from_env
-from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
+from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
@@ -17,6 +18,7 @@ from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
+    VERTEXAI_CLAUDE_ENV_BY_KEY,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["canonical_provider", "get_model_instance"]
+__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
@@ -187,9 +189,25 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             extra_kwargs["api_key"] = api_key
 
     if canonical_provider_key == "vertexai_claude":
-        # Vertex authenticates with Google credentials and never sends an API key.
-        extra_kwargs.pop("api_key", None)
-        populate_vertexai_claude_runtime_kwargs(extra_kwargs, runtime_paths)
+        if "project_id" not in extra_kwargs:
+            project_id = get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
+            if project_id:
+                extra_kwargs["project_id"] = project_id
+        if "region" not in extra_kwargs:
+            region = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
+            if region:
+                extra_kwargs["region"] = region
+        if "base_url" not in extra_kwargs:
+            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
+            if base_url:
+                extra_kwargs["base_url"] = base_url
+        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
+        if "credentials" not in client_params and (
+            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
+        if client_params:
+            extra_kwargs["client_params"] = client_params
 
     if canonical_provider_key == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
@@ -283,7 +301,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "openai":
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
-        base_url = runtime_openai_base_url(runtime_paths, extra_kwargs)
+        base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
         if base_url:
             extra_kwargs["base_url"] = base_url
         if model_config.api == "responses" or (
@@ -346,6 +364,48 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     raise ValueError(msg)
 
 
+def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the dashboard key saved for one model config (``model:<name>``), if any."""
+    model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
+    return model_creds.get("api_key") if model_creds else None
+
+
+# Settings the provider model classes accept in place of ``api_key``; Gemini with
+# ``vertexai: true`` authenticates with Google Cloud credentials instead.
+_ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("auth_token",),
+    "azure": ("azure_ad_token", "azure_ad_token_provider"),
+    "google": ("vertexai",),
+}
+
+
+def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
+    """Return the provider service a configured model needs a key for when none resolves, else None.
+
+    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``
+    (or a provider's alternative credential such as Anthropic's ``auth_token``), then the
+    per-model dashboard key, then the shared provider key (including its env-var-named
+    twin). Only providers that authenticate with one API key are checked, and unknown
+    model names are left to config validation.
+    """
+    model_config = config.models.get(model_name)
+    if model_config is None:
+        return None
+    provider = canonical_provider(model_config.provider)
+    if provider == "gemini":
+        provider = "google"
+    if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
+        return None
+    extra_kwargs = model_config.extra_kwargs or {}
+    if any(extra_kwargs.get(name) for name in ("api_key", *_ALTERNATIVE_AUTH_KWARGS.get(provider, ()))):
+        return None
+    if _model_credential_api_key(model_name, runtime_paths):
+        return None
+    if get_api_key_for_provider(provider, runtime_paths=runtime_paths):
+        return None
+    return provider
+
+
 def get_model_instance(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -363,9 +423,10 @@ def get_model_instance(
     model_id = model_config.id
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    model_api_key = get_model_api_key(model_name, model_config, runtime_paths)
-    if model_api_key is not None:
-        extra_kwargs["api_key"] = model_api_key.value
+
+    model_api_key = _model_credential_api_key(model_name, runtime_paths)
+    if model_api_key:
+        extra_kwargs["api_key"] = model_api_key
 
     if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))

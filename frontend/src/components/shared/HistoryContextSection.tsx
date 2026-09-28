@@ -364,7 +364,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
               <FieldGroup
                 label="Threshold Percent"
-                helperText="Soft replay budget as a fraction of the effective replay window. Crossing it records planning metadata; destructive compaction waits for the hard budget."
+                helperText="Soft replay budget as a fraction of the effective replay window. Crossing it records planning metadata; text compaction waits for the hard budget."
                 htmlFor="compaction_threshold_percent"
               >
                 <Input

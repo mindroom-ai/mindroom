@@ -416,7 +416,12 @@ class PendingEventWorker:
         if event.event_id in self._deferred:
             progress.cursor = event.receipt_order
             return True
-        self._record_room_progress(room_id, event.receipt_order - 1)
+        if progress.deferred_count == 0:
+            # Reaching a later event only proves the earlier ones done when none
+            # of them is still handed to a turn. A handed-off source that keeps
+            # coming back failed is not progress, and counting it as progress
+            # reset the cooldown to its first step on every pass.
+            self._record_room_progress(room_id, event.receipt_order - 1)
         pending = await self.store.is_pending(event.event_id)
         if self._stopped:
             return False

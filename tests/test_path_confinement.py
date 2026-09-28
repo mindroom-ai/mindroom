@@ -8,6 +8,7 @@ import pytest
 from mindroom.path_confinement import (
     open_directory_within_root,
     open_regular_file_within_root,
+    read_regular_file_within_root,
     resolve_path_within_root,
 )
 
@@ -179,3 +180,23 @@ def test_failed_walk_closes_owned_descriptors(tmp_path: Path, monkeypatch: pytes
     for descriptor in descriptors:
         with pytest.raises(OSError, match="Bad file descriptor"):
             os.fstat(descriptor)
+
+
+def test_bounded_read_returns_bytes_and_refuses_links_fifos_and_oversize(tmp_path: Path) -> None:
+    """Bounded reads never follow a link, block on a FIFO, or buffer past their cap."""
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "dir" / "file").write_bytes(b"12345")
+    (tmp_path / "outside").write_bytes(b"secret")
+    (tmp_path / "dir" / "link").symlink_to(tmp_path / "outside")
+    (tmp_path / "linked-dir").symlink_to(tmp_path / "dir", target_is_directory=True)
+    os.mkfifo(tmp_path / "dir" / "fifo")
+
+    assert read_regular_file_within_root(tmp_path, "dir/file", max_bytes=5) == b"12345"
+    with pytest.raises(ValueError, match="size limit"):
+        read_regular_file_within_root(tmp_path, "dir/file", max_bytes=4)
+    with pytest.raises(OSError, match="Too many levels"):
+        read_regular_file_within_root(tmp_path, "dir/link", max_bytes=10)
+    with pytest.raises(OSError, match=r"Not a directory|Too many levels"):
+        read_regular_file_within_root(tmp_path, "linked-dir/file", max_bytes=10)
+    with pytest.raises(ValueError, match="regular file"):
+        read_regular_file_within_root(tmp_path, "dir/fifo", max_bytes=10)

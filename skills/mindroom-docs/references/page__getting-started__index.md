@@ -12,7 +12,41 @@ Watch the 2-minute setup video:
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Initialize local config
+### 1. Run MindRoom
+
+```bash
+uvx mindroom run
+```
+
+When no config exists yet and MindRoom runs in a terminal, it asks a few setup questions first:
+
+1. Choose a model provider preset (default `openai`).
+2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden and never printed.
+   Press Enter to skip, then connect the provider later through the dashboard's provider setup, or add the key to `~/.mindroom/.env` and restart `mindroom run`.
+   MindRoom does not ask when the key is already set in your environment.
+   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting `mindroom run`.
+
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
+Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`.
+
+On first run, MindRoom automatically initiates pairing.
+It prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
+
+After pairing completes, MindRoom starts the runtime and dashboard.
+
+Notes:
+
+- Pair codes are short-lived (10 minutes).
+- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
+- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
+- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
+
+### 2. Optional: set up explicitly with `config init`
+
+Use `config init` to create or review the files before starting, to pick a preset non-interactively, or to use a self-hosted homeserver:
 
 ```bash
 uvx mindroom config init
@@ -62,7 +96,7 @@ These local provider configs run entirely locally and do not require real cloud 
 
 Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
 
-### 2. Add remote-provider credentials when needed
+Then add remote-provider credentials when needed:
 
 ```bash
 $EDITOR ~/.mindroom/.env
@@ -79,37 +113,17 @@ For hosted providers, set the credentials for the provider you selected:
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
-### 3. Pair your local install from chat UI
+Then run `uvx mindroom run`.
 
-1. Open `https://chat.mindroom.chat` and sign in.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
+### 3. Verify
 
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-Notes:
-
-- Pair code is short-lived (10 minutes). Generate a new one if it expires.
-- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
-- Use `--no-persist-env` to print export commands instead of writing `.env`; evaluate or copy those commands into the current shell yourself.
-
-### 4. Run MindRoom
-
-```bash
-uvx mindroom run
-```
-
-### 5. Verify
-
-**In chat:** Send a message mentioning your agent in a room where it is configured.
+**In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
-**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
+**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
+Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.
 
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).

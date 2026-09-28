@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires owned to-device transport and acknowledged progress."""
+    """The wheel requires the release that accepts key-query responses without device_keys."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -280,5 +280,6 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert Version("1.0.8") not in requirement.specifier
     assert Version("1.0.9") not in requirement.specifier
     assert Version("1.1.0") not in requirement.specifier
-    assert Version("1.1.1") in requirement.specifier
+    assert Version("1.1.1") not in requirement.specifier
+    assert Version("1.1.2") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier

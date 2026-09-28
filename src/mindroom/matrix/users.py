@@ -14,7 +14,7 @@ from nio.durable import DurableSyncConfig
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix import appservice, provisioning
+from mindroom.matrix import appservice, provisioning, provisioning_env
 from mindroom.matrix._owned_session import (
     IngestionConsumerStore,
     MatrixCredentials,
@@ -821,8 +821,8 @@ async def _register_user(
     """
     server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
     user_id = MatrixID.from_username(username, server_name).full_id
-    registration_token = provisioning.registration_token_from_env(runtime_paths=runtime_paths)
-    registration_shared_secret = provisioning.registration_shared_secret_from_env(runtime_paths=runtime_paths)
+    registration_token = provisioning_env.registration_token_from_env(runtime_paths=runtime_paths)
+    registration_shared_secret = provisioning_env.registration_shared_secret_from_env(runtime_paths=runtime_paths)
 
     provisioning_result = await _register_user_via_provisioning_if_configured(
         homeserver=homeserver,
@@ -874,7 +874,7 @@ async def _register_user_via_provisioning_if_configured(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Register through the provisioning service when local client creds are configured."""
-    provisioning_url = provisioning.provisioning_url_from_env(runtime_paths=runtime_paths)
+    provisioning_url = provisioning_env.provisioning_url_from_env(runtime_paths=runtime_paths)
     creds = provisioning.required_local_provisioning_client_credentials_for_registration(
         provisioning_url=provisioning_url,
         registration_token=registration_token,

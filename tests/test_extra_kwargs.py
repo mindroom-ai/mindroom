@@ -30,9 +30,8 @@ from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_st
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
-    _MAX_CACHE_MARKERS,
+    MAX_CACHE_MARKERS,
     _count_cache_markers,
-    _prompt_cache_control,
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
     _request_kwargs_with_replay_safe_tool_search_results,
@@ -41,6 +40,7 @@ from mindroom.claude_prompt_cache import (
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
     prewarm_anthropic_async_client,
+    prompt_cache_control,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -783,8 +783,8 @@ def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() ->
 
 def test_prompt_cache_control_ttl() -> None:
     """Extended cache time selects the 1h TTL; the default omits the ttl field."""
-    assert _prompt_cache_control() == {"type": "ephemeral"}
-    assert _prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
+    assert prompt_cache_control() == {"type": "ephemeral"}
+    assert prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
 
 
 def _strict_tool_definition() -> dict[str, object]:
@@ -951,7 +951,7 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
 
     prepared = _request_kwargs_with_prompt_cache_ladder(
         request_kwargs,
-        _prompt_cache_control(extended_cache_time=True),
+        prompt_cache_control(extended_cache_time=True),
     )
 
     expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
@@ -960,7 +960,7 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert tool_result_block["cache_control"] == expected_cache_control
     assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
     assert prepared["tools"][-1]["cache_control"] == expected_cache_control
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
@@ -991,8 +991,8 @@ def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_conte
         "messages": second_turn_messages,
     }
 
-    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, _prompt_cache_control())
-    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, _prompt_cache_control())
+    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, prompt_cache_control())
+    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, prompt_cache_control())
 
     first_current_turn = first_prepared["messages"][0]
     second_replayed_turn = second_prepared["messages"][0]
@@ -1019,14 +1019,14 @@ def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() ->
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     # Budget: 4 total minus system marker minus the pre-existing message
     # marker leaves room for one new rung (on m3) and the tools marker.
     assert prepared["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in prepared["messages"][0]["content"][0]
     assert prepared["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_client_proxy_delegates_context_manager() -> None:
@@ -1062,10 +1062,10 @@ def test_prompt_cache_ladder_respects_marker_budget() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert prepared is request_kwargs
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
@@ -1083,7 +1083,7 @@ def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert "cache_control" not in str(prepared["messages"][1])
     assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
@@ -1095,7 +1095,7 @@ def test_prompt_cache_ladder_does_not_mutate_input() -> None:
     tools = [{"name": "demo_tool", "input_schema": {"type": "object"}}]
     request_kwargs = {"messages": messages, "tools": tools}
 
-    _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert messages == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
     assert tools == [{"name": "demo_tool", "input_schema": {"type": "object"}}]

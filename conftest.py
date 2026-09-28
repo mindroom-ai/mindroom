@@ -5,6 +5,8 @@ This file exists at the repository root so pytest imports it before
 """
 
 import os
+import tempfile
+from pathlib import Path
 
 # Rich resolves color support once, when a `Console` is constructed, and the CLI builds
 # its consoles at import time (`mindroom.cli.config`, `.desktop`, `.service`), so no
@@ -20,3 +22,10 @@ import os
 # `FORCE_COLOR` and over Typer's own `force_terminal` consoles. Setting `NO_COLOR`
 # instead would not do: it strips color but leaves bold and other SGR codes.
 os.environ["TERM"] = "dumb"
+
+# pytest-shm moves the temp root to the /dev/shm tmpfs before this file is imported,
+# then frees each run's temporary files, tiktoken's downloaded encodings among them.
+# Pin its cache to the temp root as it stands now, which survives across runs, so a
+# local run neither downloads the encodings again nor needs the network.
+if "TIKTOKEN_CACHE_DIR" not in os.environ and "DATA_GYM_CACHE_DIR" not in os.environ:
+    os.environ["TIKTOKEN_CACHE_DIR"] = str(Path(tempfile.gettempdir()) / "data-gym-cache")

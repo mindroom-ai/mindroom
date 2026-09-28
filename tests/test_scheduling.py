@@ -216,8 +216,8 @@ def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> No
         ),
     )
 
-    once_model = build_scheduled_task_read_model(once_record, current_time=current_time)
-    cron_model = build_scheduled_task_read_model(cron_record, current_time=current_time)
+    once_model = build_scheduled_task_read_model(once_record, timezone="UTC", current_time=current_time)
+    cron_model = build_scheduled_task_read_model(cron_record, timezone="UTC", current_time=current_time)
 
     assert once_model.task_id == "once123"
     assert once_model.status == "cancelled"
@@ -1996,6 +1996,7 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
         task_id="task123",
         workflow=workflow,
         matrix_admin=matrix_admin,
+        timezone="UTC",
     )
     parsed = workflow.model_copy(update={"description": "Updated description"})
     with (
@@ -2283,6 +2284,7 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
+        timezone="UTC",
     )
 
     assert updated_task.created_at == created_at
@@ -2343,6 +2345,7 @@ async def test_save_edited_scheduled_task_is_state_only(tmp_path: Path) -> None:
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
+        timezone="UTC",
     )
 
     assert updated_task.created_at == created_at
@@ -2386,6 +2389,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change(tmp_path:
             workflow=updated_workflow,
             existing_task=existing_task,
             runtime_paths=_test_runtime_paths(tmp_path),
+            timezone="UTC",
         )
 
     client.room_put_state.assert_not_called()
@@ -2470,6 +2474,7 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
             room_id="!test:server",
             task_id="task1234",
             workflow=workflow,
+            timezone="UTC",
         )
 
 
@@ -2494,6 +2499,7 @@ async def test_persist_scheduled_task_state_includes_cron_description() -> None:
         room_id="!test:server",
         task_id="task1234",
         workflow=workflow,
+        timezone="UTC",
     )
 
     content = client.room_put_state.await_args.kwargs["content"]
@@ -2522,6 +2528,7 @@ async def test_persist_scheduled_task_state_omits_cron_description_for_one_time_
         room_id="!test:server",
         task_id="task1234",
         workflow=workflow,
+        timezone="UTC",
     )
 
     content = client.room_put_state.await_args.kwargs["content"]

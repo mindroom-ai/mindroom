@@ -29,7 +29,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import RuntimePaths, config_relative_path
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -47,10 +49,11 @@ from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolved_worker_key_scope,
     worker_key_agent_name,
+    written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
-    plan_scoped_visible_state_roots,
+    plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
@@ -69,6 +72,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_CONFIG_VOLUME_NAME,
     WORKER_STORAGE_VOLUME_NAME,
+    WORKER_TMP_VOLUME_NAME,
 )
 
 if TYPE_CHECKING:
@@ -78,6 +82,8 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
+
+logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
@@ -99,6 +105,8 @@ _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
+# The template hash this release wrote, so a template an older release rewrote after a downgrade reads as old.
+ANNOTATION_WORKSPACE_TEMPLATE_HASH = "mindroom.ai/workspace-template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -162,7 +170,6 @@ test -s "{token_path}"
 
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
-_DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
 
@@ -292,6 +299,7 @@ class _AppsApiProtocol(Protocol):
         name: str,
         namespace: str,
         body: dict[str, object],
+        _request_timeout: float | None = None,
     ) -> KubernetesDeployment: ...
 
     def delete_namespaced_deployment(
@@ -632,6 +640,7 @@ def _plan_knowledge_storage_mounts(
     mounted_storage_root: Path,
     existing_mounts: tuple[dict[str, object], ...],
     worker_key: str,
+    worker_roots: Path,
 ) -> tuple[_KnowledgeStorageMountPlan, ...]:
     storage_mount_paths = tuple(
         Path(cast("str", mount["mountPath"]))
@@ -653,6 +662,14 @@ def _plan_knowledge_storage_mounts(
             )
             raise WorkerBackendError(msg)
         if any(mount_path.is_relative_to(existing_path) for existing_path in storage_mount_paths):
+            continue
+        if written_by_other_workers(relative_path, worker_roots):
+            # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
+            logger.error(
+                "Refusing to mount knowledge inside a directory other sandbox workers write",
+                worker_key=worker_key,
+                path=str(relative_path),
+            )
             continue
         if collision := _first_overlapping_path(mount_path, storage_mount_paths):
             msg = (
@@ -754,12 +771,17 @@ class KubernetesResourceManager:
         assert self.api_exception_cls is not None
         return self.api_exception_cls
 
-    def list_deployments(self) -> list[KubernetesDeployment]:
+    def api_clients(self) -> tuple[_AppsApiProtocol, _CoreApiProtocol]:
+        """Return the loaded apps and core API clients."""
+        return self._apps, self._core
+
+    def list_deployments(self, *, request_timeout: float | None = None) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
             label_selector=_list_selector(extra_labels=self.config.extra_labels),
             _preload_content=False,
+            _request_timeout=request_timeout,
         )
         try:
             payload = json.loads(response.data)
@@ -1399,8 +1421,13 @@ class KubernetesResourceManager:
                         "requests": resource_requests,
                         "limits": resource_limits,
                     },
+                    # The image's /app tree stays writable by the runtime user for
+                    # trusted primaries, so worker pods mount the root filesystem
+                    # read-only: tool code must not replace runner code the runner
+                    # imports later. Only volumes and the /tmp emptyDir stay writable.
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
                         "capabilities": {"drop": ["ALL"]},
                         **(
                             {"seccompProfile": dict(self.config.seccomp_profile)}
@@ -1471,6 +1498,7 @@ class KubernetesResourceManager:
             metadata["ownerReferences"] = [owner_reference]
         desired_annotations = dict(annotations)
         desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        desired_annotations[ANNOTATION_WORKSPACE_TEMPLATE_HASH] = desired_annotations[_ANNOTATION_TEMPLATE_HASH]
         if private_agent_names is not None:
             desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
                 sorted(private_agent_names),
@@ -1507,7 +1535,9 @@ class KubernetesResourceManager:
         include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
-        venv_path = f"{dedicated_root}/venv"
+        # No PATH or VIRTUAL_ENV here: the long-lived runner resolves uv, node,
+        # chromium, and Xvnc from the image, never from the worker-writable venv.
+        # Tool subprocesses get the worker venv from worker_subprocess_env.
         env: list[dict[str, object]] = [
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "forkserver"},
@@ -1518,8 +1548,6 @@ class KubernetesResourceManager:
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
-            {"name": "VIRTUAL_ENV", "value": venv_path},
-            {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
                 "value": f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
@@ -1676,6 +1704,7 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
         )
+        mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         if self.config.config_map_name is None:
             mounts.extend(self._file_config_storage_mounts())
         if self.config.config_map_name is not None:
@@ -1749,6 +1778,7 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
+            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {}},
         ]
         if self.config.config_map_name is not None:
             volumes.append(
@@ -1842,22 +1872,11 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
-        mounted_storage_root = Path(self.config.storage_mount_path)
-        mounts: list[dict[str, object]] = [
-            {
-                "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": str(planned_root.worker_visible_path),
-                "subPath": str(planned_root.local_path.relative_to(self.storage_root)),
-            }
-            for planned_root in plan_scoped_visible_state_roots(
-                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
-                local_shared_storage_root=self.storage_root,
-                worker_visible_shared_storage_root=mounted_storage_root,
-                private_agent_names=private_agent_names,
-                allow_unknown_worker_key=False,
-                resolved_agent_policies=self.resolved_agent_policies,
-            )
-        ]
+        mounts = self._workspace_storage_mounts(
+            worker_key,
+            private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+        )
         mounts.append(
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1866,24 +1885,49 @@ class KubernetesResourceManager:
             },
         )
         # The worker root is writable so tools can persist state, but the primary keeps
-        # mirroring credentials into `.shared_credentials` on every ensure. Mounting that
-        # directory read-only stops worker code from deleting it or replacing it with a
-        # link into the deployment-wide credential store.
-        mirror_subpath = f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}"
-        mounts.append(
-            {
+        # mirroring credentials into `.shared_credentials` on every ensure and writes the
+        # startup manifest the runner boots from into `.runtime`. Mounting those
+        # directories read-only stops worker code from rewriting them or replacing them
+        # with links elsewhere.
+        for read_only_subpath in (
+            f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+            str(constants.sandbox_startup_manifest_path(Path(state_subpath)).parent),
+        ):
+            read_only_mount: dict[str, object] = {
                 "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": f"{self.config.storage_mount_path}/{mirror_subpath}",
-                "subPath": mirror_subpath,
+                "mountPath": f"{self.config.storage_mount_path}/{read_only_subpath}",
+                "subPath": read_only_subpath,
                 "readOnly": True,
-            },
-        )
+            }
+            mounts.append(read_only_mount)
         validate_unique_worker_visible_paths(
             (str(mount["mountPath"]) for mount in mounts),
             worker_key=worker_key,
             duplicate_label="Kubernetes mountPath",
         )
         return mounts
+
+    def _workspace_storage_mounts(
+        self,
+        worker_key: str,
+        *,
+        private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": str(workspace_mount.worker_visible_path),
+                "subPath": str(workspace_mount.local_path.relative_to(self.storage_root)),
+            }
+            for workspace_mount in plan_scoped_workspace_mounts(
+                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+                local_shared_storage_root=self.storage_root,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                private_agent_names=private_agent_names,
+                resolved_agent_policies=self.resolved_agent_policies,
+            )
+        ]
 
     def _knowledge_storage_mounts(
         self,
@@ -1897,6 +1941,7 @@ class KubernetesResourceManager:
             mounted_storage_root=mounted_storage_root,
             existing_mounts=existing_mounts,
             worker_key=worker_key,
+            worker_roots=Path(self.config.storage_subpath_prefix),
         )
         return [
             {
@@ -1933,11 +1978,21 @@ class KubernetesResourceManager:
             raw_path = cast("Mapping[str, object]", raw_base).get("path")
             if not isinstance(raw_path, str):
                 continue
-            source_path = resolve_config_relative_path(raw_path, self.runtime_paths)
             try:
-                relative_paths.add(source_path.relative_to(self.storage_root))
+                source_path = Path(os.path.normpath(config_relative_path(raw_path, self.runtime_paths)))
+                relative_path = source_path.relative_to(self.storage_root)
             except ValueError:
+                logger.warning("Not mounting knowledge outside the worker storage root", knowledge_base=base_id)
                 continue
+            try:
+                with open_directory_within_root(self.storage_root, relative_path):
+                    relative_paths.add(relative_path)
+            except (OSError, ValueError):
+                logger.warning(
+                    "Not mounting knowledge that is missing or reached through a link",
+                    knowledge_base=base_id,
+                    path=str(relative_path),
+                )
         ordered_paths = list(relative_paths)
         ordered_paths.sort(key=lambda path: path.as_posix())
         return tuple(ordered_paths)

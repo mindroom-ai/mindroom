@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from agno.run.agent import RunOutput
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -105,10 +105,10 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
     )
     captured_prompt: str | None = None
 
-    async def capture_run(**kwargs: object) -> SimpleNamespace:
+    async def capture_run(**kwargs: object) -> RunOutput:
         nonlocal captured_prompt
         captured_prompt = str(kwargs["run_input"])
-        return SimpleNamespace(content="Ops topic")
+        return RunOutput(content="Ops topic")
 
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=None),
@@ -146,10 +146,10 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
     )
     captured_prompt: str | None = None
 
-    async def capture_run(**kwargs: object) -> SimpleNamespace:
+    async def capture_run(**kwargs: object) -> RunOutput:
         nonlocal captured_prompt
         captured_prompt = str(kwargs["run_input"])
-        return SimpleNamespace(content="Ops topic")
+        return RunOutput(content="Ops topic")
 
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=None),

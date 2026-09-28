@@ -457,8 +457,13 @@ Set the API key for each provider you use in `config.yaml`:
 For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
 A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
-All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
+**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`), read only when the plain variable is unset or empty; see [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
+Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
+When a stored value is first imported or changes, MindRoom logs one notice naming the service, the variable that supplied it, and whether it came from the process environment, `.env`, or the process environment overriding `.env`.
+Values are never logged, and unchanged values are neither announced nor rewritten.
+To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env` (for a seed, remove that service's entry from each declaration that lists it), then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Environment sync never overwrites credentials saved through the dashboard (`_source=ui`) or legacy credentials without a source marker.
 
 ### Codex CLI Subscription Auth
 
@@ -477,7 +482,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline, except that a certificate verification failure stops startup immediately without retrying (see [Matrix TLS trust](https://docs.mindroom.chat/architecture/matrix/#tls-trust)) | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
@@ -674,7 +679,7 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     # Summary input chunks use the selected compaction model's context window.
-    # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
+    # Text compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
     timeout_seconds: 600           # Maximum seconds allowed for each compaction summary request
@@ -709,12 +714,12 @@ defaults:
 # Provider environment variables are not injected by this setting.
 # google_vertex_adc is unsupported because isolated workers do not receive ADC files.
 
-# Required compaction is destructive inside the active session.
+# Required compaction summarizes older runs of the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
 # It runs before a reply when raw history exceeds the hard replay budget.
 # It also runs before the next reply after a manual compact_context request.
 # Otherwise MindRoom leaves the stored session unchanged and relies on replay fitting for that reply.
-# It rewrites the stored session summary and removes compacted raw runs from the live session.
+# It rewrites the stored session summary and moves compacted raw runs into the compaction archive.
 # Agno then replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
@@ -994,6 +999,8 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
+To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
 ## Credential Storage Encryption
 
@@ -1077,7 +1084,21 @@ Prompt overrides that are read per request are picked up without restarting bots
 
 ## Managed Avatars
 
-MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space.
+Every agent, team, and managed room gets a Matrix avatar by default.
+MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
+Any other agent or team receives a stable stock avatar chosen from its name.
+A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
+The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png` when present, then the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images, and otherwise the stock `mind-logo` image, which wheel installs (`uvx`) use because they lack bundled files.
+Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
+Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
+When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
+Agent, team, and root Space avatars are retried the next time MindRoom starts after that window.
+Managed room avatars are only chosen when a room is created, so run `mindroom avatars sync` to fill them in.
+`mindroom avatars sync` also clears recent failures, so it retries immediately and lets the next start retry agent and team avatars.
+Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
+To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
+
+MindRoom can also generate custom avatars for agents, teams, rooms, and the optional root Matrix Space.
 Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.
 Every omitted prompt falls back to MindRoom's built-in default.
 
@@ -1090,12 +1111,12 @@ prompts:
   AVATAR_ROOM_SYSTEM_PROMPT: "You are creating a refined, minimalist icon design for a room avatar."
 ```
 
-`mindroom avatars generate` only creates missing local avatar files by default.
+`mindroom avatars generate` only creates missing local avatar files by default, and it creates a custom file for every entity without a workspace or bundled avatar file because downloaded stock avatars do not count.
 Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
 Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for 1024x1024 high-quality PNG rendering.
 Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
-Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
+Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars, which sets every managed room to its default: its own file, its single agent's or team's avatar, or its stock pick.
 
 ## Personal Agent Rooms
 
@@ -1164,6 +1185,9 @@ If room creation succeeds but its local room-ID receipt is lost, alias recovery 
 Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
 Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
 Room ownership and membership are verified before reusing an alias.
+The owner may invite other MindRoom agents into their personal room; an agent sees only messages sent after its invite.
+Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
+Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 

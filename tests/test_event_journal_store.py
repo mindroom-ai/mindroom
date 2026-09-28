@@ -23,9 +23,11 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
@@ -184,7 +186,7 @@ async def _release_writes_the_store_abandoned(
     backend: SqliteBackend,
     abandoned: set[asyncio.Task[object]],
 ) -> None:
-    """End writes a close left waiting, so a failure reads as one.
+    """End writes the store left waiting, so a failure reads as one.
 
     Empty on a healthy close, and reached only when the test using it is
     already failing. It exists because an abandoned write cannot be cancelled
@@ -375,6 +377,37 @@ class _PausingBackend:
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read, unpaused."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Close the wrapped backend."""
+        await self.inner.close()
+
+
+@dataclass(slots=True)
+class _WritesAfterTheFirstWait:
+    """A real backend that starts each write after its first only once `gate` returns.
+
+    An operation that commits in several transactions lets a racer be ordered
+    between two of its commits, or after all of them if the racer loses the
+    released row to the operation's next claim. Holding the later writes makes
+    the first ordering the only one, instead of leaving it to whichever
+    connection PostgreSQL grants the row first.
+    """
+
+    inner: Backend
+    gate: Callable[[], Awaitable[object]]
+    writes: int = 0
+
+    async def write[T](self, operation: Operation[T]) -> T:
+        """Run one write, behind the gate unless it is the first."""
+        self.writes += 1
+        if self.writes > 1:
+            await self.gate()
+        return await self.inner.write(operation)
+
+    async def read[T](self, operation: Operation[T]) -> T:
+        """Run one read, ungated."""
         return await self.inner.read(operation)
 
     async def close(self) -> None:
@@ -5013,6 +5046,12 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
         window is opened by pausing the walk after its first statement -- the
         real transaction, the real SQL, only held open -- and the fence is a
         real membership batch admission on the second store.
+
+        The walk commits its chunk and its final marker in separate
+        transactions, and the marker waits for the fence to commit. Otherwise
+        the queued fence and the marker's own claim race for the row the chunk
+        releases, and a marker that wins publishes first and is erased by the
+        fence after it: a correct ordering, but not the one under test.
         """
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
@@ -5029,8 +5068,15 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
                 fence_finished,
             )
 
+        async def after_the_fence() -> None:
+            committed = await asyncio.to_thread(fence_finished.wait, _WORKER_WAIT_SECONDS)
+            assert committed, "the fence never committed"
+
         hydrating = EventJournalStore(
-            backend=_PausingBackend(rival_stores.first.backend, hold_the_walk_open),
+            backend=_WritesAfterTheFirstWait(
+                _PausingBackend(rival_stores.first.backend, hold_the_walk_open),
+                after_the_fence,
+            ),
         ).principal(principal_id)
         epoch = await reader.membership_epoch(ROOM)
 
@@ -8787,6 +8833,40 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
     faked worker has no connection to take away.
     """
 
+    async def test_finished_statement_is_released_before_its_completion_is_reported(self) -> None:
+        """A worker thread that has not yet dropped its work item keeps nothing the statement used.
+
+        The pool holds each work item until its thread gets back to it, and a
+        thread starved of the GIL can take a while. A recovery walk that holds
+        one page per install used to find the previous page still alive behind
+        that item, a third page where the walk promises two.
+        """
+
+        class _Payload:
+            pass
+
+        class _RetainingExecutor(ThreadPoolExecutor):
+            """Keep every work item, as a thread that has not dropped its own yet does."""
+
+            def __init__(self) -> None:
+                super().__init__(max_workers=1)
+                self.retained: list[tuple[object, ...]] = []
+
+            def submit(self, fn, /, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+                self.retained.append((fn, args, kwargs))
+                return super().submit(fn, *args, **kwargs)
+
+        executor = _RetainingExecutor()
+        offload = ThreadOffload(_executor=executor)
+        payload = _Payload()
+        released = weakref.ref(payload)
+        await offload.run(partial(id, payload))
+        del payload
+        offload.shutdown()
+
+        assert executor.retained
+        assert released() is None, "the finished statement's data outlived it behind the pool's work item"
+
     async def test_cancellation_retrieves_a_completed_worker_failure(self) -> None:
         """The caller keeps cancellation while the worker's failure remains observable."""
         work: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -9195,6 +9275,48 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert all(isinstance(refusal, RuntimeError) for refusal in refusals), (
             "a write the closed store never ran reported something other than a refusal"
         )
+
+    @pytest.mark.parametrize("writer_started", [True, False], ids=["idle-writer", "unstarted-writer"])
+    async def test_no_write_is_left_waiting_when_the_writer_is_cancelled_without_close(
+        self,
+        tmp_path: Path,
+        writer_started: bool,
+    ) -> None:
+        """A writer cancelled outside ``close()`` refuses the write still in its queue.
+
+        ``close()`` is not the only thing that cancels the writer task: a loop
+        shutting down, as ``asyncio.run`` and pytest-asyncio do, cancels every
+        task at once. Cancelled after a write is queued but before the writer
+        takes it, the task used to end with the write still queued, and
+        ``settled`` held its caller forever -- the loop's own shutdown then
+        never finished. A writer that never ran its first step never enters its
+        coroutine at all, so the refusal cannot live there.
+        """
+        backend = SqliteBackend.open(tmp_path / "cancelled-writer.db")
+        ran = threading.Event()
+
+        def operation(_transaction: Transaction) -> str:
+            ran.set()
+            return "landed"
+
+        if writer_started:
+            await backend.write(lambda _transaction: None)
+        writing = asyncio.create_task(backend.write(operation))
+        # The write enqueues, and the writer has not resumed (or started) yet.
+        await asyncio.sleep(0)
+        writer = backend._writer_task
+        assert writer is not None
+        writer.cancel()
+        answered, abandoned = await asyncio.wait({writing}, timeout=_SETTLEMENT_WAIT_SECONDS)
+        refusals = [task.exception() for task in answered]
+        await _release_writes_the_store_abandoned(backend, abandoned)
+        await backend.close()
+
+        assert not abandoned, "a write stayed queued behind a writer that had been cancelled"
+        assert not ran.is_set()
+        assert len(refusals) == 1
+        assert isinstance(refusals[0], RuntimeError)
+        assert str(refusals[0]) == "The event-journal writer stopped before running this write"
 
 
 class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:

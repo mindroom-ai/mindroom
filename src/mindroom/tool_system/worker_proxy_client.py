@@ -127,7 +127,7 @@ def _record_proxy_exception_for_worker(
     if _is_request_level_proxy_transport_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
-    worker_manager.record_failure(worker_handle.worker_key, str(exc))
+    worker_manager.record_failure(worker_handle.worker_key, str(exc), startup_count=worker_handle.startup_count)
 
 
 def _is_request_level_proxy_transport_error(exc: Exception) -> bool:
@@ -172,7 +172,7 @@ def record_proxy_response_failure_for_worker(
     if failure_kind == "tool":
         worker_manager.touch_worker(worker_handle.worker_key)
         return
-    worker_manager.record_failure(worker_handle.worker_key, error)
+    worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
 
 def post_worker_proxy_json(

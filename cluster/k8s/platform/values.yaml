@@ -42,6 +42,8 @@ autoscaling:
 
 cleanupScheduler:
   enabled: "true"
+  # Days an instance of an inactive subscription stays stopped (data kept) before teardown.
+  teardownGraceDays: 30
 
 platformSecrets:
   create: true

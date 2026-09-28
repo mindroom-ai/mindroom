@@ -22,8 +22,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
@@ -125,6 +129,7 @@ _CLI_ROOTS = frozenset(
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.desktop.protocol": frozenset({"dotenv"}),
     "mindroom.matrix.runtime_media": frozenset({"dotenv"}),
+    "mindroom.matrix.provisioning_env": frozenset({"dotenv"}),
     "mindroom.cli.main": _CLI_ROOTS,
     # Doctor may use the CLI, config, and HTTP stacks at import time, but no
     # provider, storage, or other feature-specific dependency.
@@ -251,6 +256,52 @@ def test_participation_state_has_no_framework_dependencies() -> None:
         "mindroom.participation",
         ("agno", "mindroom.provider_tool_policy", "mindroom.hooks"),
     )
+
+
+def test_cli_help_does_not_require_unix_file_locking() -> None:
+    """Desktop's platform-specific implementation must not break general CLI help on Windows."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl'] = None; "
+            "from typer.testing import CliRunner; from mindroom.cli.main import app; "
+            "result = CliRunner().invoke(app, ['--help']); print(result.output); "
+            "raise SystemExit(result.exit_code)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "Usage:" in result.stdout
+
+
+def test_service_status_pairing_check_does_not_load_matrix_or_http_clients(tmp_path: Path) -> None:
+    """The macOS app polls `mindroom service status` every few seconds, so its pairing check must stay env-only."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    service_environment = {"MINDROOM_CONFIG_PATH": str(config_path), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")}
+    probe = (
+        "import json, sys\n"
+        "from mindroom.cli.service import _service_pairing_required\n"
+        "from mindroom.services.manager import get_service_manager\n"
+        "get_service_manager().get_service_environment()\n"
+        f"required = _service_pairing_required({service_environment!r})\n"
+        "loaded = sorted(n for n in sys.modules if n.split('.')[0] in {'nio', 'httpx'})\n"
+        "print(json.dumps({'required': required, 'loaded': loaded}))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    payload = json.loads(result.stdout)
+    assert payload == {"required": True, "loaded": []}
 
 
 def test_primary_runtime_defers_heavy_optional_dependencies() -> None:

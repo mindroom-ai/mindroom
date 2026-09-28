@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+import ssl
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -24,8 +25,8 @@ from mindroom.cancellation import (
     current_task_is_process_shutdown,
     request_task_cancel,
 )
-from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_session import maybe_ssl_context
 from mindroom.matrix.health import (
     MATRIX_INGESTION_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -564,6 +566,19 @@ async def run_with_retry(
             return
 
 
+def _certificate_verification_failure(error: BaseException) -> ssl.SSLCertVerificationError | None:
+    """Return the certificate verification error behind an httpx transport error, if any."""
+    seen: list[BaseException] = []
+    cause: BaseException | None = error
+    while cause is not None and cause not in seen:
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return cause
+        seen.append(cause)
+        # Follow __context__ even when suppressed: httpcore re-raises connect errors with a cosmetic `from None`.
+        cause = cause.__cause__ or cause.__context__
+    return None
+
+
 async def wait_for_matrix_homeserver(
     *,
     runtime_paths: RuntimePaths,
@@ -574,7 +589,8 @@ async def wait_for_matrix_homeserver(
     """Wait for the configured Matrix homeserver to answer `/versions`."""
     if timeout_seconds is None:
         timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths)
-    versions_url = matrix_versions_url(constants.runtime_matrix_homeserver(runtime_paths=runtime_paths))
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+    versions_url = matrix_versions_url(homeserver)
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
     loop = asyncio.get_running_loop()
     deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
@@ -585,20 +601,31 @@ async def wait_for_matrix_homeserver(
         timeout_seconds=timeout_seconds,
     )
 
+    # Probe with the TLS trust Matrix logins use, so the probe cannot reject a server logins would accept.
     async with httpx.AsyncClient(
         timeout=request_timeout_seconds,
-        verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+        verify=maybe_ssl_context(homeserver, runtime_paths) or True,
     ) as client:
         while deadline is None or loop.time() < deadline:
             attempt += 1
             try:
                 response = await client.get(versions_url)
             except httpx.TransportError as exc:
+                # An untrusted certificate is a setup problem that waiting cannot fix.
+                verification_error = _certificate_verification_failure(exc)
+                if verification_error is not None:
+                    msg = (
+                        f"Could not verify the TLS certificate of Matrix homeserver {homeserver}: {verification_error}. "
+                        "Make sure the system CA store trusts the homeserver's certificate, or set SSL_CERT_FILE "
+                        "to a CA bundle that does. Set MATRIX_SSL_VERIFY=false only for local testing."
+                    )
+                    raise PermanentStartupError(msg) from exc
                 if attempt == 1 or attempt % 5 == 0:
                     logger.info(
                         "Matrix homeserver not ready yet",
                         url=versions_url,
                         attempt=attempt,
+                        error_type=type(exc).__name__,
                         error=str(exc),
                     )
                 await asyncio.sleep(retry_interval_seconds)

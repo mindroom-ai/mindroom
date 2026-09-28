@@ -463,8 +463,12 @@ class TurnController:
         event: PreparedIngress,
         envelope: MessageEnvelope,
     ) -> bool:
-        """Return whether this event may notify the conversation's active response."""
-        if envelope.origin.intent is not TurnIntent.ROUTER_HANDOFF:
+        """Return whether this event may notify the conversation's active response.
+
+        Router handoffs and agent relays (for example a `matrix_message` handoff) that
+        are addressed to another participant must not pause this agent's running turn.
+        """
+        if envelope.origin.intent not in {TurnIntent.ROUTER_HANDOFF, TurnIntent.TRUSTED_INTERNAL_RELAY}:
             return True
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             event.source,
@@ -1867,7 +1871,11 @@ class TurnController:
         is no row to race and nothing else will ever put this notice in the
         room.
         """
-        error_text = get_user_friendly_error_message(error, self.deps.agent_name)
+        error_text = get_user_friendly_error_message(
+            error,
+            self.deps.agent_name,
+            runtime_paths=self.deps.runtime_paths,
+        )
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         if existing_event_id is not None:
             edited = await self.deps.delivery_gateway.edit_text(

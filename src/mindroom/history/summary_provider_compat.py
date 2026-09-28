@@ -58,8 +58,13 @@ def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
     """Normalize the effective request on a fresh summary model, preserving caller mappings."""
     from agno.models.openai import OpenAIChat, OpenAIResponses  # noqa: PLC0415 - defer optional provider imports
 
+    from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415 - defer optional provider imports
+
     # Agno-level retries belong to the outer summary retry policy.
     model.retries = 0
+    if isinstance(model, MindRoomOpenRouter):
+        # One-off summaries never reuse their prefix, so skip Claude cache writes.
+        model.cache_system_prompt = False
     if isinstance(model, OpenAIChat | OpenAIResponses):
         model.max_retries = 0
         model.client_params = {**(model.client_params or {}), "max_retries": 0}

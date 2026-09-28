@@ -15,6 +15,7 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.exceptions import ModelProviderError
 from agno.media import Image
+from agno.metrics import RunMetrics
 from agno.models.message import Message
 from agno.models.openai import OpenAIResponses
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
@@ -435,6 +436,61 @@ async def test_terminal_usage_survives_stream_failure(
             assert usage["requests"][0]["created_at"] > 0
         else:
             assert all(not item.get(key, 0) for item in model_metrics for key in expected)
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+async def test_mixed_model_failed_stream_keeps_request_attribution(tmp_path: Path, *, sync: bool) -> None:
+    """A metered failure after switching models still exports both provider calls."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(agents={"status": AgentConfig(display_name="Status")})
+    storage = create_state_storage(
+        "status",
+        tmp_path / "agents/status",
+        subdir="sessions",
+        session_table="status_sessions",
+    )
+    complete = _response("resp_complete", "completed")
+    complete["usage"] = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    failed = _response("resp_failed", "failed")
+    failed["usage"] = {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}
+    failed["error"] = {"code": "server_error", "message": "Generation failed"}
+    run = RunOutput(run_id="run", agent_id="status", metrics=RunMetrics())
+    messages = [Message(role="user", content="Check status")]
+    try:
+        async with _model(
+            _created("resp_complete") + _text() + _event("response.completed", response=complete),
+            _created("resp_failed") + _text() + _event("response.failed", response=failed),
+        ) as model:
+            for model_id in ("first-model", "second-model"):
+                model.id = model_id
+                try:
+                    if sync:
+                        list(model.response_stream(messages, run_response=run))
+                    else:
+                        async for _ in model.aresponse_stream(messages, run_response=run):
+                            pass
+                except ModelProviderError:
+                    assert model_id == "second-model"
+        run.messages = messages
+        assert run.metrics is not None
+        storage.upsert_session(
+            AgentSession(
+                session_id="session",
+                agent_id="status",
+                session_data={"session_metrics": run.metrics.to_dict()},
+            ),
+        )
+        storage.upsert_run(run, session_id="session")
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 30
+        assert [(row["model"], row["totals"]["total_tokens"]) for row in report.to_dict()["request_breakdown"]] == [
+            ("first-model", 10),
+            ("second-model", 20),
+        ]
+        assert report.request_coverage is not None
+        assert report.request_coverage.unavailable_sources == 0
     finally:
         storage.close()
 

@@ -7,6 +7,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,8 @@ import pytest
 from mindroom.desktop.native_config import (
     NativeConfigError,
     NativeDesktopConfig,
+    NativeFilesConfig,
+    NativeShellConfig,
     load_native_config,
     native_config_path,
     save_native_config,
@@ -50,12 +55,136 @@ def test_native_config_round_trip_and_owner_only_mode(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
+def _extended(roots: object, *, enabled: object = False, **updates: object) -> dict[str, object]:
+    payload = _payload(**updates)
+    payload["files"] = {"roots": roots}
+    payload["shell"] = {"enabled": enabled}
+    return payload
+
+
+def test_old_config_loads_disabled_local_access_and_saves_complete_extended_payload(tmp_path: Path) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(_payload(revision=4)), encoding="utf-8")
+    path.chmod(0o600)
+    old = load_native_config(path)
+    assert old.files == NativeFilesConfig(roots=())
+    assert old.shell == NativeShellConfig(enabled=False)
+    saved = save_native_config(path, old, expected_revision=4)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        **_payload(revision=5),
+        "files": {"roots": []},
+        "shell": {"enabled": False},
+    }
+    assert load_native_config(path) == saved
+
+
+def test_extended_config_round_trips_without_checking_saved_root_availability(tmp_path: Path) -> None:
+    missing = tmp_path / "removed-after-selection"
+    config = NativeDesktopConfig.from_payload(_extended([str(tmp_path), str(missing)], enabled=True))
+    assert config.files == NativeFilesConfig(roots=(tmp_path, missing))
+    assert config.shell == NativeShellConfig(enabled=True)
+    saved = save_native_config(native_config_path(tmp_path), config, expected_revision=0)
+    assert saved.to_payload()["files"] == {"roots": [str(tmp_path), str(missing)]}
+    assert saved.to_payload()["shell"] == {"enabled": True}
+    assert load_native_config(native_config_path(tmp_path)) == saved
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_payload(), "files": {"roots": []}},
+        {**_payload(), "shell": {"enabled": False}},
+        {**_extended([]), "files": {"roots": [], "writable": True}},
+        {**_extended([]), "shell": {"enabled": False, "auto_approve_seconds": 60}},
+        {**_extended([]), "files": []},
+        _extended("/selected"),
+        _extended(["/selected"] * 2),
+        _extended([f"/selected/{index}" for index in range(33)]),
+        _extended([7]),
+        _extended([""]),
+        _extended(["relative"]),
+        _extended(["/selected/../other"]),
+        _extended(["/selected\x00"]),
+        _extended(["/" + "a" * 4096]),
+        _extended([], enabled=1),
+        _extended([], enabled=None),
+    ],
+)
+def test_native_config_rejects_invalid_local_access(payload: dict[str, object]) -> None:
+    with pytest.raises(NativeConfigError) as caught:
+        NativeDesktopConfig.from_payload(payload)
+    assert caught.value.code == "invalid_request"
+
+
+def test_local_access_edit_canonicalizes_only_new_roots_and_preserves_other_settings(tmp_path: Path) -> None:
+    saved_root = tmp_path / "saved"
+    new_root = tmp_path / "new"
+    new_root.mkdir()
+    link = tmp_path / "link-to-new"
+    link.symlink_to(new_root, target_is_directory=True)
+    current = NativeDesktopConfig.from_payload(_extended([str(saved_root)], allowed_app_ids=[]))
+
+    updated = current.with_local_access({"roots": [str(saved_root), str(link)]}, {"enabled": True})
+
+    assert updated.files.roots == (saved_root, new_root.resolve())
+    assert updated.shell.enabled is True
+    assert {**updated.to_payload(), "files": None, "shell": None} == {
+        **current.to_payload(),
+        "files": None,
+        "shell": None,
+    }
+
+
+@pytest.mark.parametrize("new_root", ["missing", "file.txt", "duplicate-link"])
+def test_local_access_edit_requires_new_unique_directories(tmp_path: Path, new_root: str) -> None:
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    (tmp_path / "file.txt").write_text("not a folder", encoding="utf-8")
+    (tmp_path / "duplicate-link").symlink_to(root, target_is_directory=True)
+    current = NativeDesktopConfig.from_payload(_extended([str(root)]))
+    with pytest.raises(NativeConfigError) as caught:
+        current.with_local_access({"roots": [str(root), str(tmp_path / new_root)]}, {"enabled": False})
+    assert caught.value.code == "invalid_request"
+
+
 def test_native_config_compare_and_swap_rejects_stale_writer(tmp_path: Path) -> None:
     path = native_config_path(tmp_path)
     save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
     with pytest.raises(NativeConfigError, match="changed") as caught:
         save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
     assert caught.value.code == "revision_conflict"
+
+
+def test_simultaneous_app_and_terminal_saves_have_one_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent edit cannot silently overwrite another writer with the same revision."""
+    from mindroom.desktop import native_config  # noqa: PLC0415
+
+    path = native_config_path(tmp_path)
+    original_write = native_config.write_json_file_durable
+    ready = threading.Barrier(2)
+
+    def slow_write(*args: object, **kwargs: object) -> None:
+        time.sleep(0.05)
+        original_write(*args, **kwargs)
+
+    monkeypatch.setattr(native_config, "write_json_file_durable", slow_write)
+
+    def save(app: str) -> str:
+        ready.wait(timeout=5)
+        try:
+            config = NativeDesktopConfig.from_payload(_payload(allowed_app_ids=[app]))
+            save_native_config(path, config, expected_revision=0)
+        except NativeConfigError as exc:
+            return exc.code
+        return app
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, ["com.example.First", "com.example.Second"]))
+    assert results.count("revision_conflict") == 1
+    assert load_native_config(path).allowed_app_ids == tuple(
+        result for result in results if result != "revision_conflict"
+    )
 
 
 @pytest.mark.parametrize(
@@ -186,9 +315,12 @@ def test_unsupported_config_path_cannot_be_repaired(
         if kind == "foreign_owner":
             patch.setattr(os, "getuid", lambda: before.st_uid + 1)
         if kind == "unreadable":
+            original_open = os.open
 
-            def denied(*_args: object, **_kwargs: object) -> None:
-                raise PermissionError
+            def denied(file: Path, flags: int) -> int:
+                if file == path:
+                    raise PermissionError
+                return original_open(file, flags)
 
             patch.setattr(os, "open", denied)
         with pytest.raises(NativeConfigError) as caught:
