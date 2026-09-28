@@ -1142,7 +1142,8 @@ async def start_device_pair(
 ) -> DevicePairStartResponse:
     """Start pairing from a local client; a signed-in browser user approves it later."""
     now = _now_utc()
-    remote = request.client.host if request.client else "unknown"
+    client_ip = request.client.host if request.client else None
+    remote = client_ip or "unknown"
     device_secret = secrets.token_urlsafe(32)
     async with state.lock:
         _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
@@ -1158,7 +1159,7 @@ async def start_device_pair(
             device_secret_hash=_hash_token(device_secret),
             client_name=payload.client_name.strip(),
             fingerprint=payload.client_pubkey_or_fingerprint.strip(),
-            client_ip=request.client.host if request.client else None,
+            client_ip=client_ip,
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
