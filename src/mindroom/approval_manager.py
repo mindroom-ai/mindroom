@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
-from mindroom.redaction import MAX_REDACTION_DEPTH, redact_sensitive_data
+from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
@@ -115,43 +115,12 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     return text[: max_length - len(_SANITIZER_TRUNCATION_MARKER)] + _SANITIZER_TRUNCATION_MARKER
 
 
-def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
-    if isinstance(sanitized, dict):
-        if not isinstance(original, dict):
-            return "__truncated__" in sanitized or any(
-                _contains_sanitizer_truncation(None, item) for item in sanitized.values()
-            )
-        original_by_text_key = {str(key): item for key, item in original.items()}
-        return (
-            len(sanitized) < len(original)
-            or ("__truncated__" in sanitized and "__truncated__" not in original)
-            or any(
-                _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
-                for key, item in sanitized.items()
-                if key != "__truncated__" or key in original
-            )
-        )
-    if isinstance(sanitized, list):
-        original_items = list(original) if isinstance(original, list | tuple | set | frozenset) else []
-        return (
-            len(original_items) > len(sanitized)
-            or (sanitized != original_items and sanitized[-1:] == [_SANITIZER_TRUNCATION_MARKER])
-            or any(
-                _contains_sanitizer_truncation(original_item, sanitized_item)
-                for original_item, sanitized_item in zip(original_items, sanitized, strict=False)
-            )
-        )
-    return isinstance(sanitized, str) and sanitized.endswith(_SANITIZER_TRUNCATION_MARKER) and sanitized != original
-
-
-def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def _build_event_arguments_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     sanitized = sanitize_failure_value(arguments, precise=True)
-    sanitizer_truncated = _contains_sanitizer_truncation(arguments, sanitized)
     if not isinstance(sanitized, dict):
-        wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
-        return wrapped, True
+        return {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
-        return sanitized, sanitizer_truncated
+        return sanitized
     per_value_budget = max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // max(len(sanitized), 1))
     preview = {
         key: _truncate_event_argument_value(value, max_length=per_value_budget) for key, value in sanitized.items()
@@ -165,33 +134,44 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
                 f"{len(sanitized)} arguments omitted because the preview exceeded the size limit.",
                 max_length=max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // 2),
             ),
-        }, True
-    return preview, True
+        }
+    return preview
 
 
 def _full_arguments_json_bytes(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
 
 
-def _nests_beyond_redaction_depth(value: object, depth: int = 0) -> bool:
-    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
-    if depth >= MAX_REDACTION_DEPTH:
-        return True
-    if isinstance(value, Mapping):
-        return any(_nests_beyond_redaction_depth(item, depth + 1) for item in value.values())
-    if isinstance(value, list | tuple | set | frozenset):
-        return any(_nests_beyond_redaction_depth(item, depth + 1) for item in value)
-    return False
-
-
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
-    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES or _nests_beyond_redaction_depth(
-        arguments,
+    if (
+        nests_beyond_redaction_depth(arguments)
+        or _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES
     ):
         return None
     sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, precise=True))
     return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
+
+
+@dataclass(frozen=True, slots=True)
+class _EventArguments:
+    """Redacted tool arguments for one approval card."""
+
+    preview: dict[str, Any]
+    full: dict[str, Any] | None
+    """The complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the preview shows less than the complete redacted arguments."""
+        return self.preview != self.full
+
+
+def _build_event_arguments(arguments: dict[str, Any]) -> _EventArguments:
+    return _EventArguments(
+        preview=_build_event_arguments_preview(arguments),
+        full=_build_full_event_arguments(arguments),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,16 +394,13 @@ class ApprovalManager:
         """Prepare one shared pending-card payload for a typed exact-call target."""
         if self.prepare_event is None:
             return None
-        event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
-        full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
-        )
+        event_arguments = await asyncio.to_thread(_build_event_arguments, raw_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
-            arguments=event_arguments,
-            arguments_truncated=arguments_truncated,
-            full_arguments=full_arguments,
+            arguments=event_arguments.preview,
+            arguments_truncated=event_arguments.truncated,
+            full_arguments=event_arguments.full if event_arguments.truncated else None,
             agent_name=agent_name,
             thread_id=thread_id,
             requester_id=requester_id,

@@ -20,6 +20,7 @@ __all__ = [
     "MAX_REDACTION_DEPTH",
     "REDACTED",
     "REDACTION_FAILED",
+    "nests_beyond_redaction_depth",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -54,7 +55,7 @@ _API_KEY_MESSAGE_PATTERN = re.compile(_API_KEY_MESSAGE_REGEX, re.IGNORECASE)
 # after `&` go through assignment redaction instead.
 _PRECISE_URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
-    r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>;|&()`]+)",
+    r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>;|&()`$]+)",
 )
 _PRECISE_BEARER_TOKEN_PATTERN = re.compile(_BEARER_REGEX.replace(r"\s", r"[^\S\r\n]"), re.IGNORECASE)
 _PRECISE_API_KEY_MESSAGE_PATTERN = re.compile(_API_KEY_MESSAGE_REGEX.replace(r"\s", r"[^\S\r\n]"), re.IGNORECASE)
@@ -75,15 +76,39 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # quote and JSON punctuation, which are not shell syntax.
 _PRECISE_ESCAPE_REGEX = r"\\[^\s;|&<>()`]"
 _PRECISE_VALUE_REGEXES: dict[str | None, str] = {
-    None: "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s,&)\]}\"';|<>`(\\])+",
-    '"': "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s\"&;|<>()`\\])+",
-    "'": "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s'&;|<>()`\\])+",
+    None: "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s,&)\]}\"';|<>`($\\])+",
+    '"': "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s\"&;|<>()`$\\])+",
+    "'": "(?:" + _PRECISE_ESCAPE_REGEX + r"|[^\s'&;|<>()`$\\])+",
 }
 _PRECISE_VALUE_PATTERNS = {quote: re.compile(regex) for quote, regex in _PRECISE_VALUE_REGEXES.items()}
 _AUTHORIZATION_CREDENTIAL_PATTERNS = {
     quote: re.compile(r"[^\S\r\n]+(?P<credential>" + regex + ")") for quote, regex in _PRECISE_VALUE_REGEXES.items()
 }
-_AUTHORIZATION_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+# Registered HTTP authentication schemes plus common vendor ones; any other first word is the credential itself.
+_AUTHORIZATION_SCHEMES: frozenset[str] = frozenset(
+    {
+        "apikey",
+        "aws4-hmac-sha256",
+        "basic",
+        "bearer",
+        "concealed",
+        "digest",
+        "dpop",
+        "gnap",
+        "hoba",
+        "mutual",
+        "negotiate",
+        "ntlm",
+        "oauth",
+        "privatetoken",
+        "scram-sha-1",
+        "scram-sha-256",
+        "sso-key",
+        "token",
+        "vapid",
+    },
+)
+_REDACTED_URL_USERINFO = "***@"
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -398,7 +423,7 @@ def _precise_assignment_value_span(value: str, prefix_match: re.Match[str]) -> t
     A leading quote is skipped because a preview cannot know whether it opens or closes a
     string. ``key= word`` and a value on the next line hide nothing: in a shell the first
     assigns an empty value, so the next word is the command, not the secret. Authorization
-    values after ``:`` or inside quotes keep their scheme word and lose only the credential.
+    values after ``:`` or inside quotes keep a known scheme word and lose only the credential.
     """
     value_start = prefix_match.end()
     separator = prefix_match.group("separator")
@@ -415,15 +440,18 @@ def _precise_assignment_value_span(value: str, prefix_match: re.Match[str]) -> t
     if word is None:
         return None
     normalized_key = _classify_key(prefix_match.group("key")).normalized
+    if word.group().startswith(_REDACTED_URL_USERINFO):
+        # URL redaction already hid this userinfo; the rest of the word is the visible host.
+        return None
     if (
         (normalized_key == "authorization" or normalized_key.endswith("_authorization"))
         and (quote is not None or separator == ":")
-        and _AUTHORIZATION_SCHEME_PATTERN.fullmatch(word.group())
+        and word.group().lower() in _AUTHORIZATION_SCHEMES
     ):
         credential = _AUTHORIZATION_CREDENTIAL_PATTERNS[quote].match(value, word.end())
-        if credential is None:
-            return None if word.group().lower() in {"basic", "bearer"} else word.span()
-        return None if credential.group("credential") == REDACTED else credential.span("credential")
+        if credential is None or credential.group("credential") == REDACTED:
+            return None
+        return credential.span("credential")
     return word.span()
 
 
@@ -439,6 +467,19 @@ def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> s
     return "".join(parts)
 
 
+def _is_query_parameter(value: str, prefix_match: re.Match[str], classification: _KeyClassification) -> bool:
+    """Return whether a URL-only secret key such as ``sig`` or ``state`` sits where a query string puts it.
+
+    Precise URLs end at ``&``, so their later parameters reach assignment redaction instead.
+    """
+    start = prefix_match.start()
+    return (
+        classification.is_redacted_query
+        and prefix_match.group("separator") == "="
+        and (start == 0 or value[start - 1] in "?&")
+    )
+
+
 def _redact_secret_assignments(value: str, *, precise: bool) -> str:
     """Redact shallow key assignments with one forward-only scan.
 
@@ -450,7 +491,7 @@ def _redact_secret_assignments(value: str, *, precise: bool) -> str:
     while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix_match.end()
         classification = _classify_key(prefix_match.group("key"))
-        if not classification.is_secret:
+        if not (classification.is_secret or (precise and _is_query_parameter(value, prefix_match, classification))):
             continue
 
         if precise:
@@ -514,9 +555,9 @@ def _redact_url(value: str) -> str:
 
 
 def _redact_query_fragment(value: str, *, max_length: int | None, precise: bool) -> str:
-    if precise and any(character.isspace() for character in value):
-        # Text with whitespace is a statement or search, not a query string; re-encoding it would garble the preview.
-        return redact_sensitive_text(value, max_length=max_length, precise=True)
+    if precise:
+        # A reviewer must read the value as written; re-encoding would garble statements and searches.
+        return _redact_sensitive_text_fail_closed(value, max_length=max_length, precise=True)
     query_items: list[tuple[str, str]] = []
     changed = False
     for key, item in parse_qsl(value, keep_blank_values=True):
@@ -526,7 +567,7 @@ def _redact_query_fragment(value: str, *, max_length: int | None, precise: bool)
         else:
             query_items.append((key, item))
     if not changed:
-        return redact_sensitive_text(value, max_length=max_length, precise=precise)
+        return redact_sensitive_text(value, max_length=max_length)
     return _truncate_text(urlencode(query_items, doseq=True, safe="*"), max_length)
 
 
@@ -581,6 +622,9 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, precise: bool)
         redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted, precise=precise)
+    if precise and len(bounded_value) < len(value) and not redacted.endswith(_TRUNCATED):
+        # Redaction can shrink cut input below the limit, so mark the cut explicitly.
+        redacted += _TRUNCATED
     return _truncate_text(redacted, max_length)
 
 
@@ -604,6 +648,17 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None, precise:
         max_length=max_length,
         precise=precise,
     )
+
+
+def nests_beyond_redaction_depth(value: object, depth: int = 0) -> bool:
+    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
+    if depth >= MAX_REDACTION_DEPTH:
+        return True
+    if isinstance(value, Mapping):
+        return any(nests_beyond_redaction_depth(item, depth + 1) for item in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(nests_beyond_redaction_depth(item, depth + 1) for item in value)
+    return False
 
 
 def _normalized_structured_value(value: object) -> object:
