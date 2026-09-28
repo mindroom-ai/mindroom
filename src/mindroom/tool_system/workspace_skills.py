@@ -6,9 +6,9 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
-import copy
 import json
 import os
+import pickle
 import re
 import threading
 from contextlib import contextmanager, suppress
@@ -183,28 +183,38 @@ def _strict_frontmatter(text: str, *, trusted: bool) -> Any:  # noqa: ANN401
     Workspace frontmatter, which worker code can write, gets PyYAML's pure-Python loader like Agno's LocalSkills, with
     the refusals of ``yaml_io.safe_load_untrusted``; operator-owned skill roots keep the fast safe loader.
     """
-    value, error = _cached_frontmatter(text, trusted=trusted)
+    pickled, error = _cached_frontmatter(text, trusted=trusted)
     if error is not None:
         raise YAMLError(error)
-    return copy.deepcopy(value)
+    return _unpickled(pickled)
 
 
 @lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
-def _cached_frontmatter(text: str, *, trusted: bool) -> tuple[object, str | None]:
+def _cached_frontmatter(text: str, *, trusted: bool) -> tuple[bytes, str | None]:
     try:
-        return (yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}, None
+        return _pickled((yaml_io.safe_load(text) if trusted else yaml_io.safe_load_untrusted(text)) or {}), None
     except Exception as exc:
         # PyYAML refuses values such as 2026-02-30, `!!int ""`, `!!bool maybe`, or deep nesting with ValueError,
         # IndexError, KeyError, AttributeError, or RecursionError; like LocalSkills, any of them makes the YAML invalid.
-        return None, str(exc)
+        return b"", str(exc)
 
 
 @lru_cache(maxsize=_PARSE_CACHE_ENTRIES)
-def _cached_json5(text: str) -> tuple[object, str | None]:
+def _cached_json5(text: str) -> tuple[bytes, str | None]:
     try:
-        return json5.loads(text), None
+        return _pickled(json5.loads(text)), None
     except Exception as exc:
-        return None, str(exc)
+        return b"", str(exc)
+
+
+def _pickled(value: object) -> bytes:
+    """Keep a cached parse as bytes, which stay near the size of its text where live parsed objects take far more."""
+    return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _unpickled(data: bytes) -> Any:  # noqa: ANN401
+    """Return a fresh copy of a cached parse, which only ``_pickled`` wrote from parser output of built-in types."""
+    return pickle.loads(data)  # noqa: S301 - this module pickled it
 
 
 def normalized_newlines(text: str) -> str:
@@ -249,12 +259,13 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return cast("dict[str, Any]", raw)
     if isinstance(raw, str):
-        parsed, error = _cached_json5(raw)
+        pickled, error = _cached_json5(raw)
         if error is not None:
             logger.warning("Failed to parse skill metadata JSON5", path=path, error=error)
             return None
+        parsed = _unpickled(pickled)
         if isinstance(parsed, dict):
-            return copy.deepcopy(cast("dict[str, Any]", parsed))
+            return cast("dict[str, Any]", parsed)
         logger.warning("Skill metadata JSON5 must be an object", path=path)
         return None
 
@@ -328,21 +339,13 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """
     skills: list[Skill] = []
     loaded_bytes = 0
-    for _directory, skill, share in _measured_skills(skills_root):
-        loaded_bytes += share.prompt_bytes
+    for _directory, skill, prompt_bytes in _measured_skills(skills_root, charges={}):
+        loaded_bytes += prompt_bytes
         if loaded_bytes > MAX_WORKSPACE_SKILLS_BYTES:
             logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
             break
         skills.append(skill)
     return skills
-
-
-@dataclass(frozen=True)
-class _SkillBudgetShare:
-    """One loaded skill's share of the workspace prompt budget and of its frontmatter parse budget."""
-
-    prompt_bytes: int
-    parse_cost: int
 
 
 @dataclass(frozen=True)
@@ -356,16 +359,17 @@ _FRONTMATTER_BUDGET_SPENT = _BudgetSpent("Workspace skill frontmatter exceeds it
 _READ_BUDGET_SPENT = _BudgetSpent("Workspace skill files exceed their read budget; skipping the rest")
 
 
-def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, _SkillBudgetShare]]:
-    """Yield the skills loading reads with their budget shares, measured inside the guard that skips one skill.
+def _measured_skills(skills_root: Path, *, charges: dict[str, int]) -> Iterator[tuple[str, Skill, int]]:
+    """Yield the skills loading reads with their prompt bytes, measured inside the guard that skips one skill.
 
-    Frontmatter is parsed only while the workspace's frontmatter budget lasts, so planted skill files cannot make the
-    primary parse more than that per load.
+    Frontmatter is parsed only while the workspace's frontmatter budget lasts, and each parse is charged before it runs,
+    so planted skill files, refused or not, cannot make the primary parse more than that per load. ``charges`` receives
+    what each parsed directory cost.
     """
     parsed_bytes = 0
     read_bytes = 0
 
-    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, _SkillBudgetShare] | _BudgetSpent | None:
+    def measured(skill_fd: int, directory: str) -> tuple[str, Skill, int] | _BudgetSpent | None:
         nonlocal parsed_bytes, read_bytes
         content = _read_skill_markdown(skill_fd, skills_root, directory)
         if content is None:
@@ -378,12 +382,17 @@ def _measured_skills(skills_root: Path) -> Iterator[tuple[str, Skill, _SkillBudg
             return None
         if parsed_bytes + size > MAX_WORKSPACE_FRONTMATTER_BYTES:
             return _FRONTMATTER_BUDGET_SPENT
+        # Spent even when the parse raises or skill loading refuses the skill it parsed.
+        parsed_bytes += size
+        charges[directory] = size
         skill = _read_skill(skill_fd, content, skills_root, directory)
-        cost = skill_parse_cost(size, skill) if skill is not None else 0
-        if parsed_bytes + cost > MAX_WORKSPACE_FRONTMATTER_BYTES:
+        # Only a loaded skill's JSON5 metadata is parsed later, so only it adds that weight.
+        surcharge = skill_parse_cost(size, skill) - size if skill is not None else 0
+        if parsed_bytes + surcharge > MAX_WORKSPACE_FRONTMATTER_BYTES:
             return _FRONTMATTER_BUDGET_SPENT
-        parsed_bytes += cost
-        return None if skill is None else (directory, skill, _SkillBudgetShare(skill_prompt_bytes(skill), cost))
+        parsed_bytes += surcharge
+        charges[directory] += surcharge
+        return None if skill is None else (directory, skill, skill_prompt_bytes(skill))
 
     for result in _each_skill_directory(skills_root, measured, limit=MAX_WORKSPACE_SKILLS):
         if isinstance(result, _BudgetSpent):
@@ -429,9 +438,19 @@ def skill_prompt_bytes(skill: Skill) -> int:
     return len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
 
 
-def workspace_skill_budget_shares(skills_root: Path) -> dict[str, _SkillBudgetShare]:
-    """Return the budget shares of every skill directory loading reads, as it measures them."""
-    return {directory: share for directory, _skill, share in _measured_skills(skills_root)}
+@dataclass(frozen=True)
+class _WorkspaceSkillBudget:
+    """What one loading pass spends: each loaded skill's prompt bytes, and the parse charge of every directory it parsed."""
+
+    prompt_bytes: dict[str, int]
+    parse_charges: dict[str, int]
+
+
+def workspace_skill_budget(skills_root: Path) -> _WorkspaceSkillBudget:
+    """Return what a loading pass spends on this workspace, as skill loading measures it."""
+    charges: dict[str, int] = {}
+    prompt_bytes = {directory: size for directory, _skill, size in _measured_skills(skills_root, charges=charges)}
+    return _WorkspaceSkillBudget(prompt_bytes, charges)
 
 
 def support_entry_count(skill_fd: int, directory: str) -> int:

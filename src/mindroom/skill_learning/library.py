@@ -51,7 +51,7 @@ from mindroom.tool_system.workspace_skills import (
     update_skill_usage,
     update_skill_usages,
     workspace_skill,
-    workspace_skill_budget_shares,
+    workspace_skill_budget,
     workspace_skill_name,
 )
 
@@ -323,15 +323,17 @@ def _require_prompt_budget(
     )
     if changed is None:
         return
-    others = [share for directory, share in workspace_skill_budget_shares(skills_root).items() if directory != name]
-    if sum(share.prompt_bytes for share in others) + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
+    budget = workspace_skill_budget(skills_root)
+    other_bytes = sum(size for directory, size in budget.prompt_bytes.items() if directory != name)
+    if other_bytes + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
         msg = (
             f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
             "budget, and skill loading would skip some; shorten or merge skills instead."
         )
         raise SkillEditError(msg)
-    parse_cost = skill_parse_cost(frontmatter_bytes(markdown), changed)
-    if sum(share.parse_cost for share in others) + parse_cost > MAX_WORKSPACE_FRONTMATTER_BYTES:
+    # Loading charges every directory it parses, refused ones too, so the check counts what loading counts.
+    other_charges = sum(charge for directory, charge in budget.parse_charges.items() if directory != name)
+    if other_charges + skill_parse_cost(frontmatter_bytes(markdown), changed) > MAX_WORKSPACE_FRONTMATTER_BYTES:
         msg = (
             f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
             "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
@@ -481,7 +483,7 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     if not skills_root.is_dir():
         return []
     # Only skills that loading reads can be learned or used, and reading no more bounds what the pass parses.
-    loaded = list(workspace_skill_budget_shares(skills_root)) if archive_after_days > 0 else []
+    loaded = list(workspace_skill_budget(skills_root).prompt_bytes) if archive_after_days > 0 else []
     with open_skills_root(skills_root) as root_fd:
         archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now)
         forget_missing_skill_usage(root_fd)

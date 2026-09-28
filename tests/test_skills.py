@@ -717,6 +717,52 @@ def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> No
     assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
 
 
+def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path) -> None:
+    """Frontmatter that skill loading parses and then refuses still counts, so refused skills cannot parse for free."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    workspace_skills_module._cached_frontmatter.cache_clear()
+    padding = "n" * (workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 200)
+    refusals = (
+        lambda index: f"name: {'long-' * 20}{index}\ndescription: d\nnote: {padding}",
+        lambda index: f"- item-{index}\n- {padding}",
+        lambda index: f"name: {'long-' * 20}{index}\ndescription: [unclosed\nnote: {padding}",
+    )
+    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS):
+        (workspace_skills / f"r-{index:03d}").mkdir()
+        (workspace_skills / f"r-{index:03d}" / "SKILL.md").write_text(
+            f"---\n{refusals[index % len(refusals)](index)}\n---\nbody\n",
+            encoding="utf-8",
+        )
+    real = workspace_skills_module.yaml_io.safe_load_untrusted
+    parsed: list[int] = []
+
+    def counted(text: str) -> object:
+        parsed.append(len(text.encode()))
+        return real(text)
+
+    with patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", counted), capture_logs() as logs:
+        assert _skill_names(_load_agent_skills(tmp_path, storage)) == []
+    assert 0 < sum(parsed) <= workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
+
+
+def test_cached_parses_are_kept_compact_and_returned_as_copies() -> None:
+    """A cached parse keeps about the size of its text, where the live objects of many empty mappings take far more."""
+    text = "metadata: [" + "{}, " * 2000 + "]\n"
+    first = workspace_skills_module._strict_frontmatter(text, trusted=False)
+    pickled, error = workspace_skills_module._cached_frontmatter(text, trusted=False)
+    assert error is None
+    assert isinstance(pickled, bytes)
+    assert len(pickled) <= len(text)
+    first["metadata"].append("changed")
+    assert len(workspace_skills_module._strict_frontmatter(text, trusted=False)["metadata"]) == 2000
+    metadata = workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s")
+    assert metadata == {"a": {"b": 1}}
+    metadata["a"]["b"] = 2
+    assert workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s") == {"a": {"b": 1}}
+
+
 def test_a_full_library_of_ordinary_skills_loads(tmp_path: Path) -> None:
     """The count cap, not the frontmatter budget, bounds a library whose frontmatter is the size real skills use."""
     storage, workspace_skills = _workspace_skills(tmp_path)

@@ -2748,6 +2748,19 @@ def test_skill_manage_refuses_frontmatter_past_its_parse_caps(tmp_path: Path) ->
     assert not (root / "deploy-checks").exists()
 
 
+def test_skill_manage_counts_the_frontmatter_of_refused_skills(tmp_path: Path) -> None:
+    """Loading charges refused skills' frontmatter too, so a change it would skip is refused instead of saved."""
+    root = tmp_path / "skills"
+    per_skill = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 256
+    for index in range(workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill):
+        name = f"a-{index:02d}"
+        _write_skill(root, name, f"---\nname: {'long-' * 20}{index}\ndescription: d\nnote: {'n' * per_skill}\n---\n")
+    near_cap = LEARNED.replace("description:", f"note: {'n' * per_skill}\ndescription:")
+    with pytest.raises(library.SkillEditError, match="parse budget"):
+        library.create_skill(root, "deploy-checks", near_cap, reserved_names=frozenset(), learner=True)
+    assert not (root / "deploy-checks").exists()
+
+
 def test_the_catalog_reads_the_usage_file_once(tmp_path: Path) -> None:
     """Ownership comes from one read of the usage file, however many workspace skills load."""
     config, paths = _learner(tmp_path)
