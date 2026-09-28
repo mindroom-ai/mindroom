@@ -11,6 +11,7 @@ from mindroom import model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
@@ -112,6 +113,7 @@ async def suggest_responder(
         )
 
         response = await agent.arun(prompt, session_id="routing")
+        await record_system_usage(response, runtime_paths=runtime_paths, kind="routing")
         try:
             suggestion = _RoutingSuggestion.model_validate(response.content)
         except ValidationError:

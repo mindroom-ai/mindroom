@@ -24,6 +24,7 @@ vi.mock("@/components/ui/toaster", () => ({
 
 type KeyStatusResponse = {
   has_key: boolean;
+  credential_service?: string;
   source?: string;
   masked_key?: string;
   api_key?: string;
@@ -148,6 +149,30 @@ describe("ModelConfig", () => {
     const scrollContainer = screen.getByTestId("models-table-scroll-container");
     expect(scrollContainer).toHaveClass("overflow-x-auto");
     expect(within(scrollContainer).getByRole("table")).toBeTruthy();
+  });
+
+  it("shows provider keys resolved from their env-var-named service", async () => {
+    keyStatusByService.anthropic = {
+      has_key: true,
+      credential_service: "ANTHROPIC_API_KEY",
+      source: "ui",
+      masked_key: "sk-a...-key",
+    };
+    keyStatusByService.openrouter = {
+      has_key: true,
+      credential_service: "openrouter",
+      source: "env",
+      masked_key: "sk-o...-key",
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Source: UI, saved as ANTHROPIC_API_KEY"),
+      ).toBeTruthy();
+    });
+    expect(screen.getAllByText(/saved as/)).toHaveLength(1);
   });
 
   it("starts inline editing when a row is clicked", () => {

@@ -20,6 +20,16 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 
+## Connect Your AI Provider
+
+When the router, an agent, or a team uses a model whose provider has no API key, every dashboard page shows a **Connect your AI provider** banner.
+The check uses the same key lookup as the runtime, so keys in `.env`, keys saved per model on the **Models** page, and provider keys saved under their environment variable name (for example `OPENROUTER_API_KEY`) all count.
+Select **Connect provider**, choose OpenRouter, Anthropic, or OpenAI, and paste a key.
+MindRoom checks the key with the provider through a read-only request that does not use credits, and saves it as the `openrouter`, `anthropic`, or `openai` credential only when the provider accepts it.
+OpenRouter is recommended for the hosted default setup, where one key covers chat, memory, and voice.
+If you connect Anthropic or OpenAI while your models still use OpenRouter, the dialog lists the affected models so you can switch them on the **Models** page.
+When an agent cannot reply because no provider key is set, it answers in chat with a pointer to this setup step instead of the raw provider error, including the dashboard address when `MINDROOM_PUBLIC_URL` is set.
+
 ## Dashboard Tabs
 
 ### Home and Browse Workspace
@@ -154,6 +164,7 @@ Manage service credentials directly from the dashboard:
 - **List configured credential services** from `CredentialsManager`
 - **Create/select service names** (for example `github_private` or `model:sonnet`)
 - **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
+- **Save provider keys under their env var name**: a new service named after a provider key env var (for example `ANTHROPIC_API_KEY`) is stored under the canonical provider service (`anthropic`), which the Models page and runtime read, while an existing env-var-named service keeps receiving writes because config may reference it by exact name
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
@@ -361,6 +372,13 @@ Team member tokens contribute to model, requester, daily, and request detail wit
 Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
 The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
 
+Organization reports include internal AI work under the `system:internal` entity: routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+These counters contribute to model, daily, and request totals without increasing conversation or AI reply counts.
+System overhead has no assumed human requester and is excluded from personal and private-agent reports.
+Request `kind` identifies the operation as `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, or `voice_transcription`.
+Only newly recorded provider counters are available; historical internal calls are not reconstructed, and transcription duration is not converted into estimated tokens.
+A usage storage failure is logged without discarding a successful internal response.
+
 `cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
 The same rows appear within each entity in `breakdown`.
 Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
@@ -373,8 +391,9 @@ Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and 
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and its per-model totals.
 Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Each model counts that run once on the first date it was used.
 Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
 When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
@@ -387,8 +406,10 @@ This option defaults to `false` and is available only on these organization HTTP
 Each flat request row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, `kind`, an epoch-seconds `created_at`, and all nine token counters in `totals`.
 Rows preserve individual provider calls, including cache counters, so a consumer can apply context-length pricing without treating a multi-call run as one large request.
 No prices, provider thresholds, prompts, responses, session IDs, or run IDs are exported.
-Requests receive model attribution only when their counters reconcile exactly with the validated run totals and one known model bucket.
-Missing, malformed, mixed-model, or inconsistent request detail is excluded and marks `request_coverage` incomplete while aggregate totals remain available.
+New request records include the provider and model used for that call, including runs resumed with a different model.
+Requests are exported only when every counter reconciles exactly with both the run total and its per-model totals.
+Older request records without model attribution can inherit a single known run model; ambiguous mixed-model history is excluded.
+Missing, malformed, or inconsistent request detail also marks `request_coverage` incomplete while aggregate totals remain available.
 Existing usage ledgers are not backfilled; initial migration can import request counters still present in retained messages, but missing history cannot be reconstructed.
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.

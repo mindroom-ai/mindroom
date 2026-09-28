@@ -2,10 +2,13 @@ import SwiftUI
 
 struct AppSettingsView: View {
     @ObservedObject var runner: MindRoomCommandRunner
+    @ObservedObject var chatPreferences: ChatWebsitePreferences
     @State private var startAtLogin = LoginItemController.shared.isEnabled
     @State private var loginTitle = LoginItemController.shared.menuTitle
     @State private var errorMessage: String?
     @State private var confirmServiceInstall = false
+    @State private var chatWebsite = ""
+    @State private var chatWebsiteInvalid = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -24,6 +27,22 @@ struct AppSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 if !LoginItemController.shared.canToggle {
                     Text(loginTitle).font(.callout)
+                }
+            }
+            AppSectionCard {
+                Text("Chat").font(.headline)
+                TextField("Chat website", text: $chatWebsite)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(saveChatWebsite)
+                Text("Use an HTTPS website, or HTTP on this Mac for local development.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if chatWebsiteInvalid {
+                    Text("Enter an HTTPS URL or a loopback HTTP URL without login details, query, or fragment.")
+                        .foregroundStyle(.red)
+                }
+                HStack {
+                    Button("Save Chat Website", action: saveChatWebsite)
+                    Button("Open in Browser") { NSWorkspace.shared.open(chatPreferences.url) }
                 }
             }
             AppSectionCard {
@@ -56,11 +75,14 @@ struct AppSettingsView: View {
                     Button("Open Logs Folder") { runner.run(.openLogsFolder) }
                     Button("Open Config Folder") { runner.run(.openConfigFolder) }
                 }
-                Text("The app and command-line tools share ~/.mindroom. Command results appear below.")
+                Text("Local agents use the installed service's saved configuration, or ~/.mindroom for a new service. Command results appear below.")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
-        .onAppear { refreshLogin() }
+        .onAppear {
+            refreshLogin()
+            chatWebsite = chatPreferences.url.absoluteString
+        }
         .alert("Unable to Complete Action", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) {
@@ -73,6 +95,10 @@ struct AppSettingsView: View {
     private func refreshLogin() {
         startAtLogin = LoginItemController.shared.isEnabled
         loginTitle = LoginItemController.shared.menuTitle
+    }
+
+    private func saveChatWebsite() {
+        chatWebsiteInvalid = !chatPreferences.save(chatWebsite)
     }
 
     private var appVersion: String {

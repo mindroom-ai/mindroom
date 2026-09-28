@@ -22,6 +22,7 @@ import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.sensitivity import strip_sensitive_config_values
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function, ToolResult
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.workers.backend import WorkerBackend
@@ -170,6 +172,7 @@ class _PrimaryWorkerManagerContext:
     dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
+    runtime_config: Config | None
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
@@ -456,7 +459,23 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
         worker_grantable_credentials=(
             context.config.get_worker_grantable_credentials() if context is not None else None
         ),
+        runtime_config=context.config if context is not None else None,
     )
+
+
+def _runner_config_snapshot_payload(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object]:
+    """Return the request field carrying the primary's live config, without secrets, to the runner.
+
+    The static runner and Kubernetes workers only mount a seed config file, so agents added or
+    edited after seeding exist only in the config the primary hot-reloads.  Docker workers read a
+    per-worker projection of the live config whose config-relative paths are rewritten for the
+    container, so they get no request snapshot.
+    """
+    if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
+        return {}
+    return {
+        "config_snapshot": strip_sensitive_config_values(to_json_compatible(runtime_config.authored_model_dump())),
+    }
 
 
 def _get_worker_manager(
@@ -522,7 +541,7 @@ def _record_worker_save_failure(
 ) -> None:
     """Record a worker save protocol/integrity failure against worker health."""
     if worker_handle is not None:
-        worker_manager.record_failure(worker_handle.worker_key, error)
+        worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
 
 def _validated_worker_save_receipt(
@@ -607,6 +626,7 @@ def save_attachment_to_worker(
             **attachment_fields,
             "mime_type": mime_type,
             "filename": filename,
+            **_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config),
         }
 
         data = post_worker_proxy_json(
@@ -703,7 +723,11 @@ def view_file_from_worker(
 
         data = post_worker_proxy_json(
             config=_worker_proxy_client_config(proxy_config, runtime_paths),
-            payload={**worker_payload, "path": path},
+            payload={
+                **worker_payload,
+                "path": path,
+                **_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config),
+            },
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
@@ -949,6 +973,7 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
         )
         payload.update(worker_payload)
+        payload.update(_runner_config_snapshot_payload(runtime_paths, manager_context.runtime_config))
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:

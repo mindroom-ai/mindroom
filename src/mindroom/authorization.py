@@ -18,12 +18,13 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.matrix.room_membership import (
     cached_joined_member_ids,
     ensure_room_membership_synced,
     room_membership_is_complete,
 )
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -91,8 +92,14 @@ def _responder_reply_authorization(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> _ReplyAuthorizationDecision:
-    """Allow any proven grant before considering unresolved relevant membership."""
+    """Allow any proven grant before considering unresolved relevant membership.
+
+    ``observed_room`` is the answering bot's own synced view of ``room_id``. Its roster never grants
+    access; it only lets a same-room denial wait briefly for the router to apply a join.
+    """
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
@@ -120,6 +127,22 @@ def _responder_reply_authorization(
         current_room_id=room_id if access.current_room_members else None,
     ):
         return _ReplyAuthorizationDecision.PENDING
+    if (
+        room_id is not None
+        and observed_room is not None
+        and observed_room.room_id == room_id
+        and membership_index.awaits_router_join(
+            resolved_sender,
+            room_id,
+            cached_joined_member_ids(observed_room),
+            room_keys=access.members_of_rooms,
+            current_room=access.current_room_members,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    ):
+        logger.info("reply_authorization_awaits_router_join", room_id=room_id, entity_name=entity_name)
+        return _ReplyAuthorizationDecision.PENDING
     return _ReplyAuthorizationDecision.DENIED
 
 
@@ -132,11 +155,13 @@ def is_sender_allowed_for_agent_reply_in_room(
     membership_index: AgentReplyMembershipIndex,
     *,
     require_resolved_membership: bool = False,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> bool:
     """Require conversation access to one agent, evaluated for one current room.
 
     ``room_id`` is the conversation the sender is already part of, not a target
     room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    ``observed_room`` is the answering bot's own synced view of that room.
     """
     return is_sender_allowed_for_entity_replies_in_room(
         sender_id,
@@ -146,6 +171,7 @@ def is_sender_allowed_for_agent_reply_in_room(
         runtime_paths,
         membership_index,
         require_resolved_membership=require_resolved_membership,
+        observed_room=observed_room,
     )
 
 
@@ -158,11 +184,13 @@ def is_sender_allowed_for_entity_replies_in_room(
     membership_index: AgentReplyMembershipIndex,
     *,
     require_resolved_membership: bool = False,
+    observed_room: nio.MatrixRoom | None = None,
 ) -> bool:
     """Require conversation access to every execution entity for one current room.
 
     ``room_id`` is the conversation the sender is already part of, not a target
     room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    ``observed_room`` is the answering bot's own synced view of that room.
     """
     decisions = {
         _responder_reply_authorization(
@@ -172,6 +200,7 @@ def is_sender_allowed_for_entity_replies_in_room(
             config,
             runtime_paths,
             membership_index,
+            observed_room=observed_room,
         )
         for entity_name in entity_names
     }
@@ -207,25 +236,39 @@ def is_sender_allowed_for_agent_credential_management(
     return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
 
 
-def is_sender_allowed_for_agent_oauth_connection_management(
+def is_sender_allowed_for_agent_oauth_connection(
     sender_id: str,
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    *,
+    requester_owned: bool,
 ) -> bool:
-    """Check whether a requester may manage their OAuth connection for one agent.
+    """Check whether a requester may connect or reset one of an agent's OAuth accounts.
 
-    Callers granting the private-agent exception must resolve credentials to the
-    authenticated requester's isolated user or user-agent target.
+    Administrators and credential managers may manage any of the agent's connections, and every
+    requester may manage their own connection to a private agent. A requester-owned connection
+    holds only the requester's own credentials, so anyone who may use the agent may manage it,
+    as on the Connections portal. Callers must resolve the credentials to the authenticated
+    requester's own user or user-agent target before relying on either requester rule.
     """
-    if not sender_id:
-        return False
     agent = config.agents.get(agent_name)
-    if agent is None:
+    if not sender_id or agent is None:
         return False
-    if agent.private is not None:
+    if agent.private is not None or is_sender_allowed_for_agent_credential_management(
+        sender_id,
+        agent_name,
+        config,
+        runtime_paths,
+    ):
         return True
-    return is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config, runtime_paths)
+    return (
+        requester_owned
+        and try_parse_historical_matrix_user_id(sender_id) is not None
+        and is_human_requester_id(sender_id, config, runtime_paths)
+        and is_sender_allowed_for_responder(sender_id, agent_name, None, config, runtime_paths, membership_index)
+    )
 
 
 def is_platform_administrator(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:

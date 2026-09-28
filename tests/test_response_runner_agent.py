@@ -46,7 +46,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
-from mindroom.history.storage import write_scope_state
+from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import CompactionLifecycleStart, HistoryScope, HistoryScopeState
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -3039,7 +3039,7 @@ class TestAgentBot(AgentBotTestBase):
         storage = bot._conversation_state_writer.create_storage(None, scope=scope)
         try:
             session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
-            write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+            set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
             seed_session(storage, session)
         finally:
             storage.close()

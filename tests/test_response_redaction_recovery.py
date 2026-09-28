@@ -30,7 +30,7 @@ from mindroom.turn_store import TurnStore
 from tests.journal_helpers import admit_dispatch_event
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import _response_recovery_bot
-from tests.test_turn_store import _FakeAgentStorage, _ReplayCaptureModel, _store, _store_with_storage
+from tests.test_turn_store import _ReplayCaptureModel, _seeded_storage, _store, _store_with_storage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -494,12 +494,13 @@ async def test_redaction_callback_settlement_cannot_split_recovery_snapshot(
 @pytest.mark.parametrize("scope", ["exact", "other_room", "other_principal"])
 async def test_cleanup_gate_reconciles_only_its_recorded_physical_tombstones(
     journal_store: EventJournalStore,
+    tmp_path: Path,
     deleted_id: str,
     scope: str,
 ) -> None:
     """The batched lookup covers physical source aliases and revisions within exact scope."""
     principal = journal_store.principal("agent@alice")
-    store = await _store_with_storage(journal_store, _FakeAgentStorage(None))
+    store = await _store_with_storage(journal_store, _seeded_storage(tmp_path))
     target = MessageTarget.resolve(ROOM, "$thread", SOURCE)
     await store.record_pending_turn(
         TurnRecord.create(

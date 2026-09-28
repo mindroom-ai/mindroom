@@ -1,14 +1,16 @@
-"""Runtime integration for destructive history compaction."""
+"""Runtime integration for history text compaction."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom import model_loading
 from mindroom.agno_compat_provider_errors import is_provider_timeout
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import SummaryModel, compact_scope_history
 from mindroom.history.native import configure_native_history, native_history_route
 from mindroom.history.policy import (
@@ -36,8 +38,8 @@ from mindroom.history.session_context import (
 from mindroom.history.storage import (
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
-    prune_reintroduced_runs,
     read_scope_state,
+    reconcile_compaction_state,
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
@@ -304,11 +306,11 @@ async def prepare_scope_history(
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_scope = scope or resolve_history_scope(agent)
-    native_model = configure_native_history(
+    configure_native = partial(
+        configure_native_history,
         active_model if active_model is not None else agent.model,
         plan=resolved_inputs.execution_plan,
         history_settings=resolved_inputs.history_settings,
-        session=scope_context.session if scope_context is not None else None,
         allowed=allow_native_compaction,
     )
     if scope_context is None or scope_context.session is None:
@@ -317,19 +319,26 @@ async def prepare_scope_history(
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
-            native_model=native_model,
+            native_model=configure_native(session=None),
         )
 
     execution_plan = resolved_inputs.execution_plan
     session = scope_context.session
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
-    state = _prepare_scope_state_for_run(
-        storage=scope_context.storage,
-        session=session,
-        scope=scope_context.scope,
-        execution_plan=execution_plan,
+    # Archive reconciliation reads and writes SQLite; keep it off the event loop and let
+    # an in-flight write finish before cancellation propagates.
+    state = await run_blocking_until_complete(
+        partial(
+            _prepare_scope_state_for_run,
+            storage=scope_context.storage,
+            session=session,
+            scope=scope_context.scope,
+            execution_plan=execution_plan,
+        ),
     )
+    # The native route names the summary generation, which reconciliation may have refreshed.
+    native_model = configure_native(session=session)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)
     compaction_outcomes: list[CompactionOutcome] = []
@@ -353,8 +362,8 @@ async def prepare_scope_history(
     logger.info(
         "History preparation check",
         agent=agent_name,
-        auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.destructive_compaction_available,
-        compaction_available=execution_plan.destructive_compaction_available,
+        auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.text_compaction_available,
+        compaction_available=execution_plan.text_compaction_available,
         trigger_budget=execution_plan.replay_budget_tokens,
         hard_budget=execution_plan.hard_replay_budget_tokens,
         replay_window=execution_plan.replay_window_tokens,
@@ -955,18 +964,17 @@ def _prepare_scope_state_for_run(
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
+    reconcile_compaction_state(storage, session, scope)
     state = read_scope_state(session, scope)
-    # Persists its own deletes; the session row has nothing new to write.
-    prune_reintroduced_runs(storage, session, state)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)
-    if state.force_compact_before_next_run and not execution_plan.destructive_compaction_available:
+    if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
         state = clear_force_compaction_state(session, scope, state)
         storage.upsert_session(session)
         description = describe_compaction_unavailability(execution_plan)
         logger.warning(
-            "Forced compaction skipped because destructive compaction is unavailable",
+            "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,
             scope=scope.key,
             reason=description,

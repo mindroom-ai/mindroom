@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -109,6 +110,20 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert f"CALLBACK_URL=http://127.0.0.1:8765/api/triggers/{callback_id}" in script_text
     assert "CALLBACK_TOKEN=mrt_" in script_text
     assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_mint_callback_needs_no_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workspaces on SMB, gcsfuse, and similar mounts lack hard links, so publication never needs one."""
+
+    def no_hard_links(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    assert stat.S_IMODE(Path(payload["script_path"]).stat().st_mode) == 0o700
 
 
 def test_mint_callback_uses_current_trigger_policy(tmp_path: Path) -> None:
@@ -258,3 +273,44 @@ def test_manager_requires_live_human_requester(tmp_path: Path) -> None:
     assert "live Matrix tool context" in no_context["message"]
     assert bot_requester["status"] == "error"
     assert "human Matrix requester" in bot_requester["message"]
+
+
+def _workspace(tmp_path: Path) -> Path:
+    return _runtime_paths(tmp_path).storage_root / "agents" / "coder" / "workspace"
+
+
+@pytest.mark.parametrize("replaced", ["workspace", "callbacks_dir"])
+def test_mint_callback_refuses_a_linked_workspace_directory(tmp_path: Path, replaced: str) -> None:
+    """A workspace or callbacks directory swapped for a link never receives the capability script."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    workspace = _workspace(tmp_path)
+    if replaced == "workspace":
+        workspace.parent.mkdir(parents=True)
+        workspace.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (workspace / ".mindroom").mkdir(parents=True)
+        (workspace / ".mindroom" / "callbacks").symlink_to(elsewhere, target_is_directory=True)
+
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "error"
+    assert not list(elsewhere.iterdir())
+    assert ExternalTriggerStore(_runtime_paths(tmp_path)).list_records() == []
+
+
+def test_mint_callback_does_not_write_through_a_planted_gitignore_link(tmp_path: Path) -> None:
+    """A link planted as the callbacks .gitignore is left alone instead of truncating or creating its target."""
+    callbacks_dir = _workspace(tmp_path) / ".mindroom" / "callbacks"
+    callbacks_dir.mkdir(parents=True)
+    existing_target = tmp_path / "primary-file.json"
+    existing_target.write_text('{"secret": "kept"}', encoding="utf-8")
+    (callbacks_dir / ".gitignore").symlink_to(existing_target)
+
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    assert existing_target.read_text(encoding="utf-8") == '{"secret": "kept"}'
+    assert stat.S_IMODE(Path(payload["script_path"]).stat().st_mode) == 0o700

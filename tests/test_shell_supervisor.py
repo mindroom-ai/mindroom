@@ -750,7 +750,7 @@ async def test_background_limit_discards_rejected_process(monkeypatch: pytest.Mo
         spawned_pids.append(process.pid)
         return process
 
-    monkeypatch.setattr(shell_execution_module, "_MAX_BACKGROUNDED", 1)
+    monkeypatch.setattr(shell_execution_module, "MAX_BACKGROUNDED", 1)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
     async with _running_server(registry) as socket_path:
         accepted = await _run(socket_path, ["sleep", "300"], timeout=0)

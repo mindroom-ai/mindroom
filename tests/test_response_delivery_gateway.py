@@ -541,7 +541,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outside.mkdir()
         (workspace / ".mindroom").symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(ValueError, match="workspace root"):
+        with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
             await gateway.deliver_final(
                 self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )

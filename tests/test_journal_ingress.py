@@ -2682,6 +2682,43 @@ class TestRoomRetryBackoff:
         assert attempts == ["$message"] * (outage_failures + 1) + ["$later"]
         assert retry_sleeps[-1][0] == _MAX_RETRY_DELAY_SECONDS
 
+    @pytest.mark.parametrize("failing_sources", [1, 2, 3])
+    async def test_sources_handed_back_by_their_turn_back_off_together(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        failing_sources: int,
+    ) -> None:
+        """Handed-off sources that keep coming back failed still back off.
+
+        Each source is deferred to a turn that fails and returns it. Reaching
+        the second one used to count as progress past the first, so a room with
+        two such sources retried every second forever.
+        """
+        worker: PendingEventWorker
+
+        async def hand_back(event_id: str) -> None:
+            await asyncio.sleep(0)
+            worker.release((event_id,))
+            worker.wake(room_id=ROOM)
+
+        async def handle(event: JournalEvent) -> bool:
+            asyncio.get_running_loop().create_task(hand_back(event.event_id), name="failed_turn")
+            return False
+
+        for index in range(failing_sources):
+            await TestPendingEventWorker._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            for index in range(7):
+                await _eventually(lambda index=index: len(retry_sleeps) > index)
+                retry_sleeps[index][1].set()
+        finally:
+            await worker.stop()
+
+        assert [delay for delay, _release in retry_sleeps[:7]] == [1, 2, 4, 8, 16, 30, 30]
+
     async def test_each_room_wakes_at_its_own_retry_without_new_admission(
         self,
         alice: PrincipalStore,

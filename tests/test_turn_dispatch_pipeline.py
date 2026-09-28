@@ -1658,14 +1658,16 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mention_kind", ["other_agent", "joined_human"])
-    async def test_router_handoff_for_another_target_does_not_signal_active_response(
+    @pytest.mark.parametrize("relay_sender", ["router", "self"])
+    async def test_relay_for_another_target_does_not_signal_active_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
         mention_kind: str,
+        relay_sender: str,
     ) -> None:
-        """A router handoff addressed elsewhere must not interrupt this agent's active turn."""
+        """A router handoff or this agent's own relay addressed elsewhere must not interrupt its active turn."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
@@ -1681,7 +1683,11 @@ class TestAgentBot(AgentBotTestBase):
             body = "@person:localhost could you help with this?"
             mentioned_user_id = "@person:localhost"
             room.add_member(mentioned_user_id, "Person", None)
-        event = self._router_relay_event(body=body)
+        event = (
+            self._router_relay_event(body=body)
+            if relay_sender == "router"
+            else self._router_relay_event(sender=bot.matrix_id.full_id, body=body)
+        )
         event.source["content"]["m.mentions"] = {"user_ids": [mentioned_user_id]}
         prepared_event = PreparedIngress(
             sender=event.sender,

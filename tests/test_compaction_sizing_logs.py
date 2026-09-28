@@ -18,7 +18,7 @@ from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS
 from mindroom.history.compaction import SummaryModel, _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from tests.conftest import FakeModel
+from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
     _close_test_storages,
@@ -114,7 +114,7 @@ async def test_chunk_events_report_actual_sizing_strategy(
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     summary_inputs: list[str] = []
 
     async def record_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:

@@ -50,9 +50,12 @@ def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
 
 
 def _upsert_env_value(lines: list[str], key: str, value: str) -> None:
+    """Set the first assignment of `key` and drop later ones, which dotenv would otherwise let win."""
     pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
-    for idx, line in enumerate(lines):
-        if pattern.match(line):
-            lines[idx] = f"{key}={value}"
-            return
-    lines.append(f"{key}={value}")
+    matches = [idx for idx, line in enumerate(lines) if pattern.match(line)]
+    if not matches:
+        lines.append(f"{key}={value}")
+        return
+    lines[matches[0]] = f"{key}={value}"
+    for idx in reversed(matches[1:]):
+        del lines[idx]

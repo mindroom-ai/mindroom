@@ -44,7 +44,7 @@ def request_compaction_before_next_reply(
     session_state: dict[str, object] | None = None,
     record_pending_scope_in_session_state: bool = False,
 ) -> _ManualCompactionRequestResult:
-    """Schedule destructive compaction before the next reply in the current history scope."""
+    """Schedule text compaction before the next reply in the current history scope."""
     if session_id is None:
         return _ManualCompactionRequestResult("Error: No active session available. Cannot determine session.")
 
@@ -140,7 +140,7 @@ def _validate_compaction_budget(
     active_context_window: int | None,
     compaction_config: CompactionConfig,
 ) -> str | None:
-    """Return a user-facing error when destructive compaction is unavailable."""
+    """Return a user-facing error when text compaction is unavailable."""
     execution_plan = resolve_history_execution_plan(
         config=config,
         compaction_config=compaction_config,

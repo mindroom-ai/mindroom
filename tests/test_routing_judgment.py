@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from agno.run.agent import RunOutput
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -47,9 +48,9 @@ def _providers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        async def arun(self, prompt: str, **_kwargs: object) -> SimpleNamespace:
+        async def arun(self, prompt: str, **_kwargs: object) -> RunOutput:
             prompts.append(prompt)
-            return SimpleNamespace(content={"entity_name": "research", "reasoning": "fallback"})
+            return RunOutput(content={"entity_name": "research", "reasoning": "fallback"})
 
     monkeypatch.setattr(routing, "Agent", Router)
     return prompts

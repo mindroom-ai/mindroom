@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import create_background_task
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
@@ -14,6 +17,7 @@ from mindroom.matrix.personal_room_store import (
     read_personal_room,
     retained_personal_rooms,
 )
+from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
@@ -29,6 +33,28 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+_RECONCILIATION_RETRY_SECONDS = 30.0
+# A candidate that keeps failing, such as a room waiting for a person to fix its
+# membership, is retried after doubling delays up to this cap.
+_RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
+
+
+@dataclass(frozen=True)
+class _CandidateBackoff:
+    """One candidate's consecutive reconciliation failures and when it is next due."""
+
+    failures: int
+    delay_seconds: float
+    retry_at: float
+    error_type: type[Exception]
+
+
+def _next_backoff(previous: _CandidateBackoff | None, error: Exception) -> _CandidateBackoff:
+    if previous is None:
+        failures, delay = 1, _RECONCILIATION_RETRY_SECONDS
+    else:
+        failures, delay = previous.failures + 1, min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
+    return _CandidateBackoff(failures, delay, monotonic() + delay, type(error))
 
 
 @dataclass(frozen=True)
@@ -51,6 +77,10 @@ class PersonalRoomLifecycle:
     requester_user_id: Callable[[nio.RoomMessageFormatted], str]
     _reconciled: bool = field(default=False, init=False)
     _config_revision: int = field(default=0, init=False)
+    _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
+    _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
+    _reconciliation_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _next_reconciliation_at: float = field(default=0.0, init=False)
 
     @property
     def observes_onboarding_joins(self) -> bool:
@@ -61,6 +91,54 @@ class PersonalRoomLifecycle:
         """Revisit existing records and optional backfill after a configuration reload."""
         self._config_revision += 1
         self._reconciled = False
+        self._completed_candidates.clear()
+        self._candidate_backoff.clear()
+        self._next_reconciliation_at = 0.0
+
+    def schedule_reconciliation(self) -> None:
+        """Start at most one maintenance pass without delaying durable sync admission."""
+        if (
+            self._reconciled
+            or not self.observes_onboarding_joins
+            or self._reconciliation_task is not None
+            or monotonic() < self._next_reconciliation_at
+        ):
+            return
+        settings = self.runtime.config.personal_rooms
+        assert settings is not None
+        target = self.lookup_target(settings.agent)
+        if target is None or not target.first_sync_complete or self.runtime.client is None:
+            return
+        self._reconciliation_task = create_background_task(
+            self._run_reconciliation(),
+            name=f"personal_room_reconciliation_{self.agent_name}",
+            owner=self.runtime,
+        )
+
+    async def _run_reconciliation(self) -> None:
+        revision = self._config_revision
+        cancelled = False
+        try:
+            await self._reconcile()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if not cancelled and revision == self._config_revision:
+                self._next_reconciliation_at = monotonic() + _RECONCILIATION_RETRY_SECONDS
+            self._reconciliation_task = None
+
+    async def cancel_reconciliation(self, *, timeout_seconds: float) -> None:
+        """Cancel within the shutdown budget, retaining ownership of unfinished work."""
+        task = self._reconciliation_task
+        if task is not None:
+            task.cancel()
+            done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+            if task in done:
+                await asyncio.gather(task, return_exceptions=True)
+                self._reconciliation_task = None
+        self._next_reconciliation_at = 0.0
+        await self.service.cancel_guest_removal_retries(timeout_seconds=timeout_seconds)
 
     async def _onboard(
         self,
@@ -116,6 +194,7 @@ class PersonalRoomLifecycle:
         """Finish local welcomes and route definite joins without bypassing baseline admission."""
         if event.membership in {"join", "leave", "ban"}:
             await self.service.owner_membership_event(room.room_id, event.state_key, event.membership)
+        await self.service.guest_membership_event(room, event.state_key, event.membership)
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
         if self.observes_onboarding_joins and event.prev_membership is not None:
@@ -151,7 +230,26 @@ class PersonalRoomLifecycle:
                 candidates.add((record.user_id, record.resume_source_room_id or record.source_room_id))
         return candidates, failed
 
-    async def reconcile(self) -> None:
+    async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool]:
+        """Collect lobby members without losing recorded intent when a lobby is unavailable."""
+        assert self.runtime.client is not None
+        candidates: set[tuple[str, str]] = set()
+        failed = False
+        for room_id in resolve_room_aliases(onboarding_rooms, self.runtime_paths):
+            try:
+                members = await get_room_members(self.runtime.client, room_id)
+            except Exception:
+                logger.exception("Personal-room backfill failed", room_id=room_id)
+                failed = True
+                continue
+            if members is None:
+                logger.error("Personal-room backfill membership unavailable", room_id=room_id)
+                failed = True
+                continue
+            candidates.update((user_id, room_id) for user_id in members)
+        return candidates, failed
+
+    async def _reconcile(self) -> None:
         """Retry recorded intent and optional lobby backfill after the owner has synced."""
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
@@ -160,28 +258,58 @@ class PersonalRoomLifecycle:
         target = self.lookup_target(settings.agent)
         if target is None or not target.first_sync_complete or self.runtime.client is None:
             return
-        candidates, failed = self._recorded_candidates(settings.agent)
+        candidates, failed = await asyncio.to_thread(self._recorded_candidates, settings.agent)
         if settings.backfill:
-            for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths):
-                try:
-                    members = await get_room_members(self.runtime.client, room_id)
-                except Exception:
-                    logger.exception("Personal-room backfill failed", room_id=room_id)
-                    failed = True
-                    continue
-                if members is None:
-                    logger.error("Personal-room backfill membership unavailable", room_id=room_id)
-                    failed = True
-                    continue
-                candidates.update((user_id, room_id) for user_id in members)
-        for user_id, room_id in sorted(candidates):
-            try:
-                await self._onboard(user_id, room_id)
-            except Exception:
-                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id)
+            backfill, backfill_failed = await self._backfill_candidates(settings.onboarding_rooms)
+            candidates.update(backfill)
+            failed |= backfill_failed
+        for candidate in sorted(candidates - self._completed_candidates):
+            if revision != self._config_revision:
+                return
+            if not await self._reconcile_candidate(candidate, revision):
                 failed = True
         if not failed and revision == self._config_revision:
             self._reconciled = True
+
+    async def _reconcile_candidate(self, candidate: tuple[str, str], revision: int) -> bool:
+        """Retry one candidate once its delay has passed; False leaves it pending."""
+        previous = self._candidate_backoff.get(candidate)
+        if previous is not None and monotonic() < previous.retry_at:
+            return False
+        user_id, room_id = candidate
+        try:
+            await self._onboard(user_id, room_id)
+        except Exception as error:
+            backoff = _next_backoff(previous, error)
+            if revision == self._config_revision:
+                self._candidate_backoff[candidate] = backoff
+            retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
+            if isinstance(error, PersonalRoomRosterMismatchError):
+                # Expected until a person changes the room, so no traceback.
+                logger.warning(
+                    "Personal-room imported roster has unattested members",
+                    user_id=user_id,
+                    room_id=room_id,
+                    personal_room_id=error.room_id,
+                    unexpected_user_ids=error.unexpected_user_ids,
+                    **retry,
+                )
+            elif previous is None or previous.error_type is not type(error):
+                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
+            else:
+                logger.warning(
+                    "Personal-room reconciliation failed",
+                    user_id=user_id,
+                    room_id=room_id,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    **retry,
+                )
+            return False
+        if revision == self._config_revision:
+            self._completed_candidates.add(candidate)
+            self._candidate_backoff.pop(candidate, None)
+        return True
 
     def retained_room_ids(self) -> set[str]:
         """Return recorded rejoin authority, including when provisioning is disabled."""

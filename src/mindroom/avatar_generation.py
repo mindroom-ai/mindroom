@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import functools
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from functools import cache
@@ -21,12 +22,14 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
+from mindroom.managed_avatars import clear_failed_stock_downloads, room_avatar_path, root_space_avatar_path
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.model_defaults import OPENAI_AVATAR_IMAGE, OPENAI_AVATAR_PROMPT
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     import nio
@@ -260,14 +263,19 @@ async def _generate_avatar(
 async def _sync_avatar_target(
     client: nio.AsyncClient,
     *,
-    avatar_path: Path,
+    resolve_avatar: Callable[[], Awaitable[Path | None]],
     room_id: str,
     label: str,
     force: bool = False,
 ) -> bool | None:
-    """Apply one managed avatar target unless the room already has an avatar."""
+    """Apply one managed avatar target unless the room already has an avatar or none is available."""
     if not force and await room_has_avatar(client, room_id):
         _get_console().print(f"[dim]⊘ Skipped avatar for {label} (already set)[/dim]")
+        return None
+
+    avatar_path = await resolve_avatar()
+    if avatar_path is None:
+        _get_console().print(f"[dim]⊘ Skipped avatar for {label} (no avatar available)[/dim]")
         return None
 
     if await set_room_avatar_from_file(client, room_id, avatar_path):
@@ -289,11 +297,6 @@ async def _sync_configured_room_avatars(
     skip_count = 0
     failed_labels: list[str] = []
     for room_name in sorted(_managed_room_avatar_keys(config)):
-        avatar_path = resolve_avatar_path("rooms", room_name, runtime_paths)
-        if not avatar_path.exists():
-            skip_count += 1
-            continue
-
         room_id = get_room_id(room_name, runtime_paths)
         if not room_id:
             _get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
@@ -302,7 +305,7 @@ async def _sync_configured_room_avatars(
         label = f"room '{room_name}'"
         success = await _sync_avatar_target(
             client,
-            avatar_path=avatar_path,
+            resolve_avatar=functools.partial(room_avatar_path, room_name, config, runtime_paths),
             room_id=room_id,
             label=label,
             force=force,
@@ -328,17 +331,9 @@ async def _sync_root_space_avatar(
     if not config.matrix_space.enabled or not state.space_room_id:
         return None
 
-    root_space_avatar_path = resolve_avatar_path(
-        "spaces",
-        _ROOT_SPACE_AVATAR_NAME,
-        runtime_paths,
-    )
-    if not root_space_avatar_path.exists():
-        return None
-
     return await _sync_avatar_target(
         client,
-        avatar_path=root_space_avatar_path,
+        resolve_avatar=functools.partial(root_space_avatar_path, runtime_paths),
         room_id=state.space_room_id,
         label="root space",
         force=force,
@@ -359,6 +354,8 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     console.print("[green]✓ Using router account[/green]")
 
     config = _load_validated_config(runtime_paths)
+    # An explicit sync retries stock downloads that failed recently instead of waiting out the retry window.
+    clear_failed_stock_downloads(runtime_paths)
     failed_labels: list[str] = []
     try:
         success_count, skip_count, failed_labels = await _sync_configured_room_avatars(

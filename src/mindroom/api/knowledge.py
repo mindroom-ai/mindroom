@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,9 +34,13 @@ from mindroom.knowledge.status import (
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, resolve_path_within_root
+from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractContextManager
+    from typing import BinaryIO
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -76,10 +82,23 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
+    try:
+        root = shared_knowledge_path(config.knowledge_bases[base_id].path, runtime_paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _open_checked_directory(root: Path, relative_path: Path = Path()) -> AbstractContextManager[int]:
+    """Pin a directory at or below the checked canonical root, following no link on its whole path.
+
+    Workers can write bases inside agent workspaces, so a folder checked by
+    name may be swapped for a link before the mutation; acting relative to
+    this descriptor refuses the swap instead of reaching the link target.
+    """
+    return open_directory_within_root(Path(root.anchor), root.relative_to(root.anchor) / relative_path)
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -87,13 +106,11 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
     if candidate.is_absolute() or ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    resolved_root = root.resolve()
-    resolved = (resolved_root / candidate).resolve()
     try:
-        resolved.relative_to(resolved_root)
+        # The root is the checked binding path; no link below it is followed.
+        return resolve_path_within_root(root, candidate, symlinks="reject")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Path is outside the knowledge folder") from exc
-    return resolved
 
 
 async def _list_file_info(
@@ -104,18 +121,16 @@ async def _list_file_info(
 ) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
-    resolved_root = root.resolve()
-
-    if not resolved_root.is_dir():
+    if not root.is_dir():
         return _FileListInfo(files=files, total_size=total_size)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, root, runtime_paths)
     if error is not None:
         return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
     for file_path in sorted(managed_paths):
         try:
             stat = file_path.stat()
-            relative_path = file_path.relative_to(resolved_root).as_posix()
+            relative_path = file_path.relative_to(root).as_posix()
         except (OSError, ValueError):
             continue
         total_size += stat.st_size
@@ -146,11 +161,10 @@ async def _count_managed_files(
     the corpus on every request; ``/bases/{base_id}/files`` still serves the full
     listing for callers that need it.
     """
-    resolved_root = root.resolve()
-    if not resolved_root.is_dir():
+    if not root.is_dir():
         return _FileCountInfo(count=0)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, root, runtime_paths)
     if error is not None:
         return _FileCountInfo(count=0, degraded=True, error=error)
     return _FileCountInfo(count=len(managed_paths))
@@ -220,12 +234,12 @@ def _same_source_base_ids(
     base_id: str,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
-    source_root = _knowledge_root(config, base_id, runtime_paths).resolve()
+    source_root = _knowledge_root(config, base_id, runtime_paths)
     base_ids = [base_id]
     for candidate_id in config.knowledge_bases:
         if candidate_id == base_id:
             continue
-        if _knowledge_root(config, candidate_id, runtime_paths).resolve() == source_root:
+        if _knowledge_root(config, candidate_id, runtime_paths) == source_root:
             base_ids.append(candidate_id)
     return tuple(base_ids)
 
@@ -483,13 +497,12 @@ def _ensure_within_upload_limit(bytes_written: int, filename: str) -> None:
         raise _upload_limit_error(filename)
 
 
-async def _stream_upload_to_destination(upload: UploadFile, destination: Path, filename: str) -> None:
+async def _stream_upload_to_destination(upload: UploadFile, destination: BinaryIO, filename: str) -> None:
     bytes_written = 0
-    with destination.open("wb") as handle:
-        while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
-            bytes_written += len(chunk)
-            _ensure_within_upload_limit(bytes_written, filename)
-            handle.write(chunk)
+    while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
+        bytes_written += len(chunk)
+        _ensure_within_upload_limit(bytes_written, filename)
+        destination.write(chunk)
 
 
 def _reject_non_file_upload_destination(destination: Path, relative_path: str) -> None:
@@ -519,35 +532,31 @@ def _reject_duplicate_upload_destination(relative_path: str) -> None:
     )
 
 
-def _upload_temp_path(destination: Path) -> Path:
-    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.upload.tmp")
-
-
 @dataclass(frozen=True, slots=True)
 class _UploadTarget:
     upload: UploadFile
-    destination: Path
     filename: str
     relative_path: str
 
 
 @dataclass(frozen=True, slots=True)
 class _StagedUpload:
-    temp_path: Path
-    destination: Path
+    temp_name: str
     relative_path: str
 
 
-async def _stage_upload(upload: UploadFile, destination: Path, filename: str, relative_path: str) -> _StagedUpload:
-    _validate_upload_size_hint(upload, filename)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = _upload_temp_path(destination)
+async def _stage_upload(root_fd: int, target: _UploadTarget) -> _StagedUpload:
+    _validate_upload_size_hint(target.upload, target.filename)
+    temp_name = f".{target.relative_path}.{uuid.uuid4().hex}.upload.tmp"
+    temp_fd = open_regular_file_at(root_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        await _stream_upload_to_destination(upload, temp_path, filename)
+        with os.fdopen(temp_fd, "wb") as handle:
+            await _stream_upload_to_destination(target.upload, handle, target.filename)
     except (asyncio.CancelledError, Exception):
-        temp_path.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            os.unlink(temp_name, dir_fd=root_fd)
         raise
-    return _StagedUpload(temp_path=temp_path, destination=destination, relative_path=relative_path)
+    return _StagedUpload(temp_name=temp_name, relative_path=target.relative_path)
 
 
 async def _write_uploads(
@@ -562,7 +571,6 @@ async def _write_uploads(
     try:
         upload_targets: list[_UploadTarget] = []
         seen_relative_paths: set[str] = set()
-        resolved_root = root.resolve()
         for upload in files:
             filename = Path(upload.filename or "").name
             if not filename:
@@ -570,39 +578,35 @@ async def _write_uploads(
 
             destination = _resolve_within_root(root, filename)
             _reject_git_file_mutation(config, base_id, runtime_paths, destination)
-            relative_path = destination.relative_to(resolved_root).as_posix()
+            relative_path = destination.relative_to(root).as_posix()
             _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
             if relative_path in seen_relative_paths:
                 _reject_duplicate_upload_destination(relative_path)
             seen_relative_paths.add(relative_path)
             _reject_non_file_upload_destination(destination, relative_path)
-            upload_targets.append(
-                _UploadTarget(
-                    upload=upload,
-                    destination=destination,
-                    filename=filename,
-                    relative_path=relative_path,
-                ),
-            )
+            upload_targets.append(_UploadTarget(upload=upload, filename=filename, relative_path=relative_path))
 
-        staged_uploads: list[_StagedUpload] = []
-        try:
-            staged_uploads = [
-                await _stage_upload(
-                    target.upload,
-                    target.destination,
-                    target.filename,
-                    target.relative_path,
-                )
-                for target in upload_targets
-            ]
-            cancelled_after_source_changed = await before_commit() if staged_uploads and before_commit else False
-            for staged_upload in staged_uploads:
-                staged_upload.temp_path.replace(staged_upload.destination)
-        except (asyncio.CancelledError, Exception):
-            for staged_upload in staged_uploads:
-                staged_upload.temp_path.unlink(missing_ok=True)
-            raise
+        if not upload_targets:
+            return [], False
+        root.mkdir(parents=True, exist_ok=True)
+        # Upload names are single components, so every upload is staged and published in the pinned root.
+        with _open_checked_directory(root) as root_fd:
+            staged_uploads: list[_StagedUpload] = []
+            try:
+                staged_uploads = [await _stage_upload(root_fd, target) for target in upload_targets]
+                cancelled_after_source_changed = await before_commit() if before_commit else False
+                for staged_upload in staged_uploads:
+                    os.replace(
+                        staged_upload.temp_name,
+                        staged_upload.relative_path,
+                        src_dir_fd=root_fd,
+                        dst_dir_fd=root_fd,
+                    )
+            except (asyncio.CancelledError, Exception):
+                for staged_upload in staged_uploads:
+                    with suppress(FileNotFoundError):
+                        os.unlink(staged_upload.temp_name, dir_fd=root_fd)
+                raise
         return [staged_upload.relative_path for staged_upload in staged_uploads], cancelled_after_source_changed
     finally:
         for upload in files:
@@ -742,9 +746,11 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-        relative_path = target.relative_to(root.resolve()).as_posix()
+        relative_file = target.relative_to(root)
+        relative_path = relative_file.as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
-        target.unlink()
+        with _open_checked_directory(root, relative_file.parent) as parent_fd:
+            os.unlink(relative_file.name, dir_fd=parent_fd)
         cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
             base_id,
             config=config,

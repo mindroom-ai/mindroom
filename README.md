@@ -99,20 +99,14 @@ Watch the 2-minute setup video:
 <a href="https://youtu.be/jR3xLUxyWhg"><img src="https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg" alt="MindRoom: installing and talking to my first AI agent in 2 minutes" width="480"></a>
 
 ```bash
-# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
-uvx mindroom config init
-
-# Add model auth, or run `uvx mindroom config init --provider codex` and `codex login`
-$EDITOR ~/.mindroom/.env
-
-# Generate pair code in https://chat.mindroom.chat:
-# Settings -> Local MindRoom -> Generate Pair Code
-uvx mindroom connect --pair-code ABCD-EFGH
-
-# Start MindRoom
 uvx mindroom run
+# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
+# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
+# then prints a link and QR code: approve it with your MindRoom Chat account,
+# or enter the code in MindRoom Chat -> Settings -> Local MindRoom
 ```
 
+To create or review the files without starting, run `uvx mindroom config init` (optionally with `--provider codex` or another preset), edit `~/.mindroom/.env`, and then run `uvx mindroom run`.
 See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for full details.
 
 ### Self-hosted, from source

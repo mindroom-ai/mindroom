@@ -11,7 +11,7 @@ import yaml
 
 from mindroom import constants
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
@@ -433,7 +433,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=True)) as mock_admins,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -453,13 +453,13 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         call(client, "!space:localhost", "!lobby:localhost", "localhost", snapshot=ANY),
         call(client, "!space:localhost", "!dev:localhost", "localhost", snapshot=ANY),
     ]
-    mock_avatar.assert_awaited_once_with(
-        client,
-        "!space:localhost",
-        avatar_category="spaces",
-        avatar_name="root_space",
-        context="root_space",
-        runtime_paths=runtime_paths_for(config),
+    mock_avatar.assert_awaited_once()
+    assert mock_avatar.await_args.args == (client, "!space:localhost")
+    assert mock_avatar.await_args.kwargs["context"] == "root_space"
+    assert await mock_avatar.await_args.kwargs["resolve_avatar"]() == resolve_avatar_path(
+        "spaces",
+        "root_space",
+        runtime_paths_for(config),
     )
 
 
@@ -495,7 +495,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=True)) as mock_admins,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -513,13 +513,13 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace", snapshot=ANY)
     mock_admins.assert_awaited_once_with(client, "!space:localhost", {"@owner:localhost"}, snapshot=ANY)
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost", snapshot=ANY)
-    mock_avatar.assert_awaited_once_with(
-        client,
-        "!space:localhost",
-        avatar_category="spaces",
-        avatar_name="root_space",
-        context="root_space",
-        runtime_paths=runtime_paths_for(config),
+    mock_avatar.assert_awaited_once()
+    assert mock_avatar.await_args.args == (client, "!space:localhost")
+    assert mock_avatar.await_args.kwargs["context"] == "root_space"
+    assert await mock_avatar.await_args.kwargs["resolve_avatar"]() == resolve_avatar_path(
+        "spaces",
+        "root_space",
+        runtime_paths_for(config),
     )
 
 
@@ -554,7 +554,7 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -592,7 +592,7 @@ async def test_ensure_root_space_returns_none_when_name_write_fails(tmp_path) ->
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=False)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -626,7 +626,7 @@ async def test_ensure_root_space_returns_none_when_admin_power_reconciliation_fa
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
         patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=False)) as mock_admins,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -661,7 +661,7 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=False)) as mock_add,
-        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+        patch("mindroom.matrix.rooms._set_room_avatar", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,

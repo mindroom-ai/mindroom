@@ -222,6 +222,8 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
+| `matrix/provisioning_heartbeat.py` | Best-effort startup and periodic "last seen" heartbeat from paired installs to the hosted provisioning service |
+| `matrix/provisioning_env.py` | Slim environment readers deciding whether a hosted install registers by token, shared secret, or pairing, plus the paired-install client-credential headers (no Matrix/HTTP imports) |
 | `matrix/image_handler.py` | Image message download, decryption, and AI processing |
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
@@ -263,6 +265,11 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
 | `desktop/legacy_command_journal.py` | Validates historical JSON v1 receipts for the SQLite journal's one-time import |
 | `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
+| `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
+| `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
+| `desktop/shell_prompt.py` | Local terminal approval for shell commands requested through a terminal-owned Desktop bridge |
 | `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
 | `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
 | `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
@@ -271,6 +278,8 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `desktop/native_config.py` | Validates and persists private native-helper configuration |
 | `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
 | `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/local_dashboard.py` | Validates the loopback dashboard URL and provides its credential through the private native-host pipe |
+| `desktop/startup_errors.py` | Translates desktop startup failures into actionable protocol errors and recovery advice |
 | `desktop/native_entry.py` | Starts the packaged native desktop helper |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
@@ -646,17 +655,16 @@ uvx mindroom config init --matrix-server mindroom.chat
 
 2) Add at least one model provider key in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
 
-3) Generate a pair code in `https://chat.mindroom.chat` (`Settings -> Local MindRoom`) and pair locally
-```bash
-uvx mindroom connect --pair-code ABCD-EFGH
-```
-
-4) Start MindRoom
+3) Start MindRoom (pairing happens automatically on first run)
 ```bash
 uvx mindroom run
 ```
 
-`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
+On first run, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
+Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+
+`mindroom run` (or `mindroom connect`) writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
 
 ### SaaS Platform Commands
 
@@ -874,8 +882,8 @@ mindroom doctor
 # Run the stack
 uv run mindroom run --storage-path mindroom_data
 
-# Pair local install with hosted provisioning
-mindroom connect --pair-code ABCD-EFGH
+# Pair local install with hosted provisioning (automatic on first run, or explicit via mindroom connect)
+mindroom connect
 
 # Bootstrap local Synapse + MindRoom Chat (Docker)
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix

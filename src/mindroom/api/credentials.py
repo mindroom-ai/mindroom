@@ -36,6 +36,7 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.credential_policy import credential_service_policy, is_oauth_token_service
 from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
+from mindroom.credentials_sync import canonical_provider_service, resolve_provider_service_api_key
 from mindroom.embedder_health import handle_embedder_credential_change
 from mindroom.embedding_factory import embedder_client_signature
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -62,6 +63,19 @@ def _validated_service(service: str) -> str:
         return validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _save_service(access: _DashboardCredentialAccess, service: str) -> str:
+    """Return the service to write, storing new env-var-named provider keys under the canonical provider.
+
+    An env-var-named service that already exists keeps receiving writes, because
+    config may reference it by exact name (for example an embedder
+    ``credentials_service``), so rotating it must update that service.
+    """
+    canonical_service = canonical_provider_service(service)
+    if canonical_service == service or access.load(service) is not None:
+        return service
+    return canonical_service
 
 
 def _active_embedder_runtime(request: Request, access: _DashboardCredentialAccess) -> _ActiveEmbedderRuntime | None:
@@ -291,6 +305,7 @@ async def set_credentials(
         agent_name=agent_name,
         service_names=(service,),
     )
+    service = _save_service(access, service)
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
@@ -300,7 +315,7 @@ async def set_credentials(
     access.save(service, creds)
     _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
 
-    return {"status": "success", "message": f"Credentials saved for {service}"}
+    return {"status": "success", "service": service, "message": f"Credentials saved for {service}"}
 
 
 @router.post("/{service}/api-key")
@@ -315,22 +330,71 @@ async def set_api_key(
     request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
+    service = save_dashboard_api_key(
+        http_request,
+        service,
+        payload.api_key,
+        key_name=payload.key_name,
+        agent_name=agent_name,
+    )
+    return {"status": "success", "service": service, "message": f"API key set for {service}"}
+
+
+def save_dashboard_api_key(
+    http_request: Request,
+    service: str,
+    api_key: str,
+    *,
+    key_name: str = "api_key",
+    agent_name: str | None = None,
+) -> str:
+    """Save one UI-sourced API key through the dashboard credential access rules and return the stored service."""
     access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
     )
-    reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
+    service = _save_service(access, service)
+    reject_oauth_api_key_write_field(service, access.match(service), key_name=key_name)
 
     credentials = access.load(service) or {}
     access.reject_stored_oauth_credentials(credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
-    credentials[payload.key_name] = payload.api_key
+    credentials[key_name] = api_key
     credentials["_source"] = "ui"
     access.save(service, credentials)
     _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
+    return service
 
-    return {"status": "success", "message": f"API key set for {service}"}
+
+def _load_api_key_credentials(
+    access: _DashboardCredentialAccess,
+    service: str,
+    key_name: str,
+) -> tuple[str, dict[str, Any]]:
+    """Load the credentials the runtime reads this service's key from, and the service that holds them.
+
+    Provider API keys resolve like the runtime does: the canonical service first,
+    then its env-var-named twin (for example ``ANTHROPIC_API_KEY``).
+    """
+    loaded: dict[str, dict[str, Any]] = {}
+
+    def load(candidate: str) -> dict[str, Any]:
+        if candidate not in loaded:
+            credentials = access.load(candidate) or {}
+            access.reject_stored_oauth_credentials(credentials)
+            loaded[candidate] = credentials
+        return loaded[candidate]
+
+    if key_name != "api_key":
+        return service, load(service)
+
+    def load_api_key(candidate: str) -> str | None:
+        api_key = load(candidate).get("api_key")
+        return api_key if isinstance(api_key, str) else None
+
+    credential_service, _ = resolve_provider_service_api_key(service, load_api_key)
+    return credential_service, load(credential_service)
 
 
 @router.get("/{service}/api-key")
@@ -350,8 +414,7 @@ async def get_api_key(
     )
     oauth_match = access.match(service)
     reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
-    credentials = access.load(service) or {}
-    access.reject_stored_oauth_credentials(credentials)
+    credential_service, credentials = _load_api_key_credentials(access, service, key_name)
     api_key = credentials.get(key_name)
     if is_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
         raise HTTPException(
@@ -363,6 +426,7 @@ async def get_api_key(
         source = credentials.get("_source")
         response = {
             "service": service,
+            "credential_service": credential_service,
             "has_key": True,
             "key_name": key_name,
             # Return masked version
@@ -439,6 +503,7 @@ async def copy_credentials(
         agent_name=agent_name,
         service_names=(service, source_service),
     )
+    service = _save_service(access, service)
     destination_match = oauth_service_match(request, service)
     source_match = oauth_service_match(request, source_service)
     reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
@@ -458,7 +523,11 @@ async def copy_credentials(
     access.save(service, target_creds)
     _handle_runtime_credential_change(request, access, previous_embedder_runtime)
 
-    return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
+    return {
+        "status": "success",
+        "service": service,
+        "message": f"Credentials copied from {source_service} to {service}",
+    }
 
 
 @router.post("/{service}/test")

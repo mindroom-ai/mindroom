@@ -7,15 +7,19 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index, user_scope_shared_agent_names
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     private_instance_scope_root_path,
+    private_instances_root_path,
     resolved_worker_key_scope,
-    visible_state_roots_for_worker_key,
+    shared_storage_root,
+    visible_workspace_roots,
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -28,10 +32,10 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 __all__ = [
-    "ScopedVisibleStateRoot",
+    "ScopedWorkspaceMount",
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
-    "plan_scoped_visible_state_roots",
+    "plan_scoped_workspace_mounts",
     "resolve_state_scope_worker_key",
     "resolved_agent_policies_from_config_data",
     "stable_signature_json",
@@ -40,6 +44,7 @@ __all__ = [
     "validate_unique_worker_visible_paths",
 ]
 
+logger = get_logger(__name__)
 
 _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
     {
@@ -59,8 +64,8 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class ScopedVisibleStateRoot:
-    """One durable state root that a dedicated worker may see."""
+class ScopedWorkspaceMount:
+    """One existing workspace a dedicated worker mounts writable at its canonical path."""
 
     local_path: Path
     worker_visible_path: Path
@@ -235,20 +240,15 @@ def build_dedicated_worker_runtime_paths(
     )
 
 
-def plan_scoped_visible_state_roots(
+def _scoped_workspaces(
     *,
     worker_key: str,
-    local_shared_storage_root: Path,
-    worker_visible_shared_storage_root: Path,
+    storage_root: Path,
     private_agent_names: frozenset[str] | None,
-    allow_unknown_worker_key: bool,
-    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
-) -> tuple[ScopedVisibleStateRoot, ...]:
-    """Return the durable state roots a dedicated worker may mount by default."""
+    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None,
+) -> tuple[Path, ...]:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
-        if allow_unknown_worker_key:
-            return ()
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
         raise WorkerBackendError(msg)
 
@@ -261,50 +261,82 @@ def plan_scoped_visible_state_roots(
             private_agent_names=private_agent_names,
             resolved_agent_policies=resolved_agent_policies,
         )
-
-    effective_private_agent_names = private_agent_names or frozenset()
-    user_scope_agent_names = user_scope_shared_agent_names(resolved_agent_policies or {})
-    agent_name = worker_key_agent_name(worker_key)
-    if scope == "user_agent" and agent_name is not None and agent_name in effective_private_agent_names:
-        worker_visible_roots = (private_instance_scope_root_path(worker_visible_shared_storage_root, worker_key),)
-        local_roots = (private_instance_scope_root_path(local_shared_storage_root, worker_key),)
-    else:
-        worker_visible_roots = visible_state_roots_for_worker_key(
-            worker_visible_shared_storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-            user_scope_agent_names=user_scope_agent_names,
-        )
-        local_roots = visible_state_roots_for_worker_key(
-            local_shared_storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-            user_scope_agent_names=user_scope_agent_names,
-        )
-    if not worker_visible_roots or len(worker_visible_roots) != len(local_roots):
+    workspaces = visible_workspace_roots(
+        storage_root,
+        worker_key,
+        resolved_agent_policies or {},
+        private_agent_names=private_agent_names or frozenset(),
+    )
+    if not workspaces and scope != "user":
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
         raise WorkerBackendError(msg)
+    return workspaces
 
-    for local_root in local_roots:
-        local_root.mkdir(parents=True, exist_ok=True)
 
-    planned_roots = [
-        ScopedVisibleStateRoot(
-            local_path=local_root,
-            worker_visible_path=worker_visible_root,
-        )
-        for local_root, worker_visible_root in zip(local_roots, worker_visible_roots, strict=True)
-    ]
-    canonical_scope = private_instance_scope_root_path(local_shared_storage_root, worker_key)
-    if canonical_scope in local_roots:
-        planned_roots.extend(
-            ScopedVisibleStateRoot(
-                local_path=canonical_scope,
-                worker_visible_path=worker_visible_shared_storage_root / alias.relative_to(local_shared_storage_root),
+def plan_scoped_workspace_mounts(
+    *,
+    worker_key: str,
+    local_shared_storage_root: Path,
+    worker_visible_shared_storage_root: Path,
+    private_agent_names: frozenset[str] | None,
+    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
+    create_shared: bool = False,
+) -> tuple[ScopedWorkspaceMount, ...]:
+    """Return the workspaces one dedicated worker mounts writable, at their canonical paths.
+
+    A workspace is mounted only when it is a real directory reached without links
+    from the storage root, because container runtimes create missing sources as
+    root. ``create_shared`` first creates missing shared workspaces that way; private
+    workspaces appear only after the primary writes their scope's identity record.
+    Private mounts repeat at the verified legacy spellings of their scope.
+    """
+    storage_root = shared_storage_root(local_shared_storage_root)
+    private_root = private_instances_root_path(storage_root)
+    mounts: list[ScopedWorkspaceMount] = []
+    for workspace in _scoped_workspaces(
+        worker_key=worker_key,
+        storage_root=storage_root,
+        private_agent_names=private_agent_names,
+        resolved_agent_policies=resolved_agent_policies,
+    ):
+        relative_path = workspace.relative_to(storage_root)
+        create = create_shared and not workspace.is_relative_to(private_root)
+        try:
+            with open_directory_within_root(storage_root, relative_path, create=create):
+                mounts.append(ScopedWorkspaceMount(workspace, worker_visible_shared_storage_root / relative_path))
+        except FileNotFoundError:
+            logger.info(
+                "Not mounting a workspace that does not exist yet",
+                worker_key=worker_key,
+                workspace=str(relative_path),
             )
-            for alias in private_scope_alias_paths(local_shared_storage_root, worker_key)
+        except OSError as exc:
+            if create:
+                msg = f"Worker workspace must be a real directory below the storage root: {relative_path}"
+                raise WorkerBackendError(msg) from exc
+            logger.warning(
+                "Not mounting a workspace reached through a link",
+                worker_key=worker_key,
+                workspace=str(relative_path),
+            )
+    canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
+    private_mounts = [mount for mount in mounts if mount.local_path.is_relative_to(canonical_scope)]
+    if private_mounts:
+        try:
+            aliases = private_scope_alias_paths(storage_root, worker_key)
+        except ValueError as exc:
+            raise WorkerBackendError(str(exc)) from exc
+        mounts.extend(
+            ScopedWorkspaceMount(
+                mount.local_path,
+                worker_visible_shared_storage_root
+                / alias.relative_to(storage_root)
+                / mount.local_path.relative_to(canonical_scope),
+            )
+            for alias in aliases
+            for mount in private_mounts
         )
-    return tuple(planned_roots)
+    return tuple(mounts)
 
 
 def validate_unique_worker_visible_paths(

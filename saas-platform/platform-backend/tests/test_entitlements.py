@@ -19,6 +19,13 @@ def test_active_paid_subscription_can_run_instances() -> None:
     assert_instance_entitlement(subscription, "start")
 
 
+def test_past_due_subscription_keeps_running_during_payment_retries() -> None:
+    subscription = _subscription(tier="hobby", status="past_due")
+
+    assert is_subscription_service_active(subscription)
+    assert_instance_entitlement(subscription, "start")
+
+
 def test_unexpired_trial_can_run_instances() -> None:
     trial_end = datetime.now(UTC) + timedelta(days=2)
     subscription = _subscription(tier="byok", status="trialing", trial_ends_at=trial_end.isoformat())
@@ -56,9 +63,11 @@ def test_trial_days_remaining_is_none_outside_trialing_status() -> None:
         _subscription(
             tier="byok", status="trialing", trial_ends_at=(datetime.now(UTC) - timedelta(days=1)).isoformat()
         ),
-        _subscription(tier="byok", status="past_due"),
         _subscription(tier="byok", status="cancelled"),
         _subscription(tier="byok", status="paused"),
+        _subscription(tier="byok", status="unpaid"),
+        _subscription(tier="byok", status="incomplete"),
+        _subscription(tier="byok", status="incomplete_expired"),
     ],
 )
 def test_inactive_or_free_subscription_cannot_run_instances(subscription: dict) -> None:

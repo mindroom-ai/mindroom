@@ -59,6 +59,15 @@ class LocalWorkerStatePaths:
     metadata_dir: Path
     metadata_file: Path
 
+    @property
+    def tmp_dir(self) -> Path:
+        """Return the disk-backed temp directory for tool subprocesses.
+
+        Dedicated workers keep `/tmp` on a small in-memory tmpfs, so large temporary
+        files such as pip's downloaded wheels go to the worker's state mount instead.
+        """
+        return self.cache_dir / "tmp"
+
 
 @dataclass
 class _LocalWorkerMetadata:
@@ -139,6 +148,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
 def _ensure_local_worker_directories(paths: LocalWorkerStatePaths) -> None:
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    paths.tmp_dir.mkdir(exist_ok=True)
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -353,8 +363,16 @@ class _LocalWorkerBackend:
 
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        startup_count: int | None = None,
+    ) -> WorkerHandle:
         """Persist one local worker failure."""
+        del startup_count  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
         worker_lock = self._worker_lock(paths)

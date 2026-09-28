@@ -27,7 +27,7 @@ One shared boundary helper encodes `None` to the empty string and decodes it bac
 ### Durable sync batch boundary
 
 The Matrix client uses `nio.durable.open_durable_sync` with Classic or Simplified Sliding Sync.
-The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.1`; `uv.lock` resolves version `1.1.1` from the package registry, with no Git source override.
+The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.2`; `uv.lock` resolves version `1.1.2` from the package registry, with no Git source override.
 Account, device, consumer and stream ownership bind once when opening the session.
 Soft-logout renewal requests the existing device; it preserves the bound stream, membership positions, and attempted-delivery sending identity.
 Hard logout, missing device storage, or changed identity stops startup instead of attempting a stream replacement.

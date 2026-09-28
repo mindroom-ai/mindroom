@@ -2424,7 +2424,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
-        assert read_scope_seen_event_ids(scope_context.session, scope_context.scope) == {
+        assert read_scope_seen_event_ids(scope_context.storage, scope_context.session, scope_context.scope) == {
             "event-1",
             "event-2",
         }

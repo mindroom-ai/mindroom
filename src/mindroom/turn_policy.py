@@ -301,8 +301,17 @@ class TurnPolicy:
 
     deps: TurnPolicyDeps
 
-    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
-        """Decide durable turn access, retrying unresolved membership before settlement."""
+    def can_reply_to_sender_in_room(
+        self,
+        sender_id: str,
+        room_id: str,
+        *,
+        observed_room: nio.MatrixRoom | None = None,
+    ) -> bool:
+        """Decide durable turn access, retrying unresolved membership before settlement.
+
+        ``observed_room`` is this bot's own view of the room; it only lets a denial wait for the router's join.
+        """
         return is_sender_allowed_for_agent_reply_in_room(
             sender_id,
             self.deps.agent_name,
@@ -311,6 +320,7 @@ class TurnPolicy:
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
             require_resolved_membership=True,
+            observed_room=observed_room,
         )
 
     def _adaptive_thread_participation(

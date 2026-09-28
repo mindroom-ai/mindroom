@@ -313,10 +313,9 @@ def _entity_mention_resolution_from_user_id(
     config: Config,
 ) -> _MentionResolution:
     """Return rendering data for one resolved entity user ID."""
-    entity_config = config.agents.get(entity_name) or config.teams[entity_name]
     return _MentionResolution(
         plain_text=resolved_user_id,
-        markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",
+        markdown_text=f"[@{config.entity_display_name(entity_name)}](https://matrix.to/#/{resolved_user_id})",
         user_id=resolved_user_id,
     )
 
