@@ -155,6 +155,8 @@ It does not ask for a key that is already set in the environment, and other pres
 The same process then pairs with MindRoom Chat and starts.
 Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
+While a hosted install waits for pairing approval, `mindroom run` already listens on the API address: `/api/health` returns `200` and `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`, so container health checks do not restart it.
+The dashboard and the rest of the API start after pairing, and `--no-api` skips these probes too.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

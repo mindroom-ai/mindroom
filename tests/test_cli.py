@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_state import get_runtime_state
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
@@ -523,11 +525,83 @@ def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", side_effect=fake_run),
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert pair_called, "pair_local_install should have been called"
     assert seen_credentials == [("test_id", "test_secret")]
+
+
+def _unused_local_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_run_answers_health_probes_while_waiting_for_pairing(tmp_path: Path) -> None:
+    """An unpaired run binds the API address first: liveness passes, readiness waits for pairing, then startup proceeds."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    port = _unused_local_port()
+    probes: dict[str, httpx.Response] = {}
+    started_ports: list[int] = []
+
+    def fake_pair_local_install(_runtime_paths: object, **_kwargs: object) -> None:
+        for name in ("health", "ready"):
+            probes[name] = httpx.get(f"http://127.0.0.1:{port}/api/{name}", trust_env=False)
+        with env_path.open("a", encoding="utf-8") as env_file:
+            env_file.write("MINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n")
+
+    async def fake_run(*, api_host: str, api_port: int, **_kwargs: object) -> None:
+        # The real API server binds the same address, with SO_REUSEADDR like Uvicorn, once pairing has finished.
+        with socket.socket() as api_socket:
+            api_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            api_socket.bind((api_host, api_port))
+        started_ports.append(api_port)
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
+        patch("mindroom.cli.main._run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            ["run", "--config", str(config_path), "--api-host", "127.0.0.1", "--api-port", str(port)],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert probes["health"].status_code == 200
+    assert probes["health"].json() == {"status": "healthy"}
+    assert probes["ready"].status_code == 503
+    assert probes["ready"].json() == {"status": "starting", "detail": "Waiting for local pairing approval"}
+    assert started_ports == [port]
+    assert get_runtime_state().phase == "idle"
+
+
+def test_run_fails_before_pairing_when_the_api_address_is_taken(tmp_path: Path) -> None:
+    """A run that cannot bind its API address stops before asking anyone to approve pairing."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+
+    with (
+        socket.socket() as occupied,
+        patch("mindroom.cli.connect.pair_local_install") as mock_pair,
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        result = runner.invoke(
+            app,
+            ["run", "--config", str(config_path), "--api-host", "127.0.0.1", "--api-port", str(port)],
+        )
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    mock_pair.assert_not_called()
+    mock_run.assert_not_called()
 
 
 def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
@@ -553,7 +627,7 @@ def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert observed == [False, False, False, True]
@@ -593,7 +667,7 @@ def test_run_exits_with_printed_credentials_when_env_is_read_only(
     monkeypatch.setattr("mindroom.cli.connect.upsert_env_values", read_only)
 
     with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 1
     assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
@@ -621,7 +695,7 @@ def test_run_confirms_the_approving_account_only_in_a_terminal(
         patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair_local_install),
         patch("mindroom.cli.main._run", new_callable=AsyncMock),
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert (confirmers[0] is not None) is interactive
@@ -660,7 +734,7 @@ def test_run_stops_when_the_approving_account_is_declined(tmp_path: Path, monkey
     monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
     with patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run:
-        result = runner.invoke(app, ["run", "--config", str(config_path)], input="n\n")
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)], input="n\n")
 
     assert result.exit_code == 1
     assert "Approved by @mallory:mindroom.chat." in result.output
@@ -681,7 +755,7 @@ def test_run_warns_about_missing_model_keys_before_pairing(tmp_path: Path) -> No
         patch("mindroom.cli.connect.pair_local_install", side_effect=lambda *_a, **_kw: events.append("pair")),
         patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
     ):
-        result = runner.invoke(app, ["run", "--config", str(config_path)])
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert events == ["keys", "pair"]
