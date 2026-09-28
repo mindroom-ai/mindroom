@@ -297,24 +297,28 @@ def _clean_str(value: object) -> str | None:
     return cleaned or None
 
 
-def _profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
-    """Return the persistent Playwright profile directory for one browser profile."""
+def _profile_dir(profiles_root: Path, profile_name: str) -> Path:
+    """Return the persistent Playwright profile directory directly below its owner's profile root."""
     normalized_profile = _clean_str(profile_name) or _DEFAULT_PROFILE
     profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or _DEFAULT_PROFILE
-    _profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
-    _profile_dir.mkdir(parents=True, exist_ok=True)
-    _profile_dir.chmod(0o700)
-    return _profile_dir
+    # The slug has no separators, so refusing a leading dot also refuses "." and "..".
+    if profile_slug.startswith("."):
+        msg = f"Browser profile names must not start with a dot: {profile_name!r}"
+        raise ValueError(msg)
+    profile_dir = profiles_root.resolve() / profile_slug
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
+    return profile_dir
 
 
 def _persistent_launch_kwargs(
     runtime_paths: RuntimePaths,
-    profile_name: str,
+    user_data_dir: Path,
     *,
     headless: bool,
     executable_override: str | None = None,
 ) -> dict[str, Any]:
-    """Return the shared persistent-context launch kwargs for one browser profile."""
+    """Return the shared persistent-context launch kwargs for one browser profile directory."""
     executable = (
         executable_override
         or runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
@@ -326,7 +330,7 @@ def _persistent_launch_kwargs(
         # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.
         "service_workers": "block",
-        "user_data_dir": str(_profile_dir(runtime_paths, profile_name)),
+        "user_data_dir": str(user_data_dir),
         "viewport": {"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH},
     }
     if executable:
@@ -556,10 +560,14 @@ class BrowserTools(Toolkit):
         timeout_seconds: float = 90.0,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
+        agent_state_root: Path | None = None,
     ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         apply_toolkit_function_aliases(self, {"browser": "browser_control"})
         self._runtime_paths = runtime_paths
+        # Signed-in profiles are agent state: an agent's toolkit keeps them in its resolved state root,
+        # which is requester-scoped for private agents. Worker runtimes own their whole storage root.
+        self._profiles_root = (agent_state_root or runtime_paths.storage_root) / "browser-profiles"
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
         self._desktop_target = self._configured_desktop_target(
@@ -1706,6 +1714,7 @@ class BrowserTools(Toolkit):
                     return state
                 await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
+            user_data_dir = _profile_dir(self._profiles_root, profile_name)
             manager = async_playwright()
             acquisition = asyncio.create_task(manager.start())
             context: BrowserContext | None = None
@@ -1716,7 +1725,7 @@ class BrowserTools(Toolkit):
                 playwright = await asyncio.shield(acquisition)
                 launch_kwargs = _persistent_launch_kwargs(
                     self._runtime_paths,
-                    profile_name,
+                    user_data_dir,
                     headless=self._worker_display is None,
                     executable_override=(
                         self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
@@ -1744,7 +1753,6 @@ class BrowserTools(Toolkit):
                         "DISPLAY": self._worker_display,
                     }
                     launch_kwargs["viewport"] = {"width": 1280, "height": 800}
-                user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(

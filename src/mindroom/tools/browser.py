@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
+        ToolManagedInitArg.AGENT_STATE_ROOT,
     ),
     config_fields=[
         ConfigField(

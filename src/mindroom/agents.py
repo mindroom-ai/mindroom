@@ -562,6 +562,7 @@ def _build_registered_agent_tool(
     agent_name: str,
     tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
+    agent_state_root: Path,
     tool_output_auto_save_threshold_bytes: int,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
@@ -592,6 +593,7 @@ def _build_registered_agent_tool(
         worker_tools_override=worker_tools,
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=workspace_path,
+        agent_state_root=agent_state_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )
@@ -888,6 +890,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_name,
         tool_config_overrides,
         agent_runtime.tool_base_dir,
+        agent_runtime.state_root,
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.execution.is_private,
         execution_identity,

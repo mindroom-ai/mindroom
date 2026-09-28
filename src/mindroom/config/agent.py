@@ -48,6 +48,7 @@ _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
         ".sessions-recovery.lock",
         "agent_modes.json",
         "agent_modes.lock",
+        "browser-profiles",
         "calls",
         "chroma",
         "knowledge_db",

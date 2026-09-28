@@ -649,6 +649,7 @@ def _build_managed_tool_init_kwargs(
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
     worker_tools_override: list[str] | None,
+    agent_state_root: Path | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
     execution_identity = worker_target.execution_identity if worker_target is not None else None
@@ -664,6 +665,7 @@ def _build_managed_tool_init_kwargs(
         ),
         ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
+        ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -702,6 +704,7 @@ def _build_tool_instance(
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
@@ -767,6 +770,7 @@ def _build_tool_instance(
             runtime_config=runtime_config,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
+            agent_state_root=agent_state_root,
         ),
     )
     include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
@@ -818,10 +822,15 @@ def get_tool_by_name(
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
-    """Get a tool instance by its registered name."""
+    """Get a tool instance by its registered name.
+
+    ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
+    worker runtimes leave it unset because their own storage root is the state they own.
+    """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
@@ -842,6 +851,7 @@ def get_tool_by_name(
         shared_storage_root_path=shared_storage_root_path,
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=tool_output_workspace_root,
+        agent_state_root=agent_state_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )

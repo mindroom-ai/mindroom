@@ -21,6 +21,8 @@ import pytest_asyncio
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.agents import build_agent_toolkit
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
@@ -33,16 +35,18 @@ from mindroom.custom_tools.browser import (
 )
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.browser_lifecycle_helpers import LifecycleBrowser
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
@@ -82,33 +86,34 @@ def test_clean_str_normalizes_values(value: object, expected: str | None) -> Non
 
 def test_profile_dir_distinct_names_yield_distinct_paths(tmp_path: Path) -> None:
     """Different profile names should map to different directories under browser-profiles."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={},
-    )
+    profiles_root = tmp_path / "state" / "browser-profiles"
 
-    mindroom_dir = _profile_dir(runtime_paths, "mindroom")
-    chrome_dir = _profile_dir(runtime_paths, "chrome")
-    profiles_root = (runtime_paths.storage_root / "browser-profiles").resolve()
+    mindroom_dir = _profile_dir(profiles_root, "mindroom")
+    chrome_dir = _profile_dir(profiles_root, "chrome")
 
     assert mindroom_dir != chrome_dir
-    assert mindroom_dir.parent == profiles_root
-    assert chrome_dir.parent == profiles_root
+    assert mindroom_dir.parent == profiles_root.resolve()
+    assert chrome_dir.parent == profiles_root.resolve()
+
+
+@pytest.mark.parametrize("profile_name", ["..", ".", " .. ", "...", ".config", "../..", "/.."])
+def test_profile_dir_rejects_names_that_leave_profiles_root(tmp_path: Path, profile_name: str) -> None:
+    """Model-chosen profile names never select the profile root, its parent, or hidden entries."""
+    profiles_root = tmp_path / "state" / "browser-profiles"
+
+    with pytest.raises(ValueError, match="Browser profile names must not start with a dot"):
+        _profile_dir(profiles_root, profile_name)
+
+    assert not (tmp_path / "state").exists()
 
 
 def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
     """profile_dir() must clamp permissions even when the dir already exists with looser mode."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={},
-    )
     target = tmp_path / "browser-profiles" / "mindroom"
     target.mkdir(parents=True)
     target.chmod(0o755)
 
-    result = _profile_dir(runtime_paths, "mindroom")
+    result = _profile_dir(tmp_path / "browser-profiles", "mindroom")
 
     assert result == target.resolve()
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
@@ -126,7 +131,7 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
         process_env={"BROWSER_EXECUTABLE_PATH": "/right"},
     )
 
-    launch_kwargs = _persistent_launch_kwargs(runtime_paths, "mindroom", headless=True)
+    launch_kwargs = _persistent_launch_kwargs(runtime_paths, tmp_path / "profile", headless=True)
 
     assert launch_kwargs["executable_path"] == "/right"
     assert "chromium_sandbox" not in launch_kwargs
@@ -1117,13 +1122,13 @@ async def test_local_preview_requires_computer_binding(
 
     def headless_launch(
         runtime_paths: RuntimePaths,
-        profile_name: str,
+        user_data_dir: Path,
         *,
         headless: bool,
         executable_override: str | None = None,
     ) -> dict[str, Any]:
         assert headless is (binding != "computer")
-        return original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+        return original_launch(runtime_paths, user_data_dir, headless=True, executable_override=executable_override)
 
     monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
     if binding == "computer":
@@ -1191,13 +1196,13 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(  # no
 
     def headless_launch(
         runtime_paths: RuntimePaths,
-        profile_name: str,
+        user_data_dir: Path,
         *,
         headless: bool,
         executable_override: str | None = None,
     ) -> dict[str, Any]:
         assert not headless
-        options = original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+        options = original_launch(runtime_paths, user_data_dir, headless=True, executable_override=executable_override)
         options.setdefault("args", []).append(f"--host-resolver-rules=MAP localhost.localdomain {private_host}")
         return options
 
@@ -1654,6 +1659,102 @@ async def test_ensure_profile_uses_storage_root_browser_profiles_path(
     await tool._ensure_profile("chrome")
 
     assert launch_kwargs["user_data_dir"] == str(runtime_paths.storage_root / "browser-profiles" / "chrome")
+
+
+def _matrix_identity(agent_name: str, requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org",
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_profiles_live_in_each_agent_state_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Signed-in host browser state never crosses agents or the requesters of a private agent."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                "research": {"display_name": "Research", "role": "Browse", "tools": ["browser"]},
+                "writer": {"display_name": "Writer", "role": "Browse", "tools": ["browser"]},
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Browse",
+                    "tools": ["browser"],
+                    "private": {"per": "user"},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    profile_dirs: set[Path] = set()
+    for agent_name, requester_id in [
+        ("research", "@alice:example.org"),
+        ("writer", "@alice:example.org"),
+        ("assistant", "@alice:example.org"),
+        ("assistant", "@bob:example.org"),
+    ]:
+        identity = _matrix_identity(agent_name, requester_id)
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+            create=True,
+        )
+        toolkit = build_agent_toolkit(
+            "browser",
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            worker_tools=[],
+            runtime_overrides=None,
+            agent_runtime=agent_runtime,
+            execution_identity=identity,
+        )
+        assert isinstance(toolkit, BrowserTools)
+        launch_kwargs, _playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext(pages=[]))
+        await toolkit._ensure_profile("mindroom")
+        await toolkit.aclose()
+        profile_dir = Path(str(launch_kwargs["user_data_dir"]))
+        assert profile_dir == agent_runtime.state_root / "browser-profiles" / "mindroom"
+        profile_dirs.add(profile_dir)
+
+    assert len(profile_dirs) == 4
+    assert not (runtime_paths.storage_root / "browser-profiles").exists()
+
+
+@pytest.mark.asyncio
+async def test_invalid_profile_name_is_rejected_before_browser_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A profile name that would escape the profile root never starts Playwright or Chromium."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.async_playwright",
+        MagicMock(side_effect=AssertionError("Playwright must not start")),
+    )
+
+    with pytest.raises(ValueError, match="must not start with a dot"):
+        await tool.browser(action="start", profile="..")
+
+    assert not (runtime_paths.storage_root / "browser-profiles").exists()
+    assert not (runtime_paths.storage_root / "Default").exists()
 
 
 @pytest.mark.asyncio
