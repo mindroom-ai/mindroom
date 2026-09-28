@@ -323,18 +323,17 @@ async def login(
 
     try:
         response = await client.login(password)
+        if not isinstance(response, nio.LoginResponse):
+            msg = f"Failed to login {user_id}: {response}"
+            raise matrix_startup_error(msg, response=response)  # noqa: TRY301 - one close covers every unreturned client
     except BaseException:
         await client.close()
         raise
-    if isinstance(response, nio.LoginResponse):
-        client.user_id = response.user_id
-        client.device_id = response.device_id
-        client.access_token = response.access_token
-        logger.info("matrix_login_succeeded", user_id=response.user_id)
-        return client
-    await client.close()
-    msg = f"Failed to login {user_id}: {response}"
-    raise matrix_startup_error(msg, response=response)
+    client.user_id = response.user_id
+    client.device_id = response.device_id
+    client.access_token = response.access_token
+    logger.info("matrix_login_succeeded", user_id=response.user_id)
+    return client
 
 
 async def login_flows(
@@ -376,26 +375,25 @@ async def restore_login(
         http_headers=http_headers,
         sync_storage=sync_storage,
     )
+    client.restore_login(user_id, device_id, access_token)
+
     try:
-        client.restore_login(user_id, device_id, access_token)
         response = await client.whoami()
+        if not isinstance(response, nio.WhoamiResponse):
+            msg = f"Failed to restore Matrix login for {user_id}: {response}"
+            raise matrix_startup_error(msg, response=response)  # noqa: TRY301 - one close covers every unreturned client
     except BaseException:
         await client.close()
         raise
-    if isinstance(response, nio.WhoamiResponse):
-        client.user_id = response.user_id
-        if response.device_id:
-            client.device_id = response.device_id
-        logger.info(
-            "matrix_login_restored",
-            user_id=response.user_id,
-            device_id=client.device_id,
-        )
-        return client
-
-    await client.close()
-    msg = f"Failed to restore Matrix login for {user_id}: {response}"
-    raise matrix_startup_error(msg, response=response)
+    client.user_id = response.user_id
+    if response.device_id:
+        client.device_id = response.device_id
+    logger.info(
+        "matrix_login_restored",
+        user_id=response.user_id,
+        device_id=client.device_id,
+    )
+    return client
 
 
 __all__ = [
