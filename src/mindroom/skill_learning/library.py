@@ -29,9 +29,11 @@ from mindroom.tool_system.workspace_skills import (
     MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
     MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
     MAX_WORKSPACE_SKILL_NAME_CHARS,
+    MAX_WORKSPACE_SKILL_READ_BYTES,
     MAX_WORKSPACE_SKILLS,
     MAX_WORKSPACE_SKILLS_BYTES,
     SKILL_FILENAME,
+    BudgetOverrun,
     SkillFrontmatterTooLargeError,
     SkillPassBudget,
     SkillUsage,
@@ -50,7 +52,6 @@ from mindroom.tool_system.workspace_skills import (
     skill_parse_charge,
     skill_prompt_bytes,
     support_entry_count,
-    update_skill_usage,
     update_skill_usages,
     workspace_skill,
     workspace_skill_budget,
@@ -76,6 +77,26 @@ _HISTORY_KEEP = 10
 
 class SkillEditError(ValueError):
     """A refused skill edit, worded for the model that asked for it."""
+
+
+_OVERRUN_REFUSALS: dict[BudgetOverrun, str] = {
+    "stopped": (
+        "The workspace's skills are already past a skill loading budget, so loading skips some of them; shrink, merge, "
+        "or remove skills before adding to them."
+    ),
+    "prompt": (
+        f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
+        "budget, and skill loading would skip some; shorten or merge skills instead."
+    ),
+    "read": (
+        f"This change would put the workspace's SKILL.md files over the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB "
+        "skill loading reads, and it would skip some; shorten or merge skills instead."
+    ),
+    "parse": (
+        f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
+        "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -327,19 +348,18 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
                 "improve or merge an existing skill instead."
             )
             raise SkillEditError(msg)
-        _require_prompt_budget(skills_root, name, content, skill_fd=None)
+        _require_workspace_budgets(skills_root, name, content, skill_fd=None)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
         # Like Hermes' record of a create, a new skill never inherits the record of a deleted one of the same name.
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            name,
-            lambda _usage: SkillUsage(created_by="learner" if learner else None, created_at=now),
+            {name: lambda _usage: SkillUsage(created_by="learner" if learner else None, created_at=now)},
         )
 
 
-def _require_prompt_budget(
+def _require_workspace_budgets(
     skills_root: Path,
     name: str,
     markdown: str,
@@ -347,7 +367,7 @@ def _require_prompt_budget(
     skill_fd: int | None,
     added: tuple[str, str] | None = None,
 ) -> None:
-    """Refuse a change after which skill loading would stop at the workspace prompt budget and skip skills."""
+    """Refuse a change after which skill loading would stop at a workspace budget and skip skills."""
     listings = {
         kind: list_support_files(skill_fd, skills_root / name, kind) if skill_fd is not None else []
         for kind in ("scripts", "references")
@@ -366,22 +386,15 @@ def _require_prompt_budget(
     except (TypeError, ValueError):
         # A support file can be added to a skill whose SKILL.md loading skips, and loading still charges its parse.
         changed = None
-    budget = workspace_skill_budget(skills_root)
-    other_bytes = sum(size for directory, size in budget.prompt_bytes.items() if directory != name)
-    if changed is not None and other_bytes + skill_prompt_bytes(changed) > MAX_WORKSPACE_SKILLS_BYTES:
-        msg = (
-            f"This change would put the workspace's skills over their {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt "
-            "budget, and skill loading would skip some; shorten or merge skills instead."
-        )
-        raise SkillEditError(msg)
-    # Loading charges every directory it parses, refused ones too, so the check counts what loading counts.
-    other_charges = sum(charge for directory, charge in budget.parse_charges.items() if directory != name)
-    if other_charges + skill_parse_charge(markdown, changed) > MAX_WORKSPACE_FRONTMATTER_BYTES:
-        msg = (
-            f"This change would put the workspace's skill frontmatter over its {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} "
-            "KiB parse budget, and skill loading would skip some; move detail from frontmatter into skill bodies."
-        )
-        raise SkillEditError(msg)
+    # Loading charges every directory it measures, refused ones too, so the check counts what loading counts.
+    overrun = workspace_skill_budget(skills_root).overrun_after(
+        name,
+        prompt_bytes=skill_prompt_bytes(changed) if changed is not None else None,
+        read=len(markdown.encode()),
+        parse=skill_parse_charge(markdown, changed),
+    )
+    if overrun is not None:
+        raise SkillEditError(_OVERRUN_REFUSALS[overrun])
 
 
 def write_skill_file(
@@ -406,7 +419,7 @@ def write_skill_file(
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False, learner=learner)
-            _require_prompt_budget(skills_root, name, content, skill_fd=skill_fd)
+            _require_workspace_budgets(skills_root, name, content, skill_fd=skill_fd)
         elif current is None:
             if support_entry_count(skill_fd, directory) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
                 msg = (
@@ -414,7 +427,13 @@ def write_skill_file(
                     "offers; extend an existing file instead."
                 )
                 raise SkillEditError(msg)
-            _require_prompt_budget(skills_root, name, markdown.content, skill_fd=skill_fd, added=(directory, filename))
+            _require_workspace_budgets(
+                skills_root,
+                name,
+                markdown.content,
+                skill_fd=skill_fd,
+                added=(directory, filename),
+            )
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
@@ -497,10 +516,9 @@ def _write_keeping_mode(directory_fd: int, filename: str, content: str) -> None:
 
 def _record_patch(root_fd: int, name: str) -> None:
     now = datetime.now(UTC)
-    update_skill_usage(
+    update_skill_usages(
         root_fd,
-        name,
-        lambda usage: usage.model_copy(update={"patch_count": usage.patch_count + 1, "last_patched_at": now}),
+        {name: lambda usage: usage.model_copy(update={"patch_count": usage.patch_count + 1, "last_patched_at": now})},
     )
 
 

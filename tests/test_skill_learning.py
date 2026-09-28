@@ -56,7 +56,6 @@ from mindroom.tool_system.workspace_skills import (
     forget_missing_skill_usage,
     open_skills_root,
     record_skill_use,
-    update_skill_usage,
     update_skill_usages,
 )
 from mindroom.usage_stats import collect_admin_usage
@@ -499,10 +498,9 @@ def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
     _write_skill(root, "adopted", LEARNED.replace("deploy-checks", "adopted"))
     _write_skill(root, "handwritten", HANDWRITTEN)
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "deploy-checks",
-            lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=45)}),
+            {"deploy-checks": lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=45)})},
         )
 
     assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks"]
@@ -1137,10 +1135,13 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
         learner=True,
     )
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "old-habit",
-            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=31)}),
+            {
+                "old-habit": lambda usage: usage.model_copy(
+                    update={"created_at": datetime.now(UTC) - timedelta(days=31)},
+                ),
+            },
         )
     send = AsyncMock(return_value=object())
     with (
@@ -1325,10 +1326,13 @@ def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
     (root / "binary" / "SKILL.md").write_bytes(b"\xff\xfe")
     _write_skill(root, "tagged", "---\nname: tagged\ndescription: Mine\nflag: !!bool maybe\n---\nBody\n")
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "deploy-checks",
-            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=45)}),
+            {
+                "deploy-checks": lambda usage: usage.model_copy(
+                    update={"created_at": datetime.now(UTC) - timedelta(days=45)},
+                ),
+            },
         )
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == ["deploy-checks"]
 
@@ -1527,10 +1531,13 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, des
     pinned = LEARNED.replace("learned: true", "pinned: true").replace("Use when deploying the web service", description)
     (root / "deploy-checks/SKILL.md").write_text(pinned)
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "deploy-checks",
-            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+            {
+                "deploy-checks": lambda usage: usage.model_copy(
+                    update={"created_at": datetime.now(UTC) - timedelta(days=90)},
+                ),
+            },
         )
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
@@ -1609,10 +1616,9 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
             learner=True,
         )
         with open_skills_root(root) as root_fd:
-            update_skill_usage(
+            update_skill_usages(
                 root_fd,
-                name,
-                lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=90)}),
+                {name: lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=90)})},
             )
     assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks", "old-habit"]
     (archived,) = (root / ".archive").glob("deploy-checks--*")
@@ -1712,10 +1718,13 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
         learner=True,
     )
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "old-habit",
-            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+            {
+                "old-habit": lambda usage: usage.model_copy(
+                    update={"created_at": datetime.now(UTC) - timedelta(days=90)},
+                ),
+            },
         )
     reached = threading.Event()
     real_archive, real_create = runner_module.archive_unused_skills, library.create_skill
@@ -2762,6 +2771,58 @@ def test_skill_manage_counts_the_frontmatter_of_refused_skills(tmp_path: Path) -
     assert not (root / "deploy-checks").exists()
 
 
+def test_skill_manage_changes_nothing_loading_skips_in_a_workspace_already_past_a_budget(tmp_path: Path) -> None:
+    """Loading stops at a budget written past by hand, so only a skill it reaches may change, and only without growing."""
+    root = tmp_path / "skills"
+    names = [f"s-{index:03d}" for index in range(130)]
+    for name in names:
+        # Descriptions up to 1024 characters are allowed, so ordinary hand-written skills can fill the budget.
+        _write_skill(root, name, f"---\nname: {name}\ndescription: {'d' * 1000}\n---\nSteps to follow.\n")
+    loaded = [skill.name for skill in workspace_skills_module.load_workspace_skills(root)]
+    assert names[0] in loaded
+    assert names[-1] not in loaded
+    with pytest.raises(library.SkillEditError, match="already past a skill loading budget"):
+        library.create_skill(
+            root,
+            "zz-new",
+            HANDWRITTEN.replace("handwritten", "zz-new"),
+            reserved_names=frozenset(),
+            learner=False,
+        )
+    for name, change in ((names[0], "Steps to follow, carefully."), (names[-1], "Steps.")):
+        current = library.read_skill_file(root, name)
+        assert current is not None
+        with pytest.raises(library.SkillEditError, match="already past a skill loading budget"):
+            library.write_skill_file(
+                root,
+                name,
+                "SKILL.md",
+                current.content.replace("Steps to follow.", change),
+                expected_digest=current.digest,
+                learner=False,
+            )
+    current = library.read_skill_file(root, names[0])
+    assert current is not None
+    shrunk = current.content.replace("Steps to follow.", "Steps.")
+    library.write_skill_file(root, names[0], "SKILL.md", shrunk, expected_digest=current.digest, learner=False)
+    assert (root / names[0] / "SKILL.md").read_text() == shrunk
+
+
+def test_skill_manage_refuses_a_change_past_the_read_budget(tmp_path: Path) -> None:
+    """Loading stops once it has read more than its budget, refused files included, so a change that would cross it is refused."""
+    root = tmp_path / "skills"
+    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
+    size = (workspace_skills_module.MAX_WORKSPACE_SKILL_READ_BYTES - 50_000) // 16
+    refused = f"---\nname: refused\ndescription: d\nnote: {'n' * cap}\n---\n"
+    for index in range(16):
+        _write_skill(root, f"a-{index:02d}", refused + "x" * (size - len(refused)))
+    grown = LEARNED.replace("1. Run the smoke test.", "x" * 60_000)
+    with pytest.raises(library.SkillEditError, match=r"SKILL\.md files over"):
+        library.create_skill(root, "deploy-checks", grown, reserved_names=frozenset(), learner=True)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    assert [skill.name for skill in workspace_skills_module.load_workspace_skills(root)] == ["deploy-checks"]
+
+
 def test_the_catalog_reads_the_usage_file_once(tmp_path: Path) -> None:
     """Ownership comes from one read of the usage file, however many workspace skills load."""
     config, paths = _learner(tmp_path)
@@ -2837,7 +2898,7 @@ def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
         # The learned flag makes a skill the learner's without skill_manage, which refuses the one past the count.
         _write_skill(root, name, LEARNED.replace("deploy-checks", name))
         with open_skills_root(root) as root_fd:
-            update_skill_usage(root_fd, name, lambda usage: usage.model_copy(update={"created_at": old}))
+            update_skill_usages(root_fd, {name: lambda usage: usage.model_copy(update={"created_at": old})})
     archived = library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
     assert len(archived) == count
     assert (root / f"s-{count:03d}").exists()
@@ -2873,7 +2934,7 @@ def test_ownership_reads_stay_within_the_frontmatter_budget(
         return real_json5(text)
 
     # As if loading had measured small files, which worker code then replaced.
-    measured = workspace_skills_module._WorkspaceSkillBudget(dict.fromkeys(names, 0), {})
+    measured = workspace_skills_module._WorkspaceSkillBudget(prompt_bytes=dict.fromkeys(names, 0))
     with (
         patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", yaml_counted),
         patch.object(workspace_skills_module.json5, "loads", json5_counted),
@@ -2910,7 +2971,7 @@ def test_ownership_reads_stay_within_the_read_budget(tmp_path: Path, reader: str
             read.append(len(data))
         return data
 
-    measured = workspace_skills_module._WorkspaceSkillBudget(dict.fromkeys(names, 0), {})
+    measured = workspace_skills_module._WorkspaceSkillBudget(prompt_bytes=dict.fromkeys(names, 0))
     with (
         patch.object(workspace_skills_module, "read_regular_file_within_root", counted),
         patch.object(library, "workspace_skill_budget", return_value=measured),
@@ -2921,7 +2982,7 @@ def test_ownership_reads_stay_within_the_read_budget(tmp_path: Path, reader: str
             library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
     assert (
         sum(read)
-        <= workspace_skills_module._MAX_WORKSPACE_SKILL_READ_BYTES + workspace_skills_module.MAX_SKILL_FILE_BYTES
+        <= workspace_skills_module.MAX_WORKSPACE_SKILL_READ_BYTES + workspace_skills_module.MAX_SKILL_FILE_BYTES
     )
 
 
@@ -3075,10 +3136,13 @@ async def test_a_chat_skill_edit_waits_for_archival_to_move_the_library(tmp_path
         learner=True,
     )
     with open_skills_root(root) as root_fd:
-        update_skill_usage(
+        update_skill_usages(
             root_fd,
-            "old-habit",
-            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+            {
+                "old-habit": lambda usage: usage.model_copy(
+                    update={"created_at": datetime.now(UTC) - timedelta(days=90)},
+                ),
+            },
         )
     reached, release = threading.Event(), threading.Event()
     real_archive = runner_module.archive_unused_skills
