@@ -732,6 +732,36 @@ async def test_redacted_arguments_keep_timed_approval(
         await manager.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("command", "shown"),
+    [
+        ("export TOKEN=abc; rm -rf ~/important", "export TOKEN=***redacted***; rm -rf ~/important"),
+        ("rm -rf ~/important # 'token:' ", "rm -rf ~/important # 'token:' "),
+    ],
+)
+@pytest.mark.asyncio
+async def test_redaction_keeps_commands_after_a_secret_visible(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    command: str,
+    shown: str,
+) -> None:
+    """The approver sees every command that follows a secret, and the card stays approvable."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "visible", command=command)
+        stored = await journal.principal("router@shared").pending_approval_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert stored is not None
+        assert stored.card["content"]["arguments"] == {"command": shown}
+        assert stored.card["content"].get("approvable", True) is True
+    finally:
+        await manager.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_arguments_beyond_redaction_depth_cannot_be_approved(
     journal_database: Callable[[], EventJournalStore],

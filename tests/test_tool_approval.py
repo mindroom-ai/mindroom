@@ -1764,6 +1764,15 @@ def test_approval_arguments_preview_detects_truncation_below_literal_marker_key(
     assert truncated is True
 
 
+def test_full_event_arguments_keep_commands_after_a_secret_visible() -> None:
+    arguments = {"command": "export TOKEN=abc; rm -rf ~/important", "content": "x" * 10_000}
+
+    full = _build_full_event_arguments(arguments)
+
+    assert full is not None
+    assert full["command"] == "export TOKEN=***redacted***; rm -rf ~/important"
+
+
 def test_full_event_arguments_returns_complete_payload() -> None:
     arguments = {"content": "x" * 10_000, "path": "notes.txt"}
 

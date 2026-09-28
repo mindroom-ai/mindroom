@@ -110,7 +110,7 @@ def _json_preview_length(value: object) -> int:
 def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     if _json_preview_length(value) <= max_length:
         return value
-    return sanitize_failure_text(_compact_preview_text(value), max_length=max_length)
+    return sanitize_failure_text(_compact_preview_text(value), max_length=max_length, precise_assignments=True)
 
 
 def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
@@ -143,7 +143,7 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
 
 
 def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    sanitized = sanitize_failure_value(arguments)
+    sanitized = sanitize_failure_value(arguments, precise_assignments=True)
     sanitizer_truncated = _contains_sanitizer_truncation(arguments, sanitized)
     if not isinstance(sanitized, dict):
         wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
@@ -175,7 +175,7 @@ def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | N
     """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
     if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
-    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, precise_assignments=True))
     if _contains_sanitizer_truncation(arguments, sanitized):
         return None
     return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None

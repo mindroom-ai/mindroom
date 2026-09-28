@@ -61,11 +61,11 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Precise redaction ends a value at whitespace and shell syntax so text after the secret stays visible;
 # escaped characters stay inside the token so an escaped quote cannot expose the rest of a secret.
-_PRECISE_VALUE_TOKEN = r"(?:\\.|[^\s,&)\]}\"';|<>`(\\])+"
-_PRECISE_VALUE_TOKEN_PATTERN = re.compile(_PRECISE_VALUE_TOKEN)
+_PRECISE_VALUE_REGEX = r"(?:\\.|[^\s,&)\]}\"';|<>`(\\])+"
+_PRECISE_VALUE_TOKEN_PATTERN = re.compile(_PRECISE_VALUE_REGEX)
 _NEXT_LINE_INDENT_PATTERN = re.compile(r"(?:\r\n|\r|\n)[^\S\r\n]*")
 _AUTHORIZATION_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
-_AUTHORIZATION_CREDENTIAL_PATTERN = re.compile(rf"[^\S\r\n]+(?P<credential>{_PRECISE_VALUE_TOKEN})")
+_AUTHORIZATION_CREDENTIAL_PATTERN = re.compile(rf"[^\S\r\n]+(?P<credential>{_PRECISE_VALUE_REGEX})")
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
