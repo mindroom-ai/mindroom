@@ -119,6 +119,12 @@ _BRIDGE_CREDENTIAL_ARGS = {
     ],
     "slack": ["--app-token", "slack-app-for-tests", "--bot-token", "slack-bot-for-tests", "--team-id", "T0TEST"],
 }
+# Levels each bridge's config loader accepts: legacy mautrix-telegram and bridgev2 mautrix-slack.
+_BRIDGE_PERMISSION_LEVELS = {
+    "telegram": {"relaybot", "user", "puppeting", "full", "admin"},
+    "slack": {"block", "relay", "commands", "user", "admin"},
+}
+_BRIDGE_RELAY_LEVEL = {"telegram": "relaybot", "slack": "relay"}
 
 
 def _add_bridge(
@@ -144,7 +150,7 @@ def test_added_bridge_grants_admin_only_to_the_designated_operator(
     monkeypatch: pytest.MonkeyPatch,
     bridge_type: str,
 ) -> None:
-    """Self-registered homeserver accounts, including an unreserved @admin, must get only relay access."""
+    """Self-registered homeserver accounts, including an unreserved @admin, get only the bridge's relay level."""
     credential_args = _BRIDGE_CREDENTIAL_ARGS[bridge_type]
     result = _add_bridge(
         bridge_manager,
@@ -157,8 +163,11 @@ def test_added_bridge_grants_admin_only_to_the_designated_operator(
     )
 
     assert result.exit_code == 0, result.output
-    config = yaml.safe_load((tmp_path / "bridges" / bridge_type / "data" / "config.yaml").read_text())
-    assert config["bridge"]["permissions"] == {"*": "relaybot", _BRIDGE_ADMIN: "admin"}
+    config_file = tmp_path / "bridges" / bridge_type / "data" / "config.yaml"
+    permissions = yaml.safe_load(config_file.read_text())["bridge"]["permissions"]
+    assert permissions == {"*": _BRIDGE_RELAY_LEVEL[bridge_type], _BRIDGE_ADMIN: "admin"}
+    assert set(permissions.values()) <= _BRIDGE_PERMISSION_LEVELS[bridge_type]
+    assert config_file.stat().st_mode & 0o777 == 0o600
     registry = (tmp_path / "bridge_instances.json").read_text()
     assert all(value not in registry for value in credential_args[1::2])
 
@@ -182,3 +191,25 @@ def test_bridge_add_rejects_an_admin_that_is_not_a_matrix_user_id(
     assert result.exit_code == 1
     assert not (tmp_path / "bridges").exists()
     assert not (tmp_path / "bridge_instances.json").exists()
+
+
+def test_registration_rewrite_keeps_appservice_tokens_owner_only(bridge_manager: ModuleType, tmp_path: Path) -> None:
+    """The registration holds the homeserver and appservice tokens, so it must not stay world-readable."""
+    registration_file = tmp_path / "registration.yaml"
+    registration_file.write_text("id: telegram\nas_token: as-token-for-tests\nurl: http://localhost:29317\n")
+    registration_file.chmod(0o644)
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type="telegram",
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
+
+    bridge_manager._point_registration_at_bridge_container(bridge, registration_file)
+
+    assert yaml.safe_load(registration_file.read_text()) == {
+        "id": "telegram",
+        "as_token": "as-token-for-tests",
+        "url": "http://alpha-telegram-bridge:29317",
+    }
+    assert registration_file.stat().st_mode & 0o777 == 0o600

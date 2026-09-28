@@ -99,6 +99,8 @@ class BridgeRegistry(BaseModel):
 
 
 MATRIX_USER_ID_PATTERN = re.compile(r"@[^:\s]+:\S+")
+# Lowest permission level of each bridge; mautrix-telegram (legacy) and mautrix-slack (bridgev2) name it differently.
+RELAY_PERMISSION_LEVELS = {BridgeType.TELEGRAM: "relaybot", BridgeType.SLACK: "relay"}
 
 # Bridge template configurations
 BRIDGE_TEMPLATES = {
@@ -121,6 +123,14 @@ BRIDGE_TEMPLATES = {
         "required_credentials": ["domain", "smtp_host", "smtp_port"],
     },
 }
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """Write a secret-bearing file that only its owner can read, whatever the umask or its previous mode."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(content)
 
 
 def load_registry() -> BridgeRegistry:
@@ -337,7 +347,8 @@ def _generate_bridge_config(bridge: BridgeConfig, credentials: dict[str, Any], a
         config_data["homeserver"]["address"] = bridge.matrix_server
         config_data["homeserver"]["domain"] = bridge.matrix_domain
     if admin_user_id is not None:
-        config_data.setdefault("bridge", {})["permissions"] = {"*": "relaybot", admin_user_id: "admin"}
+        relay_level = RELAY_PERMISSION_LEVELS[bridge.bridge_type]
+        config_data.setdefault("bridge", {})["permissions"] = {"*": relay_level, admin_user_id: "admin"}
 
     # Add credentials
     if bridge.bridge_type == BridgeType.TELEGRAM and "telegram" in config_data:
@@ -349,8 +360,8 @@ def _generate_bridge_config(bridge: BridgeConfig, credentials: dict[str, Any], a
         config_data["slack"]["bot_token"] = credentials.get("bot_token", "")
         config_data["slack"]["team_id"] = credentials.get("team_id", "")
 
-    with config_file.open("w") as f:
-        yaml.dump(config_data, f, default_flow_style=False)
+    # The config holds the platform credentials.
+    _write_private_file(config_file, yaml.dump(config_data, default_flow_style=False))
 
     bridge.config_file = str(config_file)
     return config_file
@@ -400,8 +411,7 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
     if reg_path not in config["app_service_config_files"]:
         config["app_service_config_files"].append(reg_path)
 
-    with synapse_config.open("w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+    _write_private_file(synapse_config, yaml.dump(config, default_flow_style=False))
 
     console.print("[green]✓[/green] Added to Synapse configuration")
     console.print(
@@ -445,7 +455,7 @@ def add(  # noqa: PLR0915
 
     template = BRIDGE_TEMPLATES[bridge_type]
 
-    # Every other account gets relay access only, because the instance homeserver may allow open registration.
+    # Every other account gets the relay level only, because the instance homeserver may allow open registration.
     admin_user_id = None
     if bridge_type in {BridgeType.TELEGRAM, BridgeType.SLACK}:
         admin_user_id = admin or typer.prompt("Bridge admin Matrix user ID (for example @alice:m-example.com)")
@@ -568,6 +578,14 @@ def add(  # noqa: PLR0915
     console.print(f"  ./bridge.py register {bridge_type} --instance {instance}")
 
 
+def _point_registration_at_bridge_container(bridge: BridgeConfig, registration_file: Path) -> None:
+    """Address the bridge by container name on the Docker network, keeping the appservice tokens owner-only."""
+    reg_data = yaml.safe_load(registration_file.read_text())
+    bridge_container = f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge"
+    reg_data["url"] = f"http://{bridge_container}:29317"
+    _write_private_file(registration_file, yaml.dump(reg_data, default_flow_style=False))
+
+
 @app.command()
 def register(
     bridge_type: BridgeType = typer.Argument(..., help="Bridge type to register"),
@@ -623,17 +641,7 @@ def register(
         process.terminate()
         subprocess.run(f"cd {bridge.data_dir} && docker compose down", shell=True, check=False)
 
-    # Update registration with correct URL (use container name for internal communication)
-    with registration_file.open() as f:
-        reg_data = yaml.safe_load(f)
-
-    # Use the bridge container name for internal Docker network communication
-    bridge_container = f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge"
-    reg_data["url"] = f"http://{bridge_container}:29317"
-
-    with registration_file.open("w") as f:
-        yaml.dump(reg_data, f, default_flow_style=False)
-
+    _point_registration_at_bridge_container(bridge, registration_file)
     bridge.registration_file = str(registration_file)
 
     # Register based on Matrix type

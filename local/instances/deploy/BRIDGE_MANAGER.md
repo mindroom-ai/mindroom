@@ -46,7 +46,7 @@ The `bridge.py` script provides a unified interface for managing Matrix bridges 
 - **BRIDGE_TYPE**: `telegram`, `slack`, or `email`
 - **Options**:
   - `--instance`: Target Mindroom instance (default: "default")
-  - `--admin`: Matrix user ID granted bridge `admin` for Telegram and Slack (prompted when omitted); every other account gets `relaybot` access
+  - `--admin`: Matrix user ID granted bridge `admin` for Telegram and Slack (prompted when omitted); every other account gets the lowest level (`relaybot` for Telegram, `relay` for Slack)
   - Bridge-specific credentials (e.g., `--api-id`, `--bot-token`)
 
 ### `register` - Register with Matrix Server

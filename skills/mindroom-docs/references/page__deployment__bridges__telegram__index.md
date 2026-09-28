@@ -25,10 +25,11 @@ Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, e
 When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration only; the bridge registry never stores them.
 The generated configuration grants bridge `admin` only to the Matrix user ID passed with `--admin`, which the command prompts for when omitted.
 Every other account gets `relaybot` access, because the deploy homeserver templates allow open registration and anyone could otherwise register a matching account.
-To let more users log in with their own Telegram accounts, add their Matrix user IDs with the `user` level under `bridge.permissions` in the generated configuration.
+To let more users log in with their own Telegram accounts, add their Matrix user IDs with the `puppeting` level (or `full`) under `bridge.permissions` in the generated configuration.
+The generated configuration and registration hold the Telegram credentials and appservice tokens, so the manager writes them owner-only.
 
 For Synapse, `bridge.py register` updates `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container.
-Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
+Manually expose the generated file at the configured `app_service_config_files` path, readable by the Synapse container's user (UID 1000) and nobody else, then restart Synapse.
 For Tuwunel, it generates the registration file and prints the manual admin-room steps; alternatively, run `./bridge.py register-with-matrix telegram --instance <instance>` after generation.
 
 ## Configure MindRoom
