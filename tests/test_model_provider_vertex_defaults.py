@@ -66,10 +66,12 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
     assert isinstance(model, MindroomVertexAIClaude)
     assert model.id == "claude-sonnet-5"
     assert model.region == expected_region
-    expected_project = (
-        "authored-project" if authored_region is not None and not replace_existing else "your-gcp-project-id"
-    )
-    assert model.native_compaction_endpoint() == f"{expected_endpoint}|{expected_project}|{expected_region}"
+    if authored_region is not None and not replace_existing:
+        assert model.project_id == "authored-project"
+        assert model.native_compaction_endpoint() == f"{expected_endpoint}|authored-project|{expected_region}"
+    else:
+        # The generated project ID is a starter placeholder, which counts as unset.
+        assert model.project_id is None
 
 
 @pytest.mark.parametrize(
