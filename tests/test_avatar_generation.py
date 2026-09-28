@@ -868,7 +868,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Matrix avatar sync should cover team-only rooms and the managed root space."""
+    """Matrix avatar sync covers team-only rooms and the root space, and retries recently failed stock downloads."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
@@ -924,11 +924,17 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
 
-    await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
+    failure_marker = runtime_paths.storage_root / "avatars" / "stock" / "commit-mind.failed"
+    failure_marker.parent.mkdir(parents=True)
+    failure_marker.touch()
+
+    await generate_avatars.set_room_avatars_in_matrix(runtime_paths)
 
     synced_targets = {(call.args[1], call.args[2].name) for call in set_room_avatar_from_file.await_args_list}
     assert ("!war:localhost", "war_room.png") in synced_targets
     assert ("!space:localhost", "root_space.png") in synced_targets
+    assert not failure_marker.exists()
     client.close.assert_awaited_once()
 
 

@@ -1080,12 +1080,14 @@ Every agent, team, and managed room gets a Matrix avatar by default.
 MindRoom uses the painted stock avatars from the [MindRoom assets repository](https://github.com/mindroom-ai/assets/blob/main/avatars/painted/README.md), and an agent named after one of them (for example `mind`, `code`, `research`, `writer`, or `email`) uses that picture.
 Any other agent or team receives a stable stock avatar chosen from its name.
 A room served by exactly one configured agent or team shows that entity's avatar, and any other room receives a stable stock avatar chosen from its key.
-The optional root Matrix Space shows the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images; wheel installs (`uvx`) lack bundled files and fall back to the stock `mind-logo` image.
+The optional root Matrix Space shows a workspace `avatars/spaces/root_space.png` when present, then the bundled `avatars/spaces/root_space.png` on source checkouts and Docker images, and otherwise the stock `mind-logo` image, which wheel installs (`uvx`) use because they lack bundled files.
 Images already bundled in the repository's `avatars/` directory (source checkouts and Docker images) are used directly.
 Other stock avatars are downloaded once from a pinned commit of the assets repository and cached under `<storage>/avatars/stock/`.
-Machines without internet access skip stock downloads and log a warning; failed downloads are retried daily.
+When a stock download fails, MindRoom logs one warning and does not retry that avatar for 24 hours, so offline machines are not slowed down on every start.
+The next avatar lookup after that window retries it, such as a restart or a config reload.
+Run `mindroom avatars sync` to retry immediately: it clears recent failures, retries room and root Space avatars, and lets the next start retry agent and team avatars.
 Avatars are only filled in when the Matrix profile or room has none, so pictures you set yourself are kept.
-To choose a picture, place a PNG at `avatars/<agents|teams|rooms>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
+To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 
 MindRoom can also generate custom avatars for agents, teams, rooms, and the optional root Matrix Space.
 Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.

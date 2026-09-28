@@ -527,20 +527,32 @@ def test_undecodable_images_raise_value_error(data: bytes) -> None:
         managed_avatars._normalized_png(data)
 
 
+def _failure_marker(runtime_paths: constants_mod.RuntimePaths, name: str) -> Path:
+    return _cache_path(runtime_paths, name).with_suffix(".failed")
+
+
+def _record_failure(runtime_paths: constants_mod.RuntimePaths, name: str, *, age_seconds: float = 0) -> Path:
+    marker = _failure_marker(runtime_paths, name)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    mtime = marker.stat().st_mtime - age_seconds
+    os.utime(marker, (mtime, mtime))
+    return marker
+
+
 @pytest.mark.asyncio
-async def test_failed_download_creates_negative_cache_marker(
+async def test_failed_download_creates_failure_marker(
     runtime_paths: constants_mod.RuntimePaths,
     downloads: _FakeDownloads,
 ) -> None:
-    """A failed download creates a marker file to skip retries for 24 hours."""
+    """A failed download warns once and records a marker that skips retries for 24 hours."""
     downloads.payload = httpx.ConnectError("offline")
 
     with capture_logs() as logs:
         path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
 
     assert path is None
-    marker = managed_avatars._negative_cache_marker(_cache_path(runtime_paths, "code"))
-    assert marker.is_file()
+    assert _failure_marker(runtime_paths, "code").is_file()
     assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
 
 
@@ -550,8 +562,7 @@ async def test_recent_failure_skips_download_quietly(
     downloads: _FakeDownloads,
 ) -> None:
     """A download that failed recently is not retried and does not warn again on later starts."""
-    cache_path = _cache_path(runtime_paths, "code")
-    managed_avatars._record_download_failure(cache_path)
+    _record_failure(runtime_paths, "code")
 
     with capture_logs() as logs:
         first = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
@@ -565,20 +576,41 @@ async def test_recent_failure_skips_download_quietly(
 
 
 @pytest.mark.asyncio
-async def test_successful_download_clears_negative_cache_marker(
+async def test_expired_failure_retries_the_download(
     runtime_paths: constants_mod.RuntimePaths,
-    downloads: _FakeDownloads,  # noqa: ARG001
+    downloads: _FakeDownloads,
 ) -> None:
-    """A successful download after a failure clears the negative cache marker."""
-    cache_path = _cache_path(runtime_paths, "code")
-    managed_avatars._record_download_failure(cache_path)
-    marker = managed_avatars._negative_cache_marker(cache_path)
-    assert marker.is_file()
-    # Make the marker appear old enough to trigger a retry.
-    old_mtime = marker.stat().st_mtime - (25 * 3600)
-    os.utime(marker, (old_mtime, old_mtime))
+    """After 24 hours a failed download is retried once, and another failure warns again and restarts the window."""
+    marker = _record_failure(runtime_paths, "code", age_seconds=25 * 60 * 60)
+    downloads.payload = httpx.ConnectError("still offline")
+
+    with capture_logs() as logs:
+        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
+        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
+
+    assert downloads.names == ["code"]
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
+    assert managed_avatars._download_failed_recently(marker)
+
+    os.utime(marker, (marker.stat().st_mtime - 25 * 60 * 60,) * 2)
+    downloads.payload = _image_bytes()
 
     path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
 
-    assert path is not None
-    assert not marker.exists()
+    assert path == _cache_path(runtime_paths, "code")
+
+
+@pytest.mark.asyncio
+async def test_clearing_failures_retries_the_download_immediately(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """An explicit avatar sync clears recent failures so the next resolution downloads again."""
+    _record_failure(runtime_paths, "code")
+
+    managed_avatars.clear_failed_stock_downloads(runtime_paths)
+
+    path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+
+    assert path == _cache_path(runtime_paths, "code")
+    assert downloads.names == ["code"]
