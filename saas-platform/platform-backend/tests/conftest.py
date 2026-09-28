@@ -177,3 +177,16 @@ def reset_limiter():
     _mock_limiter.reset()
     yield
     _mock_limiter.reset()
+
+
+@pytest.fixture
+def stub_uninstall_cleanup():
+    """Stub the kubectl, Supabase, and OpenRouter side effects of uninstall_instance beyond Helm."""
+    from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
+
+    with (
+        patch("backend.services.provisioner_service.run_kubectl", new=AsyncMock(return_value=(0, "", ""))) as kubectl,
+        patch("backend.services.provisioner_service.ensure_supabase", return_value=MagicMock()),
+        patch("backend.services.provisioner_service.get_instance", return_value=None),
+    ):
+        yield kubectl

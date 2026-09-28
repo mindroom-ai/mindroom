@@ -1158,11 +1158,24 @@ class TestProvisionerEndpoints:
         assert "not found" in response.json()["detail"]
 
     def test_uninstall_instance_success(
-        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
+        self,
+        client: TestClient,
+        mock_helm: AsyncMock,
+        mock_kubectl: AsyncMock,
+        mock_update_status: Mock,
+        valid_auth_header: dict,
     ):
-        """Test uninstalling an instance successfully."""
-        # Make request
-        response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
+        """Uninstall removes the release, volumes, out-of-release Secrets, and the OpenRouter key."""
+        with (
+            patch("backend.services.provisioner_service.ensure_supabase", return_value=MagicMock()),
+            patch(
+                "backend.services.provisioner_service.get_instance", return_value={"openrouter_key_hash": "hash_123"}
+            ),
+            patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+            patch("backend.services.provisioner_service.delete_openrouter_key") as delete_key,
+            patch("backend.services.provisioner_service.update_instance") as update_instance,
+        ):
+            response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -1173,10 +1186,44 @@ class TestProvisionerEndpoints:
 
         # Verify helm was called
         mock_helm.assert_called_with(["uninstall", "instance-123", "--namespace=mindroom-instances"])
+        mock_kubectl.assert_has_calls(
+            [
+                call(
+                    [
+                        "delete",
+                        "pvc",
+                        "mindroom-storage-123",
+                        "synapse-storage-123",
+                        "--ignore-not-found",
+                        "--wait=false",
+                    ],
+                    namespace="mindroom-instances",
+                ),
+                call(
+                    [
+                        "delete",
+                        "secret",
+                        "mindroom-api-keys-123",
+                        "mindroom-primary-api-key-123",
+                        "mindroom-worker-auth-123",
+                        "--ignore-not-found",
+                        "--wait=false",
+                    ],
+                    namespace="mindroom-instances",
+                ),
+            ]
+        )
+        delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="hash_123")
+        assert update_instance.call_args[0][2]["openrouter_key_hash"] is None
         mock_update_status.assert_called_with(123, "deprovisioned")
 
     def test_uninstall_instance_already_uninstalled(
-        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
+        self,
+        client: TestClient,
+        mock_helm: AsyncMock,
+        mock_update_status: Mock,
+        valid_auth_header: dict,
+        stub_uninstall_cleanup: AsyncMock,  # noqa: ARG002
     ):
         """Test uninstalling an already uninstalled instance."""
         # Setup
