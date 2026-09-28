@@ -370,20 +370,34 @@ def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> s
     return model_creds.get("api_key") if model_creds else None
 
 
+# Credentials the provider model classes accept in place of ``api_key``.
+_ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("auth_token",),
+    "azure": ("azure_ad_token", "azure_ad_token_provider"),
+}
+
+
 def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
     """Return the provider service a configured model needs a key for when none resolves, else None.
 
-    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``,
-    then the per-model dashboard key, then the shared provider key (including its
-    env-var-named twin). Only providers that authenticate with one API key are checked.
+    Mirrors the key lookup in ``get_model_instance``: an explicit ``extra_kwargs.api_key``
+    (or a provider's alternative credential such as Anthropic's ``auth_token``), then the
+    per-model dashboard key, then the shared provider key (including its env-var-named
+    twin). Only providers that authenticate with one API key are checked, and unknown
+    model names are left to config validation.
     """
-    model_config = config.models[model_name]
+    model_config = config.models.get(model_name)
+    if model_config is None:
+        return None
     provider = canonical_provider(model_config.provider)
     if provider == "gemini":
         provider = "google"
     if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
         return None
-    if (model_config.extra_kwargs or {}).get("api_key") or _model_credential_api_key(model_name, runtime_paths):
+    extra_kwargs = model_config.extra_kwargs or {}
+    if any(extra_kwargs.get(name) for name in ("api_key", *_ALTERNATIVE_AUTH_KWARGS.get(provider, ()))):
+        return None
+    if _model_credential_api_key(model_name, runtime_paths):
         return None
     if get_api_key_for_provider(provider, runtime_paths=runtime_paths):
         return None

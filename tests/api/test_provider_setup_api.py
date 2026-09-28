@@ -101,6 +101,67 @@ def test_status_accepts_key_in_model_config(client: TestClient) -> None:
     assert client.get("/api/provider-setup/status").json() == {"missing": []}
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        {"provider": "anthropic", "id": "claude-sonnet-5", "extra_kwargs": {"auth_token": "anthropic-oauth-token"}},
+        {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_ad_token": "azure-ad-token"}},
+        {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_ad_token_provider": "token-provider"}},
+        {"provider": "bedrock_claude", "id": "anthropic.claude-sonnet-5"},
+        {"provider": "vertexai_claude", "id": "claude-sonnet-5"},
+        {"provider": "codex", "id": "gpt-6-astra"},
+        {"provider": "ollama", "id": "qwen3.8:27b"},
+    ],
+)
+def test_status_accepts_non_api_key_authentication(client: TestClient, model: dict[str, object]) -> None:
+    """Models authenticated by a token or a non-API-key runtime never ask for a provider key."""
+    _publish_config(
+        Config.model_validate(
+            {
+                "models": {"default": model},
+                "agents": {"mind": {"display_name": "Mind", "role": "assistant", "model": "default"}},
+            },
+        ),
+    )
+
+    assert client.get("/api/provider-setup/status").json() == {"missing": []}
+
+
+def _config_with_unknown_model_reference() -> Config:
+    """Config validation allows the router and agents to name a model missing from ``models``."""
+    return Config.model_validate(
+        {
+            "models": {"sonnet": {"provider": "openrouter", "id": "anthropic/claude-sonnet-5"}},
+            "agents": {"mind": {"display_name": "Mind", "role": "assistant", "model": "ghost"}},
+        },
+    )
+
+
+def test_status_skips_model_references_missing_from_models(client: TestClient) -> None:
+    """An unknown model reference (here the implicit router ``default``) never breaks the status check."""
+    _publish_config(_config_with_unknown_model_reference())
+
+    response = client.get("/api/provider-setup/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"missing": []}
+
+
+def test_connect_succeeds_with_model_references_missing_from_models(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving a verified key still reports success when config names an unknown model."""
+    _publish_config(_config_with_unknown_model_reference())
+    _mock_provider(monkeypatch, lambda _request: httpx.Response(200, json={"data": {}}))
+
+    response = client.post("/api/provider-setup/connect", json={"provider": "openrouter", "api_key": _OPENROUTER_KEY})
+
+    assert response.status_code == 200
+    assert response.json() == {"service": "openrouter", "missing": []}
+    assert _credentials(client).load_credentials("openrouter") == {"api_key": _OPENROUTER_KEY, "_source": "ui"}
+
+
 def test_status_ignores_unused_and_keyless_models(client: TestClient) -> None:
     """Unused models and providers without API keys never ask for setup."""
     config = _hosted_config()
