@@ -31,8 +31,7 @@ Pairing flows: the service supports device-initiated pairing (CLI starts at
 ``/v1/local-mindroom/pair/device/approve``, CLI polls at
 ``/v1/local-mindroom/pair/device/poll`` for credentials). Before approving,
 the browser reads ``/v1/local-mindroom/pair/device/inspect``, which names the
-address that started the session and a short device check derived from the
-client fingerprint, the same check ``mindroom connect`` prints. The legacy
+client and the address that started the session. The legacy
 browser-initiated flow (``/v1/local-mindroom/pair/start``,
 ``/v1/local-mindroom/pair/status``, ``/v1/local-mindroom/pair/complete``) is
 kept for one release to allow existing chat clients to migrate.
@@ -330,7 +329,6 @@ class DevicePairSessionOut(BaseModel):
 
     client_name: str
     client_ip: str | None
-    device_check: str
     created_at: datetime
     expires_at: datetime
     status: Literal["pending", "approved"]
@@ -1121,21 +1119,14 @@ def _find_device_session_unlocked(state: ProvisioningState, pair_code: str, now:
     return session
 
 
-def _device_check(fingerprint: str) -> str:
-    """Return the short install check that `mindroom connect` prints for the user to compare."""
-    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:8].upper()
-    return f"{digest[:4]}-{digest[4:]}"
-
-
 def _device_session_out(session: PairSession) -> DevicePairSessionOut:
-    if session.client_name is None or session.fingerprint is None:
+    if session.client_name is None:
         raise HTTPException(status_code=500, detail="Corrupt pair session")
     if session.status not in ("pending", "approved"):
         raise HTTPException(status_code=500, detail="Corrupt pair session")
     return DevicePairSessionOut(
         client_name=session.client_name,
         client_ip=session.client_ip,
-        device_check=_device_check(session.fingerprint),
         created_at=session.created_at,
         expires_at=session.expires_at,
         status=session.status,
@@ -1151,11 +1142,11 @@ async def start_device_pair(
 ) -> DevicePairStartResponse:
     """Start pairing from a local client; a signed-in browser user approves it later."""
     now = _now_utc()
-    client_ip = request.client.host if request.client else None
+    remote = request.client.host if request.client else "unknown"
     device_secret = secrets.token_urlsafe(32)
     async with state.lock:
         _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
-        _enforce_rate_limit_unlocked(state, key=f"pair:device:start:{client_ip}", limit=10, window_seconds=60)
+        _enforce_rate_limit_unlocked(state, key=f"pair:device:start:{remote}", limit=10, window_seconds=60)
         pair_code = _new_pair_code_unlocked(state)
         session = PairSession(
             id=secrets.token_urlsafe(18),
@@ -1167,7 +1158,7 @@ async def start_device_pair(
             device_secret_hash=_hash_token(device_secret),
             client_name=payload.client_name.strip(),
             fingerprint=payload.client_pubkey_or_fingerprint.strip(),
-            client_ip=client_ip,
+            client_ip=request.client.host if request.client else None,
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id

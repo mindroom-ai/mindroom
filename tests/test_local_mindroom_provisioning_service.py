@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
@@ -909,26 +908,6 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
     provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
 
 
-def test_cli_device_check_matches_the_approval_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The device check `mindroom connect` prints is the one the approval page shows for that install."""
-    _patch_openid_auth(monkeypatch)
-    fingerprint = cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml")
-
-    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.json"))) as client:
-        started = client.post(
-            "/v1/local-mindroom/pair/device/start",
-            json={"client_name": "devbox", "client_pubkey_or_fingerprint": fingerprint},
-        ).json()
-        inspected = client.post(
-            "/v1/local-mindroom/pair/device/inspect",
-            json={"pair_code": started["pair_code"]},
-            headers=ALICE_OPENID_HEADERS,
-        ).json()
-
-    assert inspected["device_check"] == cli_connect.device_check(fingerprint)
-    assert re.fullmatch(r"[0-9A-F]{4}-[0-9A-F]{4}", inspected["device_check"])
-
-
 def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generated pair code already held by a live session is replaced before it is handed out."""
     codes = iter(["AAAA-BBBB", "AAAA-BBBB", "CCCC-DDDD"])
@@ -1668,7 +1647,6 @@ def test_legacy_state_loads_device_sessions_without_client_ip(tmp_path: Path, mo
 
     assert inspected.status_code == 200
     assert inspected.json()["client_ip"] is None
-    assert inspected.json()["device_check"] == provisioning._device_check("sha256:abc123")
 
 
 def _install_homeserver(

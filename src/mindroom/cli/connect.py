@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 __all__ = [
     "DevicePairSession",
     "PairCompleteResult",
-    "device_check",
     "local_client_fingerprint",
     "pair_local_install",
     "persist_local_provisioning_env",
@@ -415,15 +414,6 @@ def local_client_fingerprint(*, config_path: Path) -> str:
     return f"sha256:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}"
 
 
-def device_check(client_fingerprint: str) -> str:
-    """Return the short check the approval page shows for this fingerprint.
-
-    Kept identical to scripts/local_mindroom_provisioning_service.py by a contract test.
-    """
-    digest = hashlib.sha256(client_fingerprint.encode("utf-8")).hexdigest()[:8].upper()
-    return f"{digest[:4]}-{digest[4:]}"
-
-
 def _print_exports(
     console: Console,
     provisioning_url: str,
@@ -485,14 +475,12 @@ def pair_local_install(
         provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
     ).strip()
     name = (client_name or "").strip() or socket.gethostname()
-    fingerprint = local_client_fingerprint(config_path=runtime_paths.config_path)
-    check = device_check(fingerprint)
 
     def announce(session: DevicePairSession) -> None:
         console.print("\nConnect this machine to MindRoom:")
         console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
         console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
-        console.print(f"  Confirm the page shows device check {check}", markup=False)
+        console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
         if console.is_terminal:
             console.print(render_qr(session.approve_url), markup=False, highlight=False)
         console.print("Waiting for approval (Ctrl+C to cancel)…")
@@ -502,7 +490,7 @@ def pair_local_install(
     result = run_device_pairing(
         provisioning_url=resolved_url,
         client_name=name,
-        client_fingerprint=fingerprint,
+        client_fingerprint=local_client_fingerprint(config_path=runtime_paths.config_path),
         matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
         announce=announce,
         post_request=post_request,

@@ -63,8 +63,7 @@ uvx mindroom run
 On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-MindRoom also prints a device check such as `Confirm the page shows device check AB12-CD34`.
-The approval page shows the address that requested the pairing and its device check; approve only when the device check matches the one your terminal printed, because a link someone else sends you belongs to their machine.
+Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
 
 After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
 In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
