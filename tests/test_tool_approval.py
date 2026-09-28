@@ -46,6 +46,7 @@ from mindroom.event_journal import (
     delivery_transaction_id,
 )
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.redaction import MAX_REDACTION_DEPTH
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -1771,6 +1772,40 @@ def test_full_event_arguments_keep_commands_after_a_secret_visible() -> None:
 
     assert full is not None
     assert full["command"] == "export TOKEN=***redacted***; rm -rf ~/important"
+
+
+def _nested_command(levels: int) -> object:
+    nested: object = "rm -rf ~/important"
+    for _ in range(levels):
+        nested = {"child": nested}
+    return nested
+
+
+def test_full_event_arguments_stop_exactly_at_the_redaction_depth() -> None:
+    # The command string sits one level below "command", so 30 wrappers put it at depth 31.
+    deepest_complete = {"command": _nested_command(MAX_REDACTION_DEPTH - 2)}
+    first_cut_off = {"command": _nested_command(MAX_REDACTION_DEPTH - 1)}
+
+    assert _build_full_event_arguments(deepest_complete) == deepest_complete
+    assert _build_full_event_arguments(first_cut_off) is None
+
+
+def test_full_event_arguments_ignore_a_literal_truncation_marker_in_content() -> None:
+    arguments = {"content": "password=abc\n... [truncated]", "pad": "z" * 3_000}
+
+    full = _build_full_event_arguments(arguments)
+
+    assert full == {"content": "password=***redacted***\n... [truncated]", "pad": "z" * 3_000}
+
+
+def test_shortened_preview_does_not_redact_already_redacted_values_again() -> None:
+    arguments = {"step": {"script": "password=abc\n./payload.sh\n" + "y" * 1_500}, "mode": "run"}
+
+    preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert truncated is True
+    assert preview["step"].startswith('{"script": "password=***redacted***\\n./payload.sh\\n')
+    assert preview["step"].endswith("... [truncated]")
 
 
 def test_full_event_arguments_returns_complete_payload() -> None:

@@ -1014,42 +1014,76 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
             f"Authorization: Token {REDACTED}; rm -rf ~",
             f"Authorization: {REDACTED}",
         ),
+        ("token= ./payload.sh", "token= ./payload.sh", f"token= {REDACTED}"),
+        ("token=\n./payload.sh", "token=\n./payload.sh", REDACTION_FAILED),
+        ("echo token:\n./payload.sh", "echo token:\n./payload.sh", REDACTION_FAILED),
+        ("authorization=Custom ./payload.sh", f"authorization={REDACTED} ./payload.sh", f"authorization={REDACTED}"),
+        (r"eval echo token:\;./payload.sh", r"eval echo token:\;./payload.sh", f"eval echo token:{REDACTED}"),
+        (
+            "echo Authorization: Bearer\n./payload.sh",
+            "echo Authorization: Bearer\n./payload.sh",
+            f"echo Authorization: Bearer\n{REDACTED}",
+        ),
+        (
+            "curl http://a@b;./payload.sh;@example.com",
+            "curl http://***@b;./payload.sh;@example.com",
+            "curl http://***@b;./payload.sh;@example.com",
+        ),
+        (
+            "curl http://u:$(./payload.sh)@example.com",
+            "curl http://u:$(./payload.sh)@example.com",
+            "curl http://u:$(./payload.sh)@example.com",
+        ),
+        (
+            "curl http://h/?token=abc;./payload.sh",
+            f"curl http://h/?token={REDACTED};./payload.sh",
+            f"curl http://h/?token={REDACTED}",
+        ),
     ],
 )
-def test_precise_assignment_redaction_keeps_text_after_the_secret_visible(
+def test_precise_redaction_keeps_text_after_the_secret_visible(
     value: str,
     expected_precise: str,
     expected_default: str,
 ) -> None:
-    """Approval previews must show commands that follow a secret; default redaction stays unchanged."""
-    assert redact_sensitive_text(value, precise_assignments=True) == expected_precise
+    """Approval previews must show commands next to a secret; default redaction stays unchanged."""
+    assert redact_sensitive_text(value, precise=True) == expected_precise
     assert redact_sensitive_text(value) == expected_default
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("password=\n  hunter2\nmode=safe", f"password=\n  {REDACTED}\nmode=safe"),
-        ('config = {"api_key":\n    "sk-live"}\nprint(1)', f'config = {{"api_key":\n    "{REDACTED}"}}\nprint(1)'),
         (r'{"password": "hun\"ter2", "mode": "safe"}', f'{{"password": "{REDACTED}", "mode": "safe"}}'),
+        ('password="it\'s-secret"', f'password="{REDACTED}"'),
+        ('password="a,b]c}"', f'password="{REDACTED}"'),
+        ("api_key = hunter2", f"api_key = {REDACTED}"),
         ("Authorization: Basic dXNlcjpwYXNz", f"Authorization: Basic {REDACTED}"),
+        ("HTTP_AUTHORIZATION: Basic dXNlcjpwYXNz", f"HTTP_AUTHORIZATION: Basic {REDACTED}"),
+        ("X-Authorization: Token abcdef", f"X-Authorization: Token {REDACTED}"),
         ("Authorization: Bearer abc.def", f"Authorization: Bearer {REDACTED}"),
         ("Authorization: Basic", "Authorization: Basic"),
+        ("curl 'https://u:pw@h/x?a=1&token=abc'", f"curl 'https://u:***@h/x?a=1&token={REDACTED}'"),
     ],
 )
-def test_precise_assignment_redaction_still_hides_the_secret_without_failing(value: str, expected: str) -> None:
-    """Values the default redactor refuses or keeps whole are reduced to their secret token instead."""
-    assert redact_sensitive_text(value, precise_assignments=True) == expected
+def test_precise_redaction_still_hides_the_secret(value: str, expected: str) -> None:
+    """Precise redaction reduces a secret to one hidden word instead of exposing it."""
+    assert redact_sensitive_text(value, precise=True) == expected
 
 
-def test_precise_assignment_redaction_applies_to_nested_data() -> None:
-    """Structured redaction passes the precise mode to every nested string."""
+def test_precise_redaction_applies_to_nested_data() -> None:
+    """Structured redaction passes the precise mode to every nested string, including query arguments."""
     redacted = redact_sensitive_data(
-        {"command": "export TOKEN=abc; rm -rf ~", "steps": [{"run": "password=hunter2 && make deploy"}]},
-        precise_assignments=True,
+        {
+            "command": "export TOKEN=abc; rm -rf ~",
+            "steps": [{"run": "password=hunter2 && make deploy"}],
+            "query": "SELECT * FROM keys WHERE api_key='x'; DROP TABLE users",
+        },
+        precise=True,
     )
 
     assert redacted == {
         "command": f"export TOKEN={REDACTED}; rm -rf ~",
         "steps": [{"run": f"password={REDACTED} && make deploy"}],
+        "query": f"SELECT * FROM keys WHERE api_key='{REDACTED}'; DROP TABLE users",  # noqa: S608
     }

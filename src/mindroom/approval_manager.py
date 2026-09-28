@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
-from mindroom.redaction import redact_sensitive_data
+from mindroom.redaction import MAX_REDACTION_DEPTH, redact_sensitive_data
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
@@ -108,9 +108,11 @@ def _json_preview_length(value: object) -> int:
 
 
 def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
+    # The value is already redacted; redacting its JSON text again could hide text the first pass kept.
     if _json_preview_length(value) <= max_length:
         return value
-    return sanitize_failure_text(_compact_preview_text(value), max_length=max_length, precise_assignments=True)
+    text = _compact_preview_text(value)
+    return text[: max_length - len(_SANITIZER_TRUNCATION_MARKER)] + _SANITIZER_TRUNCATION_MARKER
 
 
 def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
@@ -143,7 +145,7 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
 
 
 def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    sanitized = sanitize_failure_value(arguments, precise_assignments=True)
+    sanitized = sanitize_failure_value(arguments, precise=True)
     sanitizer_truncated = _contains_sanitizer_truncation(arguments, sanitized)
     if not isinstance(sanitized, dict):
         wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
@@ -171,13 +173,24 @@ def _full_arguments_json_bytes(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
 
 
+def _nests_beyond_redaction_depth(value: object, depth: int = 0) -> bool:
+    """Return whether redaction would cut part of ``value`` off for nesting too deeply."""
+    if depth >= MAX_REDACTION_DEPTH:
+        return True
+    if isinstance(value, Mapping):
+        return any(_nests_beyond_redaction_depth(item, depth + 1) for item in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(_nests_beyond_redaction_depth(item, depth + 1) for item in value)
+    return False
+
+
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
-    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES or _nests_beyond_redaction_depth(
+        arguments,
+    ):
         return None
-    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, precise_assignments=True))
-    if _contains_sanitizer_truncation(arguments, sanitized):
-        return None
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments, precise=True))
     return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
 
 
