@@ -473,7 +473,7 @@ Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses 
 Checkout grants a plan's trial only to a Stripe customer who never had a trial, so cancelling and checking out again starts a paid subscription.
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
-Checkout sessions that grant a trial expire after 35 minutes, and when a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice.
+When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
 The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
@@ -484,22 +484,26 @@ The backend runs the scheduler in every replica, so keep the platform backend at
 ### Account Deletion
 
 A customer's deletion request (`POST /my/gdpr/request-deletion`) first sets every renewing Stripe subscription of its customer to end at the end of its current billing period (`cancel_at_period_end`) and marks it with the `mindroom_ends_for_account_deletion` metadata key.
-Subscriptions the customer had already set to end keep their own schedule, and `incomplete` or `paused` ones, which bill nothing, are left for teardown.
-If Stripe fails, the request returns `502`, the subscriptions it had already changed are set back, and the account is not deleted.
+Subscriptions the customer had already set to end, at their period end or on a chosen date (`cancel_at`), keep their own schedule.
+`incomplete` and `paused` subscriptions have no paid period to finish, so the request cancels them at once, after every change that can be undone.
+If Stripe fails, the request returns `502`, the subscriptions it had already set to end are set back, and the account is not deleted.
 It then marks the account pending deletion and stops its instances with their platform OpenRouter keys disabled; the response says so when stopping failed and will be retried.
 An account pending deletion never runs instances, whatever Stripe reports, so its instances stay stopped during the grace period even while its subscription is still paid, and the nightly run keeps them stopped even while Stripe is unreachable.
-Such an account cannot provision or start instances, open a checkout, or open the billing portal (`409`) until the deletion is cancelled.
-Each nightly run sets the renewing subscriptions of accounts still inside their grace period to end with their period again, which also covers accounts whose deletion was requested before this behavior shipped.
+Such an account cannot provision or start instances, open a checkout or the billing portal, or cancel or reactivate its subscription (`409`) until the deletion is cancelled, and an instance being provisioned for it is kept stopped.
+Each nightly run sets the renewing subscriptions of accounts still inside their grace period to end with their period again, which also covers accounts whose deletion was requested before this behavior shipped; it skips an account the customer restored meanwhile and undoes its own change when the restore lands while it runs.
 Cancelling the deletion (`POST /my/gdpr/cancel-deletion`) restores only the account and lets the marked subscriptions renew again; its instances restart once a subscription is entitled, which for a subscription whose period ended meanwhile means a new checkout.
+A customer who cancels or reactivates a subscription through `/my/subscription/cancel` or `/my/subscription/reactivate` also clears the marker, so a later cancelled deletion never renews a subscription the customer chose to end.
 After the 7-day grace period, cancelling returns `409`, because `restore_account` refuses by the database clock.
 The nightly job then claims the account with `claim_account_hard_delete`, which uses the same clock and makes `restore_account` refuse the account from then on, so a restore can never land during its teardown.
-It then cancels every remaining Stripe subscription at once and uninstalls every instance of the account (Helm release, PVCs, instance Secrets, and the platform OpenRouter key) before `hard_delete_account` deletes the account's rows.
-`hard_delete_account` only deletes a claimed account.
+It then cancels every remaining Stripe subscription at once and uninstalls every instance of the account (Helm release, PVCs, instance Secrets, and the platform OpenRouter key).
+`hard_delete_account`, which only acts on a claimed account, then deletes the account's instance, subscription, and audit-log rows.
+Last, the job deletes the account's Supabase auth user through the admin API, which also removes the `accounts` row (`ON DELETE CASCADE`), so the email and login are gone and signing in cannot recreate the account.
 Payment records and Stripe webhook event records are kept after the account is deleted with only their `account_id` cleared (`ON DELETE SET NULL`); they keep the Stripe customer and subscription identifiers, and webhook payloads can include the account ID (subscription metadata) and invoice contact details.
 Soft delete keeps a `suspended` status and `restore_account` only restores a `deleted` one, so cancelling a deletion never lifts a suspension.
-If a teardown or the hard delete fails, the account keeps its rows, the run is recorded as failed with the error, and the next run retries.
-The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) runs the same teardown immediately; when it fails it answers `500` and keeps the account's rows, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
-Instances that an older release's soft delete marked `deprovisioned` while their deployment kept running are held like any instance of an inactive subscription on the next reconcile.
+If a teardown, the hard delete, or the auth user deletion fails, the account keeps its `accounts` row, the run is recorded as failed with the error, and the next run retries from the start.
+The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion, runs the same teardown immediately, and deletes the auth user, which takes the account's rows with it.
+When a step fails it answers `500` and keeps the account row, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
+The nightly run, and any reconcile of an account pending deletion, marks instances that an older release's soft delete left `deprovisioned` while their deployment kept running as `running` again; the lifecycle then holds them, or keeps them running for an entitled subscription.
 Keep `cleanupScheduler.teardownGraceDays` at 7 or more, because a held instance's teardown date also applies while its account is pending deletion.
 
 ## Release Deployment
@@ -547,6 +551,14 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
 The script prints the API response and exits non-zero when the query fails.
 The incremental migrations from `002` on are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
 Apply them in numeric order.
+
+The first run of `005_account_deletion.sql` restarts the 7-day grace period of every account whose deletion was requested more than 7 days earlier, because older releases left those instances running and billed and their owners could still cancel.
+Without it, the first nightly cleanup after the upgrade would tear them down with no chance to cancel; reruns never restart a grace period again.
+List those accounts before applying it, and consider telling their owners that their deletion completes 7 days after the upgrade unless they cancel it:
+
+```sql
+SELECT id, email, deleted_at FROM accounts WHERE deleted_at < NOW() - INTERVAL '7 days';
+```
 
 Migration `007_one_instance_per_subscription.sql` fails without changing anything while a subscription still has more than one instance row, and its error lists them.
 Find them before applying it:
