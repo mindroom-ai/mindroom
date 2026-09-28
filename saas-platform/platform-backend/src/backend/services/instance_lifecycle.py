@@ -285,7 +285,14 @@ async def _resume(
     plan = get_plan_details(subscription["tier"])
     # A hosted-budget instance without a key lost it in an earlier failed attempt; only provisioning mints one.
     missing_key = bool(plan and plan.included_ai_budget_usd > 0 and not instance.get("openrouter_key_hash"))
-    if instance.get("status") == "deprovisioned" or missing_key or not await check_deployment_exists(str(instance_id)):
+    # After any failed resume or provision, only a full reprovision republishes the key and deployment.
+    failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
+    if (
+        instance.get("status") == "deprovisioned"
+        or missing_key
+        or failed_before
+        or not await check_deployment_exists(str(instance_id))
+    ):
         await _reprovision(sb, instance_id, subscription)
     else:
         await start_instance(instance_id)

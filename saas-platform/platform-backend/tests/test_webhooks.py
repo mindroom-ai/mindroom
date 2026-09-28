@@ -334,7 +334,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"account_id": "account_123"}])
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -415,7 +415,8 @@ class TestWebhookEndpoints:
 
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        assert response.status_code == 500
+        assert response.status_code == 200
+        assert "Unable to determine billing cycle" in response.json()["error"]
 
     def test_subscription_deleted_not_found(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -427,14 +428,14 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock subscription not found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Failed to process subscription deletion"}
+        assert response.json() == {"received": True, "error": None}
 
     def test_payment_succeeded(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test successful payment webhook."""
@@ -485,7 +486,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"account_id": "account_123"}])
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -507,14 +508,14 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock no subscription found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Failed to process payment failure"}
+        assert response.json() == {"received": True, "error": None}
 
     def test_trial_will_end(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test trial ending webhook."""
@@ -738,8 +739,9 @@ class TestWebhookEndpoints:
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        # The tier cannot be determined, so the event is not acknowledged and Stripe redelivers it.
-        assert response.status_code == 500
+        # The tier can never be determined, so the event is recorded with an error instead of retried.
+        assert response.status_code == 200
+        assert "Unable to determine tier" in response.json()["error"]
 
     def test_price_metadata_requires_tier(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -754,4 +756,5 @@ class TestWebhookEndpoints:
 
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        assert response.status_code == 500
+        assert response.status_code == 200
+        assert "Unable to determine tier" in response.json()["error"]

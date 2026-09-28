@@ -23,6 +23,20 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
         "invoice.payment_failed",
     }
 )
+# Events whose handler writes the subscription binding or status. If one raises unexpectedly, the webhook answers
+# 500 without recording it so Stripe redelivers it; those handlers are safe to run again.
+_REDELIVERED_EVENT_TYPES = frozenset(
+    {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.payment_failed",
+    }
+)
+
+
+class _PermanentEventError(ValueError):
+    """The event can never be applied (for example a price without tier metadata); record it instead of retrying."""
 
 
 def _timestamp_to_iso(timestamp: float) -> str:
@@ -48,7 +62,7 @@ def _get_tier_from_price(price: dict) -> str:
         f"Price metadata: {price.get('metadata')}, "
         f"lookup_key: {price.get('lookup_key')}"
     )
-    raise ValueError(msg)
+    raise _PermanentEventError(msg)
 
 
 def _get_billing_cycle_from_price(price: dict) -> str:
@@ -60,7 +74,7 @@ def _get_billing_cycle_from_price(price: dict) -> str:
         return cycle
 
     msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
-    raise ValueError(msg)
+    raise _PermanentEventError(msg)
 
 
 class _SubscriptionFields(TypedDict):
@@ -104,6 +118,19 @@ def _subscription_fields(subscription: dict) -> _SubscriptionFields:
     if end := subscription.get("current_period_end"):
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
     return subscription_data
+
+
+def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) -> str | None:
+    """Return the account bound to a Stripe subscription, or None when no row uses it (for example a superseded one)."""
+    rows = (
+        sb.table("subscriptions")
+        .select("account_id")
+        .eq("stripe_subscription_id", stripe_subscription_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0]["account_id"] if rows else None
 
 
 def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
@@ -207,20 +234,10 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
     logger.info("Subscription deleted: %s", subscription["id"])
     sb = ensure_supabase()
 
-    # First verify the subscription exists and get account_id for audit trail
-    sub_result = (
-        sb.table("subscriptions")
-        .select("account_id")
-        .eq("stripe_subscription_id", subscription["id"])
-        .single()
-        .execute()
-    )
-
-    if not sub_result.data:
-        logger.warning(f"Webhook received for unknown subscription: {subscription['id']}")
-        return False, None
-
-    account_id = sub_result.data["account_id"]
+    account_id = _account_id_for_stripe_subscription(sb, subscription["id"])
+    if account_id is None:
+        logger.info("Ignoring deletion of Stripe subscription %s that no account uses", subscription["id"])
+        return True, None
 
     # Update subscription status to cancelled with tenant validation
     sb.table("subscriptions").update(
@@ -277,8 +294,8 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
         account_id = account_result.data["id"]
 
     # Record the payment in both tables for compatibility
-    # First, record in payments table with tenant isolation
-    sb.table("payments").insert(
+    # First, record in payments table with tenant isolation; upsert so a redelivered invoice keeps one row
+    sb.table("payments").upsert(
         {
             "invoice_id": invoice["id"],
             "subscription_id": invoice["subscription"],
@@ -287,7 +304,8 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
             "amount": invoice["amount_paid"] / 100,
             "currency": invoice["currency"],
             "status": "succeeded",
-        }
+        },
+        on_conflict="invoice_id",
     ).execute()
 
     # Also record in usage table for metrics
@@ -324,20 +342,10 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 
     sb = ensure_supabase()
 
-    # Get account_id for tenant association
-    sub_result = (
-        sb.table("subscriptions")
-        .select("account_id")
-        .eq("stripe_subscription_id", invoice["subscription"])
-        .single()
-        .execute()
-    )
-
-    if not sub_result.data:
-        logger.warning(f"No subscription found for payment failure: {invoice['subscription']}")
-        return False, None
-
-    account_id = sub_result.data["account_id"]
+    account_id = _account_id_for_stripe_subscription(sb, invoice["subscription"])
+    if account_id is None:
+        logger.info("Ignoring payment failure for Stripe subscription %s that no account uses", invoice["subscription"])
+        return True, None
 
     # Only an active subscription becomes past_due; past_due keeps the instance running, so a failed
     # first payment (incomplete) or a late event for a cancelled subscription must not reach it.
@@ -424,8 +432,11 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
                 acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
                 if acc_result.data:
                     account_id = acc_result.data["id"]
+    except _PermanentEventError as e:
+        logger.exception("Webhook %s can never be applied; recording it", event.id)
+        error_msg = str(e)
     except Exception as e:
-        if event.type in _LIFECYCLE_EVENT_TYPES:
+        if event.type in _REDELIVERED_EVENT_TYPES:
             # Not recorded as processed, so Stripe redelivers it and the idempotent handler runs again.
             logger.exception("Webhook %s failed; asking Stripe to redeliver", event.id)
             raise HTTPException(status_code=500, detail="Failed to process event") from e

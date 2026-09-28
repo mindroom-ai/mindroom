@@ -636,6 +636,95 @@ def test_transient_db_failure_in_created_handler_is_redelivered(platform: Platfo
     assert len(platform.db.tables["webhook_events"]) == 1
 
 
+def test_deletion_of_a_superseded_subscription_is_a_no_op(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", stripe_subscription_id="sub_stripe_new"))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    body = _send_webhook("customer.subscription.deleted", {"id": "sub_stripe_old"})
+
+    assert body == {"received": True, "error": None}
+    assert platform.subscription()["status"] == "active"
+    assert platform.instance()["status"] == "running"
+
+
+def test_payment_succeeded_redelivery_after_partial_failure_keeps_one_payment(platform: Platform) -> None:
+    invoice = {
+        "id": "in_1",
+        "customer": "cus_1",
+        "subscription": "sub_stripe_1",
+        "amount_paid": 1500,
+        "currency": "usd",
+        "created": 1_750_000_000,
+    }
+    payments: dict[str, dict[str, Any]] = {}
+
+    def upsert(row: dict[str, Any], *, on_conflict: str) -> Mock:
+        payments[row[on_conflict]] = row
+        return Mock(execute=Mock(return_value=Mock(data=[row])))
+
+    usage_insert = Mock(
+        side_effect=[RuntimeError("usage write failed"), Mock(execute=Mock(return_value=Mock(data=[])))]
+    )
+    real_table = platform.db.table
+
+    def table(name: str) -> Any:  # noqa: ANN401
+        query = real_table(name)
+        if name == "payments":
+            query.upsert = upsert
+        if name == "usage":
+            query.insert = usage_insert
+        return query
+
+    with patch.object(platform.db, "table", side_effect=table):
+        first = _send_webhook("invoice.payment_succeeded", invoice)
+        second = _send_webhook("invoice.payment_succeeded", invoice)
+
+    assert first == {"received": True, "error": "usage write failed"}
+    assert second == {"received": True, "error": None}
+    assert list(payments) == ["in_1"]
+
+
+@pytest.mark.asyncio
+async def test_resume_after_a_failed_secret_publication_reprovisions(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
+    provision = platform.provision.side_effect
+    attempts = 0
+
+    async def secret_fails_once(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # The replacement key is created and its hash saved, then publishing the Secret fails.
+            platform.instance()["openrouter_key_hash"] = "key_hash_unpublished"
+            msg = "Failed to apply instance Secret mindroom-api-keys-7"
+            raise RuntimeError(msg)
+        return await provision(*args, **kwargs)
+
+    platform.provision.side_effect = secret_fails_once
+
+    first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    assert first.errors
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+    second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert second.errors == []
+    assert attempts == 2
+    assert platform.start.await_count == 1  # only the first run started; the retry reprovisioned
+    assert platform.instance()["openrouter_key_hash"] == "key_hash_new"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+    assert platform.instance()["lifecycle_error"] is None
+
+
 def test_delayed_creation_of_an_older_subscription_keeps_the_newer_binding(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active", stripe_subscription_id="sub_stripe_new"))
     platform.db.tables["instances"].append(_instance("running"))
