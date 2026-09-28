@@ -1,5 +1,7 @@
 """Matrix user account management for agents."""
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -9,7 +11,7 @@ from uuid import UUID
 
 import httpx
 import nio
-from aiohttp import ClientResponse
+from aiohttp import ClientError, ClientResponse
 from nio import crypto
 from nio.durable import DurableSyncConfig
 
@@ -920,6 +922,15 @@ async def _register_user_via_provisioning_if_configured(
     )
 
 
+def _one_time_password_error(user_id: str, detail: str) -> ValueError:
+    msg = (
+        f"Matrix account {user_id} was created, but replacing its one-time password failed{detail}. "
+        "Nobody knows this account's password now, so it cannot be used again. "
+        "Run `mindroom connect --force` to pair again, which gives new agent accounts a new namespace, then restart."
+    )
+    return matrix_startup_error(msg, permanent=True)
+
+
 async def _replace_one_time_password(
     *,
     homeserver: str,
@@ -931,26 +942,26 @@ async def _replace_one_time_password(
     """Change a provisioned account's one-time password to this install's own password."""
     client = create_matrix_http_client(homeserver, runtime_paths, user_id)
     try:
-        response = await client.login(one_time_password)
-        if isinstance(response, nio.LoginResponse):
-            auth = {
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": user_id},
-                "password": one_time_password,
-            }
-            response = await client.change_password(auth, password)
+        try:
+            response = await client.login(one_time_password)
+            if isinstance(response, nio.LoginResponse):
+                auth = {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": user_id},
+                    "password": one_time_password,
+                }
+                response = await client.change_password(auth, password)
+        except (ClientError, TimeoutError) as exc:
+            raise _one_time_password_error(user_id, f": {exc!r}") from exc
         # nio parses a non-JSON error body as {}, which passes the empty ChangePasswordResponse schema.
         transport = response.transport_response
         status = transport.status if isinstance(transport, ClientResponse) else None
         if not (isinstance(response, nio.ChangePasswordResponse) and status is not None and 200 <= status < 300):
-            msg = (
-                f"Matrix account {user_id} was created, but replacing its one-time password failed "
-                f"(HTTP {status}): {response}. "
-                f"This account cannot be used again; set a different MINDROOM_NAMESPACE "
-                f"(or have the homeserver admin deactivate {user_id}) and restart."
-            )
-            raise matrix_startup_error(msg, permanent=True)
-        await client.logout()
+            raise _one_time_password_error(user_id, f" (HTTP {status}): {response}")
+        # Best effort: the password is already replaced, so a failed logout only leaves an unused session behind.
+        with contextlib.suppress(ClientError, TimeoutError):
+            async with asyncio.timeout(10):
+                await client.logout()
     finally:
         await client.close()
 

@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import UUID
 
+import aiohttp
 import httpx
 import nio
 import pytest
 import yaml
-from aiohttp import ClientResponse
 from nio.durable import DurableSyncConfig
 
 from mindroom import constants as constants_mod
@@ -699,20 +699,24 @@ class TestMatrixRegistration:
 
     @staticmethod
     def _one_time_password_client(
-        login_response: nio.Response | None = None,
-        change_response: nio.Response | None = None,
+        login_result: nio.Response | Exception | None = None,
+        change_result: nio.Response | Exception | None = None,
     ) -> AsyncMock:
         """Return a Matrix client double whose login and password change succeed unless overridden."""
-        if change_response is None:
-            change_response = nio.ChangePasswordResponse()
-            change_response.transport_response = MagicMock(spec=ClientResponse, status=200)
+        if change_result is None:
+            change_result = nio.ChangePasswordResponse()
+            change_result.transport_response = MagicMock(spec=aiohttp.ClientResponse, status=200)
         client = AsyncMock()
-        client.login.return_value = login_response or nio.LoginResponse(
-            user_id="@test_user:localhost",
-            device_id="ONE_TIME_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        client.change_password.return_value = change_response
+        # A one-item side_effect list returns a response or raises an exception.
+        client.login.side_effect = [
+            login_result
+            or nio.LoginResponse(
+                user_id="@test_user:localhost",
+                device_id="ONE_TIME_DEVICE",
+                access_token=TEST_ACCESS_TOKEN,
+            ),
+        ]
+        client.change_password.side_effect = [change_result]
         return client
 
     @staticmethod
@@ -786,32 +790,43 @@ class TestMatrixRegistration:
         http_client.close.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_register_user_keeps_replaced_password_when_logout_fails(self, tmp_path: Path) -> None:
+        """Once the password is replaced, a failed logout of the one-time session does not fail registration."""
+        http_client = self._one_time_password_client()
+        http_client.logout.side_effect = aiohttp.ClientPayloadError("connection lost")
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client):
+            user_id = await self._register_provisioned_account(tmp_path)
+
+        assert user_id == "@test_user:localhost"
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("login_response", "change_response"),
+        ("login_result", "change_result"),
         [
             pytest.param(nio.LoginError("Invalid password"), None, id="login-error"),
+            pytest.param(aiohttp.ClientPayloadError("connection lost"), None, id="login-raises"),
             pytest.param(None, nio.ChangePasswordError("Password change is disabled"), id="change-error"),
+            pytest.param(None, aiohttp.ClientPayloadError("connection lost"), id="change-raises"),
         ],
     )
     async def test_register_user_fails_startup_when_one_time_password_is_not_replaced(
         self,
         tmp_path: Path,
-        login_response: nio.Response | None,
-        change_response: nio.Response | None,
+        login_result: nio.Response | Exception | None,
+        change_result: nio.Response | Exception | None,
     ) -> None:
         """A provisioned account whose one-time password cannot be replaced is a permanent startup error."""
-        http_client = self._one_time_password_client(login_response, change_response)
+        http_client = self._one_time_password_client(login_result, change_result)
 
         with (
             patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client),
-            pytest.raises(
-                PermanentMatrixStartupError,
-                match="cannot be used again; set a different MINDROOM_NAMESPACE",
-            ),
+            pytest.raises(PermanentMatrixStartupError, match=r"cannot be used again\. Run `mindroom connect --force`"),
         ):
             await self._register_provisioned_account(tmp_path)
 
-        if login_response is not None:
+        if login_result is not None:
             http_client.change_password.assert_not_awaited()
         http_client.logout.assert_not_awaited()
         http_client.close.assert_awaited_once_with()
@@ -1189,7 +1204,7 @@ class TestMatrixRegistration:
         tmp_path: Path,
     ) -> None:
         """A created account is unusable without its one-time password, so an outdated service stops startup."""
-        with pytest.raises(PermanentMatrixStartupError, match="did not return a one-time password"):
+        with pytest.raises(PermanentMatrixStartupError, match="missing one-time password"):
             await self._register_via_provisioning_with_response(
                 tmp_path,
                 httpx.Response(200, json={"status": "created", "user_id": "@mindroom_test_user_otherns:localhost"}),
