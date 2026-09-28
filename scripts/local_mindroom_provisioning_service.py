@@ -286,8 +286,8 @@ class RegisterAgentRequest(BaseModel):
     username: str = Field(min_length=1, max_length=255)
     # LEGACY_COMPAT: register-agent requests carrying the agent's own password
     # Legacy format: released MindRoom clients send the agent's chosen `password`, which the service registers unchanged.
-    # Last legacy release: every MindRoom release so far sends `password`; the client change that stops sending it is not yet released.
-    # Handling: a supplied password is registered as before and never returned; remove this field once released clients no longer send it.
+    # Last legacy release: v2026.9.363 (latest tag, still sends password); replacement: unreleased (#2428), which omits password and replaces the returned one-time password.
+    # Handling: a supplied password is registered as before and never returned; remove this field once no paired installs run a release older than the first release containing #2428.
     # Coverage: tests/test_local_mindroom_provisioning_service.py::test_register_agent_with_client_password_registers_it_unchanged.
     password: str | None = Field(default=None, min_length=1, max_length=1024)
     display_name: str = Field(min_length=1, max_length=255)
