@@ -57,8 +57,11 @@ def _without_tool_selection(config: object, *, vertexai: bool) -> GenerateConten
     function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
     tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
     # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
-    # The Gemini API accepts JSON output beside declarations under NONE. Vertex AI acceptance is
-    # unverified, and a rejection would fail every decision, so Vertex gets JSON only without them.
+    # Google documents JSON output beside function calling only for Gemini 3 models. Live Gemini API
+    # runs in September 2026 saw it accepted under NONE by the Gemini 3 and 2.5 models tried.
+    # Accepted risk: models that reject JSON output with declarations, or JSON output at all (reportedly
+    # older Gemini models and Gemma), fail every check closed, the same outcome as a leaked function call.
+    # Vertex AI acceptance beside declarations is unverified, so Vertex gets JSON only without them.
     json_output = not (vertexai and declaration_tools)
     # The reply's authored output schema never shapes a decision.
     return generation_config.model_copy(
