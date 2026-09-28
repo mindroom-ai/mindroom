@@ -6,9 +6,15 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   markdown-code-runner:
     runs-on: ubuntu-latest
+    # The last step pushes regenerated docs back to the branch.
+    permissions:
+      contents: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
