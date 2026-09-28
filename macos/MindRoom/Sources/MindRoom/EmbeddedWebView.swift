@@ -130,8 +130,8 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         dashboard.uiDelegate = self
     }
 
-    func openChat(force: Bool = false) {
-        let url = preferences.url
+    func openChat(url: URL? = nil, force: Bool = false) {
+        let url = url ?? preferences.url
         guard force || chatLoadedURL != url else { return }
         chatSSO = ChatSSONavigation(root: url)
         chatLoadedURL = url

@@ -49,8 +49,12 @@ The app detects the command-line runtime separately from the background service:
 2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
    The configuration path is shown in the panel.
    **Prepare Configuration** creates missing files and keeps existing configuration and credentials.
-   Expand **Connect or reconnect your chat account** and choose **Connect Account** to open your browser on MindRoom Chat.
-   Sign in if needed and click **Approve**; this completes when you approve or after 10 minutes.
+   Expand **Connect or reconnect your chat account** and choose **Connect Account** to open the approval page in the app's **Chat** tab, using its existing sign-in.
+   Compare the code above Chat with the code on the approval page, check the signed-in account, then click **Approve**.
+   If needed, sign in there or use the secondary **Open in Browser** option.
+   **Cancel** stops the waiting connection without saving new credentials and returns to **Connect Account**.
+   On success, the app shows the connection result and refreshes service status.
+   An unapproved code expires after 10 minutes.
    If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.
    Add AI provider credentials to the adjacent `.env`, or configure a local model, using **Open Config Folder**.
 3. **Check** runs `mindroom doctor` against the displayed configuration and the installed service's saved storage path.

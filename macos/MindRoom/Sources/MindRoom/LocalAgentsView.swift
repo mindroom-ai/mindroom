@@ -40,8 +40,8 @@ struct LocalAgentsView: View {
         .onChange(of: runner.isRefreshingStatus, initial: true) { _, refreshing in
             guard !refreshing, runner.hasRefreshedStatus, !choseInitialStep else { return }
             choseInitialStep = true
-            step = setup.nextStep(service: state, check: runner.setupCheck)
-            showChatSetup = !setup.configurationExists
+            step = runner.pairingCancelled ? .configure : setup.nextStep(service: state, check: runner.setupCheck)
+            showChatSetup = runner.pairingCancelled || !setup.configurationExists
         }
         .onChange(of: setup.runtimeInstalled) { wasInstalled, installed in
             if choseInitialStep, !wasInstalled, installed, step == .install { show(.configure) }
@@ -136,7 +136,7 @@ struct LocalAgentsView: View {
                 if setup.configurationExists {
                     DisclosureGroup("Connect or reconnect your chat account", isExpanded: $showChatSetup) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Your browser opens MindRoom Chat. Sign in if needed and click Approve; this finishes when you do, or after 10 minutes. Skip this if this configuration is already connected.")
+                            Text("Approve this Mac in the app’s Chat tab. Check the code and signed-in account before approving. You can cancel while waiting. Skip this if this configuration is already connected.")
                             Button("Connect Account") { runner.run(.pairHosted) }
                                 .buttonStyle(.borderedProminent)
                                 .disabled(busy || !setup.runtimeInstalled || !setup.configurationExists)
