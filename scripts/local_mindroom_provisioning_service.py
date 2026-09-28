@@ -530,7 +530,7 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
     for item in payload.get("pair_sessions", []):
         # LEGACY_COMPAT: pair sessions from the removed browser-initiated flow have no device fields
         # Legacy format: a persisted pair session whose `device_secret_hash` is missing or null, written by the removed `POST /v1/local-mindroom/pair/start` endpoint; sessions written before device pairing also lack `client_name`, `fingerprint`, and `approved_at`.
-        # Last legacy release: the last release before this change still wrote such sessions from `pair/start` (v2026.9.341 when written); v2026.9.330 first wrote device sessions, and the release carrying this change writes only those.
+        # Last legacy release: <fill at merge: last tag before merge> still wrote such sessions from `pair/start` (v2026.9.345 is the latest tag checked); <fill at merge: first tag containing this change> writes only device sessions, which v2026.9.330 first introduced.
         # Handling: such sessions are dropped on load and disappear from the file on the next write, because no remaining endpoint can use them; connections, including ones paired through that flow, load unchanged.
         # Coverage: tests/test_local_mindroom_provisioning_service.py::test_state_drops_browser_initiated_sessions_and_keeps_connections.
         if item.get("device_secret_hash") is None:

@@ -182,7 +182,8 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
 | C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
-| C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] drops persisted pair sessions without a device secret, which only the removed browser-initiated flow wrote, and loads connections unchanged. |
+| C14 | Removed/superseded | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] no longer loads pair sessions without device fields as browser-initiated sessions; it drops sessions without a device secret, which only the removed browser-initiated flow wrote, and loads connections unchanged. |
+| C15 | Removed/superseded | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] no longer resolves Matrix access tokens through whoami; browser endpoints require `X-Matrix-OpenID-Token`. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |

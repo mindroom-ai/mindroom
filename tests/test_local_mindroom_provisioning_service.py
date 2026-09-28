@@ -1296,8 +1296,14 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
     now = provisioning._now_utc()
     created_at = provisioning._as_utc_iso(now)
     expires_at = provisioning._as_utc_iso(now + provisioning.timedelta(seconds=600))
+    paired_at = provisioning._as_utc_iso(now - provisioning.timedelta(days=1))
 
-    def _connection(connection_id: str, user_id: str, namespace: str) -> dict[str, str | None]:
+    def _connection(
+        connection_id: str,
+        user_id: str,
+        namespace: str,
+        revoked_at: str | None = None,
+    ) -> dict[str, str | None]:
         return {
             "id": connection_id,
             "user_id": user_id,
@@ -1305,10 +1311,17 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
             "fingerprint": f"sha256:{connection_id}",
             "namespace": namespace,
             "client_secret_hash": provisioning._hash_token(f"{connection_id}-secret"),
-            "created_at": created_at,
-            "last_seen_at": created_at,
-            "revoked_at": None,
+            "created_at": paired_at,
+            "last_seen_at": revoked_at or paired_at,
+            "revoked_at": revoked_at,
         }
+
+    connections = [
+        _connection("alice-browser", "@alice:mindroom.chat", "abcd2345"),
+        _connection("alice-exempt", "@alice:mindroom.chat", ""),
+        _connection("alice-revoked", "@alice:mindroom.chat", "jkmn2345", revoked_at=paired_at),
+        _connection("bob-browser", "@bob:mindroom.chat", "efgh6789"),
+    ]
 
     with TestClient(provisioning.create_app(_service_config(tmp_path / "seed.json"))) as seed:
         device = _start_device_pairing(seed)
@@ -1344,11 +1357,7 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
                     },
                     device_session,
                 ],
-                "connections": [
-                    _connection("alice-browser", "@alice:mindroom.chat", "abcd2345"),
-                    _connection("alice-exempt", "@alice:mindroom.chat", ""),
-                    _connection("bob-browser", "@bob:mindroom.chat", "efgh6789"),
-                ],
+                "connections": connections,
             },
         ),
         encoding="utf-8",
@@ -1357,9 +1366,10 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         alice = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()["connections"]
         bob = client.get("/v1/local-mindroom/connections", headers=BOB_OPENID_HEADERS).json()["connections"]
-        assert [(item["id"], item["namespace"]) for item in alice] == [
-            ("alice-browser", "abcd2345"),
-            ("alice-exempt", ""),
+        assert [(item["id"], item["namespace"], item["revoked_at"] is not None) for item in alice] == [
+            ("alice-browser", "abcd2345", False),
+            ("alice-exempt", "", False),
+            ("alice-revoked", "jkmn2345", True),
         ]
         assert [(item["id"], item["namespace"]) for item in bob] == [("bob-browser", "efgh6789")]
 
@@ -1367,6 +1377,11 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
         _install_fake_register(monkeypatch, register_calls)
         credentials = {"client_id": "alice-browser", "client_secret": "alice-browser-secret"}
         assert _post_register_agent(client, credentials, "mindroom_code_abcd2345").status_code == 200
+        revoked_credentials = {"client_id": "alice-revoked", "client_secret": "alice-revoked-secret"}
+        revoked = _post_register_agent(client, revoked_credentials, "mindroom_code_jkmn2345")
+        assert revoked.status_code == 403
+        assert revoked.json()["detail"] == provisioning.CONNECTION_REVOKED_DETAIL
+        assert register_calls == ["mindroom_code_abcd2345"]
 
         for pair_code in ("AAAA-BBBB", "CCCC-DDDD"):
             response = client.post(
@@ -1384,7 +1399,10 @@ def test_state_drops_browser_initiated_sessions_and_keeps_connections(
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     assert [session["id"] for session in persisted["pair_sessions"]] == [device_session["id"]]
-    assert [item["id"] for item in persisted["connections"]] == ["alice-browser", "alice-exempt", "bob-browser"]
+    [registered, *unchanged] = persisted["connections"]
+    assert registered["last_seen_at"] != paired_at
+    assert {**registered, "last_seen_at": paired_at} == connections[0]
+    assert unchanged == connections[1:]
 
 
 def _install_homeserver(
