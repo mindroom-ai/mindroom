@@ -1084,8 +1084,8 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
 
 
-def test_kubernetes_worker_tmp_is_capped_like_the_docker_tmpfs(tmp_path: Path) -> None:
-    """Tool code writing to /tmp gets its own pod evicted instead of filling the node's ephemeral storage."""
+def test_kubernetes_worker_tmp_has_an_eviction_size_limit(tmp_path: Path) -> None:
+    """Tool code writing past 1 GiB to /tmp gets its own pod evicted instead of filling the node's ephemeral storage."""
     backend, apps_api, _core_api = _backend(
         runtime_paths=resolve_primary_runtime_paths(
             config_path=Path("config.yaml"),

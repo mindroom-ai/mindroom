@@ -648,7 +648,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` capped at 1 GiB (a tmpfs on Docker, an `emptyDir` size limit on Kubernetes, where exceeding it evicts only that worker pod).
+- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` bounded at 1 GiB: a tmpfs that refuses writes past the limit on Docker, and a disk-backed `emptyDir` whose size limit kubelet enforces by evicting only that worker pod on Kubernetes.
   The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
   Worker tools install their extras into the worker's own virtualenv on the state mount instead.
   Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.

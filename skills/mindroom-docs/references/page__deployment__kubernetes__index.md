@@ -280,7 +280,7 @@ Important behavior and constraints:
 - `workers.kubernetes.runtimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
 - Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
 - Dedicated workers need access to the runtime's storage PVC so they can reach agent workspaces.
-- Each worker's `/tmp` is a 1 GiB `emptyDir`; tool code that exceeds it gets only that worker pod evicted.
+- Each worker's `/tmp` is a disk-backed `emptyDir` with a 1 GiB size limit; kubelet enforces it by evicting only that worker pod once usage exceeds it, so writes are not refused at the limit as on a tmpfs.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
