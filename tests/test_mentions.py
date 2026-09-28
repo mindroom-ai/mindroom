@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -25,6 +26,8 @@ from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
+    import re
+
     import pytest
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
@@ -941,6 +944,28 @@ class TestMentionScanCost:
         assert formatted_ids == ["@actual_code:localhost"]
         assert processed.endswith("@actual_code:localhost thanks")
         assert len(validated) == 0
+
+    def test_entity_ids_in_one_long_run_are_read_a_bounded_distance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Checking an entity ID inside a long token reads at most one user ID's length past it, not to the run end."""
+        config = _make_config(_default_runtime_paths())
+        occurrences = 3_000
+        scanned: list[int] = []
+        run_pattern = mentions_module._NON_WHITESPACE_RUN
+
+        class CountingRunPattern:
+            def match(self, text: str, pos: int, endpos: int = sys.maxsize) -> re.Match[str] | None:
+                scanned.append(min(endpos, len(text)) - pos)
+                return run_pattern.match(text, pos, endpos)
+
+        monkeypatch.setattr(mentions_module, "_NON_WHITESPACE_RUN", CountingRunPattern())
+        text = "@x " * _MAX_MENTION_TOKENS_PER_SCANNER + ":@actual_calculator:localhost" * occurrences
+
+        user_ids = resolve_mentioned_user_ids_from_text(text, config, _runtime_paths_for(config))
+
+        assert user_ids == ["@actual_calculator:localhost"]
+        # The last occurrence ends the text, so nothing can extend it and it needs no read.
+        assert len(scanned) == occurrences - 1
+        assert sum(scanned) <= occurrences * mentions_module._MAX_USER_ID_TOKEN_CHARACTERS
 
     def test_literal_users_beyond_the_budget_are_not_resolved(self) -> None:
         """Only configured entities are searched past the budget; later literal users stay unresolved."""

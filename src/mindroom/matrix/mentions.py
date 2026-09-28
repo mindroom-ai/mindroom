@@ -26,7 +26,11 @@ if TYPE_CHECKING:
 
 _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
-_EXPLICIT_MENTION_BOUNDARY = r"(?<![-A-Za-z0-9._=/+])"
+# `@` is excluded too, so an entity ID nested inside another @ token is not found where the explicit scanner skips it.
+_EXPLICIT_MENTION_BOUNDARY = r"(?<![-A-Za-z0-9._=/+@])"
+# Characters that can continue a server name's host or port after a complete user ID.
+_SERVER_NAME_CONTINUATION_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.:")
+_MAX_USER_ID_TOKEN_CHARACTERS = 256
 _ALIAS_LOCALPART_PATTERN = re.compile(r"(?<![\w])@(\w+)")
 _NON_WHITESPACE_RUN = re.compile(r"\S+")
 # Each scanner resolves at most this many @ tokens per body, so one message costs bounded CPU on the shared loop.
@@ -321,16 +325,13 @@ def _scan_entity_user_id_tokens(
         return []
     pattern = re.compile(f"{_EXPLICIT_MENTION_BOUNDARY}(?:{_longest_first_alternation(entity_user_ids)})")
     tokens: list[_MentionToken] = []
-    validations = 0
     for match in _prose_matches(pattern, text, prose_ranges):
         user_id = match.group(0)
-        run = _NON_WHITESPACE_RUN.match(text, match.start())
-        if run is not None and run.group(0) != user_id:
-            # A longer token may extend the host or port, so it names this entity only if its longest valid prefix does.
-            if validations == _MAX_MENTION_TOKENS_PER_SCANNER:
-                continue
-            validations += 1
-            if _extract_longest_valid_matrix_user_id(run.group(0)) != user_id:
+        if match.end() < len(text) and text[match.end()] in _SERVER_NAME_CONTINUATION_CHARACTERS:
+            # The token may extend the host or port, so it names this entity only if its longest valid prefix does.
+            # No user ID is longer than 255 bytes, so the token is read no further than that.
+            run = _NON_WHITESPACE_RUN.match(text, match.start(), match.start() + _MAX_USER_ID_TOKEN_CHARACTERS)
+            if run is None or _extract_longest_valid_matrix_user_id(run.group(0)) != user_id:
                 continue
         tokens.append(_explicit_token(match.start(), user_id))
     return tokens
