@@ -564,7 +564,8 @@ revoke_public_report("pub_...")
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
 `manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
-Redaction masks every field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, and also masks credential-named keys elsewhere.
+Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names.
+Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
 Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
 `dry_run=True` validates a patch and returns its receipt without writing.
