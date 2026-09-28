@@ -1622,6 +1622,44 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    ["show", "get mcp_servers.home.env", "get models.default.extra_kwargs", "set mcp_servers.home.env {}"],
+)
+async def test_handle_config_command_masks_schema_secret_fields(tmp_path: Path, command: str) -> None:
+    """Fields the schema marks secret stay masked even under key names the name heuristics miss."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-6-astra",
+                        "extra_kwargs": {"default_headers": {"X-Auth": "model-header-sentinel"}},
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "mcp_servers": {
+                    "home": {
+                        "transport": "stdio",
+                        "command": "mcp-home",
+                        "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, _change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert "***redacted***" in response
+    assert "sentinel" not in response
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path: Path) -> None:
     """Config set preview should redact old and new sensitive leaf values."""
     config_path = tmp_path / "runtime-config.yaml"

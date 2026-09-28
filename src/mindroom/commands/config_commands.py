@@ -172,9 +172,7 @@ def _display_key_for_path(path: str) -> str | None:
     return None
 
 
-def _redact_value_for_display(value: Any, path: str | None = None) -> Any:  # noqa: ANN401
-    if path is None:
-        return redact_sensitive_data(value)
+def _redact_value_for_display(value: Any, path: str) -> Any:  # noqa: ANN401
     key = _display_key_for_path(path)
     if key is None:
         return redact_sensitive_data(value)
@@ -213,11 +211,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         return load_error, None
     assert config is not None
     config_dict = config.authored_model_dump()
+    redacted_config_dict = config.redacted_authored_model_dump()
 
     if operation == "show":
         # Show entire config
-        safe_config_dict = _redact_value_for_display(config_dict)
-        yaml_str = yaml.dump(safe_config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        yaml_str = yaml.dump(redacted_config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
         return f"**Current Configuration:**\n```yaml\n{yaml_str}```", None
 
     if operation == "get":
@@ -229,12 +227,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
         config_path_str = args[0]
         try:
-            value = _get_nested_value(config_dict, config_path_str)
+            value = _get_nested_value(redacted_config_dict, config_path_str)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
-            formatted = _format_value(_redact_value_for_display(value, config_path_str))
-            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```", None
+            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{_format_value(value)}\n```", None
 
     elif operation == "set":
         if len(args) < 2:
@@ -253,8 +250,9 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         # Get the current value for comparison
         try:
             old_value = _get_nested_value(config_dict, config_path_str)
+            redacted_old_value = _get_nested_value(redacted_config_dict, config_path_str)
         except (KeyError, IndexError):
-            old_value = None  # Path doesn't exist yet
+            old_value = redacted_old_value = None  # Path doesn't exist yet
 
         # Create a copy to test the change
         test_config_dict = config_dict.copy()
@@ -271,11 +269,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Format the preview message
-            formatted_old = (
-                _format_value(_redact_value_for_display(old_value, config_path_str))
-                if old_value is not None
-                else "Not set"
-            )
+            formatted_old = _format_value(redacted_old_value) if old_value is not None else "Not set"
             formatted_new = _format_value(_redact_value_for_display(value, config_path_str))
 
             preview_msg = (

@@ -329,6 +329,8 @@ Changes are validated against the Pydantic config schema before applying.
 !config get agents.analyst.display_name
 ```
 
+Shown values are redacted like `config_manager` inspection: fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, and credential-named keys elsewhere are masked.
+
 **Modify configuration:**
 
 ```
