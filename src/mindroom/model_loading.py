@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
@@ -422,7 +423,8 @@ def get_model_instance(
     provider = model_config.provider
     model_id = model_config.id
 
-    extra_kwargs = dict(model_config.extra_kwargs or {})
+    # Providers may write into authored nested values, such as an Agno Gemini generation_config dict.
+    extra_kwargs = deepcopy(model_config.extra_kwargs or {})
 
     model_api_key = _model_credential_api_key(model_name, runtime_paths)
     if model_api_key:
