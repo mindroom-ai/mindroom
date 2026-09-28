@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import importlib
 import json
 import os
+import threading
+import tracemalloc
 from typing import TYPE_CHECKING
 
 import pytest
@@ -186,6 +190,164 @@ async def test_event_append_never_writes_through_a_hard_link(tmp_path: Path) -> 
         await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
 
     assert outside.read_bytes().count(b"\n") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lock_worker_code_holds_in_the_record_directory_never_stalls_record_writes(tmp_path: Path) -> None:
+    """Worker code shares the record directory, so the primary never waits on a lock taken there."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    failures: list[BaseException] = []
+
+    def append() -> None:
+        try:
+            owner._append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        except BaseException as exc:
+            failures.append(exc)
+
+    with (_record_dir(handle) / ".record.lock").open("a") as planted_lock:
+        fcntl.flock(planted_lock.fileno(), fcntl.LOCK_EX)
+        writer = threading.Thread(target=append, daemon=True)
+        writer.start()
+        writer.join(timeout=5)
+        stalled = writer.is_alive()
+    writer.join(timeout=5)
+
+    assert not stalled
+    assert failures == []
+    assert [event["sequence"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_appends_to_one_record_keep_one_gapless_sequence(tmp_path: Path) -> None:
+    """Record writers still exclude each other without a lock file in the workspace."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+
+    await asyncio.gather(
+        *(
+            owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+            for index in range(8)
+        ),
+    )
+
+    events = _read_events(_record_dir(handle) / "events.jsonl")
+    assert [event["sequence"] for event in events] == list(range(1, 10))
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 9
+    assert not (_record_dir(handle) / ".record.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_append_over_a_planted_log_holds_one_event_at_a_time(tmp_path: Path) -> None:
+    """A long or deeply nested log planted by worker code costs each append memory for one line, not the log."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    filler = "f" * 4096
+    nested = "[" * 400 + "[]," * 50_000 + "[]" + "]" * 400
+    with event_path.open("a", encoding="utf-8") as events:
+        for sequence in range(2, 2002):
+            events.write(
+                json.dumps({"sequence": sequence, "kind": "output", "timestamp": "t", "data": {"content": filler}})
+                + "\n",
+            )
+        events.write(f'{{"sequence": 2002, "kind": "output", "timestamp": "t", "data": {nested}}}\n')
+
+    tracemalloc.start()
+    try:
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 8 << 20
+    assert _read_events(event_path)[-1]["sequence"] == 2003
+    assert (_record_dir(handle) / "transcript.md").stat().st_size < 2 * event_path.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_a_log_with_more_events_than_the_cap_is_refused_before_it_is_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny planted events cannot multiply the per-event parse cost past the event cap."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    monkeypatch.setattr(module, "_MAX_EVENTS", 8)
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.writelines(f'{{"sequence": {sequence}}}\n' for sequence in range(2, 11))
+    committed = event_path.read_bytes()
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+
+    assert event_path.read_bytes() == committed
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_reached_its_event_cap_can_still_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Events stop one short of the event cap, so the terminal event always fits."""
+    module = _records_module()
+    monkeypatch.setattr(module, "_MAX_EVENTS", 4)
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    for index in range(2):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+
+    with pytest.raises(ValueError, match="size limit"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "one too many"}))
+    await owner.finish(handle, status="completed", output="Done")
+
+    events = _read_events(_record_dir(handle) / "events.jsonl")
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4]
+    assert _read_json(_record_dir(handle) / "run.json")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_planted_oversized_run_view_is_refused_instead_of_parsed(tmp_path: Path) -> None:
+    """Worker code cannot make every reopen parse a many-megabyte run.json."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    run["padding"] = "p" * (5 << 20)
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.reopen(handle.locator)
 
 
 def _config(*, private_child: bool = False) -> Config:
@@ -746,7 +908,6 @@ def test_locator_rejects_malformed_present_execution_identity() -> None:
         ("run.json", ValueError),
         ("events.jsonl", ValueError),
         ("transcript.md", None),
-        (".record.lock", OSError),
         ("receipt", None),
     ],
 )
