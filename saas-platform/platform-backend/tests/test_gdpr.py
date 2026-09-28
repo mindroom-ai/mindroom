@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from main import app
 from backend.deps import verify_user
 
+from tests.fake_supabase import FakeSupabase
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 
 
@@ -63,7 +65,7 @@ def mock_lifecycle():
 
 
 def _function_body(sql: str, name: str) -> str:
-    match = re.search(rf"CREATE OR REPLACE FUNCTION {name}\(.*?\$\$(.*?)\$\$", sql, re.DOTALL)
+    match = re.search(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(.*?\$\$(.*?)\$\$", sql, re.DOTALL)
     assert match is not None, name
     return match.group(1)
 
@@ -85,12 +87,74 @@ def test_account_deletion_functions_change_only_the_account() -> None:
             assert "instances" not in body
         restore = _function_body(sql, "restore_account")
         assert "AND deleted_at > NOW() - INTERVAL '7 days'" in restore
+        assert "RETURN FALSE;" in restore
+        assert "RETURN TRUE;" in restore
+        assert re.search(r"FUNCTION restore_account\(\s*target_account_id UUID\s*\) RETURNS BOOLEAN", sql)
         # A suspension is never lifted: soft delete keeps it, and restore only undoes its own 'deleted' status.
         assert "AND status = 'deleted'" in restore
         assert "status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END" in _function_body(
             sql, "soft_delete_account"
         )
         assert "deleted_at IS NOT NULL) THEN" in _function_body(sql, "hard_delete_account")
+
+
+def test_delete_and_cancel_round_trip_never_makes_an_unpaid_subscription_provisionable() -> None:
+    """A pro checkout whose card failed stays incomplete through a deletion and its cancellation.
+
+    The fake RPCs apply only the account changes that `test_account_deletion_functions_change_only_the_account`
+    pins for the real functions, so the subscription and instance rows keep whatever Stripe last reported.
+    """
+    account_id = "00000000-0000-0000-0000-000000000002"
+    db = FakeSupabase(
+        {
+            "accounts": [{"id": account_id, "email": "test@example.com", "stripe_customer_id": "cus_1"}],
+            "subscriptions": [
+                {
+                    "id": "sub-row-1",
+                    "account_id": account_id,
+                    "stripe_subscription_id": "sub_stripe_1",
+                    "tier": "pro",
+                    "status": "incomplete",
+                    "trial_ends_at": None,
+                    "updated_at": "2026-09-01T00:00:00+00:00",
+                }
+            ],
+            "instances": [],
+            "audit_logs": [],
+        }
+    )
+    record_rpc = db.rpc
+    account = db.row("accounts", id=account_id)
+
+    def account_only_rpc(name: str, params: dict) -> object:
+        account["deleted_at"] = datetime.now(UTC).isoformat() if name == "soft_delete_account" else None
+        db.rpc_results[name] = True
+        return record_rpc(name, params)
+
+    provision = AsyncMock()
+    app.dependency_overrides[verify_user] = lambda: {"account_id": account_id, "email": "test@example.com"}
+    try:
+        with (
+            patch.object(db, "rpc", side_effect=account_only_rpc),
+            patch("backend.routes.gdpr.ensure_supabase", return_value=db),
+            patch("backend.routes.instances.ensure_supabase", return_value=db),
+            patch("backend.services.instance_lifecycle.ensure_supabase", return_value=db),
+            patch("backend.services.instance_lifecycle.stripe", MagicMock(api_key="")),
+            patch("backend.services.provisioner_service.provision_instance", provision),
+        ):
+            client = TestClient(app)
+            deleted = client.post("/my/gdpr/request-deletion", json={"confirmation": True})
+            cancelled = client.post("/my/gdpr/cancel-deletion")
+            provisioned = client.post("/my/instances/provision")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert (deleted.status_code, cancelled.status_code) == (200, 200)
+    assert [name for name, _params in db.rpc_calls] == ["soft_delete_account", "restore_account"]
+    assert db.row("subscriptions", id="sub-row-1")["status"] == "incomplete"
+    assert provisioned.status_code == 402
+    provision.assert_not_awaited()
+    assert db.tables["instances"] == []
 
 
 class TestGDPREndpoints:
@@ -205,7 +269,7 @@ class TestGDPREndpoints:
         assert data["status"] == "deletion_scheduled"
         assert data["grace_period_days"] == 7  # Reduced from 30 for GDPR compliance
         assert "deletion_date" in data
-        assert "still pending deletion" in data["cancellation"]
+        assert "Within 7 days" in data["cancellation"]
         assert "account UUID" in data["data_retained"]
 
         # Verify soft delete was called with correct reason
@@ -252,7 +316,7 @@ class TestGDPREndpoints:
 
         # Mock restore_account function
         mock_rpc = MagicMock()
-        mock_rpc.execute.return_value = MagicMock(data=None)
+        mock_rpc.execute.return_value = MagicMock(data=True)
         mock_supabase.rpc.return_value = mock_rpc
 
         response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
@@ -270,17 +334,20 @@ class TestGDPREndpoints:
         # Held instances resume only when their subscription is entitled.
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
 
-    def test_cancel_deletion_is_refused_after_the_grace_period(
+    def test_cancel_deletion_reports_a_restore_the_database_refused(
         self, client, mock_verify_user, mock_supabase, mock_lifecycle
     ):
-        """Once cleanup may have uninstalled the instances, the account can no longer be restored."""
+        """After the grace period, or for a suspended account, restore_account returns false and nothing resumes."""
         deleted_at = (datetime.now(UTC) - timedelta(days=8)).isoformat()
         mock_supabase.table().select().eq().execute.return_value = MagicMock(data=[{"deleted_at": deleted_at}])
+        mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=False)
 
         response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
 
         assert response.status_code == 409
-        mock_supabase.rpc.assert_not_called()
+        mock_supabase.rpc.assert_called_once_with(
+            "restore_account", {"target_account_id": "00000000-0000-0000-0000-000000000002"}
+        )
         mock_lifecycle.reconcile_account_instances.assert_not_awaited()
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):

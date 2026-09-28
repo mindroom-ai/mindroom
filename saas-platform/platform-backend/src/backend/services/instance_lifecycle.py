@@ -436,14 +436,13 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     """Keep an entitled instance the lifecycle does not hold on what its subscription tier pays for."""
     instance_id = instance["instance_id"]
     alignment = _plan_alignment(instance, subscription["tier"])
-    if alignment is None:
-        return
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance_id, subscription)
-    else:
+    elif alignment == "revoke":
         logger.info("Revoking the OpenRouter key of instance %s, which its tier does not include", instance_id)
         await revoke_instance_openrouter_key(sb, instance_id)
+    # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
 

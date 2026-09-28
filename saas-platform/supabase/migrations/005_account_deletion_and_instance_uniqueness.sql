@@ -47,9 +47,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-CREATE OR REPLACE FUNCTION restore_account(
+-- Restore now reports whether it restored, and CREATE OR REPLACE cannot change a return type.
+DROP FUNCTION IF EXISTS restore_account(UUID);
+CREATE FUNCTION restore_account(
     target_account_id UUID
-) RETURNS VOID AS $$
+) RETURNS BOOLEAN AS $$
 BEGIN
     -- Restore account
     UPDATE accounts
@@ -68,7 +70,7 @@ BEGIN
     AND deleted_at > NOW() - INTERVAL '7 days';
 
     IF NOT FOUND THEN
-        RETURN;
+        RETURN FALSE;
     END IF;
 
     -- Audit log entry
@@ -81,8 +83,12 @@ BEGIN
         jsonb_build_object('status', 'restored'),
         TRUE
     );
+    RETURN TRUE;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+REVOKE EXECUTE ON FUNCTION restore_account(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION restore_account(UUID) TO service_role;
 
 -- Hard delete only an account still pending deletion, so a restored account keeps its rows.
 CREATE OR REPLACE FUNCTION hard_delete_account(

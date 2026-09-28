@@ -2,7 +2,7 @@
 
 Rows are plain dicts per table. Filters compare values as strings, like PostgREST query parameters.
 Embedded many-to-one selects such as ``subscription:subscriptions(*)`` resolve through ``<table>_id`` columns.
-RPC calls are recorded in ``rpc_calls`` and have no effect on the tables.
+RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ class FakeRpc:
 
     def execute(self) -> FakeResult:
         self.db.rpc_calls.append((self.name, self.params))
-        return FakeResult(None)
+        return FakeResult(self.db.rpc_results.get(self.name))
 
 
 @dataclass
@@ -179,6 +179,7 @@ class FakeSupabase:
 
     tables: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     rpc_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    rpc_results: dict[str, Any] = field(default_factory=dict)
 
     def table(self, name: str) -> FakeQuery:
         return FakeQuery(self, name)

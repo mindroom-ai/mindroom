@@ -389,11 +389,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Restore function (for accidental deletions within the 7-day grace period).
+-- Restore function (for accidental deletions within the 7-day grace period); returns whether it restored.
 -- Only the account changes; held instances resume through the instance lifecycle while their subscription is entitled.
 CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
-) RETURNS VOID AS $$
+) RETURNS BOOLEAN AS $$
 BEGIN
     -- Restore account
     UPDATE accounts
@@ -412,7 +412,7 @@ BEGIN
     AND deleted_at > NOW() - INTERVAL '7 days';
 
     IF NOT FOUND THEN
-        RETURN;
+        RETURN FALSE;
     END IF;
 
     -- Audit log entry
@@ -425,6 +425,7 @@ BEGIN
         jsonb_build_object('status', 'restored'),
         TRUE
     );
+    RETURN TRUE;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 

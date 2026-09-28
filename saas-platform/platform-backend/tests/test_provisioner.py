@@ -2,6 +2,7 @@
 
 import base64
 import inspect
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
@@ -113,15 +114,15 @@ def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(
     )
 
 
-def _stale_hobby_key_db() -> FakeSupabase:
-    """An instance whose stored key has a limit the hobby tier no longer includes."""
+def _stored_key_db(limit_usd: int) -> FakeSupabase:
+    """An instance whose stored key has a limit the hobby tier does not include as-is."""
     return FakeSupabase(
         {
             "instances": [
                 {
                     "instance_id": "123",
                     "openrouter_key_hash": "old_hash",
-                    "openrouter_key_limit_usd": 10,
+                    "openrouter_key_limit_usd": limit_usd,
                     "openrouter_key_limit_reset": "monthly",
                 }
             ]
@@ -129,27 +130,26 @@ def _stale_hobby_key_db() -> FakeSupabase:
     )
 
 
-@pytest.mark.asyncio
-async def test_provision_openrouter_key_deletes_the_stored_key_before_minting_its_replacement() -> None:
-    """The replaced key is gone before a new one exists, so a failed delete can never leave an untracked live key."""
-    from backend.services.provisioner_service import _provision_openrouter_key
+_NEW_HOBBY_KEY = CreatedOpenRouterKey(
+    key="sk-or-v1-new-customer",
+    hash="new_hash",
+    label="MindRoom hobby instance 123",
+    limit_usd=15,
+    limit_reset="monthly",
+)
 
-    db = _stale_hobby_key_db()
-    created_key = CreatedOpenRouterKey(
-        key="sk-or-v1-new-customer",
-        hash="new_hash",
-        label="MindRoom hobby instance 123",
-        limit_usd=15,
-        limit_reset="monthly",
-    )
-    order: list[str] = []
+
+async def _replace_key(db: FakeSupabase, order: list[str], *, delete_error: Exception | None = None) -> str:
+    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
 
     def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
         order.append(f"delete {key_hash}")
+        if delete_error is not None:
+            raise delete_error
 
     def create_key(*, management_api_key: str, plan: object) -> CreatedOpenRouterKey:  # noqa: ARG001
         order.append("create")
-        return created_key
+        return _NEW_HOBBY_KEY
 
     with (
         patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
@@ -164,18 +164,55 @@ async def test_provision_openrouter_key_deletes_the_stored_key_before_minting_it
             existing_instance_row=db.row("instances", instance_id="123"),
             namespace="mindroom-instances",
         )
-
-    assert (result, pending_key) == ("sk-or-v1-new-customer", created_key)
-    assert order == ["delete old_hash", "create"]
-    assert db.row("instances", instance_id="123")["openrouter_key_hash"] is None
+        assert pending_key == _NEW_HOBBY_KEY
+        await _commit_openrouter_key(db, "123", pending_key)
+    return result
 
 
 @pytest.mark.asyncio
-async def test_failed_delete_of_the_stored_key_mints_no_replacement() -> None:
-    """While the old key cannot be deleted, the row keeps naming it and no second key is created."""
+async def test_a_smaller_stored_key_keeps_serving_until_its_replacement_is_recorded() -> None:
+    """An upgrade mints the new key first and revokes the superseded one once the new key is recorded."""
+    db = _stored_key_db(10)
+    order: list[str] = []
+
+    result = await _replace_key(db, order)
+
+    assert result == "sk-or-v1-new-customer"
+    assert order == ["create", "delete old_hash"]
+    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "new_hash"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_revoke_of_a_smaller_superseded_key_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """A superseded key that cannot be deleted is visible in the logs and does not lose the replacement."""
+    db = _stored_key_db(10)
+
+    with caplog.at_level(logging.WARNING):
+        result = await _replace_key(db, [], delete_error=OpenRouterError("OpenRouter key deletion failed"))
+
+    assert result == "sk-or-v1-new-customer"
+    assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_larger_stored_key_is_deleted_before_its_replacement_is_minted() -> None:
+    """A downgrade deletes the pricier key first, so a failure can never leave it live once the row forgets it."""
+    db = _stored_key_db(150)
+    order: list[str] = []
+
+    result = await _replace_key(db, order)
+
+    assert result == "sk-or-v1-new-customer"
+    assert order == ["delete old_hash", "create"]
+    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "new_hash"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_delete_of_a_larger_stored_key_mints_no_replacement() -> None:
+    """While the pricier key cannot be deleted, the row keeps naming it and no second key is created."""
     from backend.services.provisioner_service import _provision_openrouter_key
 
-    db = _stale_hobby_key_db()
+    db = _stored_key_db(150)
     create_key = Mock()
     with (
         patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),

@@ -581,8 +581,9 @@ async def _provision_openrouter_key(
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
-    A stored key the tier does not include as-is (for example after a downgrade) is deleted before any replacement
-    is created, so a failure never leaves a live key that the row no longer names.
+    A stored key with a larger budget than the tier includes (for example after a downgrade) is deleted before any
+    replacement exists, so a failure can never leave it live once the row stops naming it; a smaller one keeps
+    serving until its replacement is published.
     A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
     or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
     """
@@ -591,7 +592,7 @@ async def _provision_openrouter_key(
         existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         if existing_key:
             return existing_key, None
-    if _stored_openrouter_key_hash(existing_instance_row) is not None:
+    if existing_instance_row is not None and openrouter_key_exceeds_plan(existing_instance_row, tier):
         await revoke_instance_openrouter_key(sb, instance_id)
     if monthly_limit_usd <= 0:
         return "", None
@@ -614,11 +615,27 @@ async def _provision_openrouter_key(
 
 
 async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Record a newly published key; the key it replaces was already deleted by `_provision_openrouter_key`."""
+    """Record a newly published key and revoke the smaller key the row still names, if any."""
+    superseded_key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
     try:
         await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
     except Exception:
         logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
+        return
+    if superseded_key_hash is None or superseded_key_hash == created_key.hash:
+        return
+    delete_key = partial(
+        delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=superseded_key_hash
+    )
+    try:
+        await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterError:
+        logger.warning(
+            "Failed to revoke superseded OpenRouter key %s for instance %s",
+            superseded_key_hash,
+            instance_id,
+            exc_info=True,
+        )
 
 
 async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
@@ -649,7 +666,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if existing_instance_id:
         customer_id = str(existing_instance_id)
         try:
-            updated_rows = update_instance(sb, customer_id, {"status": "provisioning", "tier": tier})
+            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"})
             if not updated_rows:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
@@ -731,15 +748,15 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     # Always per instance: a shared token would let one tenant authenticate to every tenant's runner.
     sandbox_proxy_token = secrets.token_hex(32)
-    # Existing instances may have plaintext credential files; preserve their current encryption state.
-    credentials_encryption_key = await _provision_credentials_encryption_key(
-        customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
-    )
-    existing_volumes = (
-        await _existing_instance_volumes(customer_id, namespace) if existing_instance_id else _ExistingVolumes()
-    )
-    storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
     try:
+        # Existing instances may have plaintext credential files; preserve their current encryption state.
+        credentials_encryption_key = await _provision_credentials_encryption_key(
+            customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
+        )
+        existing_volumes = (
+            await _existing_instance_volumes(customer_id, namespace) if existing_instance_id else _ExistingVolumes()
+        )
+        storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
             account_id=account_id,
@@ -896,7 +913,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         )
         held_row = get_instance(sb, customer_id, columns="instance_id,openrouter_key_hash") or {}
         await set_instance_openrouter_key_disabled(held_row, disabled=True)
-        update_instance(sb, customer_id, {"status": "stopped"})
+        update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
         return {
             "customer_id": customer_id,
             "frontend_url": frontend_url,
@@ -909,7 +926,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
     try:
-        update_instance(sb, customer_id, {"status": "running" if ready else "provisioning"})
+        # The tier is recorded only once deployed; the subscription lifecycle redeploys an instance whose tier differs.
+        update_instance(sb, customer_id, {"status": "running" if ready else "provisioning", "tier": tier})
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 

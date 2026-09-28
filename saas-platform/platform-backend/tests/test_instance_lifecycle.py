@@ -118,8 +118,9 @@ def platform() -> Iterator[Platform]:
         resume_lifecycle_hold: bool,
     ) -> dict[str, Any]:
         assert resume_lifecycle_hold
+        # Like provision_instance, a successful deploy records the tier it deployed.
         db.row("instances", instance_id=data["instance_id"]).update(
-            {"status": "running", "openrouter_key_hash": "key_hash_new"}
+            {"status": "running", "tier": data["tier"], "openrouter_key_hash": "key_hash_new"}
         )
         return {"success": True}
 
@@ -1202,6 +1203,7 @@ async def test_account_inside_its_grace_period_is_not_torn_down(platform: Platfo
 
 def _cancel_deletion(platform: Platform) -> Any:  # noqa: ANN401
     record_rpc = platform.db.rpc
+    platform.db.rpc_results["restore_account"] = True
 
     def restore_account(name: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
         platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = None
@@ -1316,31 +1318,40 @@ def test_plan_change_redeploys_a_running_instance_with_the_new_budget(platform: 
 
 
 @pytest.mark.asyncio
-async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform) -> None:
+@pytest.mark.parametrize("status_after_failure", ["error", "running"])
+async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform, status_after_failure: str) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
     platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
     redeploy = platform.provision.side_effect
 
     async def helm_fails_once(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         if platform.provision.await_count == 1:
-            # Like provision_instance, a failed deploy marks the instance errored.
-            platform.instance()["status"] = "error"
+            # Like provision_instance, the hobby key is published before Helm fails, which marks the instance
+            # errored; a Kubernetes status sync may set it back to running before the next run.
+            platform.instance().update(
+                {
+                    "status": status_after_failure,
+                    "openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd,
+                }
+            )
             msg = "Helm install failed: timed out"
             raise RuntimeError(msg)
-        # The retry publishes the hobby key.
-        platform.instance().update({"openrouter_key_limit_usd": get_plan_details("hobby").included_ai_budget_usd})
         return await redeploy(*args, **kwargs)
 
     platform.provision.side_effect = helm_fails_once
 
     first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
     assert "Helm install failed" in platform.instance()["lifecycle_error"]
+    # The tier is recorded only after a successful deploy, so the instance still reads as pro.
+    assert platform.instance()["tier"] == "pro"
 
     second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    third = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
     assert first.errors
-    assert second.errors == []
+    assert second.errors == third.errors == []
     assert platform.provision.await_count == 2
+    assert platform.instance()["tier"] == "hobby"
     assert platform.instance()["lifecycle_error"] is None
 
 
@@ -1415,6 +1426,23 @@ async def test_reprovisioning_on_a_tier_without_budget_deletes_the_stored_key() 
     assert row["openrouter_key_hash"] is None
     assert row["openrouter_key_limit_usd"] is None
     assert row["tier"] == "byok"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redeploy_keeps_the_previously_deployed_tier() -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="pro", openrouter_key_hash=None)]})
+    with (
+        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(1, "", "timed out"))),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
+
+    # The lifecycle compares this tier with the subscription's, so it keeps retrying until a deploy succeeds.
+    assert db.row("instances", instance_id=7)["tier"] == "pro"
+    assert db.row("instances", instance_id=7)["status"] == "error"
 
 
 @pytest.mark.asyncio
