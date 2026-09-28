@@ -19,7 +19,6 @@ export interface ModelConfig {
   api?: "responses" | "chat_completions" | null;
   context_window?: number | null;
   host?: string; // For ollama
-  api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
 }
 

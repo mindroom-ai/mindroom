@@ -1957,7 +1957,8 @@ def create_agent(
                 and openai_native_tool_search_supported(
                     runtime_model_config.provider,
                     runtime_model_config.id,
-                    base_url=constants.runtime_openai_base_url(runtime_paths, runtime_model_config.extra_kwargs),
+                    base_url=(runtime_model_config.extra_kwargs or {}).get("base_url")
+                    or runtime_paths.env_value("OPENAI_BASE_URL"),
                 )
             )
         )

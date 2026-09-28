@@ -868,9 +868,6 @@ def _find_missing_env_keys(
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
-    # A model with its own key in config never needs the provider's shared key. Like the env
-    # checks below, this reads only config and env, never the credential store.
-    shared_key_providers = {model.provider for model in config.models.values() if model.configured_api_key() is None}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "bedrock_claude":
@@ -890,12 +887,9 @@ def _find_missing_env_keys(
                 missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
             continue
         if provider == "azure":
-            azure_env_keys = [AZURE_OPENAI_ENV_BY_KEY["endpoint"]]
-            if provider in shared_key_providers:
-                azure_env_keys.insert(0, AZURE_OPENAI_ENV_BY_KEY["api_key"])
             missing.extend(
                 (provider, env_key)
-                for env_key in azure_env_keys
+                for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
@@ -907,9 +901,7 @@ def _find_missing_env_keys(
             )
             continue
         env_key = constants.env_key_for_provider(provider)
-        # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
-        needs_env_key = provider == "ollama" or provider in shared_key_providers
-        if env_key and needs_env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
+        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
 

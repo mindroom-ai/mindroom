@@ -1083,8 +1083,8 @@ Check your environment for common issues before running `mindroom run`.
 Runs a series of checks in one pass:
 
 - **Config file** exists and is valid YAML with correct Pydantic schema
-- **Providers** — validates each shared API key (Anthropic, OpenAI, Google, OpenRouter, DeepSeek, Cerebras, Groq) at its provider's default endpoint when a model relies on it and no custom endpoint applies, lists models with their own keys without sending those keys, checks that Ollama is reachable, and sends Vertex AI Claude a one-token request built with the runtime's client settings
-- **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers) and reports which key the memory LLM uses without sending it
+- **Providers** — validates API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
+- **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
 - **Pairing** — on hosted installs, reports whether this machine is paired with MindRoom Chat; before the first run it passes with a `Not paired yet` line instead of warning, because `mindroom run` pairs automatically
 - **Storage** — confirms the storage directory is writable
