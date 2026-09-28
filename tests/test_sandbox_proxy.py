@@ -5174,7 +5174,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     worker_backend: str,
     sends_snapshot: bool,
 ) -> None:
-    """Runners that mount only a seed config get only the live config fields they resolve with each call."""
+    """Runners mount no config, so each call carries only the live config fields they resolve agents from."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", worker_backend)
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8766")
     live_config = _live_primary_config(runtime_paths)

@@ -75,7 +75,7 @@ class ScriptWorkerClient:
     ) -> None:
         """Launch the run's fixed source snapshot under its derived handle.
 
-        ``config_snapshot`` holds the live config fields runners resolve, for workers that mount only a seed config.
+        ``config_snapshot`` holds the live config fields runners resolve; workers mount no config and resolve agents only from it.
         """
         data = await self._request(
             worker,

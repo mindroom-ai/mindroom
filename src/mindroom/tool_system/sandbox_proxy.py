@@ -466,10 +466,9 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
 def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object] | None:
     """Return the live config fields runners resolve, for one runner or worker request.
 
-    The static runner and Kubernetes workers only mount a seed config file, so agents added or
-    edited after seeding exist only in the config the primary hot-reloads.  Docker workers read a
-    per-worker projection of the same fields whose config-relative paths are rewritten for the
-    container, so they get no request snapshot.
+    The static runner and Kubernetes workers mount no config and resolve agents only from this
+    snapshot.  Docker workers read a per-worker projection of the same fields whose config-relative
+    paths are rewritten for the container, so they get no request snapshot.
     """
     if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
         return None
