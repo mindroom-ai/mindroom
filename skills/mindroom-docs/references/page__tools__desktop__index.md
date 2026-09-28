@@ -186,7 +186,7 @@ Revoking clears auto-approval, rejects a waiting request, and stops every runnin
 A command still running after its inline wait keeps running as a handle instead of being killed.
 The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops the command with `kill_shell`.
 Every shell result reports `next_offset`, the byte just past the returned output, while `output_bytes` stays the total captured size.
-Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and `output_truncated: true` then means more output is available from the new `next_offset`.
+Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and more output is available while `next_offset` is below `output_bytes`.
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
 The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.

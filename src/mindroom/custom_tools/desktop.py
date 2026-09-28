@@ -231,7 +231,7 @@ _DESKTOP_DESCRIPTION = (
     "command still running then returns a handle to poll with check_shell and stop with kill_shell. Shell "
     "results include next_offset, the byte just past the returned output: pass the last next_offset as the "
     "check_shell offset to receive only newer output, since without an offset a running handle shows only its "
-    "newest output. With an offset, output_truncated means more output is available from next_offset. A handle "
+    "newest output. With an offset, more output is available while next_offset is below output_bytes. A handle "
     "stopped with kill_shell finishes with state killed and whatever exit code the process returned; completed "
     "means the command exited on its own. "
     f"Output is captured up to {MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB per command; a finished result "
