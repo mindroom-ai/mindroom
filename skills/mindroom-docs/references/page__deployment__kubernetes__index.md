@@ -537,6 +537,7 @@ Tenants share the namespace, so their isolation comes from these controls:
 - Tool code runs in the instance pod's sandbox-runner sidecar, no instance pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers.
 - The namespace enforces the Pod Security `baseline` profile, which rejects privileged containers, host namespaces, `hostPath` volumes, and added capabilities; Terraform creates it with that label, and the provisioner reapplies the label before every deployment.
 - Each instance's NetworkPolicy admits service traffic only from the ingress controller and the same instance, and allows HTTP and HTTPS egress only to public addresses and the ingress controller, so metadata services, node and private networks, and other pods are unreachable on those ports.
+  The chart finds the controller by namespace through `ingressControllerNamespace`, which must match `ingress_target_namespace` in `cluster/terraform/terraform-k8s/kube.tf`.
 
 Platform services run in `mindroom-{environment}` namespace.
 The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
