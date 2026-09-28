@@ -126,7 +126,10 @@ class TestExtractTeamMemberContributions:
         "content",
         [
             "| Model | Revenue |\n|---|---|\n| Per seat | predictable |",
+            "Model | Revenue\n---|---\nPer seat | predictable",
             "## Findings\nThree vendors price per seat.",
+            "Findings\n========\nThree vendors price per seat.",
+            "---\nThree vendors price per seat.",
             "- Per seat\n- Usage",
             "1. Per seat\n2. Usage",
             "> Quoted from the brief",

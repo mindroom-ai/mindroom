@@ -2815,6 +2815,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
+    "mindroom.matrix.message_builder",
     "mindroom.matrix.state",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
