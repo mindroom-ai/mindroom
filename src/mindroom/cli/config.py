@@ -11,7 +11,6 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
@@ -42,7 +41,6 @@ from mindroom.runtime_env_policy import (
     AZURE_OPENAI_ENV_BY_KEY,
     ENV_TEMPLATE_PLACEHOLDERS,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
-    is_unset_env_value,
 )
 
 if TYPE_CHECKING:
@@ -142,13 +140,6 @@ _FIRST_RUN_PROVIDER_STEPS: dict[_ProviderPreset, str] = {
 }
 
 
-@dataclass(frozen=True)
-class _ProviderKey:
-    """First-run answer for the preset's API key; `value=None` writes no key into `.env`."""
-
-    value: str | None
-
-
 def _config_init_owner_user_id(config_path: Path) -> str | None:
     """Return the paired owner MXID available to config init, if one was persisted."""
     from mindroom.cli.owner import parse_owner_matrix_user_id  # noqa: PLC0415
@@ -199,11 +190,11 @@ def _write_env_file(
     *,
     storage_root: Path,
     replace_existing: bool,
-    provider_key: _ProviderKey | None = None,
+    provider_api_key: str | None = None,
 ) -> bool:
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
-        write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_key))
+        write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_api_key))
         console.print(f"[green]Env file created:[/green] {env_path}")
         return True
 
@@ -216,14 +207,13 @@ def _write_env_file(
             _PUBLIC_HOSTED_ENV_DEFAULTS,
             title="Hosted Matrix defaults for mindroom.chat",
         )
-        env_key = _preset_api_key_env(selected_preset)
-        if provider_key is not None and provider_key.value is not None and env_key is not None:
-            upsert_env_values(env_path, {env_key: provider_key.value})
+        if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
+            upsert_env_values(env_path, {env_key: provider_api_key})
             console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
             changed = True
         return changed
 
-    write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_key))
+    write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_api_key))
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
     return True
 
@@ -492,6 +482,8 @@ def config_init(
 
     env_changed = _write_starter_setup(
         target,
+        env_path,
+        constants.resolve_runtime_paths(config_path=target).storage_root,
         selected_matrix_server,
         selected_preset,
         force=force,
@@ -516,22 +508,18 @@ def create_first_run_config(runtime_paths: RuntimePaths) -> None:
         "For your own Matrix server, press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.",
     )
     selected_preset = _prompt_provider_preset()
-    provider_key = _prompt_provider_key(selected_preset, runtime_paths, env_path)
+    provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path)
     _write_starter_setup(
         config_path,
+        env_path,
+        runtime_paths.storage_root,
         "mindroom.chat",
         selected_preset,
         force=False,
         replace_env_file=False,
-        provider_key=provider_key,
-        storage_path=runtime_paths.storage_root,
+        provider_api_key=provider_api_key,
     )
-    env_key = _preset_api_key_env(selected_preset)
-    if provider_key is not None and provider_key.value is not None and env_key is not None:
-        # The key was prompted for, so any exported value is empty or a template placeholder that would
-        # otherwise take precedence over the saved key when this process reloads its environment.
-        os.environ.pop(env_key, None)
-    if provider_key is None:
+    if selected_preset not in _API_KEY_PRESET_LABELS:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
         console.print(f"  {_FIRST_RUN_PROVIDER_STEPS[selected_preset].format(env_path=env_path)}")
         _print_local_model_commands(selected_preset)
@@ -542,15 +530,17 @@ def _prompt_provider_key(
     selected_preset: _ProviderPreset,
     runtime_paths: RuntimePaths,
     env_path: Path,
-) -> _ProviderKey | None:
-    """Ask for the preset's API key with hidden input; return None for presets that need other setup."""
+) -> str | None:
+    """Ask for the preset's API key with hidden input; return None when none was typed or none is needed."""
+    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+
     label = _API_KEY_PRESET_LABELS.get(selected_preset)
     env_key = _preset_api_key_env(selected_preset)
     if label is None or env_key is None:
         return None
-    if _configured_env_value(env_key, runtime_paths):
+    if get_secret_from_env(env_key, runtime_paths):
         console.print(f"Using {env_key} from your environment.")
-        return _ProviderKey(None)
+        return None
     value = typer.prompt(
         f"{label} API key (input hidden, press Enter to skip)",
         default="",
@@ -562,7 +552,11 @@ def _prompt_provider_key(
             f"Skipped. Connect your provider in the dashboard once MindRoom is running, "
             f"or add {env_key} to {env_path} and restart `mindroom run`.",
         )
-    return _ProviderKey(value or None)
+        return None
+    # Any exported value is blank or a template placeholder, and it would take precedence over
+    # the saved key when this process reloads its environment.
+    os.environ.pop(env_key, None)
+    return value
 
 
 def _starter_config(
@@ -585,21 +579,20 @@ def _starter_config(
 
 def _write_starter_setup(
     target: Path,
+    env_path: Path,
+    storage_root: Path,
     matrix_server: _MatrixServerPreset,
     selected_preset: _ProviderPreset,
     *,
     force: bool,
     replace_env_file: bool,
     keep_existing_config: bool = False,
-    provider_key: _ProviderKey | None = None,
-    storage_path: Path | None = None,
+    provider_api_key: str | None = None,
 ) -> bool:
     """Write `.env`, the starter config, Mind workspace, and agent docs; return whether `.env` changed.
 
     `.env` comes first so a failed write leaves no config that would skip first-run setup next time.
     """
-    env_path = target.parent / ".env"
-    storage_root = constants.resolve_runtime_paths(config_path=target, storage_path=storage_path).storage_root
     content = _starter_config(target, matrix_server, selected_preset)
     env_changed = _write_env_file(
         env_path,
@@ -607,7 +600,7 @@ def _write_starter_setup(
         selected_preset,
         storage_root=storage_root,
         replace_existing=replace_env_file,
-        provider_key=provider_key,
+        provider_api_key=provider_api_key,
     )
     if not keep_existing_config:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -867,19 +860,13 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
-def _configured_env_value(env_key: str, runtime_paths: RuntimePaths) -> str | None:
-    """Return the env or `_FILE` secret for one key, treating unedited starter template placeholders as unset."""
-    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
-
-    value = get_secret_from_env(env_key, runtime_paths=runtime_paths)
-    return None if value is None or is_unset_env_value(env_key, value) else value
-
-
 def _find_missing_env_keys(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
+    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
@@ -887,34 +874,34 @@ def _find_missing_env_keys(
             provider_models = [model for model in config.models.values() if model.provider == provider]
             if any((model.extra_kwargs or {}).get("aws_region") for model in provider_models):
                 continue
-            if any((model.extra_kwargs or {}).get("aws_profile") for model in provider_models) or _configured_env_value(
+            if any((model.extra_kwargs or {}).get("aws_profile") for model in provider_models) or get_secret_from_env(
                 AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
-                runtime_paths,
+                runtime_paths=runtime_paths,
             ):
                 continue
             region_keys = (
                 AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
                 AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
             )
-            if not any(_configured_env_value(env_key, runtime_paths) for env_key in region_keys):
+            if not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in region_keys):
                 missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
             continue
         if provider == "azure":
             missing.extend(
                 (provider, env_key)
                 for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
-                if not _configured_env_value(env_key, runtime_paths)
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
         if provider == "vertexai_claude":
             missing.extend(
                 (provider, env_key)
                 for env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.values()
-                if not _configured_env_value(env_key, runtime_paths)
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
         env_key = constants.env_key_for_provider(provider)
-        if env_key and not _configured_env_value(env_key, runtime_paths):
+        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
 
@@ -1202,7 +1189,7 @@ def _env_template(
     matrix_server: _MatrixServerPreset,
     provider_preset: _ProviderPreset,
     storage_root: Path,
-    provider_key: _ProviderKey | None = None,
+    provider_api_key: str | None = None,
 ) -> str:
     """Return a starter .env file for standalone deployments.
 
@@ -1228,7 +1215,7 @@ def _env_template(
             "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN="
         )
 
-    provider_lines_text = _provider_env_template(provider_preset, provider_key)
+    provider_lines_text = _provider_env_template(provider_preset, provider_api_key)
     storage_root_block = (
         "# Runtime storage root for canonical agent state, sessions, logs, and credentials\n"
         f"MINDROOM_STORAGE_PATH={storage_root.expanduser().resolve()}\n\n"
@@ -1265,11 +1252,11 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
 
 def _provider_env_template(  # noqa: PLR0911
     provider_preset: _ProviderPreset,
-    provider_key: _ProviderKey | None = None,
+    provider_api_key: str | None = None,
 ) -> str:
     """Return the provider-specific section of the starter .env file.
 
-    Without a first-run `provider_key` the preset's key is an uncommented placeholder to edit.
+    Without a `provider_api_key` typed at first run, the preset's key is an uncommented placeholder to edit.
     """
     if provider_preset == "codex":
         return textwrap.dedent("""\
@@ -1347,19 +1334,10 @@ def _provider_env_template(  # noqa: PLR0911
         """).rstrip()
 
     required_env_key = _preset_api_key_env(provider_preset)
-    key_lines: list[str] = []
-    any_active = False
+    provider_lines: list[str] = ["# AI provider API keys (set the uncommented keys for this preset)"]
     for env_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
-        active = env_key == required_env_key
-        value = ENV_TEMPLATE_PLACEHOLDERS[env_key]
-        if active and provider_key is not None:
-            active = provider_key.value is not None
-            value = provider_key.value or value
-        any_active = any_active or active
-        key_lines.append(f"{'' if active else '# '}{env_key}={value}")
-    header = (
-        "# AI provider API keys (set the uncommented keys for this preset)"
-        if any_active
-        else "# AI provider API keys (uncomment and set the key for your provider)"
-    )
-    return "\n".join([header, *key_lines])
+        if env_key == required_env_key:
+            provider_lines.append(f"{env_key}={provider_api_key or ENV_TEMPLATE_PLACEHOLDERS[env_key]}")
+        else:
+            provider_lines.append(f"# {env_key}={ENV_TEMPLATE_PLACEHOLDERS[env_key]}")
+    return "\n".join(provider_lines)

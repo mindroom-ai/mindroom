@@ -36,7 +36,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
-from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
@@ -2050,18 +2050,15 @@ class TestRunFirstRunSetup:
         assert len(started) == 1
         assert started[0].env_value("OPENAI_API_KEY") == typed_key
 
-    def test_skipped_key_leaves_no_key_and_says_where_to_add_it(self, tmp_path: Path) -> None:
-        """Pressing Enter at the key prompt writes no key and points to the dashboard and to `.env` plus a restart."""
+    def test_skipped_key_leaves_placeholder_and_says_where_to_add_it(self, tmp_path: Path) -> None:
+        """Pressing Enter writes the `config init` placeholder, which counts as unset, and points to the dashboard and `.env`."""
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
 
         result, paired, started = self._invoke_run(config_path, "anthropic\n\n")
 
         assert result.exit_code == 0, result.output
-        env_content = env_path.read_text(encoding="utf-8")
-        assert re.search(r"^\s*ANTHROPIC_API_KEY=", env_content, re.MULTILINE) is None
-        assert "# AI provider API keys (uncomment and set the key for your provider)" in env_content
-        assert "set the uncommented keys" not in env_content
+        assert "ANTHROPIC_API_KEY=your-anthropic-key-here\n" in env_path.read_text(encoding="utf-8")
         output = normalize_console_output(result.output)
         assert "Skipped" in output
         assert "Missing environment variables" not in output
@@ -2071,7 +2068,7 @@ class TestRunFirstRunSetup:
         assert "restart `mindroom run`" in output
         assert len(paired) == 1
         assert len(started) == 1
-        assert started[0].env_value("ANTHROPIC_API_KEY") is None
+        assert get_secret_from_env("ANTHROPIC_API_KEY", started[0]) is None
 
     @pytest.mark.parametrize(
         ("preset", "hint", "needs_restart"),
@@ -2107,15 +2104,14 @@ class TestRunFirstRunSetup:
         assert len(started) == 1
 
     def test_key_already_in_environment_is_not_prompted(self, tmp_path: Path) -> None:
-        """An exported provider key is used as is and never shadowed by a placeholder in the new .env."""
+        """An exported provider key is used as is; the new `.env` placeholder cannot shadow it."""
         config_path = tmp_path / "config.yaml"
 
         result, _paired, started = self._invoke_run(config_path, "openai\n", env={"OPENAI_API_KEY": "sk-exported"})
 
         assert result.exit_code == 0, result.output
         assert "API key (" not in result.output
-        env_content = (tmp_path / ".env").read_text(encoding="utf-8")
-        assert re.search(r"^\s*OPENAI_API_KEY=", env_content, re.MULTILINE) is None
+        assert "OPENAI_API_KEY=your-openai-key-here\n" in (tmp_path / ".env").read_text(encoding="utf-8")
         assert started[0].env_value("OPENAI_API_KEY") == "sk-exported"
 
     def test_key_is_added_to_env_file_created_by_connect(self, tmp_path: Path) -> None:
@@ -2242,8 +2238,8 @@ class TestRunFirstRunSetup:
         ]
         assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
 
-    def test_skipped_key_keeps_real_env_value(self, tmp_path: Path) -> None:
-        """Only a template placeholder is disabled on skip; a real key in `.env` is used and left alone."""
+    def test_real_env_file_key_is_used_without_prompt(self, tmp_path: Path) -> None:
+        """A real key already in `.env` is used without a prompt and left unchanged."""
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-real\n", encoding="utf-8")

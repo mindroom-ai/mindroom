@@ -57,18 +57,20 @@ def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
     a readable file, return its stripped contents. Else return None.
+    Blank values and unedited starter-template placeholders count as unset in both places.
     """
     val = runtime_paths.env_value(name)
-    if val:
+    if val is not None and not is_unset_env_value(name, val):
         return val
     file_var = f"{name}_FILE"
     file_path = runtime_env_path(runtime_paths, file_var)
     if file_path is not None and file_path.exists():
         try:
-            return file_path.read_text(encoding="utf-8").strip()
+            val = file_path.read_text(encoding="utf-8").strip()
         except Exception:
             # Avoid noisy logs here; callers can handle None gracefully
             return None
+        return None if is_unset_env_value(name, val) else val
     return None
 
 
@@ -349,7 +351,7 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
         env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
 
-        if env_value is None or is_unset_env_value(env_var, env_value):
+        if not env_value:
             logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 
