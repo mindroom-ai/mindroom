@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 from typing import TYPE_CHECKING, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -13,6 +14,7 @@ import httpx
 import nio
 import pytest
 import yaml
+from aiohttp import ClientResponse
 from nio.durable import DurableSyncConfig
 
 from mindroom import constants as constants_mod
@@ -39,6 +41,8 @@ from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from aioresponses import aioresponses
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 APPSERVICE_TOKEN = "as-secret"  # noqa: S105
@@ -694,9 +698,16 @@ class TestMatrixRegistration:
             )
 
     @staticmethod
-    def _one_time_password_client(change_response: nio.Response) -> AsyncMock:
+    def _one_time_password_client(
+        login_response: nio.Response | None = None,
+        change_response: nio.Response | None = None,
+    ) -> AsyncMock:
+        """Return a Matrix client double whose login and password change succeed unless overridden."""
+        if change_response is None:
+            change_response = nio.ChangePasswordResponse()
+            change_response.transport_response = MagicMock(spec=ClientResponse, status=200)
         client = AsyncMock()
-        client.login.return_value = nio.LoginResponse(
+        client.login.return_value = login_response or nio.LoginResponse(
             user_id="@test_user:localhost",
             device_id="ONE_TIME_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
@@ -704,22 +715,18 @@ class TestMatrixRegistration:
         client.change_password.return_value = change_response
         return client
 
-    @pytest.mark.asyncio
-    async def test_register_user_uses_provisioning_service_register_agent_when_configured(
-        self,
+    @staticmethod
+    async def _register_provisioned_account(
         tmp_path: Path,
-    ) -> None:
-        """A provisioned account's one-time password is replaced with the install's own password."""
-        test_pass = "test_pass"  # noqa: S105
-        client_secret = "secret-123"  # noqa: S105
+        password: str = "test_pass",  # noqa: S107
+    ) -> str:
+        """Register through a provisioning service that reports a created account with a one-time password."""
         runtime_paths = _runtime_paths(
             tmp_path,
             MINDROOM_PROVISIONING_URL="https://provisioning.example",
             MINDROOM_LOCAL_CLIENT_ID="client-123",
-            MINDROOM_LOCAL_CLIENT_SECRET=client_secret,
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
         )
-        http_client = self._one_time_password_client(nio.ChangePasswordResponse())
-
         with (
             patch(
                 "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
@@ -730,7 +737,6 @@ class TestMatrixRegistration:
                     password="one-time-pass",  # noqa: S106
                 ),
             ) as mock_register,
-            patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client) as mock_http_client,
             patch(
                 "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
@@ -739,22 +745,34 @@ class TestMatrixRegistration:
             user_id = await _register_user(
                 "http://localhost:8008",
                 "test_user",
-                test_pass,
+                password,
                 "Test User",
                 runtime_paths=runtime_paths,
             )
-
-        assert user_id == "@test_user:localhost"
         mock_register.assert_called_once_with(
             provisioning_url="https://provisioning.example",
             client_id="client-123",
-            client_secret=client_secret,
+            client_secret="secret-123",  # noqa: S106
             homeserver="http://localhost:8008",
             username="test_user",
             display_name="Test User",
             runtime_paths=runtime_paths,
         )
-        mock_http_client.assert_called_once_with("http://localhost:8008", runtime_paths, "@test_user:localhost")
+        return user_id
+
+    @pytest.mark.asyncio
+    async def test_register_user_uses_provisioning_service_register_agent_when_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A provisioned account's one-time password is replaced with the install's own password."""
+        http_client = self._one_time_password_client()
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client) as mock_http_client:
+            user_id = await self._register_provisioned_account(tmp_path, password="install-pass")  # noqa: S106
+
+        assert user_id == "@test_user:localhost"
+        mock_http_client.assert_called_once_with("http://localhost:8008", ANY, "@test_user:localhost")
         http_client.login.assert_awaited_once_with("one-time-pass")
         http_client.change_password.assert_awaited_once_with(
             {
@@ -762,51 +780,66 @@ class TestMatrixRegistration:
                 "identifier": {"type": "m.id.user", "user": "@test_user:localhost"},
                 "password": "one-time-pass",
             },
-            test_pass,
+            "install-pass",
         )
         http_client.logout.assert_awaited_once_with()
         http_client.close.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("login_response", "change_response"),
+        [
+            pytest.param(nio.LoginError("Invalid password"), None, id="login-error"),
+            pytest.param(None, nio.ChangePasswordError("Password change is disabled"), id="change-error"),
+        ],
+    )
     async def test_register_user_fails_startup_when_one_time_password_is_not_replaced(
         self,
         tmp_path: Path,
+        login_response: nio.Response | None,
+        change_response: nio.Response | None,
     ) -> None:
         """A provisioned account whose one-time password cannot be replaced is a permanent startup error."""
-        runtime_paths = _runtime_paths(
-            tmp_path,
-            MINDROOM_PROVISIONING_URL="https://provisioning.example",
-            MINDROOM_LOCAL_CLIENT_ID="client-123",
-            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
-        )
-        http_client = self._one_time_password_client(nio.ChangePasswordError("Password change is disabled"))
+        http_client = self._one_time_password_client(login_response, change_response)
 
         with (
-            patch(
-                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
-                new_callable=AsyncMock,
-                return_value=provisioning._ProvisioningRegisterResult(
-                    status="created",
-                    user_id="@test_user:localhost",
-                    password="one-time-pass",  # noqa: S106
-                ),
-            ),
             patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client),
-            patch(
-                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
-                return_value=None,
+            pytest.raises(
+                PermanentMatrixStartupError,
+                match="cannot be used again; set a different MINDROOM_NAMESPACE",
             ),
-            pytest.raises(PermanentMatrixStartupError, match="replacing its one-time password failed"),
         ):
-            await _register_user(
-                "http://localhost:8008",
-                "test_user",
-                "test_pass",
-                "Test User",
-                runtime_paths=runtime_paths,
-            )
+            await self._register_provisioned_account(tmp_path)
 
+        if login_response is not None:
+            http_client.change_password.assert_not_awaited()
+        http_client.logout.assert_not_awaited()
         http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_register_user_rejects_password_change_answered_by_non_json_server_error(
+        self,
+        tmp_path: Path,
+        aioresponse: aioresponses,
+    ) -> None:
+        """Nio reads a non-JSON 502 as an empty successful change body, so the HTTP status must decide."""
+        aioresponse.post(
+            re.compile(r"http://localhost:8008/_matrix/client/v3/login.*"),
+            payload={"user_id": "@test_user:localhost", "device_id": "ONE_TIME_DEVICE", "access_token": "token"},
+        )
+        aioresponse.post(
+            re.compile(r"http://localhost:8008/_matrix/client/v3/account/password.*"),
+            status=502,
+            body="<html>Bad Gateway</html>",
+            content_type="text/html",
+        )
+        aioresponse.post(re.compile(r"http://localhost:8008/_matrix/client/v3/logout.*"), payload={})
+
+        with pytest.raises(PermanentMatrixStartupError, match=r"replacing its one-time password failed \(HTTP 502\)"):
+            await self._register_provisioned_account(tmp_path)
+
+        requested_paths = [url.path for _method, url in aioresponse.requests]
+        assert requested_paths == ["/_matrix/client/v3/login", "/_matrix/client/v3/account/password"]
 
     @pytest.mark.asyncio
     async def test_register_user_provisioning_user_in_use_logs_in_and_syncs_display(

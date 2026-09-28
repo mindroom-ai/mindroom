@@ -146,12 +146,14 @@ async def register_user_via_provisioning_service(
         msg = "Provisioning service response returned invalid user_id for register-agent."
         raise matrix_startup_error(msg, permanent=True) from exc
 
-    password = body.get("password") if status == "created" else None
-    if status == "created" and (not isinstance(password, str) or not password):
-        msg = (
-            "Provisioning service did not return a one-time password for the created agent account. "
-            "Deploy the latest local provisioning service."
-        )
-        raise matrix_startup_error(msg, permanent=True)
+    password = None
+    if status == "created":
+        password = body.get("password")
+        if not isinstance(password, str) or not password:
+            msg = (
+                "Provisioning service did not return a one-time password for the created agent account. "
+                "Deploy the latest local provisioning service."
+            )
+            raise matrix_startup_error(msg, permanent=True)
 
     return _ProvisioningRegisterResult(status=status, user_id=parsed_user_id, password=password)

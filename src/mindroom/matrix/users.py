@@ -9,6 +9,7 @@ from uuid import UUID
 
 import httpx
 import nio
+from aiohttp import ClientResponse
 from nio import crypto
 from nio.durable import DurableSyncConfig
 
@@ -938,8 +939,16 @@ async def _replace_one_time_password(
                 "password": one_time_password,
             }
             response = await client.change_password(auth, password)
-        if not isinstance(response, nio.ChangePasswordResponse):
-            msg = f"Matrix account {user_id} was created, but replacing its one-time password failed: {response}"
+        # nio parses a non-JSON error body as {}, which passes the empty ChangePasswordResponse schema.
+        transport = response.transport_response
+        status = transport.status if isinstance(transport, ClientResponse) else None
+        if not (isinstance(response, nio.ChangePasswordResponse) and status is not None and 200 <= status < 300):
+            msg = (
+                f"Matrix account {user_id} was created, but replacing its one-time password failed "
+                f"(HTTP {status}): {response}. "
+                f"This account cannot be used again; set a different MINDROOM_NAMESPACE "
+                f"(or have the homeserver admin deactivate {user_id}) and restart."
+            )
             raise matrix_startup_error(msg, permanent=True)
         await client.logout()
     finally:
