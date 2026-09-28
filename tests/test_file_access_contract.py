@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import ModuleType
 
+    from agno.tools.file import FileTools
+
     from mindroom.config.models import FileAccess
 
 _PNG = base64.b64decode(
@@ -352,6 +354,34 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
     monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda file_tool, _coding: file_tool.save_file("new notes", "notes/new.txt"),
+        lambda file_tool, _coding: file_tool.read_file("doc.txt"),
+        lambda file_tool, _coding: file_tool.delete_file("doc.txt"),
+        lambda _file, coding_tool: coding_tool.write_file("notes/new.txt", "new notes"),
+        lambda _file, coding_tool: coding_tool.edit_file("doc.txt", "contract", "changed"),
+    ],
+    ids=["file:save_file", "file:read_file", "file:delete_file", "coding:write_file", "coding:edit_file"],
+)
+def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_construction(
+    tmp_path: Path,
+    workspace: Path,
+    outside: Path,
+    operation: Callable[[FileTools, CodingTools], str],
+) -> None:
+    """Once built, `file` and `coding` never follow a workspace that worker code replaced with a link."""
+    file_tool = file_tools()(base_dir=workspace, enable_delete_file=True)
+    coding_tool = CodingTools(base_dir=str(workspace))
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    assert operation(file_tool, coding_tool).startswith("Error")
+    assert sorted(entry.name for entry in outside.iterdir()) == ["doc.png", "doc.txt"]
+    assert (outside / "doc.txt").read_text() == _TEXT
 
 
 @pytest.mark.asyncio

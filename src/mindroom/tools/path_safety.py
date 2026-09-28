@@ -85,7 +85,10 @@ def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
 
 
 def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
-    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path."""
+    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path.
+
+    Callers open this path from ``base_dir`` as spelled, so a base dir replaced by a link is refused, not followed.
+    """
     canonical_base = base_dir.resolve()
     return resolved.relative_to(canonical_base) if resolved.is_relative_to(canonical_base) else None
 
@@ -95,7 +98,7 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         return resolved.read_bytes()
-    return read_regular_file_within_root(base_dir.resolve(), relative)
+    return read_regular_file_within_root(base_dir, relative)
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
@@ -108,7 +111,7 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(payload)
         return
-    with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
+    with open_directory_within_root(base_dir, relative.parent, create=True) as directory_fd:
         try:
             existing = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -135,7 +138,7 @@ def remove_resolved_path(base_dir: Path, resolved: Path) -> None:
         else:
             resolved.unlink()
         return
-    with open_directory_within_root(base_dir.resolve(), relative.parent) as directory_fd:
+    with open_directory_within_root(base_dir, relative.parent) as directory_fd:
         if stat.S_ISDIR(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
             os.rmdir(relative.name, dir_fd=directory_fd)
         else:
