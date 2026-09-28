@@ -140,6 +140,11 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         chat.load(URLRequest(url: url))
     }
 
+    func canStartChatSSOPopup(_ url: URL, from source: URL) -> Bool {
+        WebNavigationPolicy.sameOrigin(source, chatSSO.root)
+            && ChatSSONavigation.isStart(url, returningTo: chatSSO.root)
+    }
+
     func openDashboard(force: Bool = false) {
         guard force || !dashboardLoaded else { return }
         dashboardAttempt += 1
@@ -256,8 +261,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
             // Some SSO buttons use window.open. Accept only a Matrix SSO start from Chat itself.
             guard webView === chat, action.targetFrame == nil,
                   let source = action.sourceFrame.request.url,
-                  WebNavigationPolicy.sameOrigin(source, preferences.url),
-                  ChatSSONavigation.isStart(url, returningTo: preferences.url) else { return nil }
+                  canStartChatSSOPopup(url, from: source) else { return nil }
         }
         switch chatSSO.decide(url, clicked: true) {
         case .allow: webView.load(URLRequest(url: url))
@@ -288,7 +292,7 @@ final class EmbeddedWebTabs: NSObject, ObservableObject, WKNavigationDelegate, W
         if webView === chat {
             chatLoading = false
             chatError = "Cannot load Chat. Check your connection or Chat website, then retry."
-            chatSSO = ChatSSONavigation(root: preferences.url)
+            chatSSO = ChatSSONavigation(root: chatSSO.root)
         } else {
             dashboardLoading = false
             dashboardError = LocalDashboardError.connectionFailed.localizedDescription

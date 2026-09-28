@@ -40,8 +40,13 @@ struct LocalAgentsView: View {
         .onChange(of: runner.isRefreshingStatus, initial: true) { _, refreshing in
             guard !refreshing, runner.hasRefreshedStatus, !choseInitialStep else { return }
             choseInitialStep = true
-            step = runner.pairingCancelled ? .configure : setup.nextStep(service: state, check: runner.setupCheck)
-            showChatSetup = runner.pairingCancelled || !setup.configurationExists
+            step = setup.nextStep(service: state, check: runner.setupCheck)
+            showChatSetup = !setup.configurationExists
+        }
+        .onChange(of: runner.pairingCancelled, initial: true) { _, cancelled in
+            guard cancelled else { return }
+            show(.configure)
+            showChatSetup = true
         }
         .onChange(of: setup.runtimeInstalled) { wasInstalled, installed in
             if choseInitialStep, !wasInstalled, installed, step == .install { show(.configure) }
