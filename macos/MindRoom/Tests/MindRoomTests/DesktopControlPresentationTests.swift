@@ -272,6 +272,23 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(request.command, command, "Execution keeps the original command")
     }
 
+    func testShellHandleStateLabelsDistinguishKilledFromFinished() throws {
+        let data = Data(#"""
+        [
+          {"handle": "shell:1", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "sleep 30", "elapsed_seconds": 1.5, "state": "running"},
+          {"handle": "shell:2", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "sleep 30", "elapsed_seconds": 2.5, "state": "killed"},
+          {"handle": "shell:3", "requester_id": "@person:example.org", "agent_name": "assistant",
+           "command_preview": "true", "elapsed_seconds": 0.5, "state": "completed"}
+        ]
+        """#.utf8)
+
+        let handles = try JSONDecoder().decode([DesktopShellHandle].self, from: data)
+
+        XCTAssertEqual(handles.map(\.stateLabel), ["Running", "Killed", "Finished"])
+    }
+
     func testAutoApprovalConfirmationNamesAllLocallyAllowedCallers() {
         let value = status(
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,
