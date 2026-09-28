@@ -1970,6 +1970,7 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1989,7 +1990,11 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
                     access=ResponderAccessConfig(users=["@bob:localhost"]),
                 ),
             },
-            router=RouterConfig(model="default", accept_invites=True),
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(users=["@alice:localhost"]),
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -2034,7 +2039,7 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
 
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **Code** (alias `code`): Writes code" in response_text
-    assert "@mindroom_research" not in response_text
+    assert "\u2022 **Research**" not in response_text
 
 
 @pytest.mark.asyncio
