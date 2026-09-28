@@ -178,20 +178,22 @@ For chart-managed worker egress with human-approved temporary hostname grants, s
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
-
-The dedicated-worker provisioning flow is implemented today.
+The runtime chart supports two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
 
 Both modes store agent data in the same per-agent directory structure.
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments |
-| `workerBackend: kubernetes` | Creates dedicated worker Deployments and Services on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
+| `workers.backend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments |
+| `workers.backend: kubernetes` | Creates dedicated worker Deployments and Services on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
+
+The hosted instance chart runs only the shared sidecar (`workerBackend: static_runner`) and fails rendering for any other backend.
+Its tenants share the `mindroom-instances` namespace, and Kubernetes RBAC cannot keep one tenant's worker manager away from other tenants' Deployments, Services, PVCs, and Secrets there.
+Deploy the runtime chart in a namespace of its own when an instance needs dedicated workers.
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default.
+The shared sidecar is the default in both charts.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
 The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
@@ -204,15 +206,13 @@ See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-worke
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
+`workers.backend: kubernetes` enables the built-in Kubernetes worker backend in the runtime chart.
 The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
 Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
-The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
-The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
@@ -233,10 +233,9 @@ The effective default depends on the deployment:
 | Deployment | Worker storage mount | Visible path for `knowledge/reference` |
 | --- | --- | --- |
 | Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
-| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
 | Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
 
-Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
+The runtime chart sets `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
 Custom chart values or runtime environment settings can select another root.
 The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
@@ -251,36 +250,41 @@ The final knowledge mount list is part of the worker pod-template hash, so recon
 Typical Helm values look like:
 
 ```yaml
-workerBackend: kubernetes
-workerCleanupIntervalSeconds: 30
-storageAccessMode: ReadWriteMany
-controlPlaneNodeName: ""
-kubernetesWorkerImage: ""
-kubernetesWorkerImagePullPolicy: ""
-kubernetesWorkerServiceAccountName: ""
-kubernetesWorkerNamePrefix: "mindroom-worker"
-kubernetesWorkerStorageSubpathPrefix: "workers"
-kubernetesWorkerPort: 8766
-kubernetesWorkerReadyTimeoutSeconds: 60
-kubernetesWorkerIdleTimeoutSeconds: 1800
-kubernetesWorkerRuntimeClassName: ""
-sandbox_proxy_token: "replace-me"
+storage:
+  accessModes:
+    - ReadWriteMany
+workers:
+  backend: kubernetes
+  cleanupIntervalSeconds: 30
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+  kubernetes:
+    image:
+      repository: ""
+      pullPolicy: ""
+    namePrefix: mindroom-worker
+    storageSubpathPrefix: workers
+    port: 8766
+    readyTimeoutSeconds: 60
+    idleTimeoutSeconds: 1800
+    runtimeClassName: ""
 ```
-
-The runtime chart exposes the same concepts under the nested `workers.*` values.
 
 Important behavior and constraints:
 
-- `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
-- `workerCleanupIntervalSeconds` controls how often the primary runtime runs idle-worker cleanup.
+- `workers.kubernetes.image` defaults to the main MindRoom image settings when its repository is left empty.
+- `workers.cleanupIntervalSeconds` controls how often the primary runtime runs idle-worker cleanup.
 - Worker pod-template drift (image, env, resources) is reconciled automatically: each cleanup pass recreates scaled-down worker Deployments whose pod template no longer matches the configured spec, and running workers are recreated on their next provisioning after they scale down.
 - Reconciliation is controlled by `workers.kubernetes.reconcilePodTemplates` in the runtime chart (`MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES`, default on), so worker Deployments do not need manual recycling after image or pod-template changes.
-- `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
-- `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
-- `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
-- `kubernetesWorkerRuntimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers. The runtime chart uses `workers.kubernetes.runtimeClassName`; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
+- `workers.kubernetes.idleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
+- `workers.kubernetes.readyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
+- `workers.kubernetes.port` is the internal Service and container port used by dedicated workers.
+- `workers.kubernetes.runtimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
 - Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
-- Dedicated workers need access to the shared instance PVC so they can reach agent workspaces.
+- Dedicated workers need access to the runtime's storage PVC so they can reach agent workspaces.
+- Each worker's `/tmp` is a 1 GiB `emptyDir`; tool code that exceeds it gets only that worker pod evicted.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
@@ -292,27 +296,25 @@ Important behavior and constraints:
 - This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
 - For agent-editable per-workspace env (extra PATH entries, package indexes, npm cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.
 - MindRoom-owned workspace identity, cache, and virtualenv env names remain controlled by the worker runtime and cannot be redirected by `.mindroom/worker-env.sh`: `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, and `VIRTUAL_ENV`.
-- Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
+- Worker-local caches may still live under `workers.kubernetes.storageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements
 
 Dedicated workers need access to the same PVC as the primary runtime.
-Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
-If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
-The chart enforces this constraint during template rendering.
-For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
-Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
+Set `storage.accessModes` to `ReadWriteMany` so multiple workers can access agent storage concurrently.
+If your storage class only supports `ReadWriteOnce`, set `workers.kubernetes.colocateWithControlPlaneNode: true` or an explicit `workers.kubernetes.nodeName` so the control plane and dedicated workers stay on the same node.
 
 ### RBAC And Network Policy
 
-When `workerBackend: kubernetes` is enabled, the chart creates:
+When `workers.backend: kubernetes` is enabled, the runtime chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
-- A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
-- In the runtime chart's default same-namespace mode, a chart-created worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
-- In the runtime chart's explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
-- In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
+- A Role and RoleBinding that allow managing worker Deployments and Services in the worker namespace.
+- In the default same-namespace mode, a chart-created worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
+- In the explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
+
+That Role reaches every Deployment and Service in its namespace, so give each runtime release a namespace of its own.
 
 ### Operations
 
@@ -529,6 +531,12 @@ Each customer instance gets:
 - Own Matrix/Synapse server (SQLite)
 - Independent ConfigMap configuration
 - Dedicated ingress routes
+
+Tenants share the namespace, so their isolation comes from these controls:
+
+- Tool code runs in the instance pod's sandbox-runner sidecar, no instance pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers.
+- The Terraform-managed namespace enforces the Pod Security `baseline` profile, which rejects privileged containers, host namespaces, `hostPath` volumes, and added capabilities.
+- Each instance's NetworkPolicy admits service traffic only from the ingress controller and the same instance, and allows HTTP and HTTPS egress only to public addresses and the ingress controller, so metadata services, node and private networks, and other pods are unreachable on those ports.
 
 Platform services run in `mindroom-{environment}` namespace.
 The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.

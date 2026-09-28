@@ -89,7 +89,7 @@ env:
 ```
 
 Use the chart's existing worker image, authentication secret, storage, and RBAC settings.
-The instance chart names its opt-in values `workerBackend: kubernetes` and `workerComputerEnabled: true`; supply the allowed-origin environment value to its primary runtime through your deployment's environment configuration.
+The hosted instance chart runs no dedicated workers, so Computer is available only through the runtime chart or direct Kubernetes and Docker worker deployments.
 Changing the feature flag changes the worker configuration signature, so workers are replaced as needed.
 
 ## Native Playwright MCP provider
@@ -206,7 +206,7 @@ Then select it for the main worker container:
 MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer-578ef2b662d8e9a8.json"}
 ```
 
-The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses `kubernetesWorkerSeccompProfile`.
+The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`.
 For example:
 
 ```yaml

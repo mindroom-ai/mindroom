@@ -52,6 +52,15 @@ Git commands the primary runs in a workspace, for knowledge checkouts and the `c
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
 
+## Hosted tenant isolation
+
+Hosted tenants share the `mindroom-instances` namespace, and a tenant can run code in its own primary and sandbox-runner sidecar by design.
+The boundary between tenants is the cluster configuration around those pods.
+
+- No tenant pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers, because RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in a shared namespace.
+- The namespace enforces the Pod Security `baseline` profile, so tenant pods cannot be privileged or use host namespaces, `hostPath` volumes, or added capabilities.
+- Tenant pods reach TCP 80 and 443 only on public addresses and the ingress controller, never metadata services, node or private networks, or other pods.
+
 ## File access
 
 `defaults.file_access` sets the default and `agents.<name>.file_access` overrides it for one agent.
