@@ -49,7 +49,7 @@ class _DisjointSpans:
 
     def overlaps(self, start: int, end: int) -> bool:
         """Return whether one span overlaps any stored span."""
-        # Disjoint spans sorted by start also have sorted ends, so only the last span starting before `end` can reach past `start`.
+        # Sorted disjoint spans also have sorted ends, so only the last span starting before `end` can reach `start`.
         index = bisect_left(self.starts, end) - 1
         return index >= 0 and self.ends[index] > start
 
