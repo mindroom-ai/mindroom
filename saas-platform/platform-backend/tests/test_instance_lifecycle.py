@@ -302,7 +302,10 @@ async def test_past_due_subscription_keeps_instance_running(platform: Platform) 
 def test_payment_failure_does_not_make_incomplete_subscription_past_due(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("incomplete"))
 
-    _send_webhook("invoice.payment_failed", {"id": "in_1", "customer": "cus_1", "subscription": "sub_stripe_1"})
+    _send_webhook(
+        "invoice.payment_failed",
+        {"id": "in_1", "customer": "cus_1", "parent": {"subscription_details": {"subscription": "sub_stripe_1"}}},
+    )
 
     assert platform.subscription()["status"] == "incomplete"
 
@@ -648,43 +651,6 @@ def test_deletion_of_a_superseded_subscription_is_a_no_op(platform: Platform) ->
     assert body == {"received": True, "error": None}
     assert platform.subscription()["status"] == "active"
     assert platform.instance()["status"] == "running"
-
-
-def test_payment_succeeded_redelivery_after_partial_failure_keeps_one_payment(platform: Platform) -> None:
-    invoice = {
-        "id": "in_1",
-        "customer": "cus_1",
-        "subscription": "sub_stripe_1",
-        "amount_paid": 1500,
-        "currency": "usd",
-        "created": 1_750_000_000,
-    }
-    payments: dict[str, dict[str, Any]] = {}
-
-    def upsert(row: dict[str, Any], *, on_conflict: str) -> Mock:
-        payments[row[on_conflict]] = row
-        return Mock(execute=Mock(return_value=Mock(data=[row])))
-
-    usage_insert = Mock(
-        side_effect=[RuntimeError("usage write failed"), Mock(execute=Mock(return_value=Mock(data=[])))]
-    )
-    real_table = platform.db.table
-
-    def table(name: str) -> Any:  # noqa: ANN401
-        query = real_table(name)
-        if name == "payments":
-            query.upsert = upsert
-        if name == "usage":
-            query.insert = usage_insert
-        return query
-
-    with patch.object(platform.db, "table", side_effect=table):
-        first = _send_webhook("invoice.payment_succeeded", invoice)
-        second = _send_webhook("invoice.payment_succeeded", invoice)
-
-    assert first == {"received": True, "error": "usage write failed"}
-    assert second == {"received": True, "error": None}
-    assert list(payments) == ["in_1"]
 
 
 @pytest.mark.asyncio

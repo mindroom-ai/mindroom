@@ -124,11 +124,11 @@ class TestWebhookEndpoints:
         amount_paid: int = 2900,  # in cents
         currency: str = "usd",
     ) -> dict:
-        """Create test invoice data."""
+        """Create test invoice data in the basil API shape, where the subscription sits under ``parent``."""
         return {
             "id": invoice_id,
             "customer": customer_id,
-            "subscription": subscription_id,
+            "parent": {"type": "subscription_details", "subscription_details": {"subscription": subscription_id}},
             "amount_paid": amount_paid,
             "currency": currency,
             "created": 1700000000,
@@ -445,8 +445,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
-        mock_supabase.table().insert().execute.return_value = Mock()
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"id": "account_123"}])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
@@ -457,17 +456,18 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-        # Verify both payments and usage tables were updated
-        insert_calls = mock_supabase.table().insert.call_count
-        assert insert_calls >= 2  # payments + usage
+        # Verify the payment was recorded
+        payment = mock_supabase.table().upsert.call_args.args[0]
+        assert payment["subscription_id"] == "sub_test_123"
+        assert payment["account_id"] == "account_123"
 
     def test_payment_succeeded_no_subscription(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test payment webhook for one-time payment (no subscription)."""
         # Setup
-        invoice_data = self._create_invoice_data(subscription_id=None)
-        del invoice_data["subscription"]
+        invoice_data = self._create_invoice_data()
+        invoice_data["parent"] = None
         event = self._create_stripe_event("invoice.payment_succeeded", invoice_data)
         mock_stripe_signature.return_value = event
 

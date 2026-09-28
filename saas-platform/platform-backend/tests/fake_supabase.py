@@ -37,6 +37,7 @@ class FakeQuery:
     row_range: tuple[int, int] | None = None
     row_limit: int | None = None
     single_row: bool = False
+    conflict_column: str | None = None
 
     def select(self, columns: str = "*", **_kwargs: Any) -> FakeQuery:  # noqa: ANN401
         self.columns = columns
@@ -48,6 +49,10 @@ class FakeQuery:
 
     def insert(self, payload: dict[str, Any]) -> FakeQuery:
         self.action, self.payload = "insert", payload
+        return self
+
+    def upsert(self, payload: dict[str, Any], *, on_conflict: str) -> FakeQuery:
+        self.action, self.payload, self.conflict_column = "upsert", payload, on_conflict
         return self
 
     def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
@@ -97,6 +102,16 @@ class FakeQuery:
             row = {"id": str(uuid.uuid4()), **self.payload}
             rows.append(row)
             return FakeResult([dict(row)])
+        if self.action == "upsert":
+            assert self.payload is not None
+            assert self.conflict_column is not None
+            key = str(self.payload[self.conflict_column])
+            existing = next((row for row in rows if str(row.get(self.conflict_column)) == key), None)
+            if existing is None:
+                existing = {"id": str(uuid.uuid4())}
+                rows.append(existing)
+            existing.update(self.payload)
+            return FakeResult([dict(existing)])
         matched = [row for row in rows if self._matches(row)]
         if self.action == "update":
             assert self.payload is not None

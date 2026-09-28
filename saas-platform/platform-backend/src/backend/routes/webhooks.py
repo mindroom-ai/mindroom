@@ -254,6 +254,16 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
     return True, account_id
 
 
+def _invoice_subscription_id(invoice: dict) -> str | None:
+    """Return the Stripe subscription an invoice bills, or None for a one-off invoice.
+
+    Since Stripe API version 2025-03-31.basil the subscription lives under ``parent.subscription_details``;
+    the top-level ``invoice.subscription`` field no longer exists.
+    """
+    details = (invoice.get("parent") or {}).get("subscription_details") or {}
+    return details.get("subscription")
+
+
 def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
     """Handle successful Stripe payment events.
 
@@ -264,64 +274,32 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
     logger.info("Payment succeeded: %s", invoice["id"])
 
     # Skip if no subscription (one-time payments)
-    if not invoice.get("subscription"):
+    subscription_id = _invoice_subscription_id(invoice)
+    if not subscription_id:
         return False, None
 
     sb = ensure_supabase()
 
-    # Get account from customer
+    # Get account from customer, falling back to the account bound to the subscription
     customer_id = invoice["customer"]
-    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+    accounts = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).limit(1).execute().data
+    account_id = accounts[0]["id"] if accounts else _account_id_for_stripe_subscription(sb, subscription_id)
+    if account_id is None:
+        logger.warning("No account found for customer %s in payment %s", customer_id, invoice["id"])
+        return False, None
 
-    if not account_result.data:
-        logger.warning(f"No account found for customer_id: {customer_id} in payment")
-        # Try to get account_id from subscription if available
-        if invoice.get("subscription"):
-            sub_result = (
-                sb.table("subscriptions")
-                .select("account_id")
-                .eq("stripe_subscription_id", invoice["subscription"])
-                .single()
-                .execute()
-            )
-            if sub_result.data:
-                account_id = sub_result.data["account_id"]
-            else:
-                return False, None
-        else:
-            return False, None
-    else:
-        account_id = account_result.data["id"]
-
-    # Record the payment in both tables for compatibility
-    # First, record in payments table with tenant isolation; upsert so a redelivered invoice keeps one row
+    # Upsert so a redelivered invoice keeps one row
     sb.table("payments").upsert(
         {
             "invoice_id": invoice["id"],
-            "subscription_id": invoice["subscription"],
+            "subscription_id": subscription_id,
             "customer_id": customer_id,
-            "account_id": account_id,  # Add account_id for tenant isolation
+            "account_id": account_id,  # Tenant isolation
             "amount": invoice["amount_paid"] / 100,
             "currency": invoice["currency"],
             "status": "succeeded",
         },
         on_conflict="invoice_id",
-    ).execute()
-
-    # Also record in usage table for metrics
-    sb.table("usage").insert(
-        {
-            "account_id": account_id,
-            "metric_type": "payment",
-            "metric_value": invoice["amount_paid"] / 100,  # Convert from cents
-            "metadata": {
-                "invoice_id": invoice["id"],
-                "subscription_id": invoice["subscription"],
-                "currency": invoice["currency"],
-                "billing_reason": invoice.get("billing_reason", "subscription_cycle"),
-            },
-            "timestamp": _timestamp_to_iso(invoice["created"]),
-        }
     ).execute()
 
     return True, account_id
@@ -337,20 +315,21 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     logger.info("Payment failed: %s", invoice["id"])
 
     # Skip if no subscription
-    if not invoice.get("subscription"):
+    subscription_id = _invoice_subscription_id(invoice)
+    if not subscription_id:
         return False, None
 
     sb = ensure_supabase()
 
-    account_id = _account_id_for_stripe_subscription(sb, invoice["subscription"])
+    account_id = _account_id_for_stripe_subscription(sb, subscription_id)
     if account_id is None:
-        logger.info("Ignoring payment failure for Stripe subscription %s that no account uses", invoice["subscription"])
+        logger.info("Ignoring payment failure for Stripe subscription %s that no account uses", subscription_id)
         return True, None
 
     # Only an active subscription becomes past_due; past_due keeps the instance running, so a failed
     # first payment (incomplete) or a late event for a cancelled subscription must not reach it.
     sb.table("subscriptions").update({"status": "past_due", "updated_at": datetime.now(UTC).isoformat()}).eq(
-        "stripe_subscription_id", invoice["subscription"]
+        "stripe_subscription_id", subscription_id
     ).eq(
         "account_id",
         account_id,  # Tenant validation
