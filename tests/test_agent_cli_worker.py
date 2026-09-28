@@ -10,13 +10,12 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING
 from uuid import UUID
 
 import httpx
 import pytest
 from agno.tools.toolkit import Toolkit
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from structlog.testing import capture_logs
 
 from mindroom.agent_cli import worker as cli_worker
@@ -26,27 +25,32 @@ from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CliShellSettings, CliWorkerLaunch
 from mindroom.api import sandbox_runner_cli
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     DEFAULT_TOOL_OUTPUT_MAX_BYTES,
     resolve_primary_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+    resolved_worker_key_scope,
+)
 from mindroom.workers import runtime as worker_runtime
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec, is_cli_worker_key, process_worker_key
+from tests.conftest import bind_runtime_paths
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_docker_worker_backend import _backend
 
-if TYPE_CHECKING:
-    from mindroom.agent_policy import ResolvedAgentPolicy
-
 KEY = "v1:default:user_agent:~alice:!agent-turn-00000000000000000000000000000001:code"
 BASE = "v1:default:user_agent:alice:code"
+USER = "v1:default:user:alice"
 
 
 def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Path]:
@@ -809,28 +813,152 @@ async def test_worker_validates_transport_arguments_with_canonical_shell_schema(
         assert (await client.post("/api/sandbox-runner/agent-cli/shell", json=payload)).status_code == 422
 
 
-def test_workspace_accepts_exact_visible_user_root_and_rejects_other_roots(
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state_scope", "private_agent_names", "workspace_below_scope"),
+    [
+        pytest.param(USER, [], None, id="worker-scope-user"),
+        pytest.param(USER, [], "code/code_data", id="private-per-user"),
+        pytest.param(BASE, ["code"], "code/notes/work", id="custom-private-root"),
+    ],
+)
+async def test_config_less_worker_runs_in_the_primary_resolved_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_scope: str,
+    private_agent_names: list[str],
+    workspace_below_scope: str | None,
+) -> None:
+    """Real CLI workers have no agent config, so only the primary can resolve these workspaces."""
+    app, workspace = _app(tmp_path, monkeypatch)
+    if workspace_below_scope is not None:
+        workspace = private_instance_scope_root_path(tmp_path / "storage", state_scope) / workspace_below_scope
+    launch = _launch(workspace) | {"state_scope_worker_key": state_scope, "private_agent_names": private_agent_names}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker",
+        headers={"x-mindroom-sandbox-token": "worker-only"},
+    ) as client:
+        response = await client.post("/api/sandbox-runner/agent-cli/install", json=launch)
+        assert response.status_code == 200, response.text
+        response = await client.post(
+            "/api/sandbox-runner/agent-cli/shell",
+            json={
+                "worker_key": KEY,
+                "handle": "shell:" + "a" * 32,
+                "operation": {"function_name": "run_shell_command", "args": ["pwd"], "tail": 1},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"].strip().endswith(str(workspace))
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_workspace_outside_its_storage_mount_before_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, workspace = _app(tmp_path, monkeypatch)
-    launch = CliWorkerLaunch.model_validate(_launch(workspace) | {"state_scope_worker_key": "v1:default:user:alice"})
-    runtime = sandbox_runner_cli.app_runtime_paths(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker",
+        headers={"x-mindroom-sandbox-token": "worker-only"},
+    ) as client:
+        route = "/api/sandbox-runner/agent-cli/install"
+        for outside in (tmp_path / "other", tmp_path, workspace / "../../../.."):
+            assert (await client.post(route, json=_launch(outside))).status_code == 400
+        assert not (tmp_path / "private").exists()
+        assert (await client.post(route, json=_launch(workspace))).status_code == 200
 
-    def policies(agent_name: str) -> dict[str, ResolvedAgentPolicy]:
-        return Config(agents={agent_name: AgentConfig(display_name="Agent", worker_scope="user")}).get_agent_policies()
 
-    assert sandbox_runner_cli._workspace(launch, runtime, policies("code")) == workspace
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "state_scope", "allowed_below_scope"),
+    [
+        pytest.param(AgentConfig(display_name="Helper", worker_scope="user"), "user", None, id="worker-scope-user"),
+        pytest.param(
+            AgentConfig(display_name="Helper", private=AgentPrivateConfig(per="user", root="notes")),
+            "user",
+            "helper/notes",
+            id="private-per-user",
+        ),
+        pytest.param(
+            AgentConfig(display_name="Helper", private=AgentPrivateConfig(per="user_agent", root="notes")),
+            "user_agent",
+            "helper/notes",
+            id="custom-private-root",
+        ),
+    ],
+)
+async def test_primary_sends_only_the_agents_own_canonical_workspace(
+    tmp_path: Path,
+    agent: AgentConfig,
+    state_scope: str,
+    allowed_below_scope: str | None,
+) -> None:
+    """The primary resolves the workspace from live policies and maps it onto the worker's mounts."""
+    context = _runtime_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": agent, "other": AgentConfig(display_name="Other", worker_scope="user")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(
+        context,
+        config=config,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env=MappingProxyType(
+                {
+                    "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
+                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
+                },
+            ),
+        ),
+    )
+    spec = _cli_worker_spec(context)
+    scope_key = spec.state_scope_worker_key
+    assert scope_key is not None
+    assert resolved_worker_key_scope(scope_key) == state_scope
+    storage = context.runtime_paths.storage_root
 
-    with pytest.raises(HTTPException):
-        sandbox_runner_cli._workspace(launch, runtime, policies("other"))
-    for outside in (tmp_path / "other", workspace.parent, workspace.parent / "sessions"):
-        with pytest.raises(HTTPException):
-            sandbox_runner_cli._workspace(
-                launch.model_copy(update={"shell": _shell(str(outside))}),
-                runtime,
-                policies("code"),
-            )
+    def canonical(root: Path) -> Path:
+        if allowed_below_scope is None:
+            return root / "agents/helper/workspace"
+        return private_instance_scope_root_path(root, scope_key) / allowed_below_scope
+
+    installs: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/install"):
+            installs.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    worker = WorkerHandle("worker-id", spec.worker_key, "http://worker/api", "control", "ready", "docker", 0, 0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        outside = [
+            storage / "agents/helper",
+            private_instance_scope_root_path(storage, "v1:default:user:@mallory:example.test") / "helper/notes",
+        ]
+        if allowed_below_scope is not None:
+            outside += [storage / "agents/helper/workspace", canonical(storage).parent / "helper_data"]
+        if state_scope == "user_agent":
+            outside.append(storage / "agents/other/workspace")
+        for workspace in outside:
+            bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=worker.worker_id))
+            grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+            lease = CliWorkerLease(worker, client, context, spec, container_storage_root=Path("/app/worker"))
+            with pytest.raises(ValueError, match="no unique canonical workspace mount"):
+                await lease.install_grant(bridge, grant, shell=_shell(str(workspace)))
+        assert installs == []
+        bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=worker.worker_id))
+        grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+        lease = CliWorkerLease(worker, client, context, spec, container_storage_root=Path("/app/worker"))
+        await lease.install_grant(bridge, grant, shell=_shell(str(canonical(storage) / "src")))
+    assert installs[0]["shell"]["workspace"] == str(canonical(Path("/app/worker")) / "src")
 
 
 @pytest.mark.asyncio
