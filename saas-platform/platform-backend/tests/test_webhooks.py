@@ -415,8 +415,7 @@ class TestWebhookEndpoints:
 
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        assert response.status_code == 200
-        assert "Unable to determine billing cycle" in response.json()["error"]
+        assert response.status_code == 500
 
     def test_subscription_deleted_not_found(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -577,9 +576,9 @@ class TestWebhookEndpoints:
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        # Verify
-        assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Database error"}
+        # A failed subscription event is not acknowledged, so Stripe redelivers it.
+        assert response.status_code == 500
+        mock_supabase.table.return_value.insert.assert_not_called()
 
     def test_webhook_event_recording_failure(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -739,12 +738,8 @@ class TestWebhookEndpoints:
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        # Verify - should fail gracefully
-        assert response.status_code == 200
-        # Should have an error since tier couldn't be determined
-        result = response.json()
-        assert result["received"] is True
-        assert "error" in result or "Unable to determine tier" in str(result)
+        # The tier cannot be determined, so the event is not acknowledged and Stripe redelivers it.
+        assert response.status_code == 500
 
     def test_price_metadata_requires_tier(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -759,7 +754,4 @@ class TestWebhookEndpoints:
 
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        assert response.status_code == 200
-        result = response.json()
-        assert result["received"] is True
-        assert "Unable to determine tier" in result["error"]
+        assert response.status_code == 500

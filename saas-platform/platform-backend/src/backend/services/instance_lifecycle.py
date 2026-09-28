@@ -33,6 +33,7 @@ from backend.entitlements import (
 )
 from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
+from backend.pricing import get_plan_details
 from backend.services.instances_data import get_instance, update_instance
 from backend.services.provisioner_service import (
     CLEARED_OPENROUTER_KEY_METADATA,
@@ -281,7 +282,10 @@ async def _resume(
     if instance.get("lifecycle_stopped_at") is None:
         return
     instance_id = instance["instance_id"]
-    if instance.get("status") == "deprovisioned" or not await check_deployment_exists(str(instance_id)):
+    plan = get_plan_details(subscription["tier"])
+    # A hosted-budget instance without a key lost it in an earlier failed attempt; only provisioning mints one.
+    missing_key = bool(plan and plan.included_ai_budget_usd > 0 and not instance.get("openrouter_key_hash"))
+    if instance.get("status") == "deprovisioned" or missing_key or not await check_deployment_exists(str(instance_id)):
         await _reprovision(sb, instance_id, subscription)
     else:
         await start_instance(instance_id)

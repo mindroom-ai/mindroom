@@ -592,7 +592,7 @@ def test_failed_binding_lookup_asks_stripe_to_redeliver(platform: Platform) -> N
     ):
         failed = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
 
-    assert failed.status_code == 503
+    assert failed.status_code == 500
     assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_old"
     assert platform.db.tables["webhook_events"] == []
 
@@ -605,6 +605,35 @@ def test_failed_binding_lookup_asks_stripe_to_redeliver(platform: Platform) -> N
     assert retried.status_code == 200
     assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_1"
     assert platform.subscription()["status"] == "active"
+
+
+def test_transient_db_failure_in_created_handler_is_redelivered(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("cancelled", stripe_subscription_id="sub_stripe_old"))
+    newer = {**_stripe_subscription("active"), "created": 1_750_000_000}
+    event = Mock(id="evt_created", type="customer.subscription.created")
+    event.data.object = newer
+    client = TestClient(app)
+    real_table = platform.db.table
+
+    def failing_subscription_writes(name: str) -> Any:  # noqa: ANN401
+        query = real_table(name)
+        if name == "subscriptions":
+            query.update = Mock(side_effect=RuntimeError("connection reset"))
+        return query
+
+    with (
+        patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event),
+        patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value={"created": 1_700_000_000}),
+    ):
+        with patch.object(platform.db, "table", side_effect=failing_subscription_writes):
+            failed = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
+        retried = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
+
+    assert failed.status_code == 500
+    assert retried.status_code == 200
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_1"
+    assert platform.subscription()["status"] == "active"
+    assert len(platform.db.tables["webhook_events"]) == 1
 
 
 def test_delayed_creation_of_an_older_subscription_keeps_the_newer_binding(platform: Platform) -> None:
@@ -730,6 +759,46 @@ async def test_resume_replaces_a_key_that_openrouter_deleted(platform: Platform)
     assert platform.instance()["openrouter_key_hash"] == "key_hash_new"
     assert platform.instance()["lifecycle_stopped_at"] is None
     assert summary.errors == []
+
+
+@pytest.mark.asyncio
+async def test_failed_key_replacement_is_retried_by_reprovisioning(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
+            teardown_after=(now + timedelta(days=28)).isoformat(),
+        )
+    )
+    platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
+    provision = platform.provision.side_effect
+    attempts = 0
+
+    async def flaky_provision(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "OpenRouter key creation failed with status 502"
+            raise RuntimeError(msg)
+        return await provision(*args, **kwargs)
+
+    platform.provision.side_effect = flaky_provision
+
+    first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert first.errors
+    assert platform.instance()["openrouter_key_hash"] is None
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+    second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert second.errors == []
+    assert attempts == 2
+    assert platform.instance()["openrouter_key_hash"] == "key_hash_new"
+    assert platform.instance()["lifecycle_stopped_at"] is None
+    assert platform.instance()["lifecycle_error"] is None
 
 
 def test_update_for_a_superseded_stripe_subscription_is_ignored(platform: Platform) -> None:
