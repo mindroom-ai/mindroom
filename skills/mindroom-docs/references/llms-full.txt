@@ -6607,6 +6607,7 @@ The current implementation bypasses Crawl4AI cache for fresher reads and truncat
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
 Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
 Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
+WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
 When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings fail the crawl.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
@@ -7254,6 +7255,7 @@ Host profiles are agent state: a primary-process browser keeps `<profile>` under
 Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
 A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
 The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because they all go through a loopback relay that resolves each destination itself and dials only an address the policy allows.
+WebRTC may send UDP only through a proxy, and neither the relay nor an HTTP proxy carries UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
 When the environment configures `all_proxy`, or matching `http_proxy` and `https_proxy` values, that proxy carries every browser connection instead and owns destination enforcement; other proxy settings stop the browser from starting.
 
 #### Configuration

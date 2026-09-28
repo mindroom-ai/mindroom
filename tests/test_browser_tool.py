@@ -1332,6 +1332,20 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
 
 _PROXY_ENV_NAMES = ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server")
 _REBINDING_HOST = "rebind.test"
+_WEBRTC_STUN_PROBE_JS = """
+async () => {
+  const connection = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:%d" }] });
+  connection.createDataChannel("probe");
+  await connection.setLocalDescription(await connection.createOffer());
+  await new Promise((resolve) => {
+    if (connection.iceGatheringState === "complete") return resolve();
+    connection.onicegatheringstatechange = () => connection.iceGatheringState === "complete" && resolve();
+    setTimeout(resolve, 3000);
+  });
+  connection.close();
+  return "gathered";
+}
+"""
 _WEBSOCKET_PROBE_JS = """
 () => new Promise((resolve) => {
   const socket = new WebSocket("ws://127.0.0.1:%d/socket");
@@ -1461,19 +1475,10 @@ async def test_headless_host_browser_dials_only_validated_addresses(
         await tool.aclose()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("binding", "expected"), [("unbound", "error"), ("headless", "error"), ("computer", "open")])
-async def test_page_websockets_follow_browser_destination_policy(
-    binding: str,
-    expected: str,
-    loopback_service: tuple[int, list[str]],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Page WebSockets reach loopback only from a Computer browser, like its HTTP requests."""
+def _headless_real_browser(binding: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> BrowserTools:
+    """Return a real-Chromium toolkit with the given binding; only the Computer display launch becomes headless."""
     executable = _chromium_executable()
     _clear_proxy_env(monkeypatch)
-    port, hits = loopback_service
     original_launch = _persistent_launch_kwargs
 
     def headless_launch(
@@ -1497,6 +1502,21 @@ async def test_page_websockets_follow_browser_destination_policy(
         tool.bind_worker_display(":99", tmp_path / "workspace")
     elif binding == "headless":
         tool.bind_worker_headless(tmp_path / "workspace", dict(os.environ))
+    return tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("binding", "expected"), [("unbound", "error"), ("headless", "error"), ("computer", "open")])
+async def test_page_websockets_follow_browser_destination_policy(
+    binding: str,
+    expected: str,
+    loopback_service: tuple[int, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Page WebSockets reach loopback only from a Computer browser, like its HTTP requests."""
+    port, hits = loopback_service
+    tool = _headless_real_browser(binding, monkeypatch, tmp_path)
     try:
         await tool.browser(action="start")
         result = json.loads(
@@ -1505,6 +1525,45 @@ async def test_page_websockets_follow_browser_destination_policy(
         assert result["result"] == expected
         assert ("/socket" in hits) is (expected == "open")
     finally:
+        await tool.aclose()
+
+
+class _DatagramRecorder(asyncio.DatagramProtocol):
+    """Record every datagram a page manages to send to a loopback UDP service."""
+
+    def __init__(self) -> None:
+        self.datagrams: list[bytes] = []
+
+    def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+        del addr
+        self.datagrams.append(data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["unbound", "headless", "computer"])
+async def test_page_webrtc_sends_no_udp_around_the_destination_relay(
+    binding: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ICE gathering cannot send STUN datagrams to loopback, because UDP never passes the relay."""
+    tool = _headless_real_browser(binding, monkeypatch, tmp_path)
+    transport, recorder = await asyncio.get_running_loop().create_datagram_endpoint(
+        _DatagramRecorder,
+        local_addr=("127.0.0.1", 0),
+    )
+    try:
+        await tool.browser(action="start")
+        result = json.loads(
+            await tool.browser(
+                action="act",
+                request={"kind": "evaluate", "fn": _WEBRTC_STUN_PROBE_JS % transport.get_extra_info("sockname")[1]},
+            ),
+        )
+        assert result["result"] == "gathered"
+        assert recorder.datagrams == []
+    finally:
+        transport.close()
         await tool.aclose()
 
 

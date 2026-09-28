@@ -20,6 +20,9 @@ COMPUTER_PROXY_BYPASS = (
     "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
 )
 _REPLY_ADDRESS = b"\x00\x01\x00\x00\x00\x00\x00\x00"
+# The proxy carries only TCP, so WebRTC must not send UDP (STUN, TURN, or media) around it.
+# Chromium ignores the --force-webrtc-ip-handling-policy spelling.
+PROXIED_WEBRTC_ONLY_ARG = "--webrtc-ip-handling-policy=disable_non_proxied_udp"
 
 
 def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mapping[str, str]) -> str | None:

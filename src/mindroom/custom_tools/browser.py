@@ -53,6 +53,7 @@ from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     COMPUTER_PROXY_BYPASS,
+    PROXIED_WEBRTC_ONLY_ARG,
     BrowserDestinationProxy,
     browser_upstream_proxy_url,
 )
@@ -326,6 +327,7 @@ def _persistent_launch_kwargs(
         or shutil.which("google-chrome-stable")
     )
     launch_kwargs: dict[str, Any] = {
+        "args": [PROXIED_WEBRTC_ONLY_ARG],
         "headless": headless,
         # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.

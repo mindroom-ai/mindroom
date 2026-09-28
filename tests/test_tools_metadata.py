@@ -481,6 +481,11 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
             proxy_config = self.config.proxy_config
             assert proxy_config is not None
             endpoints.append(proxy_config.server)
+            # UDP cannot pass the relay, and no environment switch may let loopback skip it.
+            assert {
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--proxy-bypass-list=<-loopback>",
+            } <= set(self.config.extra_args)
             for host, port in (("127.0.0.1", service_port), ("169.254.169.254", 80)):
                 _reader, writer, status = await socks5_connect(proxy_config.server, host, port, literal=True)
                 writer.close()

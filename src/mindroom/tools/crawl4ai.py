@@ -9,7 +9,11 @@ from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy_url
+from mindroom.worker_computer.browser_proxy import (
+    PROXIED_WEBRTC_ONLY_ARG,
+    BrowserDestinationProxy,
+    browser_upstream_proxy_url,
+)
 
 if TYPE_CHECKING:
     from agno.tools.crawl4ai import Crawl4aiTools
@@ -133,6 +137,8 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
                     headless=self.headless,
                     verbose=False,
                     proxy_config={"server": proxy_server},
+                    # Playwright forces loopback through the proxy only unless an environment switch disables it.
+                    extra_args=[PROXIED_WEBRTC_ONLY_ARG, "--proxy-bypass-list=<-loopback>"],
                 )
 
                 async with agno_crawl4ai.AsyncWebCrawler(config=browser_config) as crawler:
