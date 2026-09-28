@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 import time
+import unicodedata
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,11 +33,18 @@ if TYPE_CHECKING:
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
 _MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
-# Longer runs of whitespace or blank-looking characters could push part of a request out of an approver's view.
-BLANK_GLYPHS = frozenset("\u115f\u1160\u2800\u3164\uffa0")
-_BLANK_RUN = re.compile(rf"[\s{''.join(sorted(BLANK_GLYPHS))}]+")
+# Letters, marks, and symbols that render as nothing or as empty space: every default-ignorable code point outside
+# the control and format categories, which approval surfaces already escape, plus two blank symbols.
+_INVISIBLE_CHARACTERS = (
+    "\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180d\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\U0001d159\U000e0100-\U000e01ef"
+)
+INVISIBLE_CHARACTER = re.compile(f"[{_INVISIBLE_CHARACTERS}]")
+# Longer runs of whitespace or invisible characters could push part of a request out of an approver's view.
+_BLANK_RUN = re.compile(rf"[\s{_INVISIBLE_CHARACTERS}]+")
 _MAX_BLANK_RUN = 64
 _MAX_BLANK_LINES = 2
+# More combining marks on one character can be drawn over neighbouring text.
+_MAX_COMBINING_MARKS = 8
 # Synthetic events posted just before a request appears must reach their target before anyone can answer it.
 _AGENT_INPUT_SETTLE_SECONDS = 1.0
 _COMMAND_PREVIEW_CHARS = 200
@@ -150,10 +158,19 @@ def _validate_command(command: object) -> None:
 def _reject_padding(text: str, field: str) -> None:
     if any(len(run) > _MAX_BLANK_RUN or run.count("\n") > _MAX_BLANK_LINES + 1 for run in _BLANK_RUN.findall(text)):
         message = (
-            f"{field} must not contain more than {_MAX_BLANK_RUN} whitespace or blank characters or "
+            f"{field} must not contain more than {_MAX_BLANK_RUN} whitespace or invisible characters or "
             f"{_MAX_BLANK_LINES} blank lines in a row, which could hide part of the request from the approver."
         )
         raise DesktopShellError(message)
+    marks = 0
+    for character in text:
+        marks = marks + 1 if unicodedata.category(character).startswith("M") else 0
+        if marks > _MAX_COMBINING_MARKS:
+            message = (
+                f"{field} must not stack more than {_MAX_COMBINING_MARKS} combining marks on one character, "
+                "which could hide part of the request from the approver."
+            )
+            raise DesktopShellError(message)
 
 
 class DesktopShell:
@@ -344,7 +361,7 @@ class DesktopShell:
         finally:
             self._agent_inputs -= 1
             if not self._agent_inputs:
-                self._agent_input_ended_at = time.monotonic()
+                self._agent_input_ended_at = self._monotonic_clock()
                 self._agent_input_idle.set()
 
     async def _await_approval(self, request: DesktopShellRequest, deadline: float) -> str:
@@ -353,7 +370,7 @@ class DesktopShell:
         self._awaiting_decision = True
         try:
             await self._agent_input_idle.wait()
-            settle = self._agent_input_ended_at + _AGENT_INPUT_SETTLE_SECONDS - time.monotonic()
+            settle = self._agent_input_ended_at + _AGENT_INPUT_SETTLE_SECONDS - self._monotonic_clock()
             await asyncio.sleep(max(0.0, settle))
             if self._cancel_event.is_set():
                 return "cancelled"

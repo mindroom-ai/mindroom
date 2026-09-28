@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TextIO, cast
 
-from mindroom.desktop.shell import BLANK_GLYPHS
+from mindroom.desktop.shell import INVISIBLE_CHARACTER
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -77,16 +77,16 @@ def _parse_shell_approval(answer: str) -> _ShellApprovalChoice | None:
 
 
 def _escape_terminal_text(value: str) -> str:
-    """Show controls, format characters, blank-looking characters other than the ASCII space, and backslashes as escapes."""
+    """Show controls, format and invisible characters, spaces other than the ASCII space, and backslashes as escapes."""
     return "".join(_escaped_character(character) for character in value)
 
 
 def _escaped_character(character: str) -> str:
     if character in _ESCAPES:
         return _ESCAPES[character]
-    # Look-alike, wide, and blank-looking spaces could disguise a command or pad it past the visible rows.
+    # Look-alike, wide, and invisible characters could disguise a command or pad it past the visible rows.
     if character == " " or (
-        character not in BLANK_GLYPHS and not unicodedata.category(character).startswith(("C", "Z"))
+        not INVISIBLE_CHARACTER.fullmatch(character) and not unicodedata.category(character).startswith(("C", "Z"))
     ):
         return character
     code = ord(character)
@@ -129,7 +129,7 @@ def _describe_pending_request(pending: Mapping[str, object], *, now: float) -> s
         "It runs as your user account with its full access, including files outside selected folders and the network.",
     ]
     if shown != fields:
-        lines.append("Control, formatting, blank or non-ASCII space, and backslash characters are shown escaped.")
+        lines.append("Control, formatting, invisible, non-ASCII space, and backslash characters are shown escaped.")
     lines.append("Timed and until-stopped choices also approve later commands from every allowed requester and agent.")
     # Next to the choices, so a command too long for the screen cannot hide its start above the visible rows.
     command_lines = command.count("\n") + 1

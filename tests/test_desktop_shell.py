@@ -569,6 +569,11 @@ async def test_cancelling_execute_stops_process_before_delayed_write(tmp_path: P
         "echo ok" + "\u3000" * 65 + "touch marker",
         "echo ok #" + "\u2800" * 65 + "\ntouch marker",
         "echo ok #" + "\u3164 " * 33 + "\ntouch marker",
+        "echo ok" + "\n\u034f" * 3_000 + "\ntouch marker",
+        "echo ok #" + "\ufe0f" * 65 + "\ntouch marker",
+        "echo ok #" + "\U000e0100" * 65 + "\ntouch marker",
+        "echo ok #" + "\U0001d159" * 65 + "\ntouch marker",
+        "echo ok #x" + "\u0301" * 9 + "\ntouch marker",
     ],
     ids=[
         "newlines",
@@ -580,6 +585,11 @@ async def test_cancelling_execute_stops_process_before_delayed_write(tmp_path: P
         "wide-spaces",
         "braille-blanks",
         "hangul-fillers",
+        "grapheme-joiner-lines",
+        "variation-selectors",
+        "supplementary-variation-selectors",
+        "null-noteheads",
+        "stacked-combining-marks",
     ],
 )
 @pytest.mark.asyncio
@@ -602,8 +612,9 @@ async def test_whitespace_padding_that_could_hide_part_of_a_command_is_refused_b
         "printf one\n\n\nprintf two",
         "python3 - <<'EOF'\nif True:\n" + " " * 63 + "print('deep')\nEOF",
         "printf a" + " " * 64 + "; printf b",
+        "echo caf\u00e9 \u2764\ufe0f \u0928\u092e\u0938\u094d\u0924\u0947 e" + "\u0301" * 8,
     ],
-    ids=["two-blank-lines", "indentation", "space-run"],
+    ids=["two-blank-lines", "indentation", "space-run", "accents-emoji-and-devanagari"],
 )
 @pytest.mark.asyncio
 async def test_ordinary_blank_lines_and_indentation_still_reach_approval(tmp_path: Path, command: str) -> None:
@@ -708,6 +719,27 @@ async def test_approval_waits_until_events_of_the_last_agent_input_have_arrived(
         # Input arriving during the settle would restart it indefinitely, so it is refused too.
         with pytest.raises(DesktopShellError, match="waiting for local approval"), shell.agent_input():
             pytest.fail("agent input ran while a request was held back")
+    await wait_pending(shell)
+    shell.decide("r1", approved=True)
+    assert completed_output(await task) == "done"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_delay_follows_the_injected_monotonic_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settle delay is measured on the shell's own monotonic clock, like every other shell deadline."""
+    monkeypatch.setattr("mindroom.desktop.shell._AGENT_INPUT_SETTLE_SECONDS", 30.0)
+    monotonic = [100.0]
+    shell = local_shell(clock=lambda: 100.0, monotonic_clock=lambda: monotonic[0])
+    with shell.agent_input():
+        pass
+    monotonic[0] = 131.0
+    task = asyncio.create_task(
+        shell.execute(DesktopShellRequest("r1", REQUESTER, AGENT, "printf done", str(tmp_path), 200_000)),
+    )
     await wait_pending(shell)
     shell.decide("r1", approved=True)
     assert completed_output(await task) == "done"

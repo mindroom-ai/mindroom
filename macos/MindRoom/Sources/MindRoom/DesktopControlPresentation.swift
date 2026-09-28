@@ -107,8 +107,8 @@ extension DesktopShellStatus {
 }
 
 extension DesktopShellRequest {
-    var displayCommand: String { desktopSafePreview(command) }
-    var displayCwd: String { desktopSafePreview(cwd) }
+    var displayCommand: String { desktopLeftToRightLines(desktopSafePreview(command)) }
+    var displayCwd: String { desktopLeftToRightLines(desktopSafePreview(cwd)) }
     var displayRequesterID: String { desktopSafePreview(requesterID) }
     var displayAgentName: String { desktopSafePreview(agentName) }
     var hasEscapedCharacters: Bool {
@@ -123,7 +123,15 @@ extension DesktopShellRequest {
     }
 }
 
-/// Escapes control, invisible-format, text-direction, blank-looking, and non-ASCII space characters so remote text cannot hide what runs.
+/// Starts every line with a left-to-right mark, so a leading right-to-left letter cannot flip how the line reads.
+/// Only the display changes; the command that runs stays exact.
+func desktopLeftToRightLines(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { "\u{200E}\($0)" }
+        .joined(separator: "\n")
+}
+
+/// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
 /// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
 func desktopSafePreview(_ text: String) -> String {
     var preview = ""
@@ -141,17 +149,18 @@ func desktopPreviewEscapes(_ text: String) -> Bool {
     text.unicodeScalars.contains(where: isHiddenPreviewScalar)
 }
 
-/// Letters and symbols that render as empty space; the helper refuses long runs of them too.
-private let desktopBlankGlyphs: Set<Unicode.Scalar> = ["\u{115F}", "\u{1160}", "\u{2800}", "\u{3164}", "\u{FFA0}"]
+/// Symbols that render as empty space without being default-ignorable; the helper refuses long runs of them too.
+private let desktopBlankSymbols: Set<Unicode.Scalar> = ["\u{2800}", "\u{1D159}"]
 
 private func isHiddenPreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
+    // Default-ignorable letters and marks, such as Hangul fillers and variation selectors, render as nothing.
+    if scalar.properties.isDefaultIgnorableCodePoint || desktopBlankSymbols.contains(scalar) { return true }
     switch scalar.properties.generalCategory {
-    case .control: scalar != "\n"
-    // Look-alike, wide, and blank-looking spaces could disguise a command or pad it out of view.
-    case .spaceSeparator: scalar != " "
-    case .otherLetter, .otherSymbol: desktopBlankGlyphs.contains(scalar)
-    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: true
-    default: false
+    case .control: return scalar != "\n"
+    // Look-alike and wide spaces could disguise a command or pad it out of view.
+    case .spaceSeparator: return scalar != " "
+    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: return true
+    default: return false
     }
 }
 
