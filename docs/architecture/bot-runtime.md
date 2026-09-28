@@ -167,7 +167,10 @@ Invite callbacks have no stable event ID for a semantic journal row, so their pe
 The pending record wakes unfinished work but never grants inviter authority: routers and agents re-read nio's current inviter after the join fence is durable and immediately before requesting the join.
 A failed join keeps the pending invitation and decrypt fence for retry.
 A current invite that the entity's invitation policy refuses is removed from the pending record, so refused inviters cannot grow it; after a policy change, reconciliation re-reads nio's cached invites instead.
-Reconciliation handles each pending room separately, so one room whose join keeps failing does not stop the others, and pending-record rewrites run off the event loop.
+Each reconciliation pass adds nio's cached invites from allowed inviters and drops refused ones in a single pending-record write.
+It then handles each pending room separately, so one room whose join keeps failing does not stop the others.
+A room whose join fails is retried after delays doubling from thirty seconds to an hour, and after five failed passes reconciliation drops it from the pending record and stops retrying it until the invite is delivered again or the process restarts.
+Pending-record rewrites run off the event loop, serialized per record file.
 Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
 Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.

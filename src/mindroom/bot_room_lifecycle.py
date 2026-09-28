@@ -6,6 +6,7 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING, Protocol
 
 import nio
@@ -43,9 +44,37 @@ if TYPE_CHECKING:
     from mindroom.matrix.users import AgentMatrixUser
 
 
-# Serializes read-modify-write cycles on pending-invite ledgers, which run in
-# worker threads so a large ledger never stalls the event loop.
-_PENDING_ROOM_INVITES_LOCK = threading.Lock()
+# Read-modify-write cycles on one pending-invite ledger run in worker threads,
+# so a large ledger never stalls the event loop, serialized per ledger file.
+_PENDING_ROOM_INVITES_LOCKS: dict[Path, threading.Lock] = {}
+_PENDING_ROOM_INVITES_LOCKS_GUARD = threading.Lock()
+# Reconciliation retries a pending invite whose join keeps failing after
+# doubling delays, and gives up after this many failed passes until the
+# invite arrives again or the process restarts.
+_PENDING_INVITE_RETRY_SECONDS = 30.0
+_PENDING_INVITE_MAX_RETRY_SECONDS = 3600.0
+_MAX_PENDING_INVITE_ATTEMPTS = 5
+
+
+@dataclass(frozen=True)
+class _PendingInviteRetry:
+    """Consecutive failed reconciliation passes for one pending invite."""
+
+    failures: int
+    delay_seconds: float
+    retry_at: float
+
+    @property
+    def abandoned(self) -> bool:
+        return self.failures >= _MAX_PENDING_INVITE_ATTEMPTS
+
+    def next_failure(self) -> _PendingInviteRetry:
+        delay = min(2 * self.delay_seconds, _PENDING_INVITE_MAX_RETRY_SECONDS)
+        return _PendingInviteRetry(self.failures + 1, delay, monotonic() + delay)
+
+
+def _first_pending_invite_failure() -> _PendingInviteRetry:
+    return _PendingInviteRetry(1, _PENDING_INVITE_RETRY_SECONDS, monotonic() + _PENDING_INVITE_RETRY_SECONDS)
 
 
 def _update_pending_room_invites(
@@ -54,7 +83,9 @@ def _update_pending_room_invites(
     failure_message: str,
 ) -> dict[str, str]:
     """Apply one change to fresh durable pending invites and return the result."""
-    with _PENDING_ROOM_INVITES_LOCK:
+    with _PENDING_ROOM_INVITES_LOCKS_GUARD:
+        lock = _PENDING_ROOM_INVITES_LOCKS.setdefault(path, threading.Lock())
+    with lock:
         pending_invites = load_pending_room_invites(path)
         updated = update(dict(pending_invites))
         if updated != pending_invites and not save_pending_room_invites(path, updated):
@@ -136,6 +167,7 @@ class BotRoomLifecycle:
         self._welcomed_room_ids: set[str] = set()
         self._decrypt_notice_fenced_room_ids: set[str] = set()
         self._applied_continuity_revision = -1
+        self._pending_invite_retries: dict[str, _PendingInviteRetry] = {}
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -273,13 +305,10 @@ class BotRoomLifecycle:
             ):
                 self._remember_invited_room(room_id)
 
-    def forget_invited_room(self, room_id: str) -> None:
+    async def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
-        self._pending_room_invites = _update_pending_room_invites(
-            self._pending_room_invites_file_path(),
-            _without_pending_invite(room_id, None),
-            f"Failed to forget pending room invite {room_id}",
-        )
+        await self._forget_pending_room_invite(room_id)
+        self._pending_invite_retries.pop(room_id, None)
         if not self._should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
@@ -301,7 +330,12 @@ class BotRoomLifecycle:
         )
 
     async def record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
-        """Persist an outstanding invite before its network work runs."""
+        """Persist an outstanding invite before its network work runs.
+
+        A freshly delivered invite also restarts reconciliation retries that
+        had given up on the room.
+        """
+        self._pending_invite_retries.pop(room_id, None)
         if not self._should_persist_invited_rooms():
             return
         await self._apply_pending_room_invites_update(
@@ -534,28 +568,79 @@ class BotRoomLifecycle:
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after configuration changes.
 
-        Each room is handled on its own, so one invite whose join keeps failing
-        stays pending without stopping the rest of the pass.
+        One ledger write adds the client's current invites from allowed
+        inviters and drops those the policy refuses. Each remaining room is
+        handled on its own, so one invite whose join keeps failing stays
+        pending without stopping the rest of the pass, and is retried after
+        doubling delays until reconciliation gives up on it.
         """
         client = self._client()
-        cached_invites = {
-            room.room_id: room.inviter for room in tuple(client.invited_rooms.values()) if room.inviter is not None
-        }
+        config = self._config()
+        allowed_invites: dict[str, str] = {}
+        refused_room_ids: set[str] = set()
+        for room in tuple(client.invited_rooms.values()):
+            if room.inviter is None:
+                continue
+            if is_inviter_allowed(config, self.deps.runtime_paths, self.deps.agent_name, room.inviter):
+                allowed_invites[room.room_id] = room.inviter
+            else:
+                refused_room_ids.add(room.room_id)
         if not self._should_persist_invited_rooms():
-            cached_invites = {}
+            allowed_invites = {}
+        retries = self._pending_invite_retries
+        allowed_invites = {
+            room_id: sender
+            for room_id, sender in allowed_invites.items()
+            if room_id not in retries or not retries[room_id].abandoned
+        }
         await self._apply_pending_room_invites_update(
-            lambda pending_invites: {**pending_invites, **cached_invites},
-            "Failed to persist cached pending room invites",
+            lambda pending_invites: {
+                **{room_id: sender for room_id, sender in pending_invites.items() if room_id not in refused_room_ids},
+                **allowed_invites,
+            },
+            "Failed to update pending room invites from the client's current invites",
         )
         for room_id, sender in tuple(self._pending_room_invites.items()):
+            retry = retries.get(room_id)
+            if retry is not None and (retry.abandoned or monotonic() < retry.retry_at):
+                continue
             room = client.invited_rooms.get(room_id)
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
             try:
                 await self._handle_invite(room, sender)
-            except Exception:
-                self._logger().exception("Pending invite reconciliation failed", room_id=room_id, sender=sender)
+            except Exception as error:
+                await self._pending_invite_failed(room_id, sender, error)
+
+    async def _pending_invite_failed(self, room_id: str, sender: str, error: Exception) -> None:
+        """Schedule the next retry of one pending invite, or give up on it."""
+        previous = self._pending_invite_retries.get(room_id)
+        retry = _first_pending_invite_failure() if previous is None else previous.next_failure()
+        self._pending_invite_retries[room_id] = retry
+        if not retry.abandoned:
+            self._logger().warning(
+                "Pending invite reconciliation failed",
+                room_id=room_id,
+                sender=sender,
+                attempt=retry.failures,
+                retry_in_seconds=retry.delay_seconds,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+            return
+        self._logger().warning(
+            "Giving up on a pending invite after repeated failures",
+            room_id=room_id,
+            sender=sender,
+            attempts=retry.failures,
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+        try:
+            await self._forget_pending_room_invite(room_id, expected_sender=sender)
+        except OSError:
+            self._logger().exception("Failed to forget an abandoned pending invite", room_id=room_id)
 
     def _current_inviter(self, room_id: str) -> str | None:
         """Return who Matrix currently says invited this bot, if the invite is still current."""
@@ -610,7 +695,7 @@ class BotRoomLifecycle:
                     room_id=room.room_id,
                 )
                 refused_sender = None if joined else self._current_inviter(room.room_id)
-                if refused_sender is not None:
+                if refused_sender is not None and self._pending_room_invites.get(room.room_id) == refused_sender:
                     # The policy refused a current invite, so retaining it only
                     # lets unwanted inviters grow the ledger. A policy change is
                     # re-evaluated from the client's cached invites instead.
@@ -625,6 +710,7 @@ class BotRoomLifecycle:
             self._remember_invited_room(room.room_id)
             await self._send_invite_welcome(room.room_id, sender)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+            self._pending_invite_retries.pop(room.room_id, None)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
         """Authorize a new join at the point Nio takes command ownership."""

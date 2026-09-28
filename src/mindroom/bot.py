@@ -1684,7 +1684,7 @@ class AgentBot:
             if joined:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
-            self._room_lifecycle.forget_invited_room(room_id)
+            await self._room_lifecycle.forget_invited_room(room_id)
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
