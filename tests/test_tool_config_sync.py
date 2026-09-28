@@ -235,8 +235,17 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     assert captured["sandbox_labels"] is None
 
 
-def test_daytona_verifies_tls_certificates_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A minimally configured Daytona tool must not disable certificate checks for its API key traffic."""
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [({}, True), ({"verify_ssl": None}, True), ({"verify_ssl": True}, True), ({"verify_ssl": False}, False)],
+)
+def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+    *,
+    expected: bool,
+) -> None:
+    """Only an explicit false may disable certificate checks for Daytona's API key traffic; unset and null verify."""
     from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
 
     captured: dict[str, object] = {}
@@ -247,9 +256,9 @@ def test_daytona_verifies_tls_certificates_by_default(monkeypatch: pytest.Monkey
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
     tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
 
-    tool_class(api_key="dt-test")
+    tool_class(api_key="dt-test", **overrides)
 
-    assert captured["verify_ssl"] is True
+    assert captured["verify_ssl"] is expected
     fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
     assert fields["verify_ssl"].default is True
 

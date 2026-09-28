@@ -225,7 +225,7 @@ def daytona_tools() -> type[DaytonaTools]:
             organization_id: str | None = None,
             timeout: int = 300,
             auto_create_sandbox: bool = True,
-            verify_ssl: bool = True,
+            verify_ssl: bool | None = True,
             persistent: bool = True,
             instructions: str | None = None,
             add_instructions: bool = False,
@@ -251,7 +251,8 @@ def daytona_tools() -> type[DaytonaTools]:
                 organization_id=organization_id,
                 timeout=timeout,
                 auto_create_sandbox=auto_create_sandbox,
-                verify_ssl=verify_ssl,
+                # Upstream disables certificate checks process-wide for any falsy value, so only an explicit False may.
+                verify_ssl=verify_ssl is not False,
                 persistent=persistent,
                 instructions=instructions,
                 add_instructions=add_instructions,
