@@ -238,6 +238,7 @@ Drain worker activity first, keep worker images on the primary's release, and ch
 
 Dedicated Kubernetes workers, including background-script workers, mount no config and resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request.
 Assigned knowledge that sits beside a file-sourced config reaches a worker only through its own read-only knowledge mount.
+Upgrading from a release whose workers mounted the primary's config interrupts background scripts still running on Kubernetes workers, as [Config-free runners and workers](../architecture/migrations.md#config-free-runners-and-workers) describes.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
 

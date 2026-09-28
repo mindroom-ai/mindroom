@@ -1097,38 +1097,32 @@ class ScriptRuntimeLifecycle:
             return adopted
         for run in runs:
             try:
-                verified_run = run
                 backend = await self._refresh_worker_backend(required_backend_locator=run.worker_backend_locator)
                 if backend is not None and run.worker_key is not None:
                     await asyncio.to_thread(backend.touch_worker, run.worker_key)
-                current_signature = verified_script_recovery_signature(
-                    run=run,
-                    backend=backend,
-                    config=config,
-                    gateway_url=self.manager.gateway_url,
-                )
-                if current_signature is None:
+                if (
+                    verified_script_recovery_signature(
+                        run=run,
+                        backend=backend,
+                        config=config,
+                        gateway_url=self.manager.gateway_url,
+                    )
+                    is None
+                ):
                     await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
                     await self.manager.reconcile_durable(run_id=run.run_id)
                     continue
-                if current_signature != run.recovery_signature:
-                    verified_run = await asyncio.to_thread(
-                        self.store.replace_recovery_signature,
-                        run.run_id,
-                        expected_signature=run.recovery_signature,
-                        recovery_signature=current_signature,
-                    )
-                authorized = self.resolver.is_authorized(verified_run, config=config)
+                authorized = self.resolver.is_authorized(run, config=config)
                 if authorized is None:
                     continue
                 if not authorized:
-                    await self.manager.revoke(verified_run.run_id, reason=OWNER_AUTHORIZATION_REVOKED)
-                reconciled = await self.manager.reconcile_durable(run_id=verified_run.run_id)
+                    await self.manager.revoke(run.run_id, reason=OWNER_AUTHORIZATION_REVOKED)
+                reconciled = await self.manager.reconcile_durable(run_id=run.run_id)
                 if reconciled.state is ScriptRunState.RUNNING and reconciled.cancel_requested_at is None:
                     # A previous primary may have died after claiming a tool call.
                     # Settle that ownership without replaying it or revoking the surviving process.
-                    await self.broker.cancel_run(verified_run.run_id)
-                    adopted.add(verified_run.run_id)
+                    await self.broker.cancel_run(run.run_id)
+                    adopted.add(run.run_id)
             except (
                 ScriptRunManagerError,
                 ScriptRunStoreError,
