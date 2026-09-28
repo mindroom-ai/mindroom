@@ -393,7 +393,7 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "\u2022 **Ops Team**: Operations escalation team (Team of 1 agent)" in welcome_message
 
 
 @pytest.mark.asyncio
@@ -445,8 +445,8 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@code**: Writes code" in welcome_message
-    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "\u2022 **Code**: Writes code" in welcome_message
+    assert "\u2022 **Ops Team**: Operations escalation team (Team of 1 agent)" in welcome_message
     assert "@research" not in welcome_message
 
 
@@ -500,7 +500,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
 
     response_text = send_response.await_args.args[0]
     assert "\U0001f9e0 **Available agents and teams in this room:**" in response_text
-    assert "\u2022 **@code**: Writes code" in response_text
+    assert "\u2022 **Code**: Writes code" in response_text
     context.client.joined_members.assert_not_awaited()
 
 
@@ -560,7 +560,7 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
 
     candidate_resolver.assert_awaited_once_with(room, "@alice:localhost")
     response_text = send_response.await_args.args[0]
-    assert "\u2022 **@code**: Writes code" in response_text
+    assert "\u2022 **Code**: Writes code" in response_text
     assert "@research" not in response_text
 
 
