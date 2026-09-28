@@ -465,7 +465,7 @@ def test_custom_api_tool_never_inflates_a_compressed_final_response(monkeypatch:
     """Identity is requested even over a model header, and a server that compresses anyway gets an error, not an inflate."""
     sent = _install_custom_api_transport(
         monkeypatch,
-        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=_GZIP_BOMB),
+        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=_TrackedStream(_GZIP_BOMB)),
     )
 
     payload = json.loads(
@@ -476,6 +476,44 @@ def test_custom_api_tool_never_inflates_a_compressed_final_response(monkeypatch:
     assert payload["status_code"] == 200
     assert "Content-Encoding gzip" in payload["error"]
     assert "data" not in payload
+
+
+@pytest.mark.parametrize(
+    ("content_encoding", "refused"),
+    [
+        ("x-gzip", "x-gzip"),
+        ("identity, DEFLATE", "deflate"),
+        ("br", "br"),
+        ("zstd, gzip", "gzip, zstd"),
+        ("none", None),
+        ("utf-8", None),
+        ("binary", None),
+        ("", None),
+    ],
+)
+def test_custom_api_tool_refuses_only_codings_httpx_would_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    content_encoding: str,
+    refused: str | None,
+) -> None:
+    """Each listed coding counts, while tokens HTTPX passes through leave the body readable as plain bytes."""
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Encoding": content_encoding},
+            stream=_TrackedStream(b'{"ok": true}'),
+        ),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
+
+    if refused is None:
+        assert payload["data"] == {"ok": True}
+        assert "error" not in payload
+    else:
+        assert payload["error"] == f"Response used Content-Encoding {refused} although identity was requested"
+        assert "data" not in payload
 
 
 def test_custom_api_tool_follows_redirects_without_reading_their_bodies(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -25,6 +25,8 @@ _CREDENTIALS_NEED_BASE_URL = (
 # Bodies are read undecoded and capped, so neither a large nor a compressed response can exhaust memory.
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_REDIRECTS = 10
+# The codings HTTPX would decode; any other token, such as `none` or `binary`, arrives as plain bytes.
+_COMPRESSED_CONTENT_ENCODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
 
 
 def _keeps_credentials(base: httpx.URL, url: httpx.URL) -> bool:
@@ -63,9 +65,9 @@ def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
             "status_code": response.status_code,
             "headers": cast("dict[str, str]", redact_sensitive_data(dict(response.headers))),
         }
-        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
-        if encoding != "identity":
-            result["error"] = f"Response used Content-Encoding {encoding} although identity was requested"
+        codings = {coding.strip().lower() for coding in response.headers.get("Content-Encoding", "").split(",")}
+        if compressed := sorted(codings & _COMPRESSED_CONTENT_ENCODINGS):
+            result["error"] = f"Response used Content-Encoding {', '.join(compressed)} although identity was requested"
             return json.dumps(result, indent=2)
         try:
             body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_RESPONSE_BYTES)
