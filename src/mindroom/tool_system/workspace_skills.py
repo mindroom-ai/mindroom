@@ -439,41 +439,40 @@ def _read_skill(skill_fd: int, content: str, skills_root: Path, directory: str) 
 
 @dataclass
 class SkillPassBudget:
-    """What one pass over a workspace may read of its SKILL.md files and parse of their frontmatter.
+    """What one pass over a workspace may still read of its SKILL.md files and parse of their frontmatter.
 
-    Worker code can write both, so each is charged before the work it pays for.
+    Worker code can write both, so a read is charged before it is decoded or matched, and a parse before it runs.
     """
 
-    read_bytes: int = _MAX_WORKSPACE_SKILL_READ_BYTES
-    parse_bytes: int = MAX_WORKSPACE_FRONTMATTER_BYTES
+    read_remaining: int = _MAX_WORKSPACE_SKILL_READ_BYTES
+    parse_remaining: int = MAX_WORKSPACE_FRONTMATTER_BYTES
 
     @property
     def read_spent(self) -> bool:
         """Return whether the pass has read past its limit, after which it reads nothing more."""
-        return self.read_bytes < 0
+        return self.read_remaining < 0
+
+    def read_markdown(self, skill_fd: int) -> str | None:
+        """Return a skill's SKILL.md, or None when it is absent or the pass has read past its limit.
+
+        The file that crosses the limit is read and charged but never decoded, and a file that is not UTF-8 is charged
+        before its decoding fails.
+        """
+        if self.read_spent:
+            return None
+        try:
+            data = read_regular_file_within_root(skill_fd, SKILL_FILENAME, max_bytes=MAX_SKILL_FILE_BYTES)
+        except FileNotFoundError:
+            return None
+        self.read_remaining -= len(data)
+        return None if self.read_spent else data.decode("utf-8")
 
     def spend_parse(self, cost: int) -> bool:
         """Charge a parse of ``cost`` when it fits, and return whether it did."""
-        if cost > self.parse_bytes:
+        if cost > self.parse_remaining:
             return False
-        self.parse_bytes -= cost
+        self.parse_remaining -= cost
         return True
-
-
-def read_skill_markdown(skill_fd: int, budget: SkillPassBudget) -> str | None:
-    """Return a skill's SKILL.md, charging its bytes to ``budget`` before they are decoded or matched.
-
-    Returns None when the file is absent or once the pass has read past its limit; a file that is not UTF-8 is charged
-    before its decoding fails.
-    """
-    if budget.read_spent:
-        return None
-    try:
-        data = read_regular_file_within_root(skill_fd, SKILL_FILENAME, max_bytes=MAX_SKILL_FILE_BYTES)
-    except FileNotFoundError:
-        return None
-    budget.read_bytes -= len(data)
-    return None if budget.read_spent else data.decode("utf-8")
 
 
 def metadata_surcharge(metadata: object) -> int:
@@ -571,7 +570,7 @@ def workspace_skill_name(content: str, directory: str) -> str | None:
 
 def _read_skill_markdown(skill_fd: int, path: Path, budget: SkillPassBudget) -> str | None:
     try:
-        return read_skill_markdown(skill_fd, budget)
+        return budget.read_markdown(skill_fd)
     except (OSError, ValueError) as exc:
         logger.warning("Refused a workspace skill file", path=str(path), error=str(exc))
         return None

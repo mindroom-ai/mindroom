@@ -46,7 +46,6 @@ from mindroom.tool_system.workspace_skills import (
     open_skills_root,
     parse_skill_markdown,
     parse_skill_metadata,
-    read_skill_markdown,
     read_text_at,
     skill_parse_charge,
     skill_prompt_bytes,
@@ -224,7 +223,7 @@ def _read_skill_file(
     budget: SkillPassBudget,
 ) -> SkillFile | None:
     """Read one skill file with its skill's ownership, reading and parsing SKILL.md only while ``budget`` lasts."""
-    markdown = read_skill_markdown(skill_fd, budget)
+    markdown = budget.read_markdown(skill_fd)
     if budget.read_spent:
         # A pass over many skills leaves SKILL.md files past its read limit unread, and pins it cannot read must hold.
         return None
