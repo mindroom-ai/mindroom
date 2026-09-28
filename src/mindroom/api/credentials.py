@@ -65,9 +65,17 @@ def _validated_service(service: str) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _validated_save_service(service: str) -> str:
-    """Validate a service being written, storing env-var-named provider keys under the canonical provider."""
-    return canonical_provider_service(_validated_service(service))
+def _save_service(access: _DashboardCredentialAccess, service: str) -> str:
+    """Return the service to write, storing new env-var-named provider keys under the canonical provider.
+
+    An env-var-named service that already exists keeps receiving writes, because
+    config may reference it by exact name (for example an embedder
+    ``credentials_service``), so rotating it must update that service.
+    """
+    canonical_service = canonical_provider_service(service)
+    if canonical_service == service or access.load(service) is not None:
+        return service
+    return canonical_service
 
 
 def _active_embedder_runtime(request: Request, access: _DashboardCredentialAccess) -> _ActiveEmbedderRuntime | None:
@@ -290,13 +298,14 @@ async def set_credentials(
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
-    service = _validated_save_service(service)
+    service = _validated_service(service)
     reject_oauth_credentials_document(payload.credentials)
     access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
     )
+    service = _save_service(access, service)
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
@@ -317,8 +326,8 @@ async def set_api_key(
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set an API key for a service."""
-    service = _validated_save_service(service)
-    request_service = _validated_save_service(payload.service)
+    service = _validated_service(service)
+    request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
     access = _DashboardCredentialAccess.resolve(
@@ -326,6 +335,7 @@ async def set_api_key(
         agent_name=agent_name,
         service_names=(service,),
     )
+    service = _save_service(access, service)
     reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
 
     credentials = access.load(service) or {}
@@ -468,13 +478,14 @@ async def copy_credentials(
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Copy credentials from one service to another."""
-    service = _validated_save_service(service)
+    service = _validated_service(service)
     source_service = _validated_service(source_service)
     access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service, source_service),
     )
+    service = _save_service(access, service)
     destination_match = oauth_service_match(request, service)
     source_match = oauth_service_match(request, source_service)
     reject_oauth_client_config_copy(source_service, source_match, service, destination_match)

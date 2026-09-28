@@ -16,6 +16,7 @@ from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
@@ -2205,6 +2206,37 @@ class TestCredentialsAPI:
         assert response.json()["service"] == "anthropic"
         assert manager.load_credentials("anthropic") == {"api_key": "sk-ant-model", "_source": "ui"}
         assert manager.load_credentials("ANTHROPIC_API_KEY") is None
+
+    @pytest.mark.parametrize("route", ["set", "api-key", "copy"])
+    def test_rotating_existing_env_named_provider_service_updates_it_in_place(
+        self,
+        client: TestClient,
+        route: str,
+    ) -> None:
+        """An existing env-var-named service may be bound by exact name, so rotation must keep writing it."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "sk-or-old", "_source": "ui"})
+        manager.save_credentials("model:router", {"api_key": "sk-or-new", "_source": "ui"})
+
+        if route == "set":
+            response = client.post(
+                "/api/credentials/OPENROUTER_API_KEY",
+                json={"credentials": {"api_key": "sk-or-new"}},
+            )
+        elif route == "api-key":
+            response = client.post(
+                "/api/credentials/OPENROUTER_API_KEY/api-key",
+                json={"service": "OPENROUTER_API_KEY", "api_key": "sk-or-new"},
+            )
+        else:
+            response = client.post("/api/credentials/OPENROUTER_API_KEY/copy-from/model:router")
+
+        assert response.status_code == 200
+        assert response.json()["service"] == "OPENROUTER_API_KEY"
+        assert manager.load_credentials("OPENROUTER_API_KEY") == {"api_key": "sk-or-new", "_source": "ui"}
+        assert manager.load_credentials("openrouter") is None
+        assert get_embedder_api_key(runtime_paths, credentials_service="OPENROUTER_API_KEY") == "sk-or-new"
 
     def test_env_named_provider_service_remains_readable_and_deletable(self, client: TestClient) -> None:
         """Already-stored env-var-named services stay visible so users can inspect and remove them."""
