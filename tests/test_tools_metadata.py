@@ -1617,6 +1617,16 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
             )
 
 
+def test_openbb_personal_access_token_cannot_be_authored_inline() -> None:
+    """The OpenBB PAT is a credential, so it is masked and only stored through the credential store."""
+    with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for password fields"):
+        validate_authored_tool_entry_overrides(
+            "openbb",
+            {"openbb_pat": "pat-sentinel"},
+            config_path_prefix="agents.a.tools",
+        )
+
+
 def test_file_access_rules_survive_the_validation_snapshot() -> None:
     """Worker validation snapshots keep each tool's file-access class."""
     snapshot = {

@@ -8905,7 +8905,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
