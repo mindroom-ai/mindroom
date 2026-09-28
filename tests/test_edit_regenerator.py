@@ -2514,6 +2514,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
     assert owner.source_event_revisions[first] == (10, "$first-edit")
     assert owner.revision_replay["$driving-edit"].response_event_id is None
 
+
 @pytest.mark.asyncio
 async def test_lane_serialized_sibling_edits_regenerate_without_spinning(
     tmp_path: Path,

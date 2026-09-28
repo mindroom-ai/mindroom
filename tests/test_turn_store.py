@@ -3861,7 +3861,10 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
         if mutation == "newer":
             await store.register_edit_revision("$user_msg", (30, "$newer-edit"))
         else:
-            await store.mark_source_redacted("$driving-edit" if mutation == "driver" else "$sibling-edit", room_id="!room:example.org")
+            await store.mark_source_redacted(
+                "$driving-edit" if mutation == "driver" else "$sibling-edit",
+                room_id="!room:example.org",
+            )
         preparation_release.set()
         result = await task
     assert result is (True if mutation == "driver" else EditPreparation.REBUILD)
@@ -3999,7 +4002,10 @@ async def test_prepared_voice_dropped_by_terminal_authority(journal_store: Event
     if terminal == "completed":
         await store.record_turn(TurnRecord.create(["$voice"]))
     else:
-        await store.mark_source_redacted("$alias" if terminal == "alias_redacted" else "$voice", room_id="!room:example.org")
+        await store.mark_source_redacted(
+            "$alias" if terminal == "alias_redacted" else "$voice",
+            room_id="!room:example.org",
+        )
     assert store.prepared_voice_for_source("$voice") is None
     assert await store.record_prepared_voice("$voice", snapshot) is None
     _reset_handled_turn_ledger_runtime()
