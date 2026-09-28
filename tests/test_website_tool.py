@@ -21,6 +21,7 @@ from mindroom.custom_tools.website import (
     _MAX_REDIRECTS,
     _TOO_MANY_REDIRECTS,
     WebsiteTools,
+    _extract_main_content_in_place,
     _MindRoomWebsiteReader,
     _safe_url_for_log,
 )
@@ -63,7 +64,7 @@ def test_website_reader_prefers_content_body_over_search_modal() -> None:
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    content = _MindRoomWebsiteReader()._extract_main_content(soup)
+    content = _extract_main_content_in_place(soup)
 
     assert "Biography" in content
     assert "open source scientific software" in content

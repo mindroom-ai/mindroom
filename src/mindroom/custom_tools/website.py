@@ -389,10 +389,6 @@ class _MindRoomWebsiteReader(WebsiteReader):
             log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
             raise
 
-    def _extract_main_content(self, soup: BeautifulSoup) -> str:
-        """Extract the best available page body text without modifying the caller's soup."""
-        return _extract_main_content_in_place(BeautifulSoup(str(soup), "html.parser"))
-
 
 class WebsiteTools(Toolkit):
     """Agno-compatible website toolkit using MindRoom's fixed extractor."""
