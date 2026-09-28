@@ -27,10 +27,10 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.room_history_reads import ThreadRoomScanBoundError
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
-from mindroom.matrix.room_history_reads import ThreadRoomScanBoundError
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _THREAD_SUMMARY_MAX_LENGTH,
@@ -42,7 +42,6 @@ from mindroom.thread_summary import (
     _generate_summary,
     _is_thread_summary_message,
     _last_summary_counts,
-    _threads_beyond_source_read,
     _next_thread_summary_threshold,
     _next_threshold,
     _normalize_thread_summary_text,
@@ -55,6 +54,7 @@ from mindroom.thread_summary import (
     _thread_locks,
     _thread_summary_cache_key,
     _ThreadEnrichment,
+    _threads_beyond_source_read,
     _ThreadSummary,
     _update_last_summary_count,
     maybe_generate_thread_summary,

@@ -214,7 +214,7 @@ class PersonalRoomService:
                 source_room_id=source_room_id,
                 reinvite_departed_owner=reinvite_departed_owner
                 or (previous is not None and previous.reinvite_departed_owner),
-                token=uuid4().hex,
+                attempt_id=uuid4().hex,
             )
             await run_blocking_until_complete(write_personal_room, path, record)
         return True
@@ -230,7 +230,11 @@ class PersonalRoomService:
         """Clear exactly this deferred trigger, keeping one deferred after it was read."""
         async with async_exclusive_file_lock(path.with_suffix(".lock")):
             record = await run_blocking_until_complete(read_personal_room, path)
-            if record is None or record.deferred_trigger != trigger:
+            if (
+                record is None
+                or record.deferred_trigger is None
+                or record.deferred_trigger.attempt_id != trigger.attempt_id
+            ):
                 return
             record.deferred_trigger = None
             await run_blocking_until_complete(write_personal_room, path, record)

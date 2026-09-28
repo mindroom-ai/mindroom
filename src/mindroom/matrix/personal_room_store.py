@@ -48,7 +48,7 @@ class DeferredPersonalRoomTrigger(BaseModel):
 
     source_room_id: str
     reinvite_departed_owner: bool = False
-    token: str
+    attempt_id: str
 
 
 class PersonalRoomRecord(BaseModel):

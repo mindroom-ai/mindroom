@@ -5735,6 +5735,7 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "OpaqueEncryptedThreadHistoryError",
     "RoomThreadsPageError",
+    "ThreadRoomScanBoundError",
     "UnresolvedOpaqueRoomHistoryError",
     "bulk_scan_thread_event_sources",
     "bundled_replacement_source",

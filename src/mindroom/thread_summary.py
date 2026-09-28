@@ -211,6 +211,14 @@ def _thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
     return _thread_locks[_thread_summary_cache_key(room_id, thread_id)]
 
 
+def _skip_thread_beyond_source_read(room_id: str, thread_id: str, message_count: int) -> bool:
+    """Advance the baseline instead of generating a summary whose pin re-check cannot pass."""
+    if _thread_summary_cache_key(room_id, thread_id) not in _threads_beyond_source_read:
+        return False
+    _update_last_summary_count(room_id, thread_id, message_count)
+    return True
+
+
 def _update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
     """Record the latest summarized message count for one thread monotonically."""
     cache_key = _thread_summary_cache_key(room_id, thread_id)
@@ -1230,10 +1238,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             human_sender_allowed=human_sender_allowed,
         ):
             return
-        if message_count < threshold:
-            return
-        if _thread_summary_cache_key(room_id, thread_id) in _threads_beyond_source_read:
-            _update_last_summary_count(room_id, thread_id, message_count)
+        if message_count < threshold or _skip_thread_beyond_source_read(room_id, thread_id, message_count):
             return
         if await _thread_is_resolved(client, room_id, thread_id):
             logger.debug(

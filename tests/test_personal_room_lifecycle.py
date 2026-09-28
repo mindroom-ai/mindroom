@@ -848,7 +848,7 @@ async def test_reconciliation_retries_a_trigger_deferred_from_another_onboarding
             deferred_trigger=DeferredPersonalRoomTrigger(
                 source_room_id="!second:localhost",
                 reinvite_departed_owner=True,
-                token="deferred",
+                attempt_id="deferred",
             ),
         ),
     )
