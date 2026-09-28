@@ -52,32 +52,47 @@ class _CredentialSeedDeclaration:
     seed: Mapping[str, Any]
 
 
+def _get_secret_from_env_with_source(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
+    """Read a secret from NAME or NAME_FILE, returning value and source var name.
+
+    If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
+    a readable file, return its stripped contents. Else return None.
+
+    Returns (value, source_var_name) where source_var_name is NAME or NAME_FILE.
+    """
+    val = runtime_paths.env_value(name)
+    if val:
+        return val, name
+    file_var = f"{name}_FILE"
+    file_path = runtime_env_path(runtime_paths, file_var)
+    if file_path is not None and file_path.exists():
+        try:
+            content = file_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            # Avoid noisy logs here; callers can handle None gracefully
+            return None
+        else:
+            return content, file_var
+    return None
+
+
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     """Read a secret from NAME or NAME_FILE.
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
     a readable file, return its stripped contents. Else return None.
     """
-    val = runtime_paths.env_value(name)
-    if val:
-        return val
-    file_var = f"{name}_FILE"
-    file_path = runtime_env_path(runtime_paths, file_var)
-    if file_path is not None and file_path.exists():
-        try:
-            return file_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            # Avoid noisy logs here; callers can handle None gracefully
-            return None
-    return None
+    result = _get_secret_from_env_with_source(name, runtime_paths)
+    return result[0] if result else None
 
 
 def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
-    github_token = get_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
-    if not github_token:
+    result = _get_secret_from_env_with_source("GITHUB_TOKEN", runtime_paths=runtime_paths)
+    if not result:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
+    github_token, source_var = result
 
     return _sync_service_credentials(
         service="github_private",
@@ -86,22 +101,64 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
             "token": github_token,
         },
         runtime_paths=runtime_paths,
-        env_var="GITHUB_TOKEN",
+        env_var=source_var,
     )
 
 
 def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update the dedicated embedder credential from EMBEDDER_API_KEY."""
-    embedder_api_key = get_secret_from_env("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
-    if not embedder_api_key:
+    result = _get_secret_from_env_with_source("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
+    if not result:
         logger.debug("No value found for EMBEDDER_API_KEY or EMBEDDER_API_KEY_FILE")
         return False
+    embedder_api_key, source_var = result
 
     return _sync_service_credentials(
         service=_EMBEDDER_CREDENTIAL_SERVICE,
         credentials={"api_key": embedder_api_key},
         runtime_paths=runtime_paths,
-        env_var="EMBEDDER_API_KEY",
+        env_var=source_var,
+    )
+
+
+def _credentials_changed(existing: dict[str, Any], new: dict[str, Any]) -> bool:
+    """Check if credential values actually changed (ignoring _source metadata)."""
+    existing_without_source = {k: v for k, v in existing.items() if not k.startswith("_")}
+    new_without_source = {k: v for k, v in new.items() if not k.startswith("_")}
+    return existing_without_source != new_without_source
+
+
+def _emit_credential_import_notice(
+    *,
+    service: str,
+    env_var: str,
+    runtime_paths: RuntimePaths,
+    is_first_import: bool,
+) -> None:
+    """Emit user-visible notice when credentials are imported or changed."""
+    # Determine source (process env vs .env)
+    in_process = env_var in runtime_paths.process_env
+    in_env_file = env_var in runtime_paths.env_file_values
+
+    if in_process and in_env_file:
+        source_description = "process environment (also set in .env, which is overridden)"
+        removal_instruction = f"remove {env_var} from both your process environment and .env"
+    elif in_process:
+        source_description = "process environment"
+        removal_instruction = f"remove {env_var} from your process environment"
+    else:
+        source_description = ".env file"
+        removal_instruction = f"remove {env_var} from your .env file"
+
+    action = "imported" if is_first_import else "updated"
+
+    # The human sentence becomes the log event itself
+    logger.info(
+        f"Credential {action}: {env_var} from {source_description} stored as '{service}'. "
+        f"To stop this: {removal_instruction}, "
+        f"and delete the stored credential via the dashboard Credentials tab or API endpoint DELETE /api/credentials/{service}",
+        service=service,
+        env_var=env_var,
     )
 
 
@@ -110,7 +167,7 @@ def _sync_service_credentials(
     service: str,
     credentials: dict[str, Any],
     runtime_paths: RuntimePaths,
-    env_var: str | None = None,
+    env_var: str,
 ) -> bool:
     """Seed or update one env-backed named service."""
     if is_oauth_token_service(service):
@@ -136,14 +193,21 @@ def _sync_service_credentials(
             logger.debug("credential_env_sync_skipped", service=service, source=source)
             return False
 
+    # Check if this is a first import or if values actually changed
+    is_first_import = existing is None
+    if existing is not None and not _credentials_changed(existing, credentials):
+        # Skip saving and logging if nothing changed
+        logger.debug("credential_env_sync_unchanged", service=service, env_var=env_var)
+        return False
+
     creds_manager.save_credentials(service, {**credentials, "_source": "env"})
-    log_context = {"service": service}
-    if env_var is not None:
-        log_context["env_var"] = env_var
-    if existing is None:
-        logger.info("credential_seeded_from_env", **log_context)
-    else:
-        logger.info("credential_updated_from_env", **log_context)
+    _emit_credential_import_notice(
+        service=service,
+        env_var=env_var,
+        runtime_paths=runtime_paths,
+        is_first_import=is_first_import,
+    )
+
     return True
 
 
@@ -347,20 +411,21 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
-        env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
+        result = _get_secret_from_env_with_source(env_var, runtime_paths=runtime_paths)
 
-        if not env_value:
+        if not result:
             logger.debug("credential_env_value_missing", env_var=env_var)
             continue
 
-        logger.debug("credential_env_value_found", env_var=env_var, value_length=len(env_value))
+        env_value, source_var = result
+        logger.debug("credential_env_value_found", env_var=source_var, value_length=len(env_value))
 
         credentials = {"host": env_value} if service == "ollama" else {"api_key": env_value}
         if _sync_service_credentials(
             service=service,
             credentials=credentials,
             runtime_paths=runtime_paths,
-            env_var=env_var,
+            env_var=source_var,
         ):
             synced_count += 1
 

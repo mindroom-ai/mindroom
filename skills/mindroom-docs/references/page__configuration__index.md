@@ -460,6 +460,14 @@ A model's `extra_kwargs.base_url` overrides this environment setting, and `extra
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
 See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
 
+**Automatic credential import**: When MindRoom starts, supported provider and bootstrap environment variables from your process environment or config-adjacent `.env` file are automatically stored in the shared credentials store.
+On first import or when a value changes, MindRoom logs which variable was imported, where it came from (process environment or `.env`), and the credential service name it was stored under.
+When a variable is set in both sources, the process environment value takes precedence and the `.env` value is overridden.
+Unchanged values on subsequent runs stay quiet.
+Values are never printed or logged.
+To stop automatic import: remove the variable from your environment or `.env` file (or both if set in both places), then delete the stored credential via the dashboard Credentials tab or API endpoint `DELETE /api/credentials/{service}`.
+Credentials set through the dashboard (marked `_source: ui`) are never overwritten by environment sync.
+
 ### Codex CLI Subscription Auth
 
 The `codex` provider does not use an API key environment variable.
