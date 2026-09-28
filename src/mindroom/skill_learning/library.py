@@ -25,6 +25,8 @@ from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import find_credential
 from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
+    MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
+    MAX_WORKSPACE_SKILL_NAME_CHARS,
     SKILL_FILENAME,
     SkillUsage,
     forget_missing_skill_usage,
@@ -46,8 +48,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_MAX_NAME_CHARS = 64
-_MAX_DESCRIPTION_CHARS = 1024
 # Hermes SKILL_PROMPT_DESC_LIMIT: new skills must fit the one-line skill index every prompt carries.
 _NEW_DESCRIPTION_CHARS = 60
 _MAX_SKILL_MARKDOWN_CHARS = 100_000
@@ -89,8 +89,11 @@ def _learner_owns(frontmatter: dict[str, object], usage: SkillUsage, *, path: st
 
 def _validate_skill_name(name: str) -> None:
     """Accept only lowercase hyphenated directory names."""
-    if len(name) > _MAX_NAME_CHARS or not _NAME.fullmatch(name):
-        msg = f"Invalid skill name {name!r}: use lowercase letters, digits and single hyphens, at most 64 characters."
+    if len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS or not _NAME.fullmatch(name):
+        msg = (
+            f"Invalid skill name {name!r}: use lowercase letters, digits and single hyphens, "
+            f"at most {MAX_WORKSPACE_SKILL_NAME_CHARS} characters."
+        )
         raise SkillEditError(msg)
 
 
@@ -119,8 +122,10 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
     if not isinstance(description, str) or not description.strip():
         msg = "Frontmatter must include a non-empty description."
         raise SkillEditError(msg)
-    if len(description) > _MAX_DESCRIPTION_CHARS or (new and len(description.strip()) > _NEW_DESCRIPTION_CHARS):
-        limit = _NEW_DESCRIPTION_CHARS if new else _MAX_DESCRIPTION_CHARS
+    if len(description) > MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS or (
+        new and len(description.strip()) > _NEW_DESCRIPTION_CHARS
+    ):
+        limit = _NEW_DESCRIPTION_CHARS if new else MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS
         msg = f"Description exceeds {limit} characters; keep one trigger-first sentence and move detail into the body."
         raise SkillEditError(msg)
     if not body:
@@ -201,7 +206,7 @@ def support_file_paths(skills_root: Path, name: str) -> list[str]:
         return [
             f"{directory}/{filename}"
             for directory in sorted(_SUPPORT_DIRECTORIES)
-            for filename in list_support_files(skill_fd, directory)
+            for filename in list_support_files(skill_fd, skills_root / name, directory)
         ]
 
 

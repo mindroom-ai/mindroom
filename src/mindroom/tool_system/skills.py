@@ -230,7 +230,11 @@ class MindroomSkills(Skills):
         try:
             content = read_support_file(Path(skill.source_path), directory, filename)
         except (OSError, ValueError) as exc:
-            logger.warning("Refused a workspace skill file", path=f"{skill.source_path}/{directory}/{filename}")
+            logger.warning(
+                "Refused a workspace skill file",
+                path=f"{skill.source_path}/{directory}/{filename}",
+                error=str(exc),
+            )
             return json.dumps(
                 {"error": f"Error reading {directory} file: {exc}", "skill_name": skill.name, key: filename},
             )

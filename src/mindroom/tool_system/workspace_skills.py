@@ -37,8 +37,8 @@ WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 # Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
-_MAX_WORKSPACE_SKILL_NAME_CHARS = 64
-_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
+MAX_WORKSPACE_SKILL_NAME_CHARS = 64
+MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 _MAX_COUNT = 2**53
 _USAGE_FILENAME = ".usage.json"
@@ -104,18 +104,18 @@ def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
         )
 
 
-def _readable_size(directory_fd: int, directory: str, filename: str) -> bool:
+def _readable_size(directory_fd: int, path: Path) -> bool:
     try:
-        size = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_size
+        size = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False).st_size
     except FileNotFoundError:
         return False
     if size > MAX_SKILL_FILE_BYTES:
-        logger.warning("Refused a workspace skill file", path=f"{directory}/{filename}", size=size)
+        logger.warning("Refused a workspace skill file", path=str(path), size=size)
         return False
     return True
 
 
-def list_support_files(skill_fd: int, directory: str) -> list[str]:
+def list_support_files(skill_fd: int, skill_path: Path, directory: str) -> list[str]:
     """Return the readable regular files directly inside one support directory; a linked directory has none."""
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
@@ -130,12 +130,16 @@ def list_support_files(skill_fd: int, directory: str) -> list[str]:
             return [
                 filename
                 for filename in filenames[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
-                if _readable_size(support_fd, directory, filename)
+                if _readable_size(support_fd, skill_path / directory / filename)
             ]
     except FileNotFoundError:
         return []
     except OSError as exc:
-        logger.warning("Ignoring unsafe workspace skill support directory", directory=directory, error=str(exc))
+        logger.warning(
+            "Ignoring unsafe workspace skill support directory",
+            path=str(skill_path / directory),
+            error=str(exc),
+        )
         return []
 
 
@@ -262,7 +266,7 @@ def _each_skill_directory[Result](
 # Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
 # Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery; the
 # workspace count, budget, name, description, listing, and file-size limits remain MindRoom policy.
-# Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
+# Coverage: tests/test_skills.py::test_a_linked_support_directory_lists_nothing,
 # tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
 # tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno,
 # tests/test_skills.py::test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning,
@@ -328,20 +332,20 @@ def _load_workspace_skill(skill_fd: int, skills_root: Path, directory: str) -> S
     frontmatter, instructions = parse_skill_markdown(content, loose=True)
     # Skill normalization drops a skill without a usable name.
     name = _frontmatter_name(frontmatter, directory) or ""
-    if len(name) > _MAX_WORKSPACE_SKILL_NAME_CHARS:
+    if len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
         logger.warning("Refused a workspace skill whose name is too long", path=str(path))
         return None
     description = frontmatter.get("description", "")
-    if isinstance(description, str) and len(description) > _MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
+    if isinstance(description, str) and len(description) > MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
         logger.warning("Truncated a workspace skill description", path=str(path))
-        description = description[:_MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
+        description = description[:MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
     return Skill(
         name=name,
         description=description,
         instructions=instructions,
         source_path=str(skills_root / directory),
-        scripts=list_support_files(skill_fd, "scripts"),
-        references=list_support_files(skill_fd, "references"),
+        scripts=list_support_files(skill_fd, skills_root / directory, "scripts"),
+        references=list_support_files(skill_fd, skills_root / directory, "references"),
         metadata=frontmatter.get("metadata"),
         license=frontmatter.get("license"),
         compatibility=frontmatter.get("compatibility"),

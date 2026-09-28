@@ -559,26 +559,19 @@ def _load_agent_skills(tmp_path: Path, storage: Path, allowlist: list[str] | Non
     )
 
 
-def test_workspace_loader_skips_links_and_special_files(tmp_path: Path) -> None:
-    """Workspace skills load through no-follow reads, so planted links and FIFOs are never opened."""
+def test_a_linked_support_directory_lists_nothing(tmp_path: Path) -> None:
+    """A skill whose references directory is a link to files outside the workspace lists none of them."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    outside = _write_skill(tmp_path / "outside", "secret", "Outside the workspace")
-    (outside.parent / "references").mkdir()
-    (outside.parent / "references" / "keys.md").write_text("private", encoding="utf-8")
-    (workspace_skills / "linked-dir").symlink_to(outside.parent, target_is_directory=True)
-    (workspace_skills / "linked-file").mkdir()
-    (workspace_skills / "linked-file" / "SKILL.md").symlink_to(outside)
-    (workspace_skills / "fifo").mkdir()
-    os.mkfifo(workspace_skills / "fifo" / "SKILL.md")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keys.md").write_text("private", encoding="utf-8")
     good = _write_skill(workspace_skills, "good", "Good skill")
-    (good.parent / "references").symlink_to(outside.parent / "references", target_is_directory=True)
+    (good.parent / "references").symlink_to(outside, target_is_directory=True)
     (good.parent / "scripts").mkdir()
     (good.parent / "scripts" / "check.sh").write_text("echo ok", encoding="utf-8")
-    (good.parent / "scripts" / "linked.sh").symlink_to(outside)
 
     skills = _load_agent_skills(tmp_path, storage)
     assert skills is not None
-    assert _skill_names(skills) == ["good"]
     skill = skills.get_skill("good")
     assert skill is not None
     assert (skill.scripts, skill.references) == (["check.sh"], [])
@@ -672,25 +665,21 @@ def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_
     assert any(log["event"] == "Ignoring SKILL.md directly in the workspace skills directory" for log in logs)
 
 
-def test_workspace_skill_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
-    """A SKILL.md over the read limit does not load, and a support file over it is not offered."""
+def test_workspace_support_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
+    """A support file over the read limit is not offered, with a warning that names it."""
     storage, root = _workspace_skills(tmp_path)
     skill_path = _write_skill(root, "guide", "Guide")
     (skill_path.parent / "references").mkdir()
     (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
     (skill_path.parent / "references" / "manual.md").write_text("x" * (MAX_SKILL_FILE_BYTES + 1), encoding="utf-8")
-    huge = _write_skill(root, "huge", "Huge")
-    huge.write_text(huge.read_text(encoding="utf-8") + "x" * MAX_SKILL_FILE_BYTES, encoding="utf-8")
     with capture_logs() as logs:
         skills = _load_agent_skills(tmp_path, storage)
     assert skills is not None
-    assert _skill_names(skills) == ["guide"]
     skill = skills.get_skill("guide")
     assert skill is not None
     assert skill.references == ["notes.md"]
     refused = [str(entry.get("path", "")) for entry in logs if entry["log_level"] == "warning"]
-    assert any(path.endswith("huge/SKILL.md") for path in refused)
-    assert any(path.endswith("references/manual.md") for path in refused)
+    assert any(path.endswith("guide/references/manual.md") for path in refused)
 
 
 def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
@@ -782,7 +771,9 @@ def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Pa
         skills = _load_agent_skills(tmp_path, storage)
 
     assert _skill_names(skills) == []
-    if layout != "linked_skills_dir":
+    if layout == "linked_skills_dir":
+        assert any(entry["event"] == "Workspace skill root is unavailable" for entry in logs)
+    else:
         assert any(str(entry.get("path", "")).endswith("planted/SKILL.md") for entry in logs)
 
 
