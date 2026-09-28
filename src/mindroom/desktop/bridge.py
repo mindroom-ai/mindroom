@@ -19,7 +19,7 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
-from mindroom.desktop.input import normalize_key_chord
+from mindroom.desktop.input import MINDROOM_APP_IDS, normalize_key_chord
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
@@ -76,8 +76,6 @@ _MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 _MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
-# MindRoom's own windows grant shell auto-approval, control leases, and app access, so agent input must never reach them.
-_MINDROOM_APP_IDS = frozenset({"chat.mindroom.menubar", "chat.mindroom.desktophelper"})
 
 
 async def _run_macos_application_events() -> None:
@@ -141,8 +139,9 @@ class DesktopBridgePolicy:
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
             raise ValueError(msg)
-        # Every policy change goes through replace(), which runs this check again, so admission needs no second one.
-        if reserved := sorted(self.allowed_app_ids & _MINDROOM_APP_IDS):
+        # Saved configuration already refuses these; this also covers one-run --allow-app overrides. Every policy
+        # change goes through replace(), which runs this check again, so admission needs no second one.
+        if reserved := sorted(self.allowed_app_ids & MINDROOM_APP_IDS):
             msg = (
                 f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
                 "remove it from the allowed applications."

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
+from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.device_identity import PinnedMatrixDevice
@@ -155,7 +156,7 @@ class NativeDesktopConfig:
             controller=controller,
             allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
             allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
-            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application", allow_empty=True),
+            allowed_app_ids=_allowed_app_ids(payload.get("allowed_app_ids")),
             capture=capture,
             browser=browser,
             files=files,
@@ -164,7 +165,7 @@ class NativeDesktopConfig:
 
     def with_allowed_apps(self, raw: object) -> NativeDesktopConfig:
         """Validate an app-only edit without revalidating unrelated browser paths."""
-        return replace(self, allowed_app_ids=_text_tuple(raw, "allowed application", allow_empty=True))
+        return replace(self, allowed_app_ids=_allowed_app_ids(raw))
 
     def with_local_access(self, files_raw: object, shell_raw: object) -> NativeDesktopConfig:
         """Validate a folder and shell edit without revalidating unrelated settings."""
@@ -330,6 +331,17 @@ def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[
     if len(set(values)) != len(values):
         raise NativeConfigError("invalid_request", f"Native desktop {label} list must not contain duplicates.")
     return values
+
+
+def _allowed_app_ids(raw: object) -> tuple[str, ...]:
+    app_ids = _text_tuple(raw, "allowed application", allow_empty=True)
+    if reserved := sorted(set(app_ids) & MINDROOM_APP_IDS):
+        raise NativeConfigError(
+            "invalid_request",
+            f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
+            "remove it from the allowed applications.",
+        )
+    return app_ids
 
 
 def _integer(raw: object, label: str, *, minimum: int, maximum: int | None = None) -> int:

@@ -6992,7 +6992,7 @@ depends_on = ["mindroom.desktop.accessibility"]
 
 [[modules]]
 path = "mindroom.desktop.native_config"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.matrix.device_identity"]
+depends_on = ["mindroom.desktop.input", "mindroom.durable_write", "mindroom.file_locks", "mindroom.matrix.device_identity"]
 
 [[modules]]
 path = "mindroom.desktop.native_entry"
