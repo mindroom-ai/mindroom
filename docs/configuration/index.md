@@ -1004,6 +1004,7 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other stored value makes that tool fail to load instead of silently choosing a truthiness.
 When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
 To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 

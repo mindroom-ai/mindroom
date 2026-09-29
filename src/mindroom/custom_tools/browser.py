@@ -27,7 +27,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
 from mindroom.custom_tools.desktop_attachment import (
@@ -46,15 +46,17 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
 )
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
-    COMPUTER_PROXY_BYPASS,
+    PROXIED_WEBRTC_ONLY_ARG,
+    RELAY_ONLY_PROXY_BYPASS,
     BrowserDestinationProxy,
-    browser_upstream_proxy_url,
+    browser_egress,
 )
 
 if TYPE_CHECKING:
@@ -302,24 +304,28 @@ def _clean_str(value: object) -> str | None:
     return cleaned or None
 
 
-def _profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
-    """Return the persistent Playwright profile directory for one browser profile."""
+def _profile_dir(profiles_root: Path, profile_name: str) -> Path:
+    """Return the persistent Playwright profile directory directly below its owner's profile root."""
     normalized_profile = _clean_str(profile_name) or _DEFAULT_PROFILE
     profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or _DEFAULT_PROFILE
-    _profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
-    _profile_dir.mkdir(parents=True, exist_ok=True)
-    _profile_dir.chmod(0o700)
-    return _profile_dir
+    # The slug has no separators, so refusing a leading dot also refuses "." and "..".
+    if profile_slug.startswith("."):
+        msg = f"Browser profile names must not start with a dot: {profile_name!r}"
+        raise ValueError(msg)
+    profile_dir = profiles_root.resolve() / profile_slug
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
+    return profile_dir
 
 
 def _persistent_launch_kwargs(
     runtime_paths: RuntimePaths,
-    profile_name: str,
+    user_data_dir: Path,
     *,
     headless: bool,
     executable_override: str | None = None,
 ) -> dict[str, Any]:
-    """Return the shared persistent-context launch kwargs for one browser profile."""
+    """Return the shared persistent-context launch kwargs for one browser profile directory."""
     executable = (
         executable_override
         or runtime_paths.env_value("BROWSER_EXECUTABLE_PATH")
@@ -327,11 +333,12 @@ def _persistent_launch_kwargs(
         or shutil.which("google-chrome-stable")
     )
     launch_kwargs: dict[str, Any] = {
+        "args": [PROXIED_WEBRTC_ONLY_ARG],
         "headless": headless,
         # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.
         "service_workers": "block",
-        "user_data_dir": str(_profile_dir(runtime_paths, profile_name)),
+        "user_data_dir": str(user_data_dir),
         "viewport": {"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH},
     }
     if executable:
@@ -569,10 +576,15 @@ class BrowserTools(Toolkit):
         timeout_seconds: float = 90.0,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
+        agent_state_root: Path | None = None,
     ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         apply_toolkit_function_aliases(self, {"browser": "browser_control"})
         self._runtime_paths = runtime_paths
+        # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
+        # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
+        self._agent_state_root = agent_state_root
+        self._profiles_root = (agent_state_root or runtime_paths.storage_root) / "browser-profiles"
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
         self._desktop_target = self._configured_desktop_target(
@@ -930,7 +942,8 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(
+            target_url = await run_browser_tool_url_check(
+                validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
                 allow_loopback=self._worker_display is not None,
@@ -983,7 +996,8 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(
+            target_url = await run_browser_tool_url_check(
+                validate_server_fetch_url,
                 target_url,
                 allow_private_networks=self._allow_private_networks,
                 allow_loopback=self._worker_display is not None,
@@ -1121,7 +1135,9 @@ class BrowserTools(Toolkit):
         if context is None:
             msg = "Browser target=desktop requires a live Matrix runtime context."
             raise ValueError(msg)
-        parameters = _desktop_browser_parameters(
+        # URL validation resolves requester-chosen hostnames, which must not block the event loop.
+        parameters = await run_browser_tool_url_check(
+            _desktop_browser_parameters,
             action,
             target_url=target_url,
             target_id=target_id,
@@ -1715,6 +1731,36 @@ class BrowserTools(Toolkit):
                     return state
                 await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
+            allow_loopback = self._worker_display is not None
+            user_data_dir = _profile_dir(self._profiles_root, profile_name)
+            launch_kwargs = _persistent_launch_kwargs(
+                self._runtime_paths,
+                user_data_dir,
+                headless=self._worker_display is None,
+                executable_override=(
+                    self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
+                    if self._worker_display is not None
+                    else None
+                ),
+            )
+            # A headless worker browser runs with its prepared environment, so that is where its route is set.
+            egress = browser_egress(
+                self._runtime_paths.process_env,
+                os.environ if self._worker_process_env is None else self._worker_process_env,
+                egress_control=self._worker_workspace is not None
+                or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
+            )
+            if self._worker_process_env is not None:
+                launch_kwargs["env"] = self._worker_process_env
+            if self._worker_display is not None:
+                launch_kwargs["chromium_sandbox"] = True
+                launch_kwargs["env"] = {
+                    **os.environ,
+                    **self._runtime_paths.process_env,
+                    "DISPLAY": self._worker_display,
+                }
+                launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+
             manager = async_playwright()
             acquisition = asyncio.create_task(manager.start())
             context: BrowserContext | None = None
@@ -1723,38 +1769,17 @@ class BrowserTools(Toolkit):
                 # The public manager cannot stop its transport during subprocess
                 # creation. Let acquisition settle before attempting cleanup.
                 playwright = await asyncio.shield(acquisition)
-                launch_kwargs = _persistent_launch_kwargs(
-                    self._runtime_paths,
-                    profile_name,
-                    headless=self._worker_display is None,
-                    executable_override=(
-                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
-                        if self._worker_display is not None
-                        else None
-                    ),
+                # Page routes see neither WebSockets nor the address Chromium resolves for itself, so the relay is
+                # Chromium's only proxy: every TCP connection, including redirects and service-worker fetches, is
+                # validated at dial time before it goes direct or through the operator's egress proxy.
+                destination_proxy = BrowserDestinationProxy(
+                    allow_private_networks=self._allow_private_networks,
+                    allow_loopback=allow_loopback,
+                    egress=egress,
                 )
-                if self._worker_process_env is not None:
-                    launch_kwargs["env"] = self._worker_process_env
-                if self._worker_display is not None:
-                    upstream = browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ)
-                    if upstream:
-                        launch_kwargs["proxy"] = {"server": upstream, "bypass": COMPUTER_PROXY_BYPASS}
-                    else:
-                        destination_proxy = BrowserDestinationProxy(
-                            allow_private_networks=self._allow_private_networks,
-                            allow_loopback=True,
-                        )
-                        await destination_proxy.start()
-                        launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": "<-loopback>"}
-                    launch_kwargs["chromium_sandbox"] = True
-                    launch_kwargs["env"] = {
-                        **os.environ,
-                        **self._runtime_paths.process_env,
-                        "DISPLAY": self._worker_display,
-                    }
-                    launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+                await destination_proxy.start()
+                launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS}
                 _give_chromium_a_short_tmpdir(launch_kwargs)
-                user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
@@ -1762,7 +1787,7 @@ class BrowserTools(Toolkit):
                     lambda route: continue_or_abort_browser_fetch(
                         route,
                         allow_private_networks=self._allow_private_networks,
-                        allow_loopback=self._worker_display is not None,
+                        allow_loopback=allow_loopback,
                     ),
                 )
                 state = _BrowserProfileState(
@@ -1940,6 +1965,8 @@ class BrowserTools(Toolkit):
             return self._worker_workspace
         if self._configured_output_dir is not None:
             return self._configured_output_dir
+        if self._agent_state_root is not None:
+            return self._agent_state_root.resolve()
         context = get_tool_runtime_context()
         storage_root = (
             context.storage_path

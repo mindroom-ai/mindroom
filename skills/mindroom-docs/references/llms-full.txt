@@ -2120,6 +2120,7 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other stored value makes that tool fail to load instead of silently choosing a truthiness.
 When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
 To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
@@ -3007,7 +3008,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.per` | `user` or `user_agent` | *required* | Which requester boundary gets its own private instance of the agent's state. MindRoom also uses that same boundary for the agent's internal execution scope |
-| `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root, and the workspace dedicated workers mount. Must be a relative path, cannot escape with `..`, and cannot start with a name the primary writes beside it: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock` |
+| `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root, and the workspace dedicated workers mount. Must be a relative path, cannot escape with `..`, and cannot start with a name the primary writes beside it: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
 | `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root without overwriting existing files. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error when the directory does not exist |
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
 | `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge) |
@@ -6613,6 +6614,10 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
+Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay, which tunnels validated destinations through it as the [browser](#browser) notes describe.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -7247,7 +7252,7 @@ Desktop screenshots are model-visible by default, while `returnAttachment=true` 
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
-For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+For the host target, `output_dir` defaults to `browser/` in the agent's state root for screenshots, PDFs, and other artifacts, which is `<storage>/agents/<agent>/browser` for a shared agent and lies under the requester's own private-instance root for a private agent, so no other agent or private requester can upload them.
 Which files `upload` may read follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
@@ -7255,13 +7260,28 @@ On a routed worker, `workspace` mode reads only files inside the worker workspac
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
+Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
+This includes a shared agent with `worker_scope: user` or `user_agent` whose `browser` runs in the primary process; route `browser` to workers with `worker_tools` to give each worker scope its own profiles.
+A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
+The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because a loopback relay is Chromium's only proxy, loopback included, and resolves and validates each destination before it dials anything.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay: after validating a destination, the relay dials it directly or opens an HTTP `CONNECT` tunnel through that proxy.
+In the primary process, the tunnel names the address the relay validated, so the proxy cannot resolve the hostname to anything else, and the proxy variables follow curl precedence: `http_proxy` for port 80, `https_proxy` for every other port, and `all_proxy` for either when its own variable is unset.
+Loopback destinations the policy allows are always dialed directly, because a proxy's loopback is another host, and with `allow_private_networks` so are destinations `no_proxy` names, whether by hostname suffix or address range; `no_proxy` can never make a destination the policy refuses, such as a metadata address, reachable.
+The proxy must allow `CONNECT` to ports 80 and 443, port 80 carrying plain-HTTP pages; Squid's default `http_access deny CONNECT !SSL_ports` rule refuses plain HTTP.
+In the primary it must also allow `CONNECT` to IP addresses, so egress proxies that allow only hostnames are unsupported for the primary browser.
+A refused tunnel fails that connection without any direct fallback and logs `browser_egress_proxy_refused_tunnel` with the requirement it failed.
+A SOCKS proxy, credentials inside a proxy URL, a proxy URL with a path, `auto_proxy`, or `socks_server` cannot be followed; the primary logs a warning and the relay dials those destinations directly within the same policy.
+In a sandbox runner, where the proxy may be what enforces approved egress, every set proxy variable must name one such HTTP(S) proxy, spellings that differ only in letter case, a trailing slash, an omitted default port, or a missing `http://` counting as one, and anything else stops the browser from starting.
+The tunnel there names the hostname, because an approved-egress proxy decides by name, so that proxy's own resolution and any rebinding against it are its responsibility; the relay still validates the name against the worker's DNS first.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
+| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `browser/` in the agent's state root as the runtime default when omitted. |
+| `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |
@@ -7408,14 +7428,15 @@ Other private addresses and cloud metadata endpoints remain blocked by default.
 Headless workers, unbound browsers, connected desktops, and ordinary server-side HTTP tools retain their existing policies.
 As with a local development browser, pages opened in Computer mode can make requests to services listening on the same worker's loopback interface.
 
-Without a configured upstream proxy, both providers enforce destinations through a worker-local proxy, including redirects.
-When the worker sets `all_proxy` or `ALL_PROXY` to an HTTP(S) proxy without embedded credentials, Chromium uses that proxy directly for external connections; only loopback bypasses it.
-Matching `http_proxy` and `https_proxy` settings are also supported.
-Per-scheme or automatic proxy configurations that cannot be preserved are rejected with a configuration error rather than silently bypassed; use `all_proxy` for these workers.
-The upstream proxy is trusted to resolve destination hostnames and enforce its own network restrictions, including blocking private and metadata addresses.
-Browser URL validation still requires hostnames to resolve inside the worker; proxy-only DNS names are not supported.
+Both providers make a worker-local destination relay Chromium's only proxy, loopback included, so every connection, including redirects and WebSockets, is validated before it is dialed.
+The relay dials allowed loopback previews itself and, when the worker sets an HTTP(S) egress proxy through `all_proxy`, `http_proxy`, or `https_proxy`, tunnels every other destination through that proxy with HTTP `CONNECT`.
+The proxy must therefore allow `CONNECT` to ports 80 and 443 for the allowed hostnames, because plain-HTTP pages are tunneled too.
+All set proxy variables must name the same proxy without embedded credentials; differing, SOCKS, or automatic proxy configurations are rejected with a configuration error rather than silently bypassed.
+The tunnel names the destination hostname, so the upstream proxy resolves it and enforces its own network restrictions, including blocking private and metadata addresses and resisting DNS rebinding against its own lookups.
+The relay still validates each hostname against the worker's DNS first, so proxy-only DNS names are not supported.
 This keeps domain-based firewall rules intact.
 A rejected proxy connection never falls back to a direct connection.
+WebRTC cannot send UDP around the relay: the `browser` provider launches Chromium with `--webrtc-ip-handling-policy=disable_non_proxied_udp`, and `browser_mcp` passes the same argument through its bundled Playwright MCP configuration.
 
 For the runtime Helm chart:
 
@@ -7501,11 +7522,10 @@ agents:
 ```
 
 Metadata and link-local addresses stay blocked even with this option.
-Without a configured upstream proxy, a worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
-With an upstream proxy, that proxy owns destination enforcement as described above.
+The worker-local destination relay checks every TCP connection, including redirect destinations, WebSockets, and loopback, then connects to the validated numeric address or tunnels through the worker's upstream proxy as described above.
 The browser keeps normal TLS, origins, and redirect behavior.
-The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
-This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.
+The URL callback also restricts request schemes and address literals without a DNS lookup; callback errors and timeouts deny requests, and service workers are blocked.
+This guard does not promise rebinding protection against an upstream proxy's own lookups, coverage of every network protocol, or confinement of malicious shell code.
 Persistent workspace files remain intentionally shared with the agent's other worker tools.
 
 ## Browser and container sandboxing
@@ -15379,6 +15399,7 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
 | `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
+| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's resolved state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 Example:
 
@@ -21241,6 +21262,15 @@ Private storage moves require stopped primaries and absent managed workers, as d
 Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
+Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
+Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
+A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
+Chromium in the host, headless worker, and Computer browsers and in `crawl4ai` no longer reads proxy settings from the environment; its only proxy is MindRoom's destination relay, which opens HTTP `CONNECT` tunnels through the configured egress proxy.
+That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests; the chart-managed approved egress proxy requires mindroom-egress-proxy v0.1.10 or later, so set `approvedEgress.image.tag: v0.1.10` before upgrading.
+The primary's egress proxy must also allow `CONNECT` to IP addresses on ports 80 and 443, because the primary tunnels to the address it validated; egress proxies that allow only hostnames are no longer supported for the primary browser.
+In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
+A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
+Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
 ### Workspace-only worker mounts
 
@@ -21729,6 +21759,9 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
+- Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
+- A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
+- A proxy environment the primary cannot follow, such as a SOCKS proxy or `auto_proxy`, makes the relay dial directly within the browser's destination policy instead of refusing to start, because no MindRoom egress policy depends on that proxy there; a sandbox runner refuses.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
@@ -24365,7 +24398,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   allowlist:
     domains:
       - example.com
@@ -24421,7 +24454,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   parentProxy:
     enabled: true
     host: agent-vault
@@ -24513,6 +24546,7 @@ Use `workers.backend: kubernetes`.
 Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
 Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
+Browser tools tunnel every connection, plain HTTP included, with `CONNECT`, which requires mindroom-egress-proxy v0.1.10 or later; set `approvedEgress.image.tag: v0.1.10`, because older images refuse plain-HTTP pages with `TCP_DENIED/403`.
 Keep `request_network_access` behind `tool_approval`.
 Use a static allowlist for hostnames that should never require approval.
 Use short `approvedEgress.maxTtlSeconds` values for temporary grants.

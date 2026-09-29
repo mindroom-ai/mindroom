@@ -36,7 +36,6 @@ IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
-    "crawl4ai": {"proxy_config"},
     "firecrawl": {"search_params"},
     "spider": {"optional_params"},
     "mem0": {"config"},

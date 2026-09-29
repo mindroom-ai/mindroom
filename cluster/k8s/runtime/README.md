@@ -348,7 +348,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   allowlist:
     domains:
       - example.com
@@ -384,7 +384,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   parentProxy:
     enabled: true
     host: agent-vault

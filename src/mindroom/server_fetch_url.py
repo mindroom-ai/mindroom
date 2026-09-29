@@ -279,12 +279,16 @@ def validate_server_fetch_url(
     *,
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
+    resolve_hostnames: bool = True,
 ) -> str:
-    """Validate that a URL is safe for a server-side HTTP(S) request."""
+    """Validate that a URL is safe for a server-side HTTP(S) request.
+
+    Callers that validate the dialed address at connect time may skip hostname resolution here.
+    """
     return _validate_server_fetch_url(
         url,
         allow_private_networks=allow_private_networks,
-        resolve_hostnames=True,
+        resolve_hostnames=resolve_hostnames,
         allow_loopback=allow_loopback,
     )
 

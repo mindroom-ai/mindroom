@@ -55,6 +55,10 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
+Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay, which tunnels validated destinations through it as the [browser](#browser) notes describe.
 The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
@@ -689,7 +693,7 @@ Desktop screenshots are model-visible by default, while `returnAttachment=true` 
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
-For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+For the host target, `output_dir` defaults to `browser/` in the agent's state root for screenshots, PDFs, and other artifacts, which is `<storage>/agents/<agent>/browser` for a shared agent and lies under the requester's own private-instance root for a private agent, so no other agent or private requester can upload them.
 Which files `upload` may read follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
@@ -697,13 +701,28 @@ On a routed worker, `workspace` mode reads only files inside the worker workspac
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
+Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
+This includes a shared agent with `worker_scope: user` or `user_agent` whose `browser` runs in the primary process; route `browser` to workers with `worker_tools` to give each worker scope its own profiles.
+A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
+The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because a loopback relay is Chromium's only proxy, loopback included, and resolves and validates each destination before it dials anything.
+WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
+An operator egress proxy sits behind the relay: after validating a destination, the relay dials it directly or opens an HTTP `CONNECT` tunnel through that proxy.
+In the primary process, the tunnel names the address the relay validated, so the proxy cannot resolve the hostname to anything else, and the proxy variables follow curl precedence: `http_proxy` for port 80, `https_proxy` for every other port, and `all_proxy` for either when its own variable is unset.
+Loopback destinations the policy allows are always dialed directly, because a proxy's loopback is another host, and with `allow_private_networks` so are destinations `no_proxy` names, whether by hostname suffix or address range; `no_proxy` can never make a destination the policy refuses, such as a metadata address, reachable.
+The proxy must allow `CONNECT` to ports 80 and 443, port 80 carrying plain-HTTP pages; Squid's default `http_access deny CONNECT !SSL_ports` rule refuses plain HTTP.
+In the primary it must also allow `CONNECT` to IP addresses, so egress proxies that allow only hostnames are unsupported for the primary browser.
+A refused tunnel fails that connection without any direct fallback and logs `browser_egress_proxy_refused_tunnel` with the requirement it failed.
+A SOCKS proxy, credentials inside a proxy URL, a proxy URL with a path, `auto_proxy`, or `socks_server` cannot be followed; the primary logs a warning and the relay dials those destinations directly within the same policy.
+In a sandbox runner, where the proxy may be what enforces approved egress, every set proxy variable must name one such HTTP(S) proxy, spellings that differ only in letter case, a trailing slash, an omitted default port, or a missing `http://` counting as one, and anything else stops the browser from starting.
+The tunnel there names the hostname, because an approved-egress proxy decides by name, so that proxy's own resolution and any rebinding against it are its responsibility; the relay still validates the name against the worker's DNS first.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
+| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `browser/` in the agent's state root as the runtime default when omitted. |
+| `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |

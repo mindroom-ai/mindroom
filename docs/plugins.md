@@ -525,6 +525,7 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
 | `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
+| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's resolved state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 Example:
 
