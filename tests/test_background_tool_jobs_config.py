@@ -533,6 +533,8 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     "unreadable",
     [
         '{"schema_version": 4, "job_id": "retired"}',
+        '{"job_id": "retired"}',
+        "[]",
         '{"schema_version": 7, "job_id": "trunc',
         '{"schema_version": 7, "job_id": "another"}',
         pytest.param(

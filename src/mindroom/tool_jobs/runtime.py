@@ -194,7 +194,7 @@ def read_job_snapshot(path: Path) -> BackgroundJob:
     if path.is_symlink() or _JOB_ID.fullmatch(path.stem) is None:
         raise JobAccessError(_UNAVAILABLE)
     payload = json.loads(path.read_text())
-    version = payload.pop("schema_version")
+    version = payload.pop("schema_version", None) if isinstance(payload, dict) else None
     if version != _SNAPSHOT_SCHEMA_VERSION:
         msg = f"Unsupported tool job snapshot {path} (schema_version={version}); remove it to continue."
         raise UnsupportedToolJobSnapshotError(msg)
@@ -891,9 +891,9 @@ class ToolJobRuntime:
         depth: int,
         expected_generation: int | None,
         operation: _Operation,
-        adapter: dict[str, Any] | None = None,
+        adapter: dict[str, Any],
     ) -> BackgroundJob:
-        """Continue the same job after its native approval has been resolved."""
+        """Continue the same job after its native approval has been resolved, with its updated adapter state."""
         async with self._lock:
             self._ensure_open(accepting=True)
             entry = self._entry(job_id, owner, depth)
@@ -906,7 +906,7 @@ class ToolJobRuntime:
                 raise JobContinuationError(msg)
             job = _updated(
                 entry.job,
-                adapter=entry.job.adapter if adapter is None else adapter,
+                adapter=adapter,
                 status="running",
                 generation=entry.job.generation + 1,
             )
