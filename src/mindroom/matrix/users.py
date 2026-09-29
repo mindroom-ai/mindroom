@@ -958,7 +958,8 @@ async def _replace_one_time_password(
         transport = response.transport_response
         status = transport.status if isinstance(transport, ClientResponse) else None
         if not (isinstance(response, nio.ChangePasswordResponse) and status is not None and 200 <= status < 300):
-            raise _one_time_password_error(user_id, f" (HTTP {status}): {response}")
+            detail = f": {response}" if isinstance(response, nio.ErrorResponse) else ""
+            raise _one_time_password_error(user_id, f" (HTTP {status}){detail}")
         # Best effort: the password is already replaced, so a failed logout only leaves an unused session behind.
         with contextlib.suppress(ClientError, TimeoutError):
             async with asyncio.timeout(_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS):

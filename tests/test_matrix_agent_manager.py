@@ -868,7 +868,10 @@ class TestMatrixRegistration:
         )
         aioresponse.post(re.compile(r"http://localhost:8008/_matrix/client/v3/logout.*"), payload={})
 
-        with pytest.raises(PermanentMatrixStartupError, match=r"replacing its one-time password failed \(HTTP 502\)"):
+        with pytest.raises(
+            PermanentMatrixStartupError,
+            match=r"replacing its one-time password failed \(HTTP 502\)\. Nobody knows",
+        ):
             await self._register_provisioned_account(tmp_path)
 
         requested_paths = [url.path for _method, url in aioresponse.requests]
