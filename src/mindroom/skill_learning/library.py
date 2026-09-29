@@ -282,7 +282,8 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
     # Workspaces of shared agents without file memory exist only once something is written into them.
     skills_root.parent.mkdir(parents=True, exist_ok=True)
     with _open_skills_root(skills_root, create=True) as root_fd:
-        if SKILL_FILENAME in _entries(root_fd, directories=False):
+        # Like skill loading, any entry named SKILL.md counts, including a link; pathlib cannot list a descriptor.
+        if SKILL_FILENAME in os.listdir(root_fd):  # noqa: PTH208
             # Skill loading then reads skills/ as one skill, so a new skill directory would never load.
             msg = f"skills/{SKILL_FILENAME} makes skills/ one skill; move it into skills/<its name>/ first."
             raise SkillEditError(msg)

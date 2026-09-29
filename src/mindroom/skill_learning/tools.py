@@ -267,6 +267,9 @@ class SkillTools:
         if change.action == "patch":
             target = change.file_path or SKILL_FILENAME
             read = await self._current(directory, target)
+            if read is None and not self.learner:
+                msg = f"{target} does not exist."
+                raise SkillEditError(msg)
             patched = _patched(read, directory, target, change.old_string, change.new_string, change.replace_all)
             await self._write(name, directory, target, patched, read)
             return target

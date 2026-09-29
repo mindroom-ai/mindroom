@@ -383,11 +383,15 @@ def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> 
     assert not (manual.parent / "references").exists()
 
 
-def test_a_new_skill_is_refused_while_the_skills_directory_is_itself_one_skill(tmp_path: Path) -> None:
-    """Skill loading then reads only skills/SKILL.md, so a new skill directory would never load."""
+@pytest.mark.parametrize("link", [False, True])
+def test_a_new_skill_is_refused_while_the_skills_directory_is_itself_one_skill(tmp_path: Path, link: bool) -> None:
+    """Skill loading then reads only skills/SKILL.md, even a link it refuses, so a new skill directory would never load."""
     root = tmp_path / "skills"
     root.mkdir()
-    (root / "SKILL.md").write_text(LEARNED.replace("deploy-checks", "skills"), encoding="utf-8")
+    if link:
+        (root / "SKILL.md").symlink_to(tmp_path / "elsewhere.md")
+    else:
+        (root / "SKILL.md").write_text(LEARNED.replace("deploy-checks", "skills"), encoding="utf-8")
     with pytest.raises(library.SkillEditError, match="makes skills/ one skill"):
         library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     assert not (root / "deploy-checks").exists()
@@ -551,9 +555,11 @@ def test_model_replies_count_only_model_visible_runs() -> None:
         Message(role="assistant", content="copied", from_history=True),
         Message(role="assistant", content="new"),
     )
-    assert count_model_replies([_tool_turn("r1")]) == (2, False)
-    assert count_model_replies([_tool_turn("r1"), copied, errored, child]) == (3, False)
-    assert count_model_replies([]) == (0, False)
+    assert count_model_replies(_tool_turn("r1")) == (2, False)
+    assert count_model_replies(copied) == (1, False)
+    assert count_model_replies(errored) == (0, False)
+    assert count_model_replies(child) == (0, False)
+    assert count_model_replies(None) == (0, False)
 
 
 def test_a_chat_skill_manage_call_restarts_the_count() -> None:
@@ -565,7 +571,7 @@ def test_a_chat_skill_manage_call_restarts_the_count() -> None:
         Message(role="tool", content="{}", tool_name="skill_manage", tool_call_id="call"),
         Message(role="assistant", content="Saved."),
     )
-    assert count_model_replies([_tool_turn("r1"), saved]) == (1, True)
+    assert count_model_replies(saved) == (1, True)
 
 
 @pytest.mark.asyncio
@@ -1433,6 +1439,14 @@ async def test_chat_skill_manage_creates_user_owned_skills_and_edits_any_workspa
     assert "1. Always run the smoke test." in learned.content
     refused = json.loads(await tools.skill_manage("patch", "mindroom-docs", old_string="a", new_string="b"))
     assert "not in its own workspace skill directory and is read-only" in refused["error"]
+    missing = await tools.skill_manage(
+        "patch",
+        "deploy-checks",
+        file_path="references/missing.md",
+        old_string="a",
+        new_string="b",
+    )
+    assert json.loads(missing)["error"] == "references/missing.md does not exist."
 
 
 def test_learning_agents_offer_skill_manage(tmp_path: Path) -> None:

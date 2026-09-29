@@ -142,7 +142,7 @@ def _review_tools(
 
 
 def _listing(names: Sequence[str]) -> str:
-    return ", ".join(names[:-1]) + f", and {names[-1]}" if len(names) > 1 else "".join(names)
+    return " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
 def _review_prompt(config: Config, catalog: SkillCatalog, runnable: Sequence[str]) -> str:

@@ -16,7 +16,7 @@ from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
     from agno.models.message import Message
     from agno.run.agent import RunOutput
@@ -44,23 +44,22 @@ def conversation_messages(session: AgentSession) -> list[Message]:
     ]
 
 
-def count_model_replies(runs: Iterable[RunOutput]) -> tuple[int, bool]:
-    """Count assistant messages, one per model request including tool-calling steps, in model-visible runs.
+def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
+    """Count a model-visible run's assistant messages, one per model request including tool-calling steps.
 
     Like Hermes resetting its counter when ``skill_manage`` runs, only replies after the last reply that called it
     count; the second value says whether one did.
     """
     replies, restarted = 0, False
-    for run in runs:
-        if not is_model_history_visible_run(run):
+    if run is None or not is_model_history_visible_run(run):
+        return replies, restarted
+    for message in run.messages or []:
+        if message.role != "assistant" or message.from_history:
             continue
-        for message in run.messages or []:
-            if message.role != "assistant" or message.from_history:
-                continue
-            if any((call.get("function") or {}).get("name") == "skill_manage" for call in message.tool_calls or []):
-                replies, restarted = 0, True
-            else:
-                replies += 1
+        if any((call.get("function") or {}).get("name") == "skill_manage" for call in message.tool_calls or []):
+            replies, restarted = 0, True
+        else:
+            replies += 1
     return replies, restarted
 
 

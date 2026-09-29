@@ -81,7 +81,7 @@ def _response_replies(
         run = storage.get_run(run_id)
     finally:
         storage.close()
-    return count_model_replies([run] if isinstance(run, RunOutput) else [])
+    return count_model_replies(run if isinstance(run, RunOutput) else None)
 
 
 def _skills_root(config: Config, runtime_paths: RuntimePaths, scope: _ReviewScope) -> Path:
