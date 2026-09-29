@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 NOW_SECONDS = 10.0
 APP_ID = "com.example.Editor"
+ALICE = "@alice:example.org"
+BOB = "@bob:example.org"
+PRIVATE_COMMAND = "printf private-shell-text >> marker"
 WINDOW = DesktopRect(100, 50, 800, 600)
 ELEMENT = AccessibilityElement(
     index=0,
@@ -204,7 +207,7 @@ def _command(
     request_id: str = "request-1",
     session_id: str = "session-1",
     sequence: int = 1,
-    requester_id: str = "@alice:example.org",
+    requester_id: str = ALICE,
     agent_name: str = "computer",
     parameters: dict[str, object] | None = None,
 ) -> DesktopCommand:
@@ -221,11 +224,6 @@ def _command(
         agent_name=agent_name,
         parameters=parameters,
     )
-
-
-ALICE = "@alice:example.org"
-BOB = "@bob:example.org"
-PRIVATE_COMMAND = "printf private-shell-text >> marker"
 
 
 @pytest.fixture

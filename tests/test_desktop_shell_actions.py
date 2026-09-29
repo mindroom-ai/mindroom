@@ -42,11 +42,9 @@ _UNKNOWN_HANDLE = r"^Unknown shell handle\.$"
 
 
 @pytest.fixture(autouse=True)
-def fake_output_uploads(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+def fake_output_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer every shell output upload with fake encrypted media unless a test installs its own upload."""
-    upload = AsyncMock(return_value=MEDIA)
-    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload)
-    return upload
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", AsyncMock(return_value=MEDIA))
 
 
 async def _execute(shell: DesktopShell, command: DesktopCommand) -> dict[str, object]:
