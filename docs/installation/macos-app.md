@@ -12,7 +12,8 @@ The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its gene
 
 ## Requirements
 
-- macOS 14 Sonoma or later, on Apple silicon or Intel.
+- macOS 14 Sonoma or later, on an Apple silicon Mac.
+  Intel Macs are not supported because the MindRoom runtime depends on packages that no longer publish Intel macOS wheels.
 - Network access to install the MindRoom runtime and connect to your Matrix server.
 - For local agents, a configured model provider credential, local model, or supported provider login.
 - For computer access, an existing Desktop-enabled MindRoom agent; application access also needs the macOS permissions described in the [Desktop guide](../tools/desktop.md).

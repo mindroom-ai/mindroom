@@ -5,13 +5,8 @@ import XCTest
 
 @MainActor
 final class DesktopBridgeProtocolTests: XCTestCase {
-    #if arch(arm64)
     private static let helperExecutablePath =
-        "Contents/Helpers/arm64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
-    #else
-    private static let helperExecutablePath =
-        "Contents/Helpers/x86_64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
-    #endif
+        "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
     private static let completeStatusData = """
     {
       "config":{"state":"ready","revision":2,"enabled":true,"controller_user_id":"@controller:example.org","controller_device_id":"CLOUD","allowed_requester_ids":["@me:example.org"],"allowed_agent_names":["assistant"],"allowed_app_ids":["com.example.Editor"]},

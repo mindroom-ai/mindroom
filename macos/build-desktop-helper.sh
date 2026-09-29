@@ -5,15 +5,14 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/dist/macos/desktop-helper"}
 UV_BINARY=${UV_BINARY:-$(command -v uv || true)}
-ARCHITECTURE=$(uname -m)
 
 usage() {
     cat <<'EOF'
-Usage: macos/build-desktop-helper.sh [--output DIR] [--arch arm64|x86_64]
+Usage: macos/build-desktop-helper.sh [--output DIR]
 
 Build the fixed-identity Python desktop helper as a nested-app-ready onedir bundle.
-Build one architecture with matching Python and dependency wheels.
-HELPER_PYTHON may override the matching managed Python 3.13 interpreter.
+Build for Apple silicon with matching Python and dependency wheels.
+HELPER_PYTHON may override the managed arm64 Python 3.13 interpreter.
 EOF
 }
 
@@ -21,10 +20,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --output)
             OUTPUT_DIR=$2
-            shift 2
-            ;;
-        --arch)
-            ARCHITECTURE=$2
             shift 2
             ;;
         -h|--help)
@@ -39,8 +34,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "The desktop helper app must be built on macOS." >&2
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "The desktop helper app must be built natively on an Apple silicon Mac." >&2
     exit 1
 fi
 if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
@@ -48,13 +43,7 @@ if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     exit 1
 fi
 
-case "$ARCHITECTURE" in
-    arm64) PYTHON_ARCHITECTURE=aarch64 ;;
-    x86_64) PYTHON_ARCHITECTURE=x86_64 ;;
-    *) echo "Unsupported desktop helper architecture: $ARCHITECTURE" >&2; exit 2 ;;
-esac
-HELPER_PYTHON=${HELPER_PYTHON:-"cpython-3.13-macos-${PYTHON_ARCHITECTURE}-none"}
-export MINDROOM_HELPER_TARGET_ARCH="$ARCHITECTURE"
+HELPER_PYTHON=${HELPER_PYTHON:-"cpython-3.13-macos-aarch64-none"}
 export MACOSX_DEPLOYMENT_TARGET=14.0
 
 rm -rf "$OUTPUT_DIR"
@@ -66,11 +55,11 @@ env -u UV_NO_SYNC UV_PROJECT_ENVIRONMENT="$HELPER_ENVIRONMENT" "$UV_BINARY" sync
     --project "$ROOT_DIR" \
     --only-group desktop-helper \
     --python "$HELPER_PYTHON" \
-    --python-platform "${PYTHON_ARCHITECTURE}-apple-darwin"
+    --python-platform aarch64-apple-darwin
 # Install local source and version metadata without the backend's dependency set.
 "$UV_BINARY" pip install --python "$HELPER_ENVIRONMENT/bin/python" --no-deps --editable "$ROOT_DIR"
 "$UV_BINARY" run --no-project --python "$HELPER_ENVIRONMENT/bin/python" \
-    /usr/bin/arch "-${ARCHITECTURE}" python -m PyInstaller \
+    python -m PyInstaller \
     --clean \
     --noconfirm \
     --distpath "$OUTPUT_DIR/dist" \

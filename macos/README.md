@@ -1,6 +1,6 @@
 # MindRoom for macOS
 
-The native app and its desktop helper require macOS 14 or newer.
+The native app and its desktop helper require macOS 14 or newer on Apple silicon.
 
 The app has Overview, Chat, Dashboard, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
 Sidebar buttons support Tab and Space navigation; when you activate a section, keyboard focus follows that section instead of remaining on a previous button.
@@ -9,7 +9,7 @@ Hover over Quit MindRoom for its effect on background work: computer access stop
 Its Python desktop helper is bundled at:
 
 ```text
-MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
+MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app
 ```
 
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
@@ -51,12 +51,12 @@ Switching sidebar sections keeps both pages alive, including chat drafts.
 
 ## Build
 
-Building requires Xcode 26 or newer, selected with `xcode-select`, including its `actool` asset compiler.
+Building requires an Apple silicon Mac and Xcode 26 or newer, selected with `xcode-select`, including its `actool` asset compiler.
 The built app still supports macOS 14 or newer.
 
 ```bash
 macos/build-macos-app.sh
-macos/build-macos-app.sh --universal --dmg
+macos/build-macos-app.sh --dmg
 ```
 
 `build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment using the locked `desktop-helper` dependency group.
@@ -65,10 +65,11 @@ The helper build does not modify the project environment.
 The frozen helper uses its bundled `certifi` roots for HTTPS, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is explicitly set.
 This avoids depending on the Python build machine's certificate paths while keeping certificate verification enabled.
 
-Universal releases contain separate `arm64` and `x86_64` helper apps; the native app selects the helper matching its compiled architecture.
-Each helper uses matching Python 3.13 and dependency wheels, and every collected Mach-O file is checked for that architecture.
-`HELPER_PYTHON` may override the matching managed interpreter, provided it supports the requested architecture.
-Building and testing the Intel helper on Apple silicon requires Rosetta.
+The app and helper are built for `arm64` only.
+Intel Macs are unsupported because runtime dependencies such as `cryptography` no longer publish Intel macOS wheels.
+Sparkle's `generate_appcast` marks arm64-only builds with `sparkle:hardwareRequirements`, so existing Intel installs are not offered these updates.
+The helper uses arm64 Python 3.13 and dependency wheels, and every collected Mach-O file is checked for `arm64`.
+`HELPER_PYTHON` may override the managed interpreter, provided it supports `arm64`.
 The helper build group excludes the backend's ML dependencies, which the desktop bridge does not use.
 
 ## Icons
@@ -154,7 +155,7 @@ Portable tests cover protocol bounds, durable configuration, setup import, lifec
 A release still requires these checks on macOS:
 
 1. `swift test --package-path macos/MindRoom`.
-2. Build the universal app, verify both nested and parent signatures, and run `smoke-desktop-helper.py` against each helper.
+2. Build the app, verify both nested and parent signatures, and run `smoke-desktop-helper.py` against the helper.
 3. Confirm Accessibility and Screen Recording prompts name the packaged helper.
 4. Upgrade over a prior signed build and confirm permission continuity.
 5. Exercise keyboard and VoiceOver navigation in Computer access.
