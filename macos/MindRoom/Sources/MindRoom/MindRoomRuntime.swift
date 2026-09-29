@@ -23,6 +23,8 @@ struct MindRoomCommandInvocation: Equatable {
 
 struct MindRoomRuntime {
     private static let bundledUVRelativePath = "Contents/Resources/bin/uv"
+    // uv also accepts an existing Intel Python on Apple silicon, which cannot install the runtime's wheels.
+    private static let runtimePython = "cpython-3.13-macos-aarch64-none"
     private static let desktopHelperRelativePath =
         "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
     private let homeURL: URL
@@ -86,9 +88,9 @@ struct MindRoomRuntime {
     func command(for action: MindRoomRuntimeAction) -> MindRoomCommandInvocation {
         switch action {
         case .installRuntime:
-            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", "3.13", "mindroom"])
+            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", Self.runtimePython, "mindroom"])
         case .updateRuntime:
-            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom"])
+            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", Self.runtimePython, "--force", "mindroom"])
         case .installService:
             return mindroomCommand(arguments: ["service", "install", "--no-confirm"])
         case .startService:

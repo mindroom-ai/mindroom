@@ -208,6 +208,7 @@ If a runtime action is still in progress, let it finish before quitting.
 **Settings** separates app updates from runtime updates.
 **Check App Updates…** uses Sparkle for signed releases configured with an update feed.
 **Update Local Runtime** updates the installed CLI.
+Installs and updates use an arm64 managed Python 3.13, so an update also replaces a runtime that was installed with an Intel Python.
 Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
 

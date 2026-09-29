@@ -47,7 +47,7 @@ final class MindRoomRuntimeTests: XCTestCase {
 
         let command = runtime.command(for: .installRuntime)
         XCTAssertEqual(command.executableURL.path, "/Applications/MindRoom.app/Contents/Resources/bin/uv")
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "mindroom"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "mindroom"])
         XCTAssertNil(command.environment["MINDROOM_CONFIG_PATH"])
         XCTAssertNil(command.environment["MINDROOM_STORAGE_PATH"])
         XCTAssertEqual(command.environment["UV_NO_PROGRESS"], "1")
@@ -62,7 +62,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .updateRuntime)
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom"])
     }
 
     func testServiceInstallUsesMindRoomServiceInstallNoConfirm() {
