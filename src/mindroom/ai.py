@@ -1212,7 +1212,7 @@ async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard prepar
             config=config,
             resolved_runtime_model=runtime_model,
             compaction_lifecycle=compaction_lifecycle,
-            current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
+            current_sender_id=None if include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
             current_timestamp_ms=current_timestamp_ms,
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,

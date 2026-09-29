@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextvars import Context
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -924,6 +925,41 @@ class TestUserIdPassthrough:
 
         assert mock_prepare_execution.await_args is not None
         assert mock_prepare_execution.await_args.kwargs["current_sender_id"] == expected_sender
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_labels_an_agent_reply_with_its_author(self, tmp_path: Path) -> None:
+        """A reply an agent wrote for a human stays that agent's words while the human is the requester."""
+        mock_agent = MagicMock()
+        prepared_execution = _PreparedExecutionContext(
+            messages=(Message(role="user", content="prepared prompt"),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ) as mock_prepare_execution,
+        ):
+            await _prepare_agent_and_prompt(
+                replace(
+                    make_turn_context("general", requester_id="@alice:example.com"),
+                    current_sender_id="@mindroom_research:example.com",
+                ),
+                prompt="test",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert mock_prepare_execution.await_args is not None
+        assert mock_prepare_execution.await_args.kwargs["current_sender_id"] == "@mindroom_research:example.com"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:

@@ -296,6 +296,8 @@ class ResponseTurnContext:
     thread_id: str | None
     requester_id: str | None
     matrix_run_metadata: dict[str, Any] | None
+    # The current message's author when it is not the requester: an entity's reply written for that human.
+    current_sender_id: str | None = None
     # Interactive selections reply to the question but consume history through the selecting source.
     history_boundary_event_id: str | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)

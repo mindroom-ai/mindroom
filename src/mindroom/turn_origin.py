@@ -70,9 +70,17 @@ class TurnOrigin:
         }
 
     @property
+    def acting_sender_id(self) -> str | None:
+        """Return the managed sender of a reply it wrote for this turn's human requester, if it is one."""
+        if self.intent == TurnIntent.MANAGED_MESSAGE and self.requester_kind == SenderKind.USER:
+            return self.transport_sender_id
+        return None
+
+    @property
     def blocks_unmentioned_managed_sender(self) -> bool:
         """Return whether an unmentioned managed sender should be treated as chatter."""
-        return self.requester_kind == SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
+        managed_sender = self.requester_kind == SenderKind.MANAGED_ENTITY or self.acting_sender_id is not None
+        return managed_sender and not self.may_dispatch_without_mention
 
     @property
     def may_answer_interactive_prompt(self) -> bool:

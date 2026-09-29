@@ -152,12 +152,13 @@ def _tagged_pending_message(
     timestamp_formatter: TimestampFormatter | None,
     member_display_names: Mapping[str, str],
 ) -> str:
-    sender = pending_event.event.requester_user_id or pending_event.event.sender
+    event = pending_event.event
+    sender = event.sender if event.acts_for_requester else event.requester_user_id or event.sender
     return render_msg_tag(
         sender=sender,
-        body=dispatch_prompt_for_event(pending_event.event),
-        event_id=pending_event.event.event_id,
-        ts=_format_event_timestamp(pending_event.event.server_timestamp, timestamp_formatter),
+        body=dispatch_prompt_for_event(event),
+        event_id=event.event_id,
+        ts=_format_event_timestamp(event.server_timestamp, timestamp_formatter),
         display_name=member_display_names.get(sender),
     )
 

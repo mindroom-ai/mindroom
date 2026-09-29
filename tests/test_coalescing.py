@@ -169,6 +169,33 @@ def test_coalesced_message_tags_carry_current_member_display_names() -> None:
     assert '<msg event_id="$a2:localhost" from="@unnamed:localhost" ts="2026-03-20 08:16 PDT">' in turn.event.body
 
 
+def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human() -> None:
+    """Replies an agent wrote for a human are tagged as the agent's words, and the batch runs as that human."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    agent = "@mindroom_research:localhost"
+    pending_events = []
+    for event_id, body, timestamp in (
+        ("$r1:localhost", "first", 1_774_019_700_000),
+        ("$r2:localhost", "second", 1_774_019_760_000),
+    ):
+        event = _text_event(event_id, body, timestamp)
+        event.sender = agent
+        pending = make_pending_event(event, room, source_kind="message", requester_user_id="@owner:localhost")
+        pending_events.append(replace(pending, event=replace(pending.event, acts_for_requester=True)))
+
+    turn = build_prepared_turn(
+        CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent)),
+        pending_events,
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert turn.requester_user_id == "@owner:localhost"
+    assert turn.current_prompt_is_structured is True
+    assert '<msg event_id="$r1:localhost" from="@mindroom_research:localhost"' in turn.event.body
+    assert '<msg event_id="$r2:localhost" from="@mindroom_research:localhost"' in turn.event.body
+    assert "@owner:localhost" not in turn.event.body
+
+
 def test_prepared_turn_carries_structured_flag_and_metadata() -> None:
     """A structured turn must carry its flag and per-message metadata to dispatch."""
     turn = build_prepared_turn(

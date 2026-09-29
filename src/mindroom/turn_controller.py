@@ -1013,11 +1013,14 @@ class TurnController:
             key=resolved_key,
             source_kind=source_kind,
         )
+        # Coalescing keys and lanes stay on the sender; the batch runs, and splits, by the effective requester.
+        acting_requester = self.deps.ingress.acting_requester_for_event(prepared_event)
         pending_event = PendingEvent(
             text_debounce_seconds=text_debounce_seconds,
             event=replace(
                 prepared_event,
-                requester_user_id=requester_user_id,
+                requester_user_id=acting_requester or requester_user_id,
+                acts_for_requester=acting_requester is not None,
                 source_kind=source_kind,
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
                 hook_source=hook_source,

@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     is_auto_resume_relay_body,
@@ -124,6 +125,26 @@ class IngressValidator:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
+
+    def acting_requester_for_event(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
+        """Return the human requester an agent's or team's own reply was written for, when trusted.
+
+        Entities that this reply mentions act for that human: they apply their
+        access policy to that human and run with that human as requester, while
+        the sender stays the message's author for every sender-based mechanic.
+        """
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict):
+            return None
+        acting_requester = content.get(ACTING_REQUESTER_KEY)
+        if (
+            not isinstance(acting_requester, str)
+            or self.managed_entity_name_for_sender(event.sender) in {None, ROUTER_AGENT_NAME}
+            or source_kind_from_content(content) not in {None, MESSAGE_SOURCE_KIND}
+            or not is_human_requester_id(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
+        ):
+            return None
+        return resolve_human_requester_alias(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
 
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""
@@ -302,7 +323,8 @@ class IngressValidator:
             return None
 
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
-        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id, observed_room=room):
+        authorized_requester = self.acting_requester_for_event(event) or requester_user_id
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(authorized_requester, room.room_id, observed_room=room):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
