@@ -371,6 +371,18 @@ def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tm
     assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
 
 
+def test_kubernetes_tmp_size_limit_changes_cache_identity_only_when_configured(tmp_path: Path) -> None:
+    """The default /tmp size keeps the existing identity while a configured size replaces the backend."""
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT": "8Gi"},
+    )
+
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
+
+
 @pytest.mark.parametrize(
     ("env_name", "changed_value"),
     [

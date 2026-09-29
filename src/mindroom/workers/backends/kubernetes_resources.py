@@ -1358,6 +1358,11 @@ class KubernetesResourceManager:
         resource_profile: str | None = None,
     ) -> dict[str, object]:
         resource_requests, resource_limits = self.config.resources_for_profile(resource_profile)
+        if self.config.tmp_size_limit is not None:
+            # kubelet also counts /tmp against the pod's summed container ephemeral-storage
+            # limits, and some clusters (GKE Autopilot) inject a 1 GiB default when unset.
+            resource_requests["ephemeral-storage"] = self.config.tmp_size_limit
+            resource_limits["ephemeral-storage"] = self.config.tmp_size_limit
         owns_state_scope = resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key
         include_agent_vault = self.config.agent_vault is not None and owns_state_scope
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
@@ -1754,7 +1759,10 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
-            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {"sizeLimit": _WORKER_TMP_SIZE_LIMIT}},
+            {
+                "name": WORKER_TMP_VOLUME_NAME,
+                "emptyDir": {"sizeLimit": self.config.tmp_size_limit or _WORKER_TMP_SIZE_LIMIT},
+            },
         ]
         if include_agent_vault:
             volumes.extend(self._agent_vault_volumes())

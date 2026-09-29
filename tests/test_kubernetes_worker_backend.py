@@ -703,6 +703,7 @@ def _backend(
     runtime_class_name: str | None = None,
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
+    tmp_size_limit: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -737,6 +738,7 @@ def _backend(
         seccomp_profile=seccomp_profile,
         runtime_class_name=runtime_class_name,
         agent_vault=agent_vault,
+        tmp_size_limit=tmp_size_limit,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1030,6 +1032,26 @@ def test_kubernetes_worker_tmp_has_an_eviction_size_limit(tmp_path: Path) -> Non
     assert volumes["worker-tmp"] == {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}}
     assert {"name": "worker-tmp", "mountPath": "/tmp"} in pod_spec["containers"][0]["volumeMounts"]  # noqa: S108
     assert pod_spec["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+
+
+def test_kubernetes_worker_tmp_size_limit_also_sizes_container_ephemeral_storage(tmp_path: Path) -> None:
+    """A configured /tmp size must not be undercut by a cluster-default container ephemeral-storage limit."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+        tmp_size_limit="8Gi",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["worker-tmp"] == {"name": "worker-tmp", "emptyDir": {"sizeLimit": "8Gi"}}
+    resources = pod_spec["containers"][0]["resources"]
+    assert resources["requests"] == {"memory": "256Mi", "cpu": "100m", "ephemeral-storage": "8Gi"}
+    assert resources["limits"] == {"memory": "1Gi", "cpu": "500m", "ephemeral-storage": "8Gi"}
 
 
 def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
@@ -1837,6 +1859,7 @@ def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Pat
             "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT=8Gi\n"
             "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST=500m\n"
             "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT=2\n"
+            "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT=8Gi\n"
         ),
         encoding="utf-8",
     )
@@ -1846,6 +1869,7 @@ def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Pat
 
     assert config.resource_requests == {"memory": "2Gi", "cpu": "500m"}
     assert config.resource_limits == {"memory": "8Gi", "cpu": "2"}
+    assert config.tmp_size_limit == "8Gi"
 
 
 def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Path) -> None:
@@ -1871,6 +1895,7 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
 
     assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
     assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
+    assert config.tmp_size_limit is None
     assert config.enable_service_links is False
 
 

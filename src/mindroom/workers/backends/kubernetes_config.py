@@ -95,6 +95,7 @@ _MEMORY_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_reques
 _MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
 _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
+_TMP_SIZE_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["tmp_size_limit"]
 _SCRIPT_RESOURCE_PROFILES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["script_resource_profiles_json"]
 _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["default_script_resource_profile"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
@@ -393,6 +394,7 @@ class KubernetesWorkerBackendConfig:
     extra_containers: tuple[dict[str, object], ...] = ()
     extra_volumes: tuple[dict[str, object], ...] = ()
     runtime_class_name: str | None = None
+    tmp_size_limit: str | None = None
 
     def __post_init__(self) -> None:
         """Reject storage prefixes that are not strict relative descendants."""
@@ -492,6 +494,7 @@ class KubernetesWorkerBackendConfig:
             ),
             reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             agent_vault=KubernetesAgentVaultConfig.from_env(env),
+            tmp_size_limit=read_env(env, _TMP_SIZE_LIMIT_ENV) or None,
         )
 
 
@@ -551,7 +554,9 @@ def kubernetes_backend_config_signature(
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
     if config.runtime_class_name is not None:
-        return (*signature, f"runtime-class:{config.runtime_class_name}")
+        signature = (*signature, f"runtime-class:{config.runtime_class_name}")
+    if config.tmp_size_limit is not None:
+        signature = (*signature, f"tmp-size-limit:{config.tmp_size_limit}")
     return signature
 
 
