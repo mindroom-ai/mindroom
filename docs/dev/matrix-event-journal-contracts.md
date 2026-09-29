@@ -267,7 +267,7 @@ The next strict read drives that retry, so there is no background refresh worker
 A strict read repairs its page's debts concurrently, within 30 seconds in total.
 A sidecar the event's own reference can never read settles that revision as its preview in plain text with a `[long message content unavailable]` note.
 Any other sidecar that this read cannot resolve, including one still downloading when the 30 seconds end, is served as that marked preview for this read only, and its debt stays owed.
-Later reads serve the same stand-in without any request while that download runs or its retry pause lasts.
+When that download failed or outlived its read, later reads serve the same stand-in without any request while the download runs or its retry pause lasts, and a download in progress with no failure behind it is joined instead.
 
 ## Bounded conversation reads
 

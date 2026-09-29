@@ -131,8 +131,8 @@ _MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ = 8
 _REFRESH_READ_SECONDS = 30.0
 # Homeserver requests, and separately sidecar downloads, that one strict read runs at once.
 _CONCURRENT_REFRESH_WORK = 8
-# Debts whose sidecar is downloading or pausing after a transient failure, kept with their marked preview so a later
-# read can serve it without refetching the revision.
+# Debts whose sidecar download failed transiently or outlived its read, kept with their refetched revision so a later
+# read can serve its marked preview without refetching it while that download runs or its pause lasts.
 _DEFERRED_SIDECAR_MEMORY_SIZE = 256
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
