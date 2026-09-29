@@ -72,6 +72,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
 | Byte-only image dimension parsing is private. | Expose a public header parser without file/network I/O or pixel decoding. | `_embedded_image_dimensions` in `openai_models.py`. |
 | Bedrock Claude hard-codes pre-Mantle SDK clients. | Add Mantle support or public typed client factories. | `bedrock_claude.py`. |
+| Claude history puts a tool result resumed after approval behind its batch's media follow-up message, which the API rejects. | Format every `tool_result` ahead of the other blocks in a Claude user turn so stored runs replay; no matching issue or PR identified. | `agno_compat_claude.py`; `tests/test_claude_tool_result_order.py`. |
 | Parsed provider responses omit terminal stop metadata. | Preserve OpenAI `finish_reason` and Claude `stop_reason` through a stable parsed-response interface. | `agno_compat_openai_chat.py`, `agno_compat_claude.py`. |
 | Hosted Responses tool-search items are omitted from replay data. | Reproduce lost hosted-search output and preserve ordered call/output items. | `agno_compat_openai_responses_items.py`. |
 | Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |

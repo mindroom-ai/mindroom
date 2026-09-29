@@ -64,7 +64,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.agno_compat_claude import request_kwargs_without_replayed_citations
+from mindroom.agno_compat_claude import (
+    request_kwargs_with_leading_tool_results,
+    request_kwargs_without_replayed_citations,
+)
 from mindroom.agno_compat_model_hooks import install_client_factories
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.hooks.enrichment import is_transient_context
@@ -692,6 +695,7 @@ def prepare_claude_request_kwargs(
     """Apply MindRoom's wire transformations to one Claude request payload."""
     prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
     prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
+    prepared_kwargs = request_kwargs_with_leading_tool_results(prepared_kwargs)
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
         _model_deferred_tool_names(model),

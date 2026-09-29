@@ -127,6 +127,59 @@ def request_kwargs_without_replayed_citations(request_kwargs: dict[str, Any]) ->
     return {**request_kwargs, "messages": prepared_messages}
 
 
+# AGNO_COMPAT: Claude history can place a resumed tool result after the batch's media message.
+# Reason: Agno 3.0.9 appends a "The tool call above generated the attached media."
+# user message right after a tool batch whose results carried media. When that
+# batch also paused a call for approval, continue_run appends the approved
+# call's result after the media message, and the stored run keeps that order.
+# format_messages merges both into one user turn whose text and image blocks
+# precede the late tool_result, but the API only pairs tool_result blocks that
+# open the turn, so the resumed request and every later Claude request that
+# replays the run fail with HTTP 400 ("tool_use ids were found without
+# tool_result blocks immediately after"). Runs stored by providers that accept
+# this order fail the same way once the agent switches to Claude.
+# Upstream issue: No matching issue identified; resumed tool results after media follow-ups are untracked.
+# Upstream PR: None identified.
+# Remove when: The pinned Agno Claude formatter puts every tool_result ahead of
+# other blocks in a user turn, so already-stored runs replay; appending resumed
+# results before the media message alone leaves stored runs broken.
+# Coverage: tests/test_claude_tool_result_order.py::test_approved_tool_result_leads_after_sibling_media;
+# tests/test_claude_tool_result_order.py::test_stored_responses_thread_replays_to_claude_with_results_first;
+# tests/test_claude_tool_result_order.py::test_vertex_claude_request_payload_puts_tool_results_first.
+def request_kwargs_with_leading_tool_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Move tool_result blocks ahead of the other blocks in each user turn.
+
+    The other blocks keep their relative order after the results. The input
+    structure is never mutated.
+    """
+    messages = request_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return request_kwargs
+    prepared_messages: list[Any] | None = None
+    for message_index, message in enumerate(messages):
+        message_dict = _as_dict(message)
+        if message_dict is None or message_dict.get("role") != "user":
+            continue
+        content = message_dict.get("content")
+        if not isinstance(content, list):
+            continue
+        tool_results = [block for block in content if _is_tool_result_block(block)]
+        if all(_is_tool_result_block(block) for block in content[: len(tool_results)]):
+            continue
+        if prepared_messages is None:
+            prepared_messages = list(messages)
+        other_blocks = [block for block in content if not _is_tool_result_block(block)]
+        prepared_messages[message_index] = {**message_dict, "content": [*tool_results, *other_blocks]}
+    if prepared_messages is None:
+        return request_kwargs
+    return {**request_kwargs, "messages": prepared_messages}
+
+
+def _is_tool_result_block(block: object) -> bool:
+    block_dict = _as_dict(block)
+    return block_dict is not None and block_dict.get("type") == "tool_result"
+
+
 def _as_dict(value: object) -> dict[str, Any] | None:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
