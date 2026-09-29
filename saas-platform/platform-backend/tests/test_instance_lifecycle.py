@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -164,7 +165,7 @@ def _send_webhook(event_type: str, obj: dict[str, Any]) -> dict[str, Any]:
         patch("backend.routes.webhooks.stripe.Webhook.construct_event", return_value=event),
         patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value=obj)
         if event_type == "customer.subscription.updated"
-        else patch.dict({}, {}),
+        else contextlib.nullcontext(),
     ):
         response = TestClient(app).post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "sig"})
     assert response.status_code == 200
@@ -2066,3 +2067,21 @@ async def test_unknown_price_still_holds_inactive_subscription(
     assert platform.subscription()["tier"] == "hobby"
     assert platform.scaled_down()
     assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+    platform.limit_key.side_effect = OpenRouterKeyNotFoundError("key gone")
+    with patch(f"{_SERVICE}.delete_openrouter_key", side_effect=OpenRouterKeyNotFoundError("key gone")):
+        first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+        second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert first.errors == second.errors == []
+    assert platform.instance()["openrouter_key_hash"] is None
+    assert platform.instance()["openrouter_key_limit_usd"] is None
+    assert platform.instance()["status"] == "stopped"
+    platform.limit_key.assert_awaited_once()
+    platform.start.assert_not_awaited()
+    platform.provision.assert_not_awaited()

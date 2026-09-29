@@ -52,6 +52,7 @@ from backend.services.provisioner_service import (
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
+    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
     set_instance_openrouter_key_limit,
     start_instance,
@@ -572,7 +573,10 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
-        await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
+        try:
+            await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
+        except OpenRouterKeyNotFoundError:
+            await revoke_instance_openrouter_key(sb, instance_id)
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)

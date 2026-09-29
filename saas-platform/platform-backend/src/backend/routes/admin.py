@@ -279,9 +279,14 @@ class UpdateAccountStatusRequest(BaseModel):
 
 
 def _update_account_auth_ban(sb: Any, account_id: str, status: str | None) -> None:
-    """Apply suspension to Auth before either admin route changes the account row."""
-    if status in {"suspended", ACTIVE_ACCOUNT_STATUS}:
-        sb.auth.admin.update_user_by_id(account_id, {"ban_duration": "876000h" if status == "suspended" else "none"})
+    """Apply a saved account status to Auth; failed updates can be retried."""
+    if status is not None:
+        try:
+            sb.auth.admin.update_user_by_id(
+                account_id, {"ban_duration": "876000h" if status == "suspended" else "none"}
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to update account authentication") from exc
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
@@ -308,7 +313,6 @@ async def update_account_status(
                         "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
                     ),
                 )
-        _update_account_auth_ban(sb, account_id, request.status)
         result = (
             sb.table("accounts")
             .update({"status": request.status, "updated_at": datetime.now(UTC).isoformat()})
@@ -320,6 +324,7 @@ async def update_account_status(
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
         # The database's id spelling is the one cached auth entries carry.
         invalidate_account_auth_cache(result.data[0]["id"])
+        _update_account_auth_ban(sb, result.data[0]["id"], request.status)
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -564,11 +569,10 @@ async def admin_update(
 
     try:
         data.pop("id", None)
-        if resource == "accounts":
-            _update_account_auth_ban(sb, resource_id, data.get("status"))
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
         if resource == "accounts" and result.data:
             invalidate_account_auth_cache(result.data[0]["id"])
+            _update_account_auth_ban(sb, result.data[0]["id"], data.get("status"))
 
         # Log admin update
         audit_log_entry(
@@ -580,6 +584,8 @@ async def admin_update(
         )
 
         return {"data": result.data[0] if result.data else None}
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Error updating resource")
         raise HTTPException(status_code=400, detail="Invalid request") from None
