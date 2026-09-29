@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tools import approved_egress as approved_egress_module
 
 if TYPE_CHECKING:
@@ -35,10 +35,10 @@ def test_full_access_requires_opt_in() -> None:
         asyncio.run(_approved_egress_tool().request_network_access(["*"], 5, "Install dependencies"))
 
 
-@pytest.mark.parametrize("value", ["false", "true", 0, 1])
+@pytest.mark.parametrize("value", ["False", "yes", "1", 0, 1])
 def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: object) -> None:
     """Stored credential values must not enable broad access through Python truthiness."""
-    with pytest.raises(TypeError, match="allow_full_access must be a boolean"):
+    with pytest.raises(ToolConfigOverrideError, match=r"'approved_egress\.allow_full_access' must be a boolean"):
         get_tool_by_name(
             "approved_egress",
             resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
@@ -46,6 +46,20 @@ def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: obje
             disable_sandbox_proxy=True,
             worker_target=None,
         )
+
+
+@pytest.mark.parametrize(("value", "expected"), [("false", False), ("true", True)])
+def test_full_access_reads_dashboard_boolean_spellings(tmp_path: Path, value: str, expected: bool) -> None:
+    """A seeded string reaches the toolkit as the boolean the dashboard shows, so "false" never enables it."""
+    tool = get_tool_by_name(
+        "approved_egress",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        credential_overrides={"allow_full_access": value},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool._allow_full_access is expected
 
 
 def test_full_access_posts_one_scoped_timed_grant(monkeypatch: pytest.MonkeyPatch) -> None:

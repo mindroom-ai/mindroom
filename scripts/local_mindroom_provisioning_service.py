@@ -29,7 +29,9 @@ tokens for the currently deployed chat client; device pairing does not.
 Pairing flows: the service supports device-initiated pairing (CLI starts at
 ``/v1/local-mindroom/pair/device/start``, browser user approves at
 ``/v1/local-mindroom/pair/device/approve``, CLI polls at
-``/v1/local-mindroom/pair/device/poll`` for credentials). The legacy
+``/v1/local-mindroom/pair/device/poll`` for credentials). Before approving,
+the browser reads ``/v1/local-mindroom/pair/device/inspect``, which names the
+client and the address that started the session. The legacy
 browser-initiated flow (``/v1/local-mindroom/pair/start``,
 ``/v1/local-mindroom/pair/status``, ``/v1/local-mindroom/pair/complete``) is
 kept for one release to allow existing chat clients to migrate.
@@ -57,6 +59,13 @@ registration, Google OAuth client fetches, and
 which the chat client shows for each install. Running installs send a heartbeat
 at startup and every few hours; the service records heartbeats at most once per
 connection every ten minutes so it does not rewrite the state file on every call.
+
+Agent passwords: register-agent creates each agent account with a random
+one-time password and returns it once, only when the account was created. The
+client logs in with it and immediately changes it to a password of its own, so
+the service never learns the password the client keeps. Older clients that
+still send their own password get it registered unchanged and receive no
+password back.
 
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
@@ -179,6 +188,7 @@ class PairSession:
     client_name: str | None = None
     fingerprint: str | None = None
     approved_at: datetime | None = None
+    client_ip: str | None = None
 
 
 @dataclass(slots=True)
@@ -274,7 +284,12 @@ class RegisterAgentRequest(BaseModel):
 
     homeserver: str = Field(min_length=1, max_length=512)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=1024)
+    # LEGACY_COMPAT: register-agent requests carrying the agent's own password
+    # Legacy format: released MindRoom clients send the agent's chosen `password`, which the service registers unchanged.
+    # Last legacy release: the release before the first one containing #2428 (at least v2026.9.364); replacement: the first release containing #2428, which omits password and replaces the returned one-time password.
+    # Handling: a supplied password is registered as before and never returned; remove this field once no paired installs run a release older than the first release containing #2428.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_register_agent_with_client_password_registers_it_unchanged.
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
     display_name: str = Field(min_length=1, max_length=255)
 
 
@@ -283,6 +298,8 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+    # One-time password generated for a created account; the client replaces it immediately.
+    password: str | None = None
 
 
 class HeartbeatResponse(BaseModel):
@@ -325,6 +342,7 @@ class DevicePairSessionOut(BaseModel):
     """What the approving browser user sees about the waiting machine."""
 
     client_name: str
+    client_ip: str | None
     created_at: datetime
     expires_at: datetime
     status: Literal["pending", "approved"]
@@ -523,6 +541,7 @@ def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | Non
             "client_name": session.client_name,
             "fingerprint": session.fingerprint,
             "approved_at": _as_utc_iso(session.approved_at),
+            "client_ip": session.client_ip,
         }
         for session in state.pair_sessions.values()
     ]
@@ -590,6 +609,12 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             client_name=item.get("client_name"),
             fingerprint=item.get("fingerprint"),
             approved_at=_from_utc_iso(item.get("approved_at")),
+            # LEGACY_COMPAT: pair sessions persisted before requester addresses were recorded lack client_ip
+            # Legacy format: state written by the provisioning service before this change; client_ip is missing.
+            # Last legacy release: unversioned service state; replaced by this change.
+            # Handling: a missing client_ip loads as None, which the approval page shows as an unknown address.
+            # Coverage: tests/test_local_mindroom_provisioning_service.py::test_legacy_state_loads_device_sessions_without_client_ip.
+            client_ip=item.get("client_ip"),
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
@@ -827,9 +852,10 @@ async def _matrix_whoami(config: ServiceConfig, access_token: str) -> str:
 
 async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
     register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
+    generated_password = None if payload.password else secrets.token_urlsafe(32)
     request_payload = {
         "username": payload.username,
-        "password": payload.password,
+        "password": payload.password or generated_password,
         "device_name": "mindroom_agent",
         "auth": {
             "type": "m.login.registration_token",
@@ -864,7 +890,7 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
             except httpx.HTTPError:
                 pass
 
-        return RegisterAgentResponse(status="created", user_id=user_id)
+        return RegisterAgentResponse(status="created", user_id=user_id, password=generated_password)
 
     detail = response.text.strip() or "unknown error"
     errcode = None
@@ -1115,6 +1141,7 @@ def _device_session_out(session: PairSession) -> DevicePairSessionOut:
         raise HTTPException(status_code=500, detail="Corrupt pair session")
     return DevicePairSessionOut(
         client_name=session.client_name,
+        client_ip=session.client_ip,
         created_at=session.created_at,
         expires_at=session.expires_at,
         status=session.status,
@@ -1130,7 +1157,8 @@ async def start_device_pair(
 ) -> DevicePairStartResponse:
     """Start pairing from a local client; a signed-in browser user approves it later."""
     now = _now_utc()
-    remote = request.client.host if request.client else "unknown"
+    client_ip = request.client.host if request.client else None
+    remote = client_ip or "unknown"
     device_secret = secrets.token_urlsafe(32)
     async with state.lock:
         _prune_pair_sessions_unlocked(state, now, config.pair_code_ttl_seconds)
@@ -1146,6 +1174,7 @@ async def start_device_pair(
             device_secret_hash=_hash_token(device_secret),
             client_name=payload.client_name.strip(),
             fingerprint=payload.client_pubkey_or_fingerprint.strip(),
+            client_ip=client_ip,
         )
         state.pair_sessions[session.id] = session
         state.pair_session_by_hash[session.pair_code_hash] = session.id
@@ -1291,7 +1320,11 @@ async def revoke_connection(
     return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
 
 
-@router.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
+@router.post(
+    "/v1/local-mindroom/register-agent",
+    response_model=RegisterAgentResponse,
+    response_model_exclude_none=True,
+)
 async def register_agent(
     payload: RegisterAgentRequest,
     config: Annotated[ServiceConfig, Depends(_service_config_from_request)],

@@ -599,7 +599,7 @@ Use continue_subagent(subagent_id, message) for follow-ups after that child retu
 Keep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.
 Each follow-up has its own audit record and does not add nesting depth.
 A running child or one awaiting approval must finish its current turn before accepting a follow-up.
-Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json, events.jsonl, and transcript.md.
+Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 

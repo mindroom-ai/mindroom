@@ -22,7 +22,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthRefreshRejectedError
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import oauth_authorization_url, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,7 +76,8 @@ def test_github_authorization_url_omits_classic_oauth_scope(tmp_path: Path) -> N
     _save_client_config(runtime_paths)
 
     authorization_url = asyncio.run(
-        _provider().authorization_uri_async(
+        oauth_authorization_url(
+            _provider(),
             runtime_paths,
             state="opaque-state",
             code_verifier="v" * 64,
@@ -110,6 +111,7 @@ def test_github_token_exchange_normalizes_rotating_user_token(tmp_path: Path) ->
             _provider().exchange_code(
                 "authorization-code",
                 runtime_paths,
+                token_url=_provider().token_url,
                 code_verifier="v" * 64,
             ),
         )
@@ -132,6 +134,7 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
+            "token_uri": _provider().token_url,
             "client_id": "github-client-id",
             "scopes": [],
             "expires_at": 1.0,
@@ -185,6 +188,7 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
+            "token_uri": context.provider.token_url,
             "client_id": "github-client-id",
             "scopes": [],
             "expires_at": 1.0,

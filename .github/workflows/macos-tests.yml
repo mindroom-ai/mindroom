@@ -36,6 +36,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           lfs: true
+          persist-credentials: false
       - name: Build and test native app
         run: /usr/bin/arch -${{ matrix.architecture }} swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
 
@@ -46,6 +47,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           lfs: true
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v7
       - name: Build universal uv binary
         run: macos/build-universal-uv.sh "$RUNNER_TEMP/uv-universal"

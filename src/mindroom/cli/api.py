@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _is_loopback(host: str) -> bool:
+def is_loopback_host(host: str) -> bool:
+    """Return whether a host name or address only reaches this machine."""
     try:
         return ip_address(host).is_loopback
     except ValueError:
@@ -48,7 +49,7 @@ def get_api_response(
     if require_key and not token:
         msg = "MINDROOM_API_KEY is required for this operational check."
         raise ValueError(msg)
-    if token and parsed.scheme == "http" and not _is_loopback(parsed.host):
+    if token and parsed.scheme == "http" and not is_loopback_host(parsed.host):
         msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
         raise ValueError(msg)
     try:

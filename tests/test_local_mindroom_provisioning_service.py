@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
 from mindroom.cli import connect as cli_connect
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import provisioning as matrix_provisioning
 from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
@@ -176,15 +177,41 @@ def _install_fake_register(monkeypatch: pytest.MonkeyPatch, register_calls: list
     monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
 
 
-def _post_register_agent(client: TestClient, complete: dict[str, str], username: str) -> httpx.Response:
+def _install_fake_homeserver(monkeypatch: pytest.MonkeyPatch, response: httpx.Response) -> list[dict[str, object]]:
+    """Answer the service's Matrix registration with `response` and record each request body."""
+    register_payloads: list[dict[str, object]] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        async def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            assert url.endswith("/_matrix/client/v3/register")
+            register_payloads.append(json)
+            return response
+
+    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _FakeAsyncClient)
+    return register_payloads
+
+
+def _post_register_agent(
+    client: TestClient,
+    complete: dict[str, str],
+    username: str,
+    password: str | None = "agent-pass-123",  # noqa: S107
+) -> httpx.Response:
+    payload = {"homeserver": "https://mindroom.chat", "username": username, "display_name": "CodeAgent"}
+    if password is not None:
+        payload["password"] = password
     return client.post(
         "/v1/local-mindroom/register-agent",
-        json={
-            "homeserver": "https://mindroom.chat",
-            "username": username,
-            "password": "agent-pass-123",
-            "display_name": "CodeAgent",
-        },
+        json=payload,
         headers={
             "X-Local-MindRoom-Client-Id": complete["client_id"],
             "X-Local-MindRoom-Client-Secret": complete["client_secret"],
@@ -822,39 +849,10 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
         listen_port=8776,
     )
 
-    class _FakeResponse:
-        status_code = 400
-        is_success = False
-        text = "M_USER_IN_USE"
-
-        @staticmethod
-        def json() -> dict[str, str]:
-            return {
-                "errcode": "M_USER_IN_USE",
-                "error": "User ID already taken",
-            }
-
-    class _FakeAsyncClient:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            del args, kwargs
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-            del exc_type, exc, tb
-
-        async def post(
-            self,
-            url: str,
-            *,
-            json: dict[str, object],
-            headers: dict[str, str] | None = None,
-        ) -> _FakeResponse:
-            del url, json, headers
-            return _FakeResponse()
-
-    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _FakeAsyncClient)
+    _install_fake_homeserver(
+        monkeypatch,
+        httpx.Response(400, json={"errcode": "M_USER_IN_USE", "error": "User ID already taken"}),
+    )
     payload = provisioning.RegisterAgentRequest(
         homeserver="https://internal-matrix:8448",
         username="mindroom_code",
@@ -865,6 +863,63 @@ async def test_register_agent_user_in_use_respects_matrix_server_name_override(
     result = await provisioning._register_agent_with_matrix(config, payload)
     assert result.status == "user_in_use"
     assert result.user_id == "@mindroom_code:mindroom.chat"
+
+
+def test_register_agent_without_password_returns_the_generated_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that sends no password gets back the one-time password the homeserver registered."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.json"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        registered = _install_fake_homeserver(
+            monkeypatch,
+            httpx.Response(200, json={"user_id": f"@{username}:mindroom.chat"}),
+        )
+        response = _post_register_agent(client, complete, username, password=None)
+
+    assert response.status_code == 200
+    generated_password = registered[0]["password"]
+    assert isinstance(generated_password, str)
+    assert len(generated_password) >= 32
+    assert response.json() == {
+        "status": "created",
+        "user_id": f"@{username}:mindroom.chat",
+        "password": generated_password,
+    }
+
+
+def test_register_agent_with_client_password_registers_it_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older clients still register their own password and get no password back."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.json"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        registered = _install_fake_homeserver(
+            monkeypatch,
+            httpx.Response(200, json={"user_id": f"@{username}:mindroom.chat"}),
+        )
+        response = _post_register_agent(client, complete, username, password="agent-pass-123")  # noqa: S106
+
+    assert registered[0]["password"] == "agent-pass-123"  # noqa: S105
+    assert response.json() == {"status": "created", "user_id": f"@{username}:mindroom.chat"}
+
+
+def test_register_agent_user_in_use_returns_no_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing account keeps its password, so the service returns none."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.json"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        _install_fake_homeserver(monkeypatch, httpx.Response(400, json={"errcode": "M_USER_IN_USE", "error": "taken"}))
+        response = _post_register_agent(client, complete, username, password=None)
+
+    assert response.json() == {"status": "user_in_use", "user_id": f"@{username}:mindroom.chat"}
 
 
 def test_client_error_detail_constants_match_service() -> None:
@@ -906,6 +961,46 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
     provisioning.DevicePairPollRequest.model_validate(poll_payload)
     provisioning.DevicePairStartResponse.model_validate(_START)
     provisioning.DevicePairPollResponse.model_validate(_CONNECTED)
+
+
+@pytest.mark.asyncio
+async def test_cli_register_agent_messages_match_service_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's register-agent request sends no password and reads the service's one-time password."""
+    service_response = {"status": "created", "user_id": "@mindroom_code:mindroom.chat", "password": "one-time-pass"}
+    requests: list[httpx.Request] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=service_response)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        matrix_provisioning.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(transport=httpx.MockTransport(_handle), **kwargs),
+    )
+
+    result = await matrix_provisioning.register_user_via_provisioning_service(
+        provisioning_url="https://provisioning.example",
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        homeserver="https://mindroom.chat",
+        username="mindroom_code",
+        display_name="CodeAgent",
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+    )
+
+    (request,) = requests
+    service_paths = {route.path for route in provisioning.create_app(_service_config(tmp_path / "state.json")).routes}
+    assert request.url.path in service_paths
+    payload = json.loads(request.content)
+    assert "password" not in payload
+    provisioning.RegisterAgentRequest.model_validate(payload)
+    assert provisioning.RegisterAgentResponse.model_validate(service_response).model_dump() == service_response
+    assert result.password == service_response["password"]
 
 
 def test_device_start_retries_colliding_pair_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -952,6 +1047,7 @@ def test_device_pairing_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         )
         assert inspected.status_code == 200
         assert inspected.json()["client_name"] == "alice-macbook"
+        assert inspected.json()["client_ip"] == "testclient"
         assert inspected.json()["status"] == "pending"
 
         approved = client.post(
@@ -1314,6 +1410,12 @@ def test_approved_device_session_survives_restart(tmp_path: Path, monkeypatch: p
     assert started["device_secret"] not in json.dumps(persisted)
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        inspected = restarted.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        ).json()
+        assert inspected["client_ip"] == "testclient"
         body = restarted.post(
             "/v1/local-mindroom/pair/device/poll",
             json={"device_secret": started["device_secret"]},
@@ -1618,6 +1720,28 @@ def test_legacy_state_loads_browser_sessions(tmp_path: Path, monkeypatch: pytest
         assert session.client_name is None
         assert session.fingerprint is None
         assert session.approved_at is None
+
+
+def test_legacy_state_loads_device_sessions_without_client_ip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device sessions persisted before requester addresses were recorded still load and show no address."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        started = _start_device_pairing(client)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    for item in payload["pair_sessions"]:
+        del item["client_ip"]
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        inspected = restarted.post(
+            "/v1/local-mindroom/pair/device/inspect",
+            json={"pair_code": started["pair_code"]},
+            headers=ALICE_OPENID_HEADERS,
+        )
+
+    assert inspected.status_code == 200
+    assert inspected.json()["client_ip"] is None
 
 
 def _install_homeserver(

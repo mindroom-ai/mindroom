@@ -19,11 +19,13 @@ Coding model training data often lags recent releases, so never trust memorized 
 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
-| Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
+| Anthropic | Balanced default | Claude Sonnet 5.5 | `claude-sonnet-5-5` |
 | Anthropic | Max intelligence | Claude Fable 5.1 | `claude-fable-5-1` |
-| Anthropic | Flagship default | Claude Opus 5 | `claude-opus-5` |
+| Anthropic | Flagship default | Claude Opus 5.5 | `claude-opus-5-5` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
+| OpenAI | Balanced | GPT-6 Sol | `gpt-6-sol` |
+| OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
 | DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
@@ -38,16 +40,17 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against provider catalogs on September 10, 2026.
+Model IDs were checked against provider catalogs on September 28, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
+Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
 The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 
-For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `anthropic`, prefer `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 Use `claude-fable-5-1` when you need Anthropic's highest available capability.
 Claude Fable 5.1 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`, and [`claude-haiku-4-5`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/haiku-4-5).
+Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and [`claude-haiku-4-5`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/haiku-4-5).
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
 Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
@@ -92,7 +95,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 **Key modules**:
 | Module | Purpose |
 |--------|---------|
-| `bounded_bytes.py` | Shared asynchronous byte collection that rejects overflowing chunks before buffering them |
+| `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
@@ -405,10 +408,10 @@ bot_accounts: []
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
   sonnet:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
 
 router:
   model: default
@@ -721,12 +724,14 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 #   --namespace mindroom-instances \
 #   -f values-with-secrets.yaml  # Never commit this file!
 
-# Quick redeploy of MindRoom backend (updates all instances)
-./saas-platform/redeploy-mindroom.sh
+# Deploy a release tag: platform Helm upgrade, then re-provision instances
+# (see docs/deployment/kubernetes.md#release-deployment)
+./cluster/scripts/deploy-release.sh v2026.9.351 --dry-run
+./cluster/scripts/deploy-release.sh v2026.9.351 --instances running  # or all, none, 1,7
 
-# Deploy platform frontend or backend
-./saas-platform/deploy.sh platform-frontend  # Build, push, and deploy frontend
-./saas-platform/deploy.sh platform-backend   # Build, push, and deploy backend
+# Apply a Supabase migration through the Management API (no DB password needed)
+SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<ref> \
+  ./cluster/scripts/db/apply-migration.sh saas-platform/supabase/migrations/<file>.sql
 
 # Use the CLI helper for common operations
 ./cluster/scripts/mindroom-cli.sh status

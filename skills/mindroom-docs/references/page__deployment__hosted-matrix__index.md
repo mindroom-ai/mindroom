@@ -59,10 +59,12 @@ uvx mindroom run
 On first run, MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
 
 After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
 In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
 Under a service or the macOS app, it prints the approving account without asking.
+While it waits for approval, `/api/health` on the API port already reports healthy and `/api/ready` reports `Waiting for local pairing approval`, so container health checks do not restart it with a new code.
 
 Pair code behavior:
 
@@ -102,6 +104,8 @@ Use `worker_scope: user_agent` when each requester should get separate per-agent
 `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
 They can only call provisioning-service endpoints that accept local client credentials, including agent registration and retrieval of the Google desktop app client configuration.
+Agent registration never sends your agents' passwords to the provisioning service.
+The service creates each new agent account with a one-time password and returns it once, and the local process immediately changes it to a locally generated password that is never sent to the provisioning service.
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.

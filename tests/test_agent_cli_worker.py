@@ -1,5 +1,5 @@
 """Isolated CLI workers reuse shell semantics without receiving primary authority."""
-# ruff: noqa: D103, S106 - isolated tests use fake credentials
+# ruff: noqa: D103, S106, S107 - isolated tests use fake credentials
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from uuid import UUID
 import httpx
 import pytest
 from agno.tools.toolkit import Toolkit
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from structlog.testing import capture_logs
 
 from mindroom.agent_cli import worker as cli_worker
@@ -26,42 +26,59 @@ from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CliShellSettings, CliWorkerLaunch
 from mindroom.api import sandbox_runner_cli
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     DEFAULT_TOOL_OUTPUT_MAX_BYTES,
     resolve_primary_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+    resolved_worker_key_scope,
+)
 from mindroom.workers import runtime as worker_runtime
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import resolve_state_scope_worker_key
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec, is_cli_worker_key, process_worker_key
+from tests.conftest import bind_runtime_paths
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_docker_worker_backend import _backend
 
 if TYPE_CHECKING:
-    from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 KEY = "v1:default:user_agent:~alice:!agent-turn-00000000000000000000000000000001:code"
 BASE = "v1:default:user_agent:alice:code"
+USER = "v1:default:user:alice"
 
 
-def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Path]:
-    workspace = tmp_path / "storage/agents/code/workspace"
-    workspace.mkdir(parents=True)
+def _app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    worker_key: str = KEY,
+    runner_token: str = "worker-only",
+) -> tuple[FastAPI, Path]:
+    """Build a CLI worker runner like Docker starts it: dedicated, with no agent config."""
+    storage = tmp_path / "storage"
+    workspace = storage / "agents/code/workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
     runtime = resolve_primary_runtime_paths(
         config_path=tmp_path / "missing.yaml",
-        storage_path=tmp_path / "storage",
+        storage_path=storage,
         process_env={
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: KEY,
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "storage"),
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(storage),
         },
     )
     app = FastAPI()
-    initialize_sandbox_runner_app(app, runtime, config=Config(), runner_token="worker-only")
+    initialize_sandbox_runner_app(app, runtime, config=Config(), runner_token=runner_token)
     app.include_router(sandbox_runner_cli.router)
     monkeypatch.setattr(sandbox_runner_cli, "_CLI_PRIVATE_ROOT", tmp_path / "private")
 
@@ -85,7 +102,6 @@ def _launch(workspace: Path) -> dict[str, object]:
     return {
         "protocol_version": WORKER_PROTOCOL_VERSION,
         "worker_key": KEY,
-        "state_scope_worker_key": BASE,
         "private_agent_names": [],
         "turn_id": "turn",
         "generation": "generation",
@@ -809,28 +825,243 @@ async def test_worker_validates_transport_arguments_with_canonical_shell_schema(
         assert (await client.post("/api/sandbox-runner/agent-cli/shell", json=payload)).status_code == 422
 
 
-def test_workspace_accepts_exact_visible_user_root_and_rejects_other_roots(
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("private_scope", "private_agent_names", "workspace_below_scope"),
+    [
+        pytest.param(None, [], None, id="worker-scope-user"),
+        pytest.param(USER, [], "code/code_data", id="private-per-user"),
+        pytest.param(BASE, ["code"], "code/notes/work", id="custom-private-root"),
+    ],
+)
+async def test_config_less_worker_runs_in_the_primary_resolved_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private_scope: str | None,
+    private_agent_names: list[str],
+    workspace_below_scope: str | None,
+) -> None:
+    """Real CLI workers have no agent config, so only the primary can resolve these workspaces."""
+    app, workspace = _app(tmp_path, monkeypatch)
+    if private_scope is not None and workspace_below_scope is not None:
+        workspace = private_instance_scope_root_path(tmp_path / "storage", private_scope) / workspace_below_scope
+    launch = _launch(workspace) | {"private_agent_names": private_agent_names}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker",
+        headers={"x-mindroom-sandbox-token": "worker-only"},
+    ) as client:
+        response = await client.post("/api/sandbox-runner/agent-cli/install", json=launch)
+        assert response.status_code == 200, response.text
+        response = await client.post(
+            "/api/sandbox-runner/agent-cli/shell",
+            json={
+                "worker_key": KEY,
+                "handle": "shell:" + "a" * 32,
+                "operation": {"function_name": "run_shell_command", "args": ["pwd"], "tail": 1},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"].strip().endswith(str(workspace))
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_workspace_outside_its_storage_mount_before_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, workspace = _app(tmp_path, monkeypatch)
-    launch = CliWorkerLaunch.model_validate(_launch(workspace) | {"state_scope_worker_key": "v1:default:user:alice"})
-    runtime = sandbox_runner_cli.app_runtime_paths(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker",
+        headers={"x-mindroom-sandbox-token": "worker-only"},
+    ) as client:
+        route = "/api/sandbox-runner/agent-cli/install"
+        for outside in (tmp_path / "other", tmp_path, workspace / "../../../.."):
+            assert (await client.post(route, json=_launch(outside))).status_code == 400
+        assert not (tmp_path / "private").exists()
+        assert (await client.post(route, json=_launch(workspace))).status_code == 200
 
-    def policies(agent_name: str) -> dict[str, ResolvedAgentPolicy]:
-        return Config(agents={agent_name: AgentConfig(display_name="Agent", worker_scope="user")}).get_agent_policies()
 
-    assert sandbox_runner_cli._workspace(launch, runtime, policies("code")) == workspace
+def _scoped_context(tmp_path: Path, agent: AgentConfig) -> ToolRuntimeContext:
+    """Primary context for agent ``helper`` configured as given, beside a user-scoped ``other``."""
+    context = _runtime_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": agent, "other": AgentConfig(display_name="Other", worker_scope="user")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        context.runtime_paths,
+    )
+    return replace(
+        context,
+        config=config,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env=MappingProxyType(
+                {
+                    "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
+                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
+                },
+            ),
+        ),
+    )
 
-    with pytest.raises(HTTPException):
-        sandbox_runner_cli._workspace(launch, runtime, policies("other"))
-    for outside in (tmp_path / "other", workspace.parent, workspace.parent / "sessions"):
-        with pytest.raises(HTTPException):
-            sandbox_runner_cli._workspace(
-                launch.model_copy(update={"shell": _shell(str(outside))}),
-                runtime,
-                policies("code"),
-            )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "allowed_below_scope"),
+    [
+        pytest.param(AgentConfig(display_name="Helper", worker_scope="user"), None, id="worker-scope-user"),
+        pytest.param(
+            AgentConfig(display_name="Helper", private=AgentPrivateConfig(per="user", root="notes")),
+            "helper/notes",
+            id="private-per-user",
+        ),
+    ],
+)
+async def test_user_scoped_agent_gets_a_docker_cli_worker_and_runs_in_its_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: AgentConfig,
+    allowed_below_scope: str | None,
+) -> None:
+    """End to end: Docker acquisition under the requester's user scope, grant install, and a shell call."""
+    context = _scoped_context(tmp_path, agent)
+    storage = context.runtime_paths.storage_root
+    container_root = tmp_path / "container/storage"
+    spec = _cli_worker_spec(context)
+    assert spec.state_scope_worker_key is not None
+    assert resolved_worker_key_scope(spec.state_scope_worker_key) == "user"
+
+    def canonical(root: Path) -> Path:
+        if allowed_below_scope is None:
+            return root / "agents/helper/workspace"
+        return private_instance_scope_root_path(root, spec.state_scope_worker_key or "") / allowed_below_scope
+
+    if allowed_below_scope is not None:
+        # The primary creates a private workspace before a worker can mount it.
+        canonical(storage).mkdir(parents=True)
+    authored = {
+        "agents": {name: config.model_dump(exclude_none=True) for name, config in context.config.agents.items()},
+    }
+    backend, docker, _ = _backend(monkeypatch, tmp_path, storage_path=storage, config_text=json.dumps(authored))
+    backend.config = replace(backend.config, extra_env={}, storage_mount_path=str(container_root))
+    handle = backend.ensure_worker(spec)
+    volumes = docker.containers.run_calls[-1]["volumes"]
+    assert any(volume.startswith(f"{canonical(storage)}:{canonical(container_root)}") for volume in volumes)
+    assert not any(str(storage / "agents/helper/sessions") in volume for volume in volumes)
+
+    app, _workspace = _app(
+        tmp_path / "container",
+        monkeypatch,
+        worker_key=spec.worker_key,
+        runner_token=handle.auth_token or "",
+    )
+    worker_transport = httpx.ASGITransport(app=app)
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "primary":
+            return httpx.Response(200)
+        return await worker_transport.handle_async_request(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=handle.worker_id))
+        grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+        lease = CliWorkerLease(handle, client, context, spec, container_storage_root=container_root)
+        await lease.install_grant(bridge, grant, shell=_shell(str(canonical(storage))))
+        result = await lease.invoke_shell("run_shell_command", {"args": ["pwd"], "tail": 1})
+    assert isinstance(result, str)
+    assert result.strip().endswith(str(canonical(container_root)))
+
+
+@pytest.mark.parametrize(
+    "foreign_scope",
+    [
+        "v1:default:user:~bob",
+        "v1:other:user:~alice",
+        "v1:default:user_agent:~alice:other",
+        "v1:default:shared:code",
+    ],
+)
+def test_cli_worker_key_is_owned_only_by_its_own_requester_scopes(foreign_scope: str) -> None:
+    for owner in ("v1:default:user_agent:~alice:code", "v1:default:user:~alice"):
+        assert resolve_state_scope_worker_key(KEY, owner) == owner
+    # Only CLI turn processes run under a per-user scope; ordinary per-agent keys keep their own.
+    with pytest.raises(WorkerBackendError, match="does not own"):
+        resolve_state_scope_worker_key("v1:default:user_agent:~alice:code", "v1:default:user:~alice")
+    with pytest.raises(WorkerBackendError, match="does not own"):
+        resolve_state_scope_worker_key(KEY, foreign_scope)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "state_scope", "allowed_below_scope"),
+    [
+        pytest.param(AgentConfig(display_name="Helper", worker_scope="user"), "user", None, id="worker-scope-user"),
+        pytest.param(
+            AgentConfig(display_name="Helper", private=AgentPrivateConfig(per="user", root="notes")),
+            "user",
+            "helper/notes",
+            id="private-per-user",
+        ),
+        pytest.param(
+            AgentConfig(display_name="Helper", private=AgentPrivateConfig(per="user_agent", root="notes")),
+            "user_agent",
+            "helper/notes",
+            id="custom-private-root",
+        ),
+    ],
+)
+async def test_primary_sends_only_the_agents_own_canonical_workspace(
+    tmp_path: Path,
+    agent: AgentConfig,
+    state_scope: str,
+    allowed_below_scope: str | None,
+) -> None:
+    """The primary resolves the workspace from live policies and maps it onto the worker's mounts."""
+    context = _scoped_context(tmp_path, agent)
+    spec = _cli_worker_spec(context)
+    scope_key = spec.state_scope_worker_key
+    assert scope_key is not None
+    assert resolved_worker_key_scope(scope_key) == state_scope
+    storage = context.runtime_paths.storage_root
+
+    def canonical(root: Path) -> Path:
+        if allowed_below_scope is None:
+            return root / "agents/helper/workspace"
+        return private_instance_scope_root_path(root, scope_key) / allowed_below_scope
+
+    installs: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/install"):
+            installs.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    worker = WorkerHandle("worker-id", spec.worker_key, "http://worker/api", "control", "ready", "docker", 0, 0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        outside = [
+            storage / "agents/helper",
+            private_instance_scope_root_path(storage, "v1:default:user:@mallory:example.test") / "helper/notes",
+        ]
+        if allowed_below_scope is not None:
+            outside += [storage / "agents/helper/workspace", canonical(storage).parent / "helper_data"]
+        if state_scope == "user_agent":
+            outside.append(storage / "agents/other/workspace")
+        for workspace in outside:
+            bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=worker.worker_id))
+            grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+            lease = CliWorkerLease(worker, client, context, spec, container_storage_root=Path("/app/worker"))
+            with pytest.raises(ValueError, match="no unique canonical workspace mount"):
+                await lease.install_grant(bridge, grant, shell=_shell(str(workspace)))
+        assert installs == []
+        bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=worker.worker_id))
+        grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+        lease = CliWorkerLease(worker, client, context, spec, container_storage_root=Path("/app/worker"))
+        await lease.install_grant(bridge, grant, shell=_shell(str(canonical(storage) / "src")))
+    assert installs[0]["shell"]["workspace"] == str(canonical(Path("/app/worker")) / "src")
 
 
 @pytest.mark.asyncio

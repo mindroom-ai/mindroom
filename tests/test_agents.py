@@ -1039,6 +1039,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
+        agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
@@ -1053,6 +1054,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             worker_tools_override,
             allowed_shared_services,
             tool_output_workspace_root,
+            agent_state_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
@@ -1099,6 +1101,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
+        agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
@@ -1113,6 +1116,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             worker_tools_override,
             allowed_shared_services,
             tool_output_workspace_root,
+            agent_state_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
@@ -1955,6 +1959,21 @@ def test_workspace_knowledge_links_never_follow_a_swapped_knowledge_directory(
     assert list(victim_knowledge.iterdir()) == []
 
 
+def test_workspace_knowledge_links_never_follow_a_replaced_workspace(tmp_path: Path) -> None:
+    """A workspace replaced by a link after runtime resolution never receives the primary's knowledge links."""
+    workspace = tmp_path / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True)
+    victim = tmp_path / "credentials"
+    (victim / "research").mkdir(parents=True)
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        workspaces_module.ensure_workspace_knowledge_links(workspace, knowledge_paths={"research": victim / "research"})
+
+    assert sorted(entry.name for entry in victim.iterdir()) == ["research"]
+
+
 def test_resolve_agent_runtime_removes_stale_workspace_knowledge_links(tmp_path: Path) -> None:
     """Removing a bound knowledge base should remove its canonical workspace alias."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -2679,6 +2698,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
+        agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
@@ -2692,6 +2712,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             worker_tools_override,
             allowed_shared_services,
             tool_output_workspace_root,
+            agent_state_root,
             tool_output_auto_save_threshold_bytes,
             runtime_config,
         )
@@ -4903,6 +4924,9 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("agent_modes.json", "private.root must not use reserved runtime directory 'agent_modes.json'"),
         ("agent_modes.lock", "private.root must not use reserved runtime directory 'agent_modes.lock'"),
         (".sessions-recovery.lock", "private.root must not use reserved runtime directory '.sessions-recovery.lock'"),
+        ("browser", "private.root must not use reserved runtime directory 'browser'"),
+        ("browser-profiles", "private.root must not use reserved runtime directory 'browser-profiles'"),
+        ("browser-profiles/mindroom", "private.root must not use reserved runtime directory 'browser-profiles'"),
     ],
 )
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:

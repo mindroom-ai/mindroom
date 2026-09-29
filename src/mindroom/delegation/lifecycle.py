@@ -15,11 +15,13 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.delegation.audit import (
     child_audit_context,
+    child_response_usage,
     finish_child_record,
     record_child_response,
     start_child_record,
 )
 from mindroom.delegation.audit import observe_child_event as record_child_event
+from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -143,14 +145,20 @@ async def settle_child_response(
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
     await update_subagent_turn(child, runtime_paths)
-    usage = await record_child_response(
-        child,
-        response,
-        config=config,
-        runtime_paths=runtime_paths,
-        decisions=decisions,
-        denial_reasons=denial_reasons,
-    )
+    try:
+        usage = await record_child_response(
+            child,
+            response,
+            config=config,
+            runtime_paths=runtime_paths,
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
+    except DelegationRecordLimitError:
+        if child.status not in _TERMINAL:
+            raise
+        # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
+        usage = child_response_usage(response)
     if child.status in _TERMINAL:
         await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
 

@@ -64,5 +64,3 @@ docs
 
 # Scripts (not needed in Docker)
 scripts
-deploy.sh
-redeploy-*.sh

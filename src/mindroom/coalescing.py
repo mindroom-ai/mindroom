@@ -255,6 +255,10 @@ class CoalescingGate:
         gate = self._gates.get(key)
         return tuple(queued.pending_event for queued in gate.queue) if gate is not None else ()
 
+    def has_pending_work(self, key: CoalescingKey) -> bool:
+        """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
+        return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
+
     def follow_up_backlog_queues_other_requester(self, key: CoalescingKey, requester_user_id: str) -> bool:
         """Return whether an active follow-up backlog still queues events from a different requester."""
         return is_active_follow_up_coalescing_key(key) and any(

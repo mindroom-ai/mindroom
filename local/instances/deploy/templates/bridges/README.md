@@ -7,8 +7,8 @@ This directory contains Matrix bridge configurations and the bridge management t
 The bridge manager generates local bridge files and controls bridge containers:
 
 ```bash
-# Add a Telegram bridge to an instance
-./bridge.py add telegram --instance default
+# Add a Telegram bridge to an instance; only --admin gets more than relay access
+./bridge.py add telegram --instance default --admin @you:m-default.example.com
 
 # Generate registration file
 ./bridge.py register telegram --instance default
@@ -73,6 +73,7 @@ First, get your credentials:
 Then add the bridge:
 ```bash
 ./bridge.py add telegram --instance yourinstance \
+  --admin @you:m-yourinstance.mindroom.chat \
   --api-id YOUR_API_ID \
   --api-hash YOUR_API_HASH \
   --bot-token YOUR_BOT_TOKEN
@@ -129,10 +130,10 @@ You can run bridges on multiple instances with different bots:
 
 ```bash
 # Add bridge to 'default' instance
-./bridge.py add telegram --instance default --bot-token TOKEN1
+./bridge.py add telegram --instance default --admin @you:m-default.example.com --bot-token TOKEN1
 
 # Add bridge to 'alt' instance with a different bot
-./bridge.py add telegram --instance alt --bot-token TOKEN2
+./bridge.py add telegram --instance alt --admin @you:m-alt.example.com --bot-token TOKEN2
 
 # Start all bridges for an instance
 ./bridge.py start --all --instance default

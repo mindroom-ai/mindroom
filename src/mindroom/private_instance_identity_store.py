@@ -199,7 +199,8 @@ def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 
     if record_stat.st_size > max_bytes:
         _raise_invalid_record("exceeds the size limit")
     try:
-        descriptor = os.open(record_path, os.O_RDONLY | os.O_NOFOLLOW)
+        # Non-blocking, so a FIFO swapped in after the type check fails the check below instead of stalling here.
+        descriptor = os.open(record_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as error:
         _raise_unreadable_record(error)
     try:

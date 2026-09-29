@@ -4328,6 +4328,12 @@ google-sheets = [
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
 ]
+google-tasks = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
 googlesearch = [
     { name = "ddgs" },
 ]
@@ -4586,21 +4592,25 @@ requires-dist = [
     { name = "google-api-python-client", marker = "extra == 'google-docs'", specifier = ">=2.178" },
     { name = "google-api-python-client", marker = "extra == 'google-drive'", specifier = ">=2.178" },
     { name = "google-api-python-client", marker = "extra == 'google-sheets'", specifier = ">=2.178" },
+    { name = "google-api-python-client", marker = "extra == 'google-tasks'", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'gmail'", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'google-calendar'", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'google-docs'", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'google-drive'", specifier = ">=2.40.3" },
+    { name = "google-auth", marker = "extra == 'google-tasks'", specifier = ">=2.40.3" },
     { name = "google-auth-httplib2", marker = "extra == 'gmail'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-calendar'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-docs'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-drive'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-sheets'", specifier = ">=0.2" },
+    { name = "google-auth-httplib2", marker = "extra == 'google-tasks'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'gmail'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-calendar'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-docs'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google-tasks'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
     { name = "google-genai", specifier = ">=2" },
     { name = "google-genai", marker = "extra == 'gemini'" },
@@ -4726,7 +4736,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "atlassian", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "skill-manage", "slack", "sleep", "spider", "spotify", "sql", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "atlassian", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "google-tasks", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "skill-manage", "slack", "sleep", "spider", "spotify", "sql", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 desktop-helper = [

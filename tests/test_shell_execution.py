@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.shell_execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell_execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
@@ -191,5 +191,79 @@ async def test_caller_capture_receives_exit_code_and_full_spool(
         assert capture.return_codes == [3]
         assert capture.stdout.read() == "kept output"
         assert list(tmp_path.iterdir()) == []
+    finally:
+        capture.release()
+
+
+@pytest.mark.asyncio
+async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the_same(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Callers learn whether a signal reached the group, while kill_command keeps its exact wording."""
+    capture = _RecordingCapture(tmp_path)
+    try:
+        started = await run_command(
+            registry,
+            namespace="test",
+            argv=["/bin/sh", "-c", "sleep 30"],
+            env={"PATH": os.defpath},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=0.2,
+            output_capture=capture,
+        )
+        assert started.handle is not None
+        record = registry[started.handle]
+
+        def vanished(_pid: int, _signal: int) -> None:
+            raise ProcessLookupError
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "killpg", vanished)
+            assert signal_record(record) is False
+            assert kill_command(registry, namespace="test", handle=started.handle) == (
+                f"Process {record.pid} already exited"
+            )
+        assert capture.incomplete is False
+        assert kill_command(registry, namespace="test", handle=started.handle) == (
+            f"Terminated process {record.pid} (SIGTERM sent). Use check_shell_command('{started.handle}') to confirm exit."
+        )
+        assert capture.incomplete is True
+        assert await _wait_until_gone(record.pid)
+    finally:
+        capture.release()
+
+
+@pytest.mark.asyncio
+async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_finished_record(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """An opted-in caller gets a finished record to page later, while the default still registers nothing."""
+    capture = _RecordingCapture(tmp_path)
+    try:
+        result = await run_command(
+            registry,
+            namespace="test",
+            argv=["/bin/sh", "-c", "printf kept; exit 3"],
+            env={"PATH": os.defpath},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=10,
+            output_capture=capture,
+            register_finished=True,
+        )
+        assert result.handle is not None
+        record = registry[result.handle]
+        assert (record.finished, record.return_code, record.namespace) == (True, 3, "test")
+        assert record.finished_at is not None
+        assert (capture.return_codes, capture.stdout.read()) == ([3], "kept")
+        assert kill_command(registry, namespace="test", handle=result.handle) == (
+            "Process already finished (exit code 3)"
+        )
+        await _run(registry, ["/bin/sh", "-c", "true"], tmp_path)
+        assert list(registry) == [result.handle]
     finally:
         capture.release()

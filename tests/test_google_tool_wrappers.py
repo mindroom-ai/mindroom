@@ -35,8 +35,9 @@ from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.custom_tools.google_tasks import GoogleTasksTools
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import (
@@ -75,6 +76,7 @@ def _save_scoped_oauth_credentials(
         GoogleDocsTools._oauth_provider,
         GoogleDriveTools._oauth_provider,
         GoogleSheetsTools._oauth_provider,
+        GoogleTasksTools._oauth_provider,
     )
     provider = next(provider for provider in providers if provider.credential_service == service)
     publish_oauth_credentials(
@@ -122,7 +124,7 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
 @pytest.mark.parametrize(
     "tool_class",
-    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools, GoogleTasksTools],
 )
 def test_google_wrappers_allow_isolating_worker_scopes(
     worker_scope: str,
@@ -157,7 +159,7 @@ def test_google_wrappers_allow_isolating_worker_scopes(
 
 @pytest.mark.parametrize(
     "tool_class",
-    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools, GoogleTasksTools],
 )
 def test_google_service_cache_is_isolated_per_thread(
     tool_class: type[Any],
@@ -293,7 +295,7 @@ def test_google_account_cache_is_thread_local(cache_field: str, values: tuple[ob
     assert observed == list(values)
 
 
-def test_google_service_account_configured_checks_instance_and_runtime_values(
+def test_google_api_toolkit_service_account_fallback_checks_instance_and_runtime_values(
     runtime_paths: RuntimePaths,
     tmp_path: Path,
 ) -> None:
@@ -307,9 +309,17 @@ def test_google_service_account_configured_checks_instance_and_runtime_values(
         },
     )
 
-    assert google_service_account_configured(str(service_account_path), runtime_paths) is True
-    assert google_service_account_configured(None, runtime_paths_with_env) is True
-    assert google_service_account_configured(None, runtime_paths) is False
+    def docs_tool(paths: RuntimePaths, **kwargs: object) -> GoogleDocsTools:
+        return GoogleDocsTools(
+            runtime_paths=paths,
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            worker_target=None,
+            **kwargs,
+        )
+
+    assert docs_tool(runtime_paths, service_account_path=str(service_account_path))._should_fallback_to_original_auth()
+    assert docs_tool(runtime_paths_with_env)._should_fallback_to_original_auth() is True
+    assert docs_tool(runtime_paths)._should_fallback_to_original_auth() is False
 
 
 @pytest.mark.parametrize(
@@ -326,6 +336,10 @@ def test_google_service_account_configured_checks_instance_and_runtime_values(
         (
             GoogleSheetsTools,
             list(GoogleSheetsTools._oauth_provider.scopes),
+        ),
+        (
+            GoogleTasksTools,
+            list(GoogleTasksTools._oauth_provider.scopes),
         ),
     ],
 )
@@ -364,6 +378,7 @@ def test_google_wrapper_build_credentials_uses_provider_scopes(
         ("google_docs", "google_docs_oauth"),
         ("google_drive", "google_drive_oauth"),
         ("google_sheets", "google_sheets_oauth"),
+        ("google_tasks", "google_tasks_oauth"),
     ],
 )
 def test_google_wrappers_load_provider_oauth_credentials(
@@ -395,7 +410,10 @@ def test_google_wrappers_load_provider_oauth_credentials(
         worker_target=None,
     )
 
-    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools))
+    assert isinstance(
+        tool,
+        (GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools, GoogleTasksTools),
+    )
     assert tool._load_token_data() is not None
 
 
@@ -640,7 +658,7 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
 
 @pytest.mark.parametrize(
     "tool_class",
-    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools, GoogleTasksTools],
 )
 def test_google_credential_read_failure_does_not_require_reconnect(
     monkeypatch: pytest.MonkeyPatch,
@@ -1935,6 +1953,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
             callback_context,
             "account-b-code",
             "pkce-verifier",
+            token_url=callback_context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         )
 
@@ -2014,6 +2033,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
         callback_context,
         "account-b-code",
         "pkce-verifier",
+        token_url=callback_context.provider.token_url,
         expected_connection_generation=issued_connection_generation,
     )
 

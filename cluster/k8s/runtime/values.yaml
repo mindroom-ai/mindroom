@@ -253,8 +253,9 @@ env:
   envFrom: []
 
 apiAuth:
-  # With workers.backend=static_runner, sidecar tool code can reach the primary API on localhost,
-  # so the chart gives the primary a generated MINDROOM_API_KEY; set true only when other API auth is configured.
+  # Worker tool code can reach the primary API, on localhost from the static_runner sidecar or over the
+  # pod network from dedicated Kubernetes workers, so the chart gives the primary a generated MINDROOM_API_KEY;
+  # set true only when other API auth is configured.
   allowUnauthenticatedPrimary: false
 
 matrix:

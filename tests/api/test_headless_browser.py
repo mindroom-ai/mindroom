@@ -268,20 +268,43 @@ async def test_headless_environment_rotation_closes_old_profile(
     browser_processes: list[BrowserProcess],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prepared proxy changes replace the browser without exposing ambient secrets."""
+    """Prepared proxy changes replace the browser and its egress route without exposing ambient secrets."""
     client, payload, _root, _config = headless_client
     monkeypatch.setenv("UNRELATED_CONTROL_SECRET", "must-stay-in-runner")
-    monkeypatch.setenv("HTTP_PROXY", "http://first:3128")
-    await _call(client, payload, action="start")
-    first = browser_processes[0]
-    assert first.launch["headless"] is True
-    assert first.launch["env"]["HTTP_PROXY"] == "http://first:3128"
-    assert "UNRELATED_CONTROL_SECRET" not in first.launch["env"]
-    monkeypatch.setenv("HTTP_PROXY", "http://second:3128")
-    await _call(client, payload, action="start")
-    assert not first.live_resources
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    for proxy in ("http://first:3128", "http://second:3128"):
+        # A lone HTTP_PROXY is the worker's single egress route for every browser connection.
+        monkeypatch.setenv("HTTP_PROXY", proxy)
+        await _call(client, payload, action="start")
+        launch = browser_processes[-1].launch
+        assert launch["headless"] is True
+        assert launch["env"]["HTTP_PROXY"] == proxy
+        # The destination relay stays Chromium's only proxy and tunnels through the worker's egress proxy.
+        assert launch["proxy"]["server"].startswith("socks5://127.0.0.1:")
+        assert launch["proxy"]["bypass"] == "<-loopback>"
+        assert "UNRELATED_CONTROL_SECRET" not in launch["env"]
+    assert not browser_processes[0].live_resources
     assert len(browser_processes) == 2
-    assert browser_processes[1].launch["env"]["HTTP_PROXY"] == "http://second:3128"
+
+
+@pytest.mark.asyncio
+async def test_headless_browser_without_egress_proxy_dials_through_destination_relay(
+    headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
+    browser_processes: list[BrowserProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A headless worker browser without an egress proxy validates every dialed address."""
+    client, payload, _root, _config = headless_client
+    for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    await _call(client, payload, action="start")
+    proxy = browser_processes[0].launch["proxy"]
+    assert isinstance(proxy, dict)
+    assert proxy["server"].startswith("socks5://127.0.0.1:")
+    assert proxy["bypass"] == "<-loopback>"
 
 
 @pytest.mark.asyncio

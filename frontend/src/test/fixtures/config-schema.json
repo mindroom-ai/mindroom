@@ -1423,7 +1423,7 @@
             }
           ],
           "default": 0.2,
-          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
+          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
           "title": "Thread Summary Temperature"
         },
         "thread_summary_first_threshold": {
@@ -2797,7 +2797,7 @@
             }
           ],
           "default": null,
-          "description": "Optional API key (usually from env vars)",
+          "description": "Optional model-specific API key used instead of the provider's shared key",
           "title": "Api Key",
           "x-mindroom": {
             "secret": true

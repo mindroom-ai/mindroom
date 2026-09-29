@@ -53,7 +53,7 @@ from mindroom.shell_supervisor import (
     run_command_via_supervisor,
 )
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
+from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -775,6 +775,7 @@ class ScriptRunManager:
                     if worker_spec.private_agent_names is not None
                     else None
                 ),
+                config_snapshot=runner_config_snapshot(context.runtime_paths, context.config),
             )
         except BaseException as exc:
             await self._preserve_ambiguous_launch(context, run.run_id)

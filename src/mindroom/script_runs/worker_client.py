@@ -70,8 +70,12 @@ class ScriptWorkerClient:
         max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
+        config_snapshot: dict[str, object] | None = None,
     ) -> None:
-        """Launch the run's fixed source snapshot under its derived handle."""
+        """Launch the run's fixed source snapshot under its derived handle.
+
+        ``config_snapshot`` is the primary's live config without secrets, for workers that mount only a seed config.
+        """
         data = await self._request(
             worker,
             method="POST",
@@ -85,6 +89,7 @@ class ScriptWorkerClient:
                 "gateway_url": gateway_url,
                 "max_runtime_seconds": max_runtime_seconds,
                 "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,
+                "config_snapshot": config_snapshot,
             },
         )
         self._raise_structured_failure(data)

@@ -108,11 +108,11 @@ class TestWebhookEndpoints:
                             "metadata": {"tier": tier, "billing_cycle": billing_cycle},
                         },
                         "quantity": quantity,
+                        "current_period_start": 1700000000,
+                        "current_period_end": 1702678400,
                     }
                 ]
             },
-            "current_period_start": 1700000000,
-            "current_period_end": 1702678400,
             "trial_end": None,
         }
 
@@ -358,8 +358,8 @@ class TestWebhookEndpoints:
     ):
         """Common projection retains timestamp omission and event-specific fields."""
         subscription = self._create_subscription_data(tier="pro")
-        subscription["current_period_start"] = period_timestamp
-        subscription["current_period_end"] = period_timestamp
+        subscription["items"]["data"][0]["current_period_start"] = period_timestamp
+        subscription["items"]["data"][0]["current_period_end"] = period_timestamp
         subscription["trial_end"] = 0
         subscription["canceled_at"] = 0
         mock_stripe_signature.return_value = self._create_stripe_event(

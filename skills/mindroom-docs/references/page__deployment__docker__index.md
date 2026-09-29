@@ -152,6 +152,11 @@ The container exposes a health endpoint on port 8765:
 curl http://localhost:8765/api/health
 ```
 
+An unpaired hosted container answers `/api/health` with `200` while it waits for pairing approval, so a health check does not restart it and replace its pairing code.
+During that wait, `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`.
+After approval, the port is briefly closed while the full API server takes it over, as at any startup, and `/api/ready` then reports normal startup progress until MindRoom is ready.
+Find the approval link in the container logs.
+
 ## Data Persistence
 
 MindRoom stores data in the `mindroom_data` directory by default:

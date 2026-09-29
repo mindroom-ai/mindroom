@@ -33,6 +33,7 @@ class _PendingOAuthState:
     execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
     code_verifier: str | None
+    token_url: str | None
 
 
 def issue_pending_oauth_state(
@@ -42,6 +43,7 @@ def issue_pending_oauth_state(
     *,
     payload: dict[str, str] | None = None,
     code_verifier: str | None = None,
+    token_url: str | None = None,
     browser_user_required: bool = True,
 ) -> str:
     """Create opaque OAuth state bound to a browser user or conversation capability."""
@@ -66,6 +68,7 @@ def issue_pending_oauth_state(
             "execution_scope_override": execution_scope_override or "",
             "payload": payload or {},
             "code_verifier": code_verifier or "",
+            "token_url": token_url or "",
         },
     )
 
@@ -111,6 +114,7 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
         else None
     )
     code_verifier = data.get("code_verifier")
+    token_url = data.get("token_url")
     return _PendingOAuthState(
         browser_user_required=browser_user_required,
         agent_name=agent_name if isinstance(agent_name, str) and agent_name else None,
@@ -118,4 +122,5 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
         execution_scope_override=cast("WorkerScope | None", execution_scope_override),
         payload=payload,
         code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
+        token_url=token_url if isinstance(token_url, str) and token_url else None,
     )
