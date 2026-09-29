@@ -106,7 +106,7 @@ if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     exit 1
 fi
 
-# An Intel uv would run under Rosetta and install an Intel runtime that cannot get its wheels.
+# An Intel uv would need Rosetta, which Apple silicon Macs do not install by default.
 if ! lipo "$UV_BINARY" -verify_arch arm64; then
     echo "The bundled uv must support Apple silicon: $UV_BINARY" >&2
     exit 1
