@@ -233,8 +233,8 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
     try:
         with Image.open(io.BytesIO(media_bytes)) as image:
             width, height = image.size
-            # Reading EXIF can decode the whole raster, as for a PNG whose eXIf chunk follows its image data.
-            if width * height > _MAX_EXIF_READ_PIXELS:
+            # A PNG whose eXIf chunk follows its image data decodes the whole raster to read EXIF.
+            if image.format == "PNG" and "exif" not in image.info and width * height > _MAX_EXIF_READ_PIXELS:
                 return {}
             orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
