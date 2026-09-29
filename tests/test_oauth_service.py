@@ -531,7 +531,7 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
             callback_started.set()
             release_callback.wait()
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", TokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", TokenClient)
     provider = OAuthProvider(
         id="demo_provider",
         display_name="Demo Provider",

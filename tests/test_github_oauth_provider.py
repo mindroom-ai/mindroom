@@ -104,7 +104,7 @@ def test_github_token_exchange_normalizes_rotating_user_token(tmp_path: Path) ->
     }
 
     with patch(
-        "mindroom.oauth.providers.AsyncOAuth2Client.fetch_token",
+        "authlib.integrations.httpx_client.AsyncOAuth2Client.fetch_token",
         new=AsyncMock(return_value=token_response),
     ):
         result = asyncio.run(
@@ -160,7 +160,7 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         worker_target=None,
     )
     with patch(
-        "mindroom.oauth.providers.AsyncOAuth2Client.refresh_token",
+        "authlib.integrations.httpx_client.AsyncOAuth2Client.refresh_token",
         new=AsyncMock(return_value=refresh_response),
     ):
         refreshed = asyncio.run(refresh_oauth_credentials(context))
@@ -202,7 +202,7 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
 
     with (
         patch(
-            "mindroom.oauth.providers.AsyncOAuth2Client.refresh_token",
+            "authlib.integrations.httpx_client.AsyncOAuth2Client.refresh_token",
             new=AsyncMock(
                 side_effect=AuthlibBaseError(
                     error="bad_refresh_token",

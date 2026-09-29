@@ -213,7 +213,7 @@ async def test_expiring_token_is_refreshed_through_the_atlassian_token_endpoint(
     def oauth_client(**kwargs: object) -> AsyncOAuth2Client:
         return AsyncOAuth2Client(transport=httpx.MockTransport(token_endpoint), **kwargs)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", oauth_client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", oauth_client)
     gateway = FakeGateway(sites_by_token={"rotated-token": [site()]}).install(monkeypatch)
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/PROJ-1"), {"key": "PROJ-1", "id": "10001"})
 
@@ -251,7 +251,7 @@ async def test_refresh_failures_ask_to_reconnect_or_to_retry(
         response = httpx.Response(status_code, json={"error": error, "error_description": "secret-detail"})
         return AsyncOAuth2Client(transport=httpx.MockTransport(lambda _request: response), **kwargs)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", oauth_client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", oauth_client)
     gateway = FakeGateway().install(monkeypatch)
 
     result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))

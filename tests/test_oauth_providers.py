@@ -152,7 +152,7 @@ async def test_token_requests_refuse_dynamic_client_registered_for_another_endpo
         token_endpoint_auth_method="none",  # noqa: S106
         runtime_bootstrapper=bootstrap,
     )
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", _UnexpectedTokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
 
     request = (
         provider.exchange_code("authorization-code", runtime_paths, token_url=provider.token_url)

@@ -246,7 +246,7 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
     def client_factory(**kwargs: object) -> AsyncOAuth2Client:
         return AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", client_factory)
     refreshed = asyncio.run(
         provider.refresh_token_data(
             {
@@ -304,9 +304,9 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
             **kwargs,
         )
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", client_factory)
     monkeypatch.setattr(
-        "mindroom.oauth.google.google_id_token.verify_oauth2_token",
+        "google.oauth2.id_token.verify_oauth2_token",
         lambda *_args: {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
     )
 
@@ -420,8 +420,8 @@ def test_google_token_parser_bounds_identity_certificate_fetch(
         request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
         return {"sub": "subject-1", "email": "alice@example.com", "email_verified": True}
 
-    monkeypatch.setattr("mindroom.oauth.google.GoogleRequest", _Request)
-    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", verify_token)
+    monkeypatch.setattr("google.auth.transport.requests.Request", _Request)
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", verify_token)
     provider = google_drive_oauth_provider()
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 

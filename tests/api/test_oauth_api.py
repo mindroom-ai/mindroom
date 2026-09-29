@@ -1277,7 +1277,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, token_url=provider.token_url))
@@ -1336,7 +1336,7 @@ def test_provider_refresh_token_data_skips_unexpired_access_token(
         def __init__(self, **_kwargs: object) -> None:
             seen["created"] = True
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     refreshed = asyncio.run(
@@ -1397,7 +1397,7 @@ def test_provider_refresh_token_data_sanitizes_terminal_error_body(
             msg = "Bad Request"
             raise HTTPStatusError(msg, request=request, response=response)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     with pytest.raises(OAuthRefreshRejectedError) as exc_info:
@@ -1455,7 +1455,7 @@ def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
             msg = "Bad Request"
             raise HTTPStatusError(msg, request=request, response=response)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     with pytest.raises(OAuthProviderError) as exc_info:
@@ -1506,7 +1506,7 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     refreshed = asyncio.run(
@@ -1633,7 +1633,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
                 **response_fields,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     refreshed = asyncio.run(
@@ -1686,7 +1686,7 @@ def test_provider_refresh_token_data_preserves_verified_claims_for_default_parse
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     refreshed = asyncio.run(
@@ -1743,7 +1743,7 @@ def test_google_provider_refresh_preserves_verified_claim_summary(
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     refreshed = asyncio.run(
@@ -1820,7 +1820,7 @@ def test_pkce_provider_exchange_sends_code_verifier(
                 "scope": "scope.read",
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
 
     result = asyncio.run(
         provider.exchange_code(
@@ -1883,7 +1883,7 @@ def test_custom_token_parser_exchange_receives_provider_payload_and_core_stamps_
         async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
             return {"access_token": "access-token"}
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
 
     result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, token_url=provider.token_url))
 
@@ -2220,7 +2220,7 @@ def test_google_token_parser_rejects_invalid_id_token_with_claim_error(
         msg = "invalid token"
         raise ValueError(msg)
 
-    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", _raise_invalid_token)
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _raise_invalid_token)
 
     with pytest.raises(OAuthClaimValidationError, match="Google identity token verification failed"):
         provider.token_parser(
@@ -3314,7 +3314,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
                 "expires_in": 3600,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     config = main._app_context(api_app).runtime_config
     assert config is not None
     generated_provider = load_oauth_providers(config, runtime_paths)["mcp_demo"]
@@ -6146,7 +6146,7 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -6216,7 +6216,7 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
             msg = "transient refresh failure"
             raise HTTPError(msg)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
     monkeypatch.setattr("mindroom.oauth.credential_lifecycle.time.time", lambda: 1000.0)
 
@@ -6286,7 +6286,7 @@ def test_status_disconnects_after_terminal_refresh_rejection(
             message = "refresh rejected"
             raise HTTPStatusError(message, request=request, response=response)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
     monkeypatch.setattr("mindroom.oauth.credential_lifecycle.time.time", lambda: 1000.0)
 
@@ -6345,7 +6345,7 @@ def test_status_does_not_refresh_credentials_missing_required_scopes(
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):

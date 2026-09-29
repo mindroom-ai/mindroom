@@ -9,10 +9,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-from google.auth import exceptions as google_auth_exceptions
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2 import id_token as google_id_token
-from requests import exceptions as requests_exceptions
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
@@ -214,6 +210,12 @@ def _google_token_parser(
         msg = "Google did not return a verifiable identity token"
         raise OAuthClaimValidationError(msg)
     else:
+        # google-auth and requests load only when a Google sign-in completes.
+        from google.auth import exceptions as google_auth_exceptions  # noqa: PLC0415
+        from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
+        from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
+        from requests import exceptions as requests_exceptions  # noqa: PLC0415
+
         try:
             claims = google_id_token.verify_oauth2_token(
                 id_token,

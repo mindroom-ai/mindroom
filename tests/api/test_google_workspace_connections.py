@@ -10,12 +10,12 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import jwt
 import pytest
+from authlib.integrations import httpx_client as authlib_httpx_client
 from fastapi.testclient import TestClient
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import providers as providers_module
 from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -280,14 +280,14 @@ def test_additional_callback_and_reset_preserve_other_credentials(
             },
         )
 
-    real_client = providers_module.AsyncOAuth2Client
+    real_client = authlib_httpx_client.AsyncOAuth2Client
     monkeypatch.setattr(
-        providers_module,
+        authlib_httpx_client,
         "AsyncOAuth2Client",
         lambda **kwargs: real_client(transport=httpx.MockTransport(token_response), **kwargs),
     )
     monkeypatch.setattr(
-        "mindroom.oauth.google.google_id_token.verify_oauth2_token",
+        "google.oauth2.id_token.verify_oauth2_token",
         lambda _token, _request, audience: {
             "sub": "secondary-subject",
             "email": "alice@secondary.example",

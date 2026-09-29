@@ -346,6 +346,11 @@ def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
     _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
 
 
+def test_api_app_defers_heavy_optional_dependencies() -> None:
+    """The API app import must leave the same engines and the authlib OAuth clients unloaded."""
+    _assert_probe_clean("mindroom.api.main", (*_HEAVY_OPTIONAL_RUNTIME_ROOTS, "authlib.integrations", "joserfc"))
+
+
 def test_worker_retirement_is_a_standard_library_leaf() -> None:
     """The retirement boundary exposes its descriptor-bound operations without loading another MindRoom module."""
     probe = """

@@ -11,11 +11,11 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from authlib.integrations import httpx_client as authlib_httpx_client
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import providers as providers_module
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot_sync,
     refresh_oauth_credentials,
@@ -282,9 +282,9 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
             json={"access_token": "refreshed-access", "token_type": "Bearer", "expires_in": 3600},
         )
 
-    real_client = providers_module.AsyncOAuth2Client
+    real_client = authlib_httpx_client.AsyncOAuth2Client
     monkeypatch.setattr(
-        providers_module,
+        authlib_httpx_client,
         "AsyncOAuth2Client",
         lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
     )

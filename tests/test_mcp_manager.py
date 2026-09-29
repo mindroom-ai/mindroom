@@ -1055,7 +1055,7 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         message = "diagnostic credential storage is unavailable"
         raise OAuthProviderError(message)
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RejectingOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", RejectingOAuth2Client)
     monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", fail_diagnostic_load)
 
     with patch("mindroom.mcp.manager.logger") as mock_logger, pytest.raises(OAuthConnectionRequired) as exc_info:
@@ -1191,7 +1191,7 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RecoveringOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", RecoveringOAuth2Client)
     toolkit = MindRoomMCPToolkit(
         server_id="demo",
         manager=manager,
@@ -1640,7 +1640,7 @@ async def test_mcp_manager_logs_successful_oauth_refresh_and_persists_credential
                 "expires_in": 300,
             }
 
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RefreshingOAuth2Client)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", RefreshingOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
 
     with patch("mindroom.mcp.manager.logger") as mock_logger:

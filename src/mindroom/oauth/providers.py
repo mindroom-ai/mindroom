@@ -31,13 +31,12 @@ from mindroom.credential_policy import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
+# The authlib OAuth clients pull in requests and joserfc, so they are imported where a client is built.
 warnings.filterwarnings(
     "ignore",
     category=AuthlibDeprecationWarning,
     module="authlib._joserfc_helpers",
 )
-from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: E402
-from authlib.integrations.requests_client import OAuth2Session  # noqa: E402
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -796,6 +795,8 @@ class OAuthProvider:
     ) -> str:
         """Build the provider authorization URL from endpoints the caller resolved and bound to the state."""
         client_config = await self.require_client_config_async(runtime_paths)
+        from authlib.integrations.requests_client import OAuth2Session  # noqa: PLC0415
+
         client = OAuth2Session(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
@@ -860,6 +861,8 @@ class OAuthProvider:
                 token_url=token_url,
             )
 
+        from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
+
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
@@ -919,6 +922,8 @@ class OAuthProvider:
         if stored_token_url != endpoints.token_url:
             raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
         client_config = await self._require_client_config_for_token_url(runtime_paths, endpoints.token_url)
+        from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
+
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,

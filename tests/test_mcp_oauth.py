@@ -703,7 +703,7 @@ async def test_mcp_oauth_refuses_bound_dynamic_client_after_move_with_registrati
     monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", _UnexpectedTokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
     assert (
         await _authorized_client_id(mcp_oauth_provider("demo", _auto_oauth_mcp_server_config()), runtime_paths)
         == "client-of-auth.example.test"
@@ -770,7 +770,7 @@ async def test_mcp_oauth_code_exchange_rejects_token_endpoint_discovered_after_a
     """A flow straddling a discovery refresh never sends its code and verifier to a newly discovered endpoint."""
     runtime_paths = _runtime_paths(tmp_path)
     monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", _UnexpectedTokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "mcp_demo_oauth_client",
         {"client_id": "registered-client-id"},
@@ -823,7 +823,7 @@ async def test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authori
         "authorization_server",
         "https://attacker.example.test",
     )
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", _UnexpectedTokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials("mcp_demo_oauth_client", {"client_id": "registered-client-id"})
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
