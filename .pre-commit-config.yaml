@@ -1,3 +1,6 @@
+# `pre-commit install` also installs the commit-msg hook; hooks without explicit stages still run only before commits.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -83,6 +86,12 @@ repos:
         entry: bash -c 'env -u VIRTUAL_ENV uv run privata --methods .'
         language: system
         pass_filenames: false
+
+      - id: check-commit-attribution
+        name: Reject Claude attribution in commit messages
+        entry: .venv/bin/python .github/scripts/check_commit_attribution.py
+        language: system
+        stages: [commit-msg]
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.26.0"
