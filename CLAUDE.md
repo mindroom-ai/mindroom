@@ -93,7 +93,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | Module | Purpose |
 |--------|---------|
 | `bounded_bytes.py` | Shared byte collection: the asynchronous collector rejects overflowing chunks before buffering them, and the synchronous one keeps a marked prefix |
-| `bounded_http_body.py` | Identity-encoded HTTP body prefixes read raw, refusing compressed bodies unread |
+| `bounded_http_body.py` | HTTP exchange read deadlines enforced through owned connection duplicates, and identity-encoded body prefixes read raw, refusing compressed bodies unread |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
