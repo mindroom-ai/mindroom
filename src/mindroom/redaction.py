@@ -628,7 +628,7 @@ def _review_mapping_key(
     key_text: str,
     index: int,
     *,
-    original_key_texts: frozenset[str],
+    unchanged_key_texts: frozenset[str],
     taken: Mapping[str, object],
     placeholders: dict[str, str],
 ) -> str:
@@ -638,10 +638,10 @@ def _review_mapping_key(
     however many keys collide, and a key review left alone always keeps its own text.
     """
     review_key = _redact_review_tokens(key_text, max_length=None, placeholders=placeholders)
-    if review_key == key_text or (review_key not in original_key_texts and review_key not in taken):
+    if review_key == key_text or (review_key not in unchanged_key_texts and review_key not in taken):
         return review_key
     review_key = f"{review_key}\ufffd{index}"
-    while review_key in original_key_texts or review_key in taken:
+    while review_key in unchanged_key_texts or review_key in taken:
         review_key += "\ufffd"
     return review_key
 
@@ -665,7 +665,12 @@ def _redact_mapping(
     items = list(value.items()) if max_collection_items is None else list(islice(value.items(), max_collection_items))
     key_texts = [_safe_str(key) for key, _ in items]
     reserved_keys: set[str] | None = None
-    original_key_texts = frozenset(key_texts) if token_placeholders is not None else frozenset()
+    # Only keys that review leaves unchanged keep their text; those are the texts a changed key must avoid.
+    unchanged_key_texts = (
+        frozenset(text for text in key_texts if _redact_review_tokens(text, max_length=None, placeholders={}) == text)
+        if token_placeholders is not None
+        else frozenset()
+    )
     for index, (key, item) in enumerate(items):
         key_text = key_texts[index]
         classification = _classify_key(key)
@@ -691,7 +696,7 @@ def _redact_mapping(
             redacted_key = _review_mapping_key(
                 key_text,
                 index,
-                original_key_texts=original_key_texts,
+                unchanged_key_texts=unchanged_key_texts,
                 taken=redacted,
                 placeholders=token_placeholders,
             )

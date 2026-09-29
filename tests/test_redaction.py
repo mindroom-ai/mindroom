@@ -1129,8 +1129,8 @@ def test_review_copy_treats_keys_like_text() -> None:
     redacted, placeholders = _review_copy({"⟦secret-1⟧": 1, token: 2})
 
     # The escaped key still names a secret, so its value is hidden like any secret-named field.
-    # The hidden token key would read like the literal key's original text, so it is suffixed by position.
-    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧\ufffd1": 2}
+    # The escaped key still names a secret, so its value is hidden like any secret-named field.
+    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧": 2}
     assert placeholders == {token: "⟦secret-1⟧"}
 
 

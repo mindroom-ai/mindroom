@@ -383,6 +383,7 @@ An `sk-` or `pk-` match must also contain a long run mixing letters and digits o
 Each distinct token becomes a numbered placeholder such as `⟦secret-1⟧`, numbered within one card, so equal tokens look equal and different tokens look different.
 A placeholder for a token that contains `--`, which starts a comment in SQL, reads `⟦secret-1 --⟧`, and a literal `⟦` in the arguments is shown as `⟦=` so it cannot pass for a placeholder.
 Floating-point numbers and integers outside ±(2^53 − 1) are shown as text and unpaired surrogates as `�`, because Matrix events cannot carry them.
+Mapping keys get the same treatment as text, and a changed key that would repeat another key's text gets `�` and its position appended so every key stays distinct.
 Other secrets written inline, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, are shown on the card, so keep secrets in credentials or secret-named fields.
 Deny the call when a hidden field, or a placeholder where a command, host, path, or delimiter belongs, could change what runs.
 A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.
