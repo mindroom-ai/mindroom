@@ -1,4 +1,4 @@
-"""Run desktop shell actions, report caller-scoped shell status, and deliver output inline or attached."""
+"""Run desktop shell actions, report local and caller-scoped shell status, and deliver output inline or attached."""
 
 from __future__ import annotations
 
