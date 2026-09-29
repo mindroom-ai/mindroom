@@ -4262,12 +4262,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
             published = _prefix_team_stream_chunk(chunk, attempt_prefix)
-            if isinstance(published, StructuredStreamChunk):
+            # Only a job join starts another attempt after the last published document.
+            if ctx.background_tool_jobs and isinstance(published, StructuredStreamChunk):
                 previous_presentation = StreamingPresentation(
                     response_text=published.content,
                     tool_trace=tuple(deepcopy(published.tool_trace or ())),
                 )
-            elif isinstance(published, str):
+            elif ctx.background_tool_jobs and isinstance(published, str):
                 previous_presentation = StreamingPresentation(response_text=published)
             yield published
 
