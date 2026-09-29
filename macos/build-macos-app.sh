@@ -83,12 +83,12 @@ INSTALL_DIR=${INSTALL_DIR:-/Applications}
 NOTARIZE=${NOTARIZE:-0}
 SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY:-}
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "This script builds a macOS .app bundle and must run on macOS." >&2
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "The MindRoom app must be built natively on an Apple silicon Mac." >&2
     exit 1
 fi
 
-for required_tool in swift xcrun xcodebuild; do
+for required_tool in swift xcrun xcodebuild lipo; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo "$required_tool is required to build the MindRoom app." >&2
         exit 1
@@ -103,6 +103,12 @@ fi
 
 if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     echo "uv is required so it can be bundled into the app. Set UV_BINARY or install uv." >&2
+    exit 1
+fi
+
+# An Intel uv would run under Rosetta and install an Intel runtime that cannot get its wheels.
+if ! lipo "$UV_BINARY" -verify_arch arm64; then
+    echo "The bundled uv must support Apple silicon: $UV_BINARY" >&2
     exit 1
 fi
 
