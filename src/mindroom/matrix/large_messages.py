@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
@@ -49,6 +50,7 @@ _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
+        ACTING_REQUESTER_KEY,
         HOOK_SOURCE_KEY,
         SKIP_MENTIONS_KEY,
         SOURCE_KIND_KEY,

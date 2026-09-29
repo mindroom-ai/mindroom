@@ -16,7 +16,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -78,6 +78,7 @@ from mindroom.matrix_delivery import (
     SendDelivery,
     TurnHandoff,
 )
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -1690,7 +1691,7 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
-        delivery_extra_content = dict(draft.extra_content or {})
+        delivery_extra_content = dict(draft.extra_content or {}) | self._acting_requester_content(request.identity)
         if interactive_response.interactive_metadata is not None:
             delivery_extra_content.update(
                 interactive.build_prompt_content(
@@ -2042,6 +2043,13 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
             return await self._deliver_stream(request)
 
+    def _acting_requester_content(self, identity: ResponseIdentity) -> dict[str, str]:
+        """Name a human requester on the reply, so entities it mentions act for that human."""
+        requester_id = identity.response_envelope.requester_id
+        if not is_human_requester_id(requester_id, self.deps.runtime.config, self.deps.runtime_paths):
+            return {}
+        return {ACTING_REQUESTER_KEY: requester_id}
+
     async def _deliver_stream(
         self,
         request: StreamingDeliveryRequest,
@@ -2070,7 +2078,7 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            extra_content=request.extra_content,
+            extra_content=(request.extra_content or {}) | self._acting_requester_content(request.identity),
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
