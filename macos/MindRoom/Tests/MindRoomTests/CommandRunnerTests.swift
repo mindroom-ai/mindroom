@@ -181,10 +181,7 @@ final class CommandRunnerTests: XCTestCase {
                 return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
             }, showSection: { _ in }
         )
-        let refreshed = expectation(description: "Status refreshed")
-        let observation = runner.$hasRefreshedStatus.filter { $0 }.sink { _ in refreshed.fulfill() }
-        runner.refreshStatus()
-        await fulfillment(of: [refreshed], timeout: 2)
+        await completeFirstStatusRefresh(runner)
 
         for command in [MindRoomCommand.installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted] {
             XCTAssertTrue(runner.isBlockedByRuntimeUpdate(command), command.title)
@@ -200,7 +197,6 @@ final class CommandRunnerTests: XCTestCase {
         await fulfillment(of: [updated], timeout: 2)
         XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.379"]))
         XCTAssertFalse(recorder.arguments.contains { $0.contains("install") && $0.contains("service") || $0.contains("connect") })
-        withExtendedLifetime(observation) {}
     }
 
     @MainActor
@@ -222,9 +218,7 @@ final class CommandRunnerTests: XCTestCase {
         runner.run(.installService)
         XCTAssertFalse(runner.isRunningCommand)
         release.signal()
-        for _ in 0..<300 where !runner.hasRefreshedStatus {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitForStatusRefresh(runner)
         XCTAssertFalse(runner.isBlockedByRuntimeUpdate(.installService))
         XCTAssertEqual(recorder.arguments, [["mindroom", "service", "status", "--logs", "0"]])
     }
@@ -342,6 +336,12 @@ private final class StatusRefreshCalls: @unchecked Sendable {
 @MainActor
 func completeFirstStatusRefresh(_ runner: MindRoomCommandRunner) async {
     runner.refreshStatus()
+    await waitForStatusRefresh(runner)
+}
+
+/// Waits for a status refresh that is already in flight to publish.
+@MainActor
+func waitForStatusRefresh(_ runner: MindRoomCommandRunner) async {
     for _ in 0..<300 where !runner.hasRefreshedStatus {
         try? await Task.sleep(for: .milliseconds(10))
     }

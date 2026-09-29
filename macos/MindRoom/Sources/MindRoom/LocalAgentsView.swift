@@ -87,7 +87,8 @@ struct LocalAgentsView: View {
         case .running: return "Local agents service running"
         case .pairing: return "Waiting for your chat account"
         case .stopped: return "Local agents service stopped"
-        case .notInstalled: return "Runtime installed · Background service not installed"
+        case .notInstalled:
+            return setup.runtimeReady ? "Runtime installed · Background service not installed" : "Runtime update needed · Background service not installed"
         case .runtimeMissing: return "Install the local-agent runtime"
         case .unknown: return "Service status unavailable"
         }
@@ -100,6 +101,7 @@ struct LocalAgentsView: View {
         case .pairing: return "The service is waiting for approval. Choose Connect Account in step 2 to approve this Mac in MindRoom Chat."
         case .stopped: return "The service is installed. Choose Start when you want your agents to run."
         case .notInstalled:
+            if !setup.runtimeReady { return "Update the runtime in step 1 before setup and service installation." }
             return setup.configurationExists
                 ? "You do not need to reinstall MindRoom. Check your setup, then install and start the service in step 4."
                 : "The runtime is ready. Prepare your configuration in step 2, then check and start your agents."
@@ -114,7 +116,7 @@ struct LocalAgentsView: View {
                   systemImage: setup.runtimeReady ? "checkmark.circle.fill" : "arrow.down.circle")
                 .font(.headline)
             if let path = setup.runtimePath {
-                Text(setup.runtimeUpdateReason.map { "\($0) Update it before configuring, checking, or starting agents." }
+                Text(setup.runtimeUpdateReason.map { "\($0) Update it before setup or installing the background service." }
                      ?? "Already installed on this Mac. Continue with your existing configuration or set up a new one.")
                 Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                 if setup.runtimeUpdateReason != nil {

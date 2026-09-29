@@ -58,8 +58,8 @@ final class MindRoomCommandRunner: ObservableObject {
     }
 
     /// `run()` refuses commands that need the runtime matching this app from every entry point until a
-    /// status refresh has read the installed version and found it matching. Settings and the menu bar
-    /// also use this to disable their controls.
+    /// status refresh has read the installed version and found it matching. Settings also uses this to
+    /// disable Apply Runtime to Service.
     func isBlockedByRuntimeUpdate(_ command: MindRoomCommand) -> Bool {
         command.requiresMatchingRuntime && (!hasRefreshedStatus || localSetup.runtimeUpdateReason != nil)
     }
