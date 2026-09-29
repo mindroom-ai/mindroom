@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem
     from mindroom.participation import ParticipationGate
     from mindroom.skill_learning.capture import SkillReviewCapture
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -385,6 +385,9 @@ class CompletedAttempt:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
     status: RunStatus = RunStatus.completed
+    # A streamed team's live document with its trace. It replaces response_text only in a reply that joins jobs,
+    # so the joined attempts extend it rather than a prose-only terminal rendering.
+    join_document: StructuredStreamChunk | None = None
 
 
 @dataclass(frozen=True)
@@ -1351,7 +1354,7 @@ async def stream_response_turn[ChunkT](
     continuation: DynamicContinuationRunState,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
-) -> AsyncGenerator[ChunkT | BackgroundWaitChunk, None]:
+) -> AsyncGenerator[ChunkT | BackgroundWaitChunk | StructuredStreamChunk, None]:
     """Own the whole response while binding context only during pulls and close."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
@@ -1383,7 +1386,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     cli_lifetime: CliTurnLifetime,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
-) -> AsyncGenerator[ChunkT | BackgroundWaitChunk, None]:
+) -> AsyncGenerator[ChunkT | BackgroundWaitChunk | StructuredStreamChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
     try:
@@ -1472,13 +1475,24 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     )
                     continuation = settle.continuation
                     keep_going = settle.keep_going
-                    if settle.response_text:
+                    join_document = resolution.join_document
+                    if join_document is not None and run.attempted_job_outcomes:
+                        # A reply that already joined jobs keeps extending its live document.
+                        yield join_document
+                        join_document = None
+                        resolution = replace(resolution, response_text="")
+                    elif settle.response_text and join_document is None:
                         yield adapter.make_text_chunk(settle.response_text)
                     if not keep_going and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
                         async for joined in join_conversation_jobs(
                             run.attempted_job_outcomes,
                             agent_names=ctx.tool_job_agent_names,
                         ):
+                            if join_document is not None:
+                                yield join_document
+                                join_document = None
+                                # The published document already holds this attempt's text.
+                                resolution = replace(resolution, response_text="")
                             if isinstance(joined, BackgroundWaitChunk):
                                 yield joined
                             else:
@@ -1492,6 +1506,8 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                     joined.prompt,
                                 )
                                 keep_going = True
+                    if join_document is not None and settle.response_text:
+                        yield adapter.make_text_chunk(settle.response_text)
                     if not keep_going:
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(

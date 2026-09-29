@@ -368,6 +368,31 @@ async def test_recovered_blocking_cancellation_keeps_visible_body_and_trace(
 
 
 @pytest.mark.asyncio
+async def test_blocking_cancellation_without_a_wait_matches_a_disabled_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabling background jobs changes nothing about stopping a blocking reply that never waited on a job."""
+    monkeypatch.setattr(
+        "mindroom.response_runner.ai_response",
+        AsyncMock(side_effect=asyncio.CancelledError("user_stop")),
+    )
+    edit = AsyncMock(return_value=True)
+    monkeypatch.setattr(DeliveryGateway, "edit_text", edit)
+    notes = []
+    for enabled in (False, True):
+        bot = _bot(tmp_path / str(enabled))
+        bot.config.memory.backend = "none"
+        bot.config.background_tool_jobs.enabled = enabled
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        request = replace(_plain_request(_target(thread_id="$thread")), existing_event_id="$response")
+        outcome = await runner._process_and_respond(request)
+        delivered = edit.await_args.args[0]
+        notes.append((outcome.delivery.terminal_status, delivered.new_text, delivered.tool_trace))
+    assert notes[1] == notes[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
 async def test_blocking_wait_cancellation_preserves_latest_presentation(

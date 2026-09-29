@@ -42,7 +42,8 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_jobs.completion import _ReadyJobContinuation
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -2190,3 +2191,41 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
         assert recorder.outcome == "skipped"
         assert recorder.interrupted_calls == []
         assert log.persisted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("joins", [0, 1])
+async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    joins: int,
+) -> None:
+    """Without a job join a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        yield AttemptResolved(
+            CompletedAttempt(
+                response_text=f"Terminal {attempts}",
+                replayable_text=f"Terminal {attempts}",
+                has_visible_content=True,
+                join_document=StructuredStreamChunk(content=f"Document {attempts}", tool_trace=[]),
+            ),
+        )
+
+    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        if len(attempted) < joins:
+            attempted.add(("job", len(attempted)))
+            yield _ReadyJobContinuation("Retrieve the result")
+
+    monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
+    chunks = await _collect(
+        stream_response_turn(_ctx(), _streaming_adapter(log, attempt), TurnSinks(), continuation=_continuation()),
+    )
+    published = [chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk for chunk in chunks]
+    assert published == (["Document 1", "Document 2"] if joins else ["notice:Terminal 1"])
