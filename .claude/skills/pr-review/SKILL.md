@@ -10,16 +10,17 @@ Review the pull request with a **zero-tolerance standard**. Every issue you find
 - ❌ **CHANGES REQUIRED** — Issues found. List every one. All must be fixed before re-review.
 
 Never approve with suggestions. Never say "looks good overall but...". If there's a "but", it's CHANGES REQUIRED.
-The one exception is **Non-blocking notes**, which list out-of-scope findings as defined below and never change the verdict.
+The one exception is **Non-blocking notes**, which list findings the [Review Scope Policy](../../../CLAUDE.md#review-scope-policy) exempts and never change the verdict.
 
 ## What blocks
 
-Zero tolerance applies to what the PR adds or changes, as the [Review Scope Policy](../../../CLAUDE.md#review-scope-policy) defines:
+Zero tolerance applies to everything the PR adds or changes: correctness, code quality, tests, and docs, including scope creep such as code, tests, or docs beyond what the change needs.
+Only two kinds of findings go under **Non-blocking notes**, each with the lines a fix would add:
 
-- A finding blocks only when it shows a defect that a normal user or deployment hits in behavior the PR adds or changes, or a security-posture violation with material impact, such as a crash of the primary, cross-agent or cross-tenant access, or data loss.
-- Hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, or a few seconds of work, and problems in code the PR does not change, go under **Non-blocking notes**, each with the lines a fix would add.
-- Scope creep in the PR itself is a blocker: code, tests, or docs beyond what the change needs, including hardening that earlier review rounds added.
-- For every blocker, name the smallest fix, and prefer one that removes code.
+- Hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, a delayed or missing background action, or a few seconds of work, unless it falls under the in-scope classes in `docs/architecture/security-posture.md`.
+- Problems in code the PR does not change.
+
+For every blocker, name the smallest fix, and prefer one that removes code; a fix that adds a new mechanism must name the concrete failure it prevents.
 
 ## Scope and Refactor Standard
 

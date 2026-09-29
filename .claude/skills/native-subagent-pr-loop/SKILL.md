@@ -39,7 +39,7 @@ After each fix, use fresh read-only reviewers with neutral prompts.
 5. Treat findings as claims.
    Verify each finding against current code before editing.
    Fix only real, in-scope issues in the main thread, as the Review Scope Policy in `CLAUDE.md` defines them.
-   Do not act on non-blocking notes without the user's agreement.
+   Apply non-blocking notes that remove code or are one-line fixes; ask the user before one that adds a new mechanism or changes code the PR does not touch.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.

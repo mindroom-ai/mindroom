@@ -497,9 +497,13 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 ### Review Scope Policy
 
 - A feature PR adds what its feature needs; hardening or fixing behavior that already exists on main belongs in its own PR.
-- A review finding blocks a PR only when it shows a defect that a normal user or deployment hits in behavior the PR adds or changes, or a security-posture violation with material impact, such as a crash of the primary, cross-agent or cross-tenant access, or data loss.
-- Other findings, such as hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, or a few seconds of work, and problems in code the PR does not change, are non-blocking notes: record the lines a fix would add, and do not act on them without the user's agreement.
-- Prefer fixes that remove code; a fix that adds a new mechanism, such as a budget, cache, limit, fallback, or retry path, must name the concrete failure it prevents.
+- Zero tolerance applies to everything a PR adds or changes: correctness, code quality, tests, and docs.
+- Two kinds of findings are non-blocking notes instead of blockers:
+  - Hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, a delayed or missing background action, or a few seconds of work, unless it falls under the in-scope classes in `docs/architecture/security-posture.md`.
+  - Problems in code the PR does not change.
+- A non-blocking note records the lines a fix would add.
+  Apply notes that remove code or are one-line fixes; ask the user before adding a new mechanism, such as a budget, cache, limit, fallback, or retry path, or before changing code the PR does not touch.
+- Prefer fixes that remove code; a fix that adds a new mechanism must name the concrete failure it prevents.
 - Every 3 review rounds, compare the PR's size with where the rounds started: if the rounds mostly fix problems that earlier fixes introduced, the PR keeps growing, or new major bug classes keep appearing, stop patching, reconsider the design, and ask the user before another round.
 
 ### Migration Policy
