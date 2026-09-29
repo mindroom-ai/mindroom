@@ -324,7 +324,6 @@ async def update_account_status(
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
         # The database's id spelling is the one cached auth entries carry.
         invalidate_account_auth_cache(result.data[0]["id"])
-        _update_account_auth_ban(sb, result.data[0]["id"], request.status)
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -333,6 +332,7 @@ async def update_account_status(
             resource_id=account_id,
             details={"status": request.status, "reason": request.reason},
         )
+        _update_account_auth_ban(sb, result.data[0]["id"], request.status)
 
         return {"status": "success", "account_id": account_id, "new_status": request.status}  # noqa: TRY300
     except HTTPException:
@@ -570,9 +570,6 @@ async def admin_update(
     try:
         data.pop("id", None)
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
-        if resource == "accounts" and result.data:
-            invalidate_account_auth_cache(result.data[0]["id"])
-            _update_account_auth_ban(sb, result.data[0]["id"], data.get("status"))
 
         # Log admin update
         audit_log_entry(
@@ -582,6 +579,9 @@ async def admin_update(
             resource_id=resource_id,
             details={"data": data},
         )
+        if resource == "accounts" and result.data:
+            invalidate_account_auth_cache(result.data[0]["id"])
+            _update_account_auth_ban(sb, result.data[0]["id"], data.get("status"))
 
         return {"data": result.data[0] if result.data else None}
     except HTTPException:
