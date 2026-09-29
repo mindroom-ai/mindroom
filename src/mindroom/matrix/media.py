@@ -216,8 +216,12 @@ class _PreparedMediaUpload:
             **_image_dimensions(self.media_bytes, self.mimetype),
         }
 
-    def encrypted_file_content(self, url: str = "") -> dict[str, Any] | None:
-        """Build encrypted metadata separately so callers retain their error boundaries."""
+    def encrypted_file_content(self, *, url: str = "") -> dict[str, Any] | None:
+        """Build the Matrix encrypted-file object, or None for unencrypted uploads.
+
+        Callers that build it before uploading, so malformed SDK metadata fails before any upload,
+        leave ``url`` empty and set it once the upload returns; callers that build it afterwards pass the MXC URI.
+        """
         if self.encryption_keys is None:
             return None
         return encrypted_file_content(
@@ -368,7 +372,8 @@ def extract_media_caption(
 def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:
     """Verify the ciphertext SHA-256, then decrypt with the given key and IV.
 
-    Raises ``EncryptionError`` on a digest mismatch or an undecodable key or IV.
+    Raises nio's ``EncryptionError`` on a digest mismatch or an undecodable key or IV,
+    and ``binascii.Error`` when the SHA-256 is not valid base64.
     A well-formed wrong key or IV yields garbage, so callers must validate the plaintext.
     """
     return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)

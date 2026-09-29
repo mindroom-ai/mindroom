@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import binascii
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -130,7 +131,7 @@ class TestPrepareMediaUpload:
     """Test shared upload preparation and the matching decryption."""
 
     def test_encrypted_upload_round_trips_through_shared_decryption(self) -> None:
-        """Prepared ciphertext decrypts with its own metadata, and a ciphertext SHA-256 mismatch raises."""
+        """Prepared ciphertext decrypts with its own metadata; a SHA-256 mismatch or non-base64 SHA-256 raises."""
         prepared = prepare_media_upload(b"payload", filename="note.txt", mimetype="text/plain", encrypt=True)
         file_content = prepared.encrypted_file_content(url="mxc://server/note")
 
@@ -149,6 +150,8 @@ class TestPrepareMediaUpload:
         tampered = bytes([prepared.data[0] ^ 1, *prepared.data[1:]])
         with pytest.raises(EncryptionError, match="SHA-256"):
             decrypt_media_bytes(tampered, key=key, sha256=sha256, iv=iv)
+        with pytest.raises(binascii.Error):
+            decrypt_media_bytes(prepared.data, key=key, sha256="a", iv=iv)
 
     def test_image_dimensions_are_probed_only_when_event_info_is_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Callers that never send Matrix image info do not pay for decoding the image."""

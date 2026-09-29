@@ -413,6 +413,30 @@ async def test_download_rejects_metadata_whose_sha256_does_not_match_the_ciphert
         await download_encrypted_screenshot(client, replace(media, sha256=other.sha256), timeout_seconds=1)
 
 
+@pytest.mark.parametrize("field", ["sha256", "key", "iv"])
+@pytest.mark.asyncio
+async def test_download_rejects_metadata_that_is_not_valid_base64(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """Undecodable key material reaches decryption, which reports it as the same authentication failure."""
+    uploaded = _capture_uploads(monkeypatch)
+    client = AsyncMock(spec=nio.AsyncClient)
+    media = await upload_encrypted_media(
+        client,
+        JPEG,
+        mime_type="image/jpeg",
+        filename="desktop.jpg",
+        timeout_seconds=1,
+    )
+    malformed = replace(media, **{field: "a"})
+    assert EncryptedDesktopMedia.from_content(malformed.to_content()) == malformed
+    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+
+    with pytest.raises(DesktopMediaError, match=r"^Matrix media authentication or decryption failed"):
+        await download_encrypted_screenshot(client, malformed, timeout_seconds=1)
+
+
 @pytest.mark.asyncio
 async def test_download_rejects_plaintext_that_does_not_match_its_declared_type(
     monkeypatch: pytest.MonkeyPatch,
