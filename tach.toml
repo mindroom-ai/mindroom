@@ -7651,15 +7651,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.tool_jobs.agno_compat_resources"
-depends_on = [
-    "mindroom.tool_jobs.resources",
-]
-visibility = [
-    "mindroom.tool_jobs.agno_compat_execution",
-]
-
-[[modules]]
 path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
     "mindroom.custom_tools.job",
@@ -7733,7 +7724,6 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.history.session_context",
-    "mindroom.tool_jobs.agno_compat_resources",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.runtime",
@@ -7752,7 +7742,6 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_compat_execution"
 depends_on = [
-    "mindroom.tool_jobs.agno_compat_resources",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",

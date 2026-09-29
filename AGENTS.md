@@ -281,7 +281,6 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
 | `tool_jobs/disabled.py` | Passive preservation of saved sources and approvals while the feature is off |
 | `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
-| `tool_jobs/agno_compat_resources.py` | SDK toolkit connection and cleanup lifetime bindings |
 | `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
 | `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
 | `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
@@ -291,7 +290,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/execution_authority.py` | Application-entry authority checks |
 | `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
 | `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
-| `tool_jobs/wait_timeout.py` | Reserved wait metadata, validation, and saved per-call wait modes |
+| `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/completion.py` | Internal completion admission and transient waiting presentation |
 | `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |

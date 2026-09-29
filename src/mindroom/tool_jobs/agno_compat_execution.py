@@ -1,4 +1,4 @@
-"""SDK schema, approved-call dispatch, and saved wait-metadata bindings."""
+"""SDK schema and approved-call dispatch bindings."""
 
 from __future__ import annotations
 
@@ -8,26 +8,12 @@ from inspect import signature
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-from agno.agent import _tools as agent_tools
 from agno.models.base import Model
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.team import _tools as team_tools
 from agno.tools.function import Function
 
-from mindroom.custom_tools.job import is_job_function, project_native_job_wait
-from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
-from mindroom.tool_jobs.agno_execution import (
-    call_wait_mode,
-    execute_owned_tool_call,
-    is_background_job_excluded,
-    is_framework_function,
-    wrap_tool_execution,
-)
-from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.custom_tools.job import project_native_job_wait
+from mindroom.tool_jobs.agno_execution import execute_owned_tool_call, wait_mode, wrap_tool_execution
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.wait_timeout import bind_tool_wait_modes
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -44,51 +30,6 @@ _SDK_BINDINGS_INSTALLED = False
 _SDK_BINDINGS_LOCK = Lock()
 
 
-def _wrap_wait_metadata[**P, R](original: Callable[P, R]) -> Callable[P, R]:
-    parameters = signature(original)
-    if not {"run_response", "run_context"} <= parameters.parameters.keys():
-        msg = "Unsupported SDK tool preparation signature"
-        raise RuntimeError(msg)
-
-    @wraps(original)
-    def prepare(*args: P.args, **kwargs: P.kwargs) -> R:
-        context = get_tool_runtime_context()
-        arguments = parameters.bind(*args, **kwargs).arguments
-        run, run_context = arguments["run_response"], arguments["run_context"]
-        if (
-            context is not None
-            and get_background_runtime(context.runtime_paths) is not None
-            and isinstance(run, RunOutput | TeamRunOutput)
-            and isinstance(run_context, RunContext)
-        ):
-            if run.metadata is None:
-                run.metadata = {}
-            if run_context.metadata is None:
-                run_context.metadata = {}
-            bind_tool_wait_modes(run.metadata, run_context.metadata, run_context.run_id)
-        return original(*args, **kwargs)
-
-    return prepare
-
-
-# AGNO_COMPAT: Bind exact saved wait modes before continued Functions receive their run context.
-# Reason: Agno rebuilds continuation metadata, forwarding parent metadata into team members,
-# and does not share later run-context mutations with the saved output.
-# Upstream issue: No matching public persisted per-call metadata extension point identified.
-# Upstream PR: None identified.
-# Remove when: SDK preserves owner-controlled per-call metadata through approval continuation.
-# Coverage: tests/test_tool_job_approval_modes.py::test_sdk_preparation_preserves_wait_modes_with_either_call_style
-# Coverage: tests/test_tool_job_approval_modes.py::test_saved_approval_retains_timeout_semantics_after_exclusion_change
-def _install_sdk_bindings() -> None:
-    global _SDK_BINDINGS_INSTALLED
-    with _SDK_BINDINGS_LOCK:
-        if not _SDK_BINDINGS_INSTALLED:
-            vars(agent_tools)["determine_tools_for_model"] = _wrap_wait_metadata(agent_tools.determine_tools_for_model)
-            vars(team_tools)["_determine_tools_for_model"] = _wrap_wait_metadata(team_tools._determine_tools_for_model)
-            _install_owned_dispatch_binding()
-            _SDK_BINDINGS_INSTALLED = True
-
-
 # AGNO_COMPAT: Own every nested SDK dispatch inside accepted background execution.
 # Reason: Embedded agents may bypass MindRoom's model construction; SDK sync dispatch
 # offloads a complete hook chain whose thread outlives cancellation of its waiter.
@@ -98,13 +39,18 @@ def _install_sdk_bindings() -> None:
 # Coverage: tests/test_tool_job_workflows.py::test_workflow_participant_runs_multiple_sync_tools
 # Coverage: tests/test_tool_job_workflows.py::test_cancel_composite_job_drains_all_sync_children
 def _install_owned_dispatch_binding() -> None:
-    original = Model.arun_function_call
+    global _SDK_BINDINGS_INSTALLED
+    with _SDK_BINDINGS_LOCK:
+        if _SDK_BINDINGS_INSTALLED:
+            return
+        original = Model.arun_function_call
 
-    @wraps(original)
-    async def execute(model: Model, function_call: FunctionCall) -> ToolCallResult:
-        return await execute_owned_tool_call(partial(original, model), function_call)
+        @wraps(original)
+        async def execute(model: Model, function_call: FunctionCall) -> ToolCallResult:
+            return await execute_owned_tool_call(partial(original, model), function_call)
 
-    type.__setattr__(Model, "arun_function_call", execute)
+        type.__setattr__(Model, "arun_function_call", execute)
+        _SDK_BINDINGS_INSTALLED = True
 
 
 # AGNO_COMPAT: Project framework parameters before provider-specific schema conversion.
@@ -125,15 +71,12 @@ def _wrap_tool_schemas(
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
-            if not isinstance(tool, Function) or is_framework_function(tool) or is_background_job_excluded(tool):
-                projected.append(tool)
-                continue
-            if is_job_function(tool) or "wait_timeout" in tool.parameters.get("properties", {}):
-                # Preserve authored metadata. A collision fails only its own
-                # execution, with instructions for excluding that toolkit.
-                projected.append(tool)
-                continue
-            if tool.stop_after_tool_call or ((job_owns_execution() or depth > 0) and not is_job_function(tool)):
+            # A declared wait_timeout keeps its authored schema; the collision fails only that call's execution.
+            if (
+                not isinstance(tool, Function)
+                or wait_mode(tool, depth=depth) != "managed"
+                or "wait_timeout" in tool.parameters.get("properties", {})
+            ):
                 projected.append(tool)
                 continue
             function = tool.model_copy()
@@ -171,8 +114,7 @@ def install_tool_job_execution(
     depth: int = 0,
 ) -> None:
     """Bind the approved-call owner to primary and concrete fallback models."""
-    _install_sdk_bindings()
-    install_execution_resource_bindings()
+    _install_owned_dispatch_binding()
     models = [model]
     if fallback_config is not None:
         models.extend(
@@ -194,7 +136,7 @@ def install_tool_job_execution(
         namespace["_mindroom_tool_jobs"] = True
 
 
-# AGNO_COMPAT: Capture wait semantics and project native approvals before SDK admission.
+# AGNO_COMPAT: Project native job-wait approvals before SDK admission.
 # Reason: Agno has no public per-call metadata hook before a confirmation pause.
 # Upstream issue: No matching argument-sensitive public extension point identified.
 # Upstream PR: None identified.
@@ -211,10 +153,6 @@ def _wrap_job_wait_dispatch(
         raise RuntimeError(msg)
 
     async def dispatch(function_calls: list[FunctionCall], *args: object, **kwargs: object) -> AsyncIterator[Any]:
-        context = get_tool_runtime_context()
-        if context is not None and get_background_runtime(context.runtime_paths) is not None:
-            for call in function_calls:
-                call_wait_mode(call, depth=depth)
         arguments = parameters.bind(function_calls, *args, **kwargs).arguments
         if not arguments.get("skip_pause_check", False):
             for call in function_calls:

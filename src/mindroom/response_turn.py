@@ -30,7 +30,6 @@ from uuid import uuid4
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
-from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime, response_cli_lifetime
@@ -53,7 +52,6 @@ from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPrese
 from mindroom.tool_jobs.completion import join_conversation_jobs, report_background_wait
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.wait_timeout import run_uses_managed_waits
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text, tool_marker_text
 
@@ -63,6 +61,7 @@ if TYPE_CHECKING:
 
     from agno.run.agent import RunOutput, RunPausedEvent
     from agno.run.team import RunPausedEvent as TeamRunPausedEvent
+    from agno.run.team import TeamRunOutput
 
     from mindroom.agent_modes import AgentMode
     from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -429,7 +428,6 @@ class PausedAttempt:
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     cli_call: dict[str, object] | None = None
-    requires_background_tool_jobs: bool = False
     continuation_count: int = 0
 
 
@@ -485,7 +483,6 @@ def paused_attempt_from_response(
     if response.status != RunStatus.paused:
         return None
     delegation = DelegationState.from_metadata(response.metadata)
-    requires_background_tool_jobs = _run_uses_background_tool_jobs(response)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
             toolkit_owners = {
@@ -499,7 +496,6 @@ def paused_attempt_from_response(
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=response.session_id or fallback_session_id,
             run_id=response.run_id or fallback_run_id,
-            requires_background_tool_jobs=requires_background_tool_jobs,
         )
         return (
             replace(
@@ -516,7 +512,6 @@ def paused_attempt_from_response(
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
         run_id=response.run_id or fallback_run_id,
-        requires_background_tool_jobs=requires_background_tool_jobs,
     )
 
 
@@ -544,7 +539,6 @@ def _paused_attempt(
     toolkit_owners: dict[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
-    requires_background_tool_jobs: bool = False,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
@@ -599,16 +593,6 @@ def _paused_attempt(
             None,
         ),
         toolkit_owners=toolkit_owners,
-        requires_background_tool_jobs=requires_background_tool_jobs,
-    )
-
-
-def _run_uses_background_tool_jobs(response: RunOutput | TeamRunOutput) -> bool:
-    """Classify exact feature ownership while the paused SDK run is available."""
-    if run_uses_managed_waits(response.metadata, response.run_id):
-        return True
-    return isinstance(response, TeamRunOutput) and any(
-        _run_uses_background_tool_jobs(member) for member in response.member_responses
     )
 
 

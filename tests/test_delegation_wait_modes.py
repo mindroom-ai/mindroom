@@ -40,12 +40,12 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initially_excluded", [False, True])
 @pytest.mark.parametrize("team", [False, True])
-async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa: PLR0915
+async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  # noqa: PLR0915
     tmp_path: Path,
     initially_excluded: bool,
     team: bool,
 ) -> None:
-    """An approval before child admission preserves its owning agent/member run's mode."""
+    """An approval before child admission follows the waiting policy of the instance that resumes it."""
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
         Config(
@@ -159,10 +159,16 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
                     denial_reasons={call_id: None},
                 )
                 assert response.status == RunStatus.completed
-                await asyncio.wait_for(child_done.wait(), 2)
-                assert executed == ["Research"]
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
-                assert len(jobs) == (0 if initially_excluded else 1)
+                if initially_excluded:
+                    # Now managed: the approved child runs as a job.
+                    await asyncio.wait_for(child_done.wait(), 2)
+                    assert executed == ["Research"]
+                    assert len(jobs) == 1
+                else:
+                    # Now excluded: the approved call's wait budget is rejected, so the child never starts.
+                    assert executed == []
+                    assert jobs == []
     finally:
         await runtime.shutdown()
         release_background_tool_jobs(paths, instance)

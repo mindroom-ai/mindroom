@@ -30,7 +30,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
 
@@ -364,10 +364,20 @@ class ApprovalResponseCoordinator:
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
     def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
-        """Recognize managed execution or native job ownership in a new pause."""
-        return (
-            paused.requires_background_tool_jobs and background_tool_jobs_enabled(self.config(), self.runtime_paths)
-        ) or any(call.toolkit_name == "job" for call in calls)
+        """Recognize a paused call that can resume only through the native job tool or managed execution."""
+        if any(call.toolkit_name == "job" for call in calls):
+            return True
+        config = self.config()
+        if not background_tool_jobs_enabled(config, self.runtime_paths):
+            return False
+        budgeted = {tool.tool_call_id for tool in paused.tools if "wait_timeout" in (tool.tool_args or {})}
+        # A budget on a managed toolkit is framework metadata; on an excluded toolkit it is the tool's own argument.
+        return any(
+            call.tool_call_id in budgeted
+            and call.toolkit_name is not None
+            and not toolkit_is_background_excluded(call.toolkit_name, config, self.runtime_paths)
+            for call in calls
+        )
 
     async def advance_pause(
         self,

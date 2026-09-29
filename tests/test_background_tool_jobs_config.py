@@ -396,7 +396,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         from mindroom.config.agent import AgentConfig
         from mindroom.config.main import Config
         from mindroom.config.models import ModelConfig
-        from mindroom.tool_jobs import agno_compat_resources
+        from mindroom.tool_jobs import agno_compat_execution
         from tests.conftest import test_runtime_paths
         from tests.identity_helpers import persist_entity_accounts
 
@@ -418,7 +418,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         assert all(function.name != "job" for function in functions)
         assert all("wait_timeout" not in function.parameters.get("properties", {}) for function in functions)
         assert not vars(agent.model).get("_mindroom_tool_jobs")
-        assert not agno_compat_resources._INSTALLED
+        assert not agno_compat_execution._SDK_BINDINGS_INSTALLED
         assert all(vars(module)[name] is original for module, name, original in bindings)
     """)
     subprocess.run(

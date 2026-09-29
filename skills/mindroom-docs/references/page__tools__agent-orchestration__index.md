@@ -306,6 +306,8 @@ Tools that stop the current model step, including model switching and dynamic to
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 Only functions of toolkits that MindRoom assembles for an agent can become jobs.
 Functions the SDK generates itself, including knowledge search, skill access, learning, and team delegation, always run inline without `wait_timeout`.
+Toolkits whose SDK connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, also run inline without `wait_timeout`.
+Waiting policy is decided when a call executes, so an approved call that resumes after a restart follows the exclusions configured at that point.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 

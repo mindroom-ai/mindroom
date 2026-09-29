@@ -3435,7 +3435,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "toolkit_name", "completion_origin", "paused_marker", "feature_enabled", "expected"),
+    ("tool_name", "toolkit_name", "completion_origin", "wait_argument", "feature_enabled", "expected"),
     [
         ("job", "job", False, False, False, True),
         ("job", "custom", False, False, False, False),
@@ -3459,11 +3459,11 @@ async def test_pause_writer_persists_background_tool_job_ownership(
     tool_name: str,
     toolkit_name: str,
     completion_origin: bool,
-    paused_marker: bool,
+    wait_argument: bool,
     feature_enabled: bool,
     expected: bool,
 ) -> None:
-    """The suspension writer freezes exact feature ownership before restart."""
+    """The suspension writer records whether a paused call can resume only through background jobs."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     runner.deps.runtime.config.background_tool_jobs.enabled = feature_enabled
     await _admit_approval_source(runner.deps.approval_store)
@@ -3475,9 +3475,14 @@ async def test_pause_writer_persists_background_tool_job_ownership(
         PausedAttempt(
             session_id="session-1",
             run_id="run-paused",
-            tools=(ToolExecution(tool_call_id="call-1", tool_name=tool_name),),
+            tools=(
+                ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name=tool_name,
+                    tool_args={"wait_timeout": 0} if wait_argument else {},
+                ),
+            ),
             toolkit_owners={("general", tool_name): toolkit_name},
-            requires_background_tool_jobs=paused_marker,
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -5021,8 +5026,8 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         run_id="run-2",
         runtime_model_name="large",
         tools=(
-            ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={}),
-            ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={}),
+            ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={"wait_timeout": 0}),
+            ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={"wait_timeout": 0}),
         ),
         response_text=("Committed before pause.\n\n🔧 `conditional_read` [1] ⏳\n\n🔧 `conditional_write` [2] ⏳"),
         tool_trace=committed_trace,
@@ -5031,7 +5036,6 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             ("general", "conditional_read"): "test_toolkit",
             ("general", "conditional_write"): "test_toolkit",
         },
-        requires_background_tool_jobs=True,
     )
     edit_text = AsyncMock(return_value=True)
     approval_store = MagicMock(

@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Never
 
-import anyio
 import pytest
 from agno.agent import Agent
 from agno.exceptions import AgentRunException, StopAgentRun
@@ -43,10 +42,8 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import (
-    connect_async_execution_resource,
     current_execution_resources,
     defer_execution_cleanup,
-    disconnect_async_execution_resource,
     execution_resources,
 )
 from mindroom.tool_jobs.results import (
@@ -428,13 +425,11 @@ async def test_resource_owner_releases_only_after_last_child() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team_parent", [False, True])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-async def test_sdk_toolkit_stays_connected_after_parent_handle(
+async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
     tmp_path: Path,
     team_parent: bool,
-    cleanup_fails: bool,
 ) -> None:
-    """SDK teardown cannot close a toolkit still owned by its running job."""
+    """A human follow-up cannot detach a call whose SDK connection lasts only for its run."""
     started, release = asyncio.Event(), asyncio.Event()
 
     class ConnectionTools(Toolkit):
@@ -460,6 +455,7 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -482,32 +478,21 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(
 
     @owned_tool_execution
     async def parent_run() -> RunOutput | TeamRunOutput:
-        response = await agent.arun("start", session_id=context.session_id)
-        if cleanup_fails:
-
-            async def close_storage() -> None:
-                message = "storage close failed after execution"
-                raise OSError(message)
-
-            assert defer_execution_cleanup(close_storage)
-        return response
+        return await agent.arun("start", session_id=context.session_id)
 
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             parent = asyncio.create_task(parent_run())
             await asyncio.wait_for(started.wait(), 2)
             signal.notify()
-            response = await asyncio.wait_for(parent, 2)
-            assert toolkit.open, "SDK teardown closed an accepted tool's live connection"
-            assert toolkit.closes == 0
+            done, _ = await asyncio.wait({parent}, timeout=0.05)
+            assert not done
             release.set()
-            job_id = json.loads(response.tools[0].result)["job_id"]
-            owner = build_execution_identity_from_runtime_context(context)
-            signal.clear()
-            result = await runtime.wait(job_id, owner=owner, depth=0)
-            assert result.job.status == "completed"
-            assert result.job.result == "connected result"
-            assert toolkit.closes == 1
+            response = await asyncio.wait_for(parent, 2)
+        assert response.tools is not None
+        assert response.tools[0].result == "connected result"
+        assert toolkit.closes == 1
+        assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         release.set()
         await runtime.shutdown()
@@ -766,110 +751,6 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
     finally:
         release.set()
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fastmcp", [False, True])
-async def test_sdk_mcp_connection_closes_in_original_task(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fastmcp: bool,
-) -> None:
-    """SDK MCP owner retains both task affinity and real FastMCP transport lifetime."""
-    started, release = asyncio.Event(), asyncio.Event()
-    owners = []
-    sdk_mcp = pytest.importorskip("agno.tools.mcp.mcp", exc_type=ImportError)
-
-    async def read() -> str:
-        started.set()
-        await release.wait()
-        return "connected result"
-
-    class AffineMCP(sdk_mcp.MCPTools):
-        async def connect(self, force: bool = False) -> None:  # noqa: ARG002 - SDK connection signature.
-            owners.append(asyncio.current_task())
-            self._initialized = True
-            self.register(read)
-
-        async def close(self) -> None:
-            assert asyncio.current_task() is owners[0]
-            self._initialized = False
-
-    if fastmcp:
-        fastmcp_module = pytest.importorskip("fastmcp")
-        server = fastmcp_module.FastMCP("test-server")
-        server.tool(read)
-        client = fastmcp_module.Client(server)
-        monkeypatch.setattr(sdk_mcp, "_build_fastmcp_client", lambda *_args, **_kwargs: client)
-        toolkit = sdk_mcp.MCPTools(command="unused")
-    else:
-        toolkit = AffineMCP(command="unused")
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
-    model = DelegationModel(
-        id="test",
-        responses=[ModelResponse(tool_calls=[_call("read", "mcp-call")]), ModelResponse(content="done")],
-    )
-    install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[toolkit])
-
-    @owned_tool_execution
-    async def parent_run() -> RunOutput | TeamRunOutput:
-        return await agent.arun("start", session_id=context.session_id)
-
-    try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
-            parent = asyncio.create_task(parent_run())
-            await asyncio.wait_for(started.wait(), 3)
-            signal.notify()
-            response = await asyncio.wait_for(parent, 3)
-            assert toolkit.initialized
-            job_id = json.loads(response.tools[0].result)["job_id"]
-            release.set()
-            signal.clear()
-            result = await runtime.wait(job_id, owner=owner, depth=0)
-            assert result.job.status == "completed"
-            assert "connected result" in result.job.result
-            assert not toolkit.initialized
-    finally:
-        release.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_shared_task_affine_connection_waits_for_both_job_owners() -> None:
-    """Shared async connections close once in the original AnyIO cancel-scope task."""
-    resource = object()
-    scope = anyio.CancelScope()
-    connections = []
-    closures = []
-
-    async def connect() -> None:
-        connections.append(asyncio.current_task())
-        scope.__enter__()
-
-    async def close() -> None:
-        closures.append(asyncio.current_task())
-        scope.__exit__(None, None, None)
-
-    async with execution_resources() as first:
-        await connect_async_execution_resource(resource, connect, close)
-        first_job = first.acquire()
-        await disconnect_async_execution_resource(resource)
-    async with execution_resources() as second:
-        await connect_async_execution_resource(resource, connect, close)
-        second_job = second.acquire()
-        await disconnect_async_execution_resource(resource)
-    assert len(connections) == 1
-    await first_job.release()
-    assert closures == []
-    await second_job.release()
-    assert closures == connections
 
 
 @pytest.mark.asyncio

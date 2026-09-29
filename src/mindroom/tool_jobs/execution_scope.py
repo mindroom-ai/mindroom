@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from functools import wraps
 from typing import cast
 
@@ -54,17 +54,12 @@ def owned_tool_execution[FunctionT: Callable[..., object]](
     async def blocking(*args: object, **kwargs: object) -> object:
         if not enabled(*args, **kwargs):
             return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
-        async with execution_resources(), _consumption_context_async():
-            return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
+        # Consumption finalizes, even for a cancelled parent, before response resources are released.
+        async with execution_resources():
+            with consumption_context(ConsumptionOwner()):
+                try:
+                    return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
+                finally:
+                    await finalize_consumption()
 
     return cast("FunctionT", blocking)
-
-
-@asynccontextmanager
-async def _consumption_context_async() -> AsyncIterator[None]:
-    """Finalize even canceled parents before releasing response resource owners."""
-    with consumption_context(ConsumptionOwner()):
-        try:
-            yield
-        finally:
-            await finalize_consumption()

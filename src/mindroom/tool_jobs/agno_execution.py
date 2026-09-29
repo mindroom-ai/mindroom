@@ -55,13 +55,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
-from mindroom.tool_jobs.wait_timeout import (
-    ToolWaitMode,
-    application_arguments,
-    read_wait_timeout,
-    record_tool_wait_mode,
-    saved_tool_wait_mode,
-)
+from mindroom.tool_jobs.wait_timeout import ToolWaitMode, application_arguments, read_wait_timeout
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -140,7 +134,7 @@ def _restore_event(saved: dict[str, Any], chunk: str) -> BaseRunOutputEvent:
     return event
 
 
-def is_background_job_excluded(function: Function) -> bool:
+def _is_background_job_excluded(function: Function) -> bool:
     """Share exact tool exclusions between schema projection and execution."""
     toolkit = function.source_toolkit
     construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
@@ -152,14 +146,18 @@ def is_background_job_excluded(function: Function) -> bool:
     )
 
 
-def is_framework_function(function: Function) -> bool:
+def _is_framework_function(function: Function) -> bool:
     """Only functions of toolkits MindRoom assembled for an actor become jobs; SDK-generated ones run inline."""
     return function.owning_toolkit is None or function_actor(function) is None
 
 
+def _declares_wait_timeout(function: Function) -> bool:
+    return "wait_timeout" in function.parameters.get("properties", {})
+
+
 def _validate_wait_timeout_parameter(function: Function) -> None:
     """Reject application parameters that would be consumed as framework metadata."""
-    if not is_job_function(function) and "wait_timeout" in function.parameters.get("properties", {}):
+    if _declares_wait_timeout(function):
         msg = (
             f"Tool {function.name!r} declares its own wait_timeout parameter. "
             "Rename it or add its toolkit to background_tool_jobs.exclude_toolkits."
@@ -167,21 +165,27 @@ def _validate_wait_timeout_parameter(function: Function) -> None:
         raise ValueError(msg)
 
 
-def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
-    """Freeze a call's argument/owner policy before the SDK can pause for approval."""
-    run = function_run_context(call.function)
-    if run is not None and call.call_id and (saved := saved_tool_wait_mode(run.metadata, run.run_id, call.call_id)):
-        return saved
-    mode: ToolWaitMode = "managed"
-    if is_background_job_excluded(call.function) or is_framework_function(call.function):
-        mode = "native"
-    elif not is_job_function(call.function) and (
-        job_owns_execution() or depth > 0 or call.function.stop_after_tool_call
+def _holds_run_connection(function: Function) -> bool:
+    """Toolkits the SDK connects for one run, such as Postgres or Agno MCP, must finish inside that run."""
+    toolkit = function.source_toolkit
+    # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
+    return isinstance(toolkit, Toolkit) and (
+        toolkit.requires_connect or any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__)
+    )
+
+
+def wait_mode(function: Function, *, depth: int) -> ToolWaitMode:
+    """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job."""
+    if (
+        is_job_function(function)
+        or _is_framework_function(function)
+        or _is_background_job_excluded(function)
+        or _holds_run_connection(function)
     ):
-        mode = "inline"
-    if run is not None and run.metadata is not None and call.call_id:
-        record_tool_wait_mode(run.metadata, run.run_id, call.call_id, mode)
-    return mode
+        return "native"
+    if job_owns_execution() or depth > 0 or function.stop_after_tool_call:
+        return "inline"
+    return "managed"
 
 
 @dataclass
@@ -296,7 +300,7 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
     finally:
         started = tracker.started_task()
         if started is not None:
-            await run_coroutine_until_complete(_drain_sync(started))
+            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
 
 
 async def _run_operation(
@@ -376,10 +380,9 @@ async def _consume_result(
 
 
 async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolWaitMode) -> ToolCallResult:
+    """Run a call here; a native call keeps its arguments, so a stray wait budget fails instead of running silently."""
     inline_call = (
-        call
-        if is_job_function(call.function) or mode == "native"
-        else call.model_copy(update={"arguments": application_arguments(call.arguments)})
+        call if mode == "native" else call.model_copy(update={"arguments": application_arguments(call.arguments)})
     )
     success, timer, _, result = await original(inline_call)
     call.result, call.error = inline_call.result, inline_call.error
@@ -396,27 +399,24 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911, PLR0912, PLR0915 - Keep admission and cleanup together.
+    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
         if runtime is None or context is None or resources is None:
             return await original(call)
-        if is_framework_function(call.function):
+        if _is_framework_function(call.function):
             job_checkpoint()
             check_current_execution_authority()
             return await original(call)
-        mode = call_wait_mode(call, depth=depth)
+        mode = wait_mode(call.function, depth=depth)
         try:
             if mode != "native":
                 _validate_wait_timeout_parameter(call.function)
             wait_timeout = (
                 None
                 if mode == "native"
-                else read_wait_timeout(
-                    call.arguments,
-                    owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
-                )
+                else read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
             )
         except ValueError as error:
             return _failed_call(call, error)
@@ -432,12 +432,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         job_checkpoint()
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
-            if (
-                mode != "managed"
-                or is_job_function(call.function)
-                or call.function.external_execution
-                or call.function.stop_after_tool_call
-            ):
+            if mode != "managed" or call.function.external_execution:
                 return await _execute_inline(original, call, mode=mode)
         run_context = function_run_context(call.function)
         if run_context is None or not run_context.run_id or not call.call_id:
@@ -472,12 +467,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),
                 reattach=True,
             )
-            if not runtime.owns_execution(job_id, adapter):
-                await reference.release()
             waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
             timer = Timer()
-            timer.start()
-            timer.stop()
             if waited.claim is None:
                 call.result = format_job_handle(waited.job)
                 return True, timer, call, FunctionExecutionResult(status="success", result=call.result)
@@ -491,7 +482,3 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 await reference.release()
 
     return execute
-
-
-async def _drain_sync(task: asyncio.Task[Any]) -> None:
-    await asyncio.gather(task, return_exceptions=True)

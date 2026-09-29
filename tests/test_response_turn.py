@@ -13,14 +13,12 @@ from unittest.mock import MagicMock, Mock
 import pytest
 from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput, RunPausedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
-from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -307,180 +305,6 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
     assert paused.requirements[0].member_agent_name == "researcher"
-
-
-@pytest.mark.parametrize(
-    ("response", "toolkit_owners", "expected"),
-    [
-        (
-            RunOutput(
-                status=RunStatus.paused,
-                session_id="session",
-                run_id="run",
-                tools=[
-                    ToolExecution(
-                        tool_call_id="call",
-                        tool_name="report",
-                        tool_args={"wait_timeout": None},
-                        requires_confirmation=True,
-                    ),
-                ],
-            ),
-            {("general", "report"): "reports"},
-            False,
-        ),
-        (
-            RunOutput(
-                status=RunStatus.paused,
-                session_id="session",
-                run_id="run",
-                tools=[
-                    ToolExecution(
-                        tool_call_id="call",
-                        tool_name="report",
-                        requires_confirmation=True,
-                    ),
-                ],
-                metadata={
-                    DELEGATION_STATE_KEY: {
-                        "hooks": {
-                            "hook": {
-                                "execution_identity": {},
-                                "arguments": {"wait_timeout": None},
-                                "started_at": 1.0,
-                            },
-                        },
-                    },
-                },
-            ),
-            {("general", "report"): "reports"},
-            False,
-        ),
-        (
-            RunOutput(
-                status=RunStatus.paused,
-                session_id="session",
-                run_id="run",
-                metadata={
-                    DELEGATION_STATE_KEY: {
-                        "pending_tools": [
-                            {
-                                "tool_call_id": "call",
-                                "tool_name": "report",
-                                "tool_args": {"wait_timeout": 0},
-                                "requires_confirmation": True,
-                            },
-                        ],
-                    },
-                },
-            ),
-            {("general", "report"): "reports"},
-            False,
-        ),
-        (
-            TeamRunOutput(
-                status=RunStatus.paused,
-                session_id="session",
-                run_id="run",
-                tools=[
-                    ToolExecution(
-                        tool_call_id="call",
-                        tool_name="report",
-                        requires_confirmation=True,
-                    ),
-                ],
-                member_responses=[
-                    RunOutput(
-                        tools=[
-                            ToolExecution(
-                                tool_call_id="member-call",
-                                tool_name="report",
-                                tool_args={"wait_timeout": 0},
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-            {("general", "report"): "reports"},
-            False,
-        ),
-        (
-            RunOutput(
-                status=RunStatus.paused,
-                session_id="session",
-                run_id="run",
-                tools=[
-                    ToolExecution(
-                        tool_call_id="call",
-                        tool_name="report",
-                        requires_confirmation=True,
-                    ),
-                ],
-            ),
-            {("general", "report"): "reports"},
-            False,
-        ),
-    ],
-    ids=[
-        "uncaptured-null-wait",
-        "native-delegation-hook",
-        "native-delegation-pending-tool",
-        "native-team-member",
-        "ordinary",
-    ],
-)
-def test_paused_attempt_records_background_tool_job_ownership(
-    response: RunOutput | TeamRunOutput,
-    toolkit_owners: dict[tuple[str, str], str | None],
-    expected: bool,
-) -> None:
-    """Pause capture classifies exact feature ownership without restart inference."""
-    paused = response_turn_module.paused_attempt_from_response(
-        response,
-        fallback_session_id="fallback-session",
-        fallback_run_id="fallback-run",
-        toolkit_owners=toolkit_owners,
-    )
-
-    assert paused is not None
-    # Argument names alone do not establish managed ownership. Real SDK capture,
-    # including managed team members, is exercised by test_tool_job_approval_modes.
-    assert paused.requires_background_tool_jobs is expected
-
-
-def test_streamed_pause_does_not_infer_ownership_from_native_argument_names() -> None:
-    """The retained SDK run supplies ownership; its earlier event lacks that evidence."""
-    earlier = ToolExecution(
-        tool_call_id="earlier",
-        tool_name="report",
-        tool_args={"wait_timeout": None},
-        result="done",
-    )
-    pending = ToolExecution(
-        tool_call_id="pending",
-        tool_name="publish",
-        requires_confirmation=True,
-    )
-    event = RunPausedEvent(
-        session_id="session",
-        run_id="run",
-        tools=[earlier, pending],
-        requirements=[RunRequirement(tool_execution=pending)],
-    )
-
-    paused = response_turn_module.paused_attempt_from_event(
-        event,
-        fallback_session_id="fallback-session",
-        fallback_run_id="fallback-run",
-        toolkit_owners={
-            ("general", "report"): "reports",
-            ("general", "publish"): "reports",
-        },
-    )
-
-    assert paused is not None
-    assert paused.tools == (pending,)
-    assert paused.requires_background_tool_jobs is False
 
 
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:

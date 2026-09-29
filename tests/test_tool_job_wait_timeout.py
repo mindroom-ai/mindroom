@@ -23,7 +23,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.agno_execution import _drain_result
+from mindroom.tool_jobs.agno_execution import _drain_result, wait_mode
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -448,5 +448,130 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         jobs = await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0)
         assert len(jobs) == (0 if nested else 2)
         assert all(job.adapter["tool_call_id"] != "invalid" for job in jobs)
+    finally:
+        await runtime.shutdown()
+
+
+class _ConnectedTools(Toolkit):
+    """A toolkit the SDK connects for one run, like Postgres."""
+
+    _requires_connect = True
+
+    def __init__(self) -> None:
+        super().__init__(name="connected", tools=[self.query])
+        bind_toolkit_authority(self, authored_name="connected")
+
+    def query(self) -> str:
+        """Return synthetic rows."""
+        return "rows"
+
+    def connect(self) -> None:
+        """Nothing to open for this synthetic connection."""
+
+    def close(self) -> None:
+        """Nothing to close for this synthetic connection."""
+
+
+class MCPTools(Toolkit):
+    """Agno recognizes its MCP toolkits by this class name."""
+
+    def __init__(self) -> None:
+        super().__init__(name="mcp", tools=[self.query])
+        bind_toolkit_authority(self, authored_name="mcp")
+
+    def query(self) -> str:
+        """Return synthetic rows."""
+        return "rows"
+
+
+def _bound(function: Function, agent: Agent) -> Function:
+    function._agent = agent
+    return function
+
+
+def _ordinary() -> str:
+    return "ordinary"
+
+
+def _stopping() -> str:
+    return "stopping"
+
+
+@pytest.mark.parametrize(
+    ("case", "depth", "owned", "expected"),
+    [
+        ("ordinary", 0, False, "managed"),
+        ("ordinary", 1, False, "inline"),
+        ("ordinary", 0, True, "inline"),
+        ("stops_step", 0, False, "inline"),
+        ("framework", 0, False, "native"),
+        ("job", 0, False, "native"),
+        ("job", 1, True, "native"),
+        ("run_connection", 0, False, "native"),
+        ("mcp", 0, False, "native"),
+    ],
+)
+def test_wait_mode_classifies_every_call_from_current_policy(
+    tmp_path: Path,
+    case: str,
+    depth: int,
+    owned: bool,
+    expected: str,
+) -> None:
+    """One classifier decides schema projection and execution for each kind of function."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    agent = Agent(id="leader")
+    stopping = assembled_function(_stopping)
+    stopping.stop_after_tool_call = True
+    functions = {
+        "ordinary": lambda: assembled_function(_ordinary),
+        "stops_step": lambda: stopping,
+        "framework": lambda: Function.from_callable(_ordinary),
+        "job": lambda: JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()[
+            "job"
+        ],
+        "run_connection": lambda: _ConnectedTools().get_functions()["query"],
+        "mcp": lambda: MCPTools().get_functions()["query"],
+    }
+    function = _bound(functions[case](), agent)
+    with tool_runtime_context(context), job_control_context(JobControl()) if owned else nullcontext():
+        assert wait_mode(function, depth=depth) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("toolkit", [_ConnectedTools, MCPTools])
+async def test_run_connected_toolkits_run_inline_without_wait_metadata(
+    tmp_path: Path,
+    toolkit: type[Toolkit],
+) -> None:
+    """A connection opened for one run is never detached, so its calls neither advertise nor accept a wait budget."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = _bound(toolkit().get_functions()["query"], Agent(id="leader", model=model))
+    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                schema = model._format_tools([function])[0]["function"]["parameters"]
+                assert "wait_timeout" not in schema.get("properties", {})
+                success, _, call, _ = await model.arun_function_call(
+                    FunctionCall(function=function, call_id="connected", arguments={}),
+                )
+                assert success is True
+                assert call.result == "rows"
+                # A stale budget is rejected rather than silently running the call without detaching it.
+                success, _, call, _ = await model.arun_function_call(
+                    FunctionCall(function=function, call_id="stale", arguments={"wait_timeout": 0}),
+                )
+                assert success is False
+                assert "wait_timeout" in str(call.error)
+        assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await runtime.shutdown()
