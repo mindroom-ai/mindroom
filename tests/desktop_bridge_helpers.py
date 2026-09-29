@@ -129,10 +129,9 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Accept the exact controller identity while capturing encrypted responses."""
     monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_args: True)
     monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr(
-        "mindroom.desktop.bridge.upload_encrypted_media",
-        AsyncMock(return_value=MEDIA),
-    )
+    upload = AsyncMock(return_value=MEDIA)
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload)
     send = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.bridge.send_encrypted_to_device", send)
     return send

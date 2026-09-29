@@ -191,7 +191,7 @@ async def test_fitted_shell_replies_fit_the_budget_as_recorded_and_sent(
 ) -> None:
     """Tail, offset, and upload-fallback shell replies fit with their metrics and maximum-length IDs."""
     monkeypatch.setattr(
-        "mindroom.desktop.bridge.upload_encrypted_media",
+        "mindroom.desktop.shell_actions.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
     )
     (tmp_path / "output").write_bytes(("\u00e9" * 30_000).encode())
@@ -282,7 +282,7 @@ async def test_offset_polls_leave_later_output_of_a_running_command_intact(
 ) -> None:
     """A bounded offset read never moves where the still-running command's next output is written."""
     upload = AsyncMock(return_value=replace(MEDIA, mime_type="text/plain"))
-    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload)
     first, second = b"a" * 50_000 + b"\n", b"b" * 50_000 + b"\n"
     (tmp_path / "first").write_bytes(first)
     (tmp_path / "second").write_bytes(second)
@@ -319,7 +319,7 @@ async def test_check_shell_offset_polls_every_byte_once_without_splitting_charac
     """Polling from each next_offset returns contiguous whole characters, and the completed slice may be attached."""
     media = replace(MEDIA, mime_type="text/plain")
     upload = AsyncMock(return_value=media)
-    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload)
     first = ("\u00e9" * 30_000).encode()  # More than one inline reply, in two-byte characters.
     rest = ("\u00fc" * 30_000 + "end").encode()
     printer = f"{shlex.quote(sys.executable)} -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))'"
@@ -446,7 +446,7 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         uploaded.append(content)
         return nio.UploadResponse("mxc://example.org/shell-output")
 
-    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload_encrypted_media)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload_encrypted_media)
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
     text = '"é" * 60_000 + "\\x01" * 1_000 + "end"'
     expected = ("é" * 60_000 + "\x01" * 1_000 + "end").encode()
@@ -496,7 +496,7 @@ async def test_failed_upload_of_a_finished_run_shell_keeps_exit_code_and_a_first
 ) -> None:
     """An attachment failure still shows the exit code and the output's start, with a handle to page on from."""
     monkeypatch.setattr(
-        "mindroom.desktop.bridge.upload_encrypted_media",
+        "mindroom.desktop.shell_actions.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
     )
     shell = _local_shell()
@@ -558,8 +558,8 @@ def _stall_output_uploads(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Even
         released.append(output)
         release(output)
 
-    monkeypatch.setattr("mindroom.desktop.bridge._MEDIA_UPLOAD_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload_encrypted_media)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.MEDIA_UPLOAD_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload_encrypted_media)
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", stalled)
     monkeypatch.setattr(DesktopShellOutput, "release", record_release)
     return started, released
@@ -589,7 +589,7 @@ async def test_failed_upload_keeps_a_finished_handle_until_its_output_is_deliver
     media = replace(MEDIA, mime_type="text/plain")
     failure = DesktopMediaError("Matrix media upload failed: offline")
     upload = AsyncMock(side_effect=[failure, *([failure] * 10 if later_uploads == "fail" else [media])])
-    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload)
     content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
     (tmp_path / "log").write_bytes(content)
     shell = _local_shell()
@@ -632,7 +632,7 @@ async def test_failed_upload_turns_an_inline_finished_run_shell_into_a_pageable_
 ) -> None:
     """Undeliverable output of a finished run_shell stays behind a handle until paged in full or revoked."""
     monkeypatch.setattr(
-        "mindroom.desktop.bridge.upload_encrypted_media",
+        "mindroom.desktop.shell_actions.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
     )
     released: list[DesktopShellOutput] = []

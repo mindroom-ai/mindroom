@@ -3558,12 +3558,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.desktop.command_parameters"
 depends_on = ["mindroom.desktop.protocol"]
-visibility = ["mindroom.desktop.bridge", "mindroom.desktop.file_actions"]
+visibility = ["mindroom.desktop.bridge", "mindroom.desktop.file_actions", "mindroom.desktop.shell_actions"]
 
 [[modules]]
 path = "mindroom.desktop.reply_fitting"
 depends_on = ["mindroom.desktop.protocol"]
-visibility = ["mindroom.desktop.bridge", "mindroom.desktop.file_actions"]
+visibility = ["mindroom.desktop.bridge", "mindroom.desktop.file_actions", "mindroom.desktop.shell_actions"]
 
 [[modules]]
 path = "mindroom.desktop.file_actions"
@@ -3571,6 +3571,18 @@ depends_on = [
     "mindroom.desktop.command_parameters",
     "mindroom.desktop.protocol",
     "mindroom.desktop.reply_fitting",
+]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
+path = "mindroom.desktop.shell_actions"
+depends_on = [
+    "mindroom.desktop.command_parameters",
+    "mindroom.desktop.media",
+    "mindroom.desktop.protocol",
+    "mindroom.desktop.reply_fitting",
+    "mindroom.desktop.shell",
+    "mindroom.logging_config",
 ]
 visibility = ["mindroom.desktop.bridge"]
 
@@ -3587,6 +3599,7 @@ depends_on = [
     "mindroom.desktop.protocol",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.shell",
+    "mindroom.desktop.shell_actions",
     "mindroom.desktop.provider",
     "mindroom.desktop.reply_fitting",
     "mindroom.logging_config",

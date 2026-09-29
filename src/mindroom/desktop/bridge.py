@@ -9,7 +9,6 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
@@ -18,7 +17,6 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal
 from mindroom.desktop.command_parameters import (
-    optional_bool_parameter,
     optional_int_parameter,
     optional_str_parameter,
     reject_unexpected_parameters,
@@ -29,7 +27,7 @@ from mindroom.desktop.command_parameters import (
 from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.input import normalize_key_chord
-from mindroom.desktop.media import DesktopMediaError, upload_encrypted_media
+from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -46,8 +44,6 @@ from mindroom.desktop.protocol import (
     DESKTOP_FILE_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
     DESKTOP_SHELL_ACTIONS,
-    MAX_INLINE_RESPONSE_BYTES,
-    SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
     DesktopObservationMode,
     DesktopProtocolError,
@@ -56,8 +52,9 @@ from mindroom.desktop.protocol import (
     event_content,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
-from mindroom.desktop.reply_fitting import fits_inline, leftmost_fitting, response_metrics, success_response
-from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
+from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
+from mindroom.desktop.shell import DesktopShell, DesktopShellError
+from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     OlmToDeviceError,
@@ -69,6 +66,7 @@ from mindroom.matrix.olm_to_device import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     import nio
     from nio import AuthenticatedToDeviceEvent
@@ -78,9 +76,6 @@ logger = get_logger(__name__)
 _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
-_MAX_WARNING_DETAIL = 500
-# Stop drains the action in flight, so every media upload it may wait on must be bounded.
-_MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 
 
@@ -433,28 +428,7 @@ class DesktopBridge:
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
-            "shell": self._shell_status(),
-        }
-
-    def _shell_status(self, caller: tuple[str, str] | None = None) -> dict[str, object]:
-        if self.shell is None:
-            return {
-                "enabled": False,
-                "pending": None,
-                "auto_approve_remaining_seconds": 0,
-                "auto_approve_until_revoked": False,
-                "active_request_id": None,
-                "handles": [],
-            }
-        return {"enabled": True, **self.shell.status(caller=caller)}
-
-    def _caller_shell_status(self, command: DesktopCommand) -> dict[str, object]:
-        """Show another allowed caller only whether approval is pending, its own active ID, and its own handles."""
-        status = self._shell_status((command.requester_id, command.agent_name))
-        return {
-            **status,
-            "pending": status["pending"] is not None,
-            "handles": self.shell.handles(command.requester_id, command.agent_name) if self.shell is not None else [],
+            "shell": shell_status(self.shell),
         }
 
     def decide_local_shell(
@@ -642,7 +616,7 @@ class DesktopBridge:
                 image.content,
                 mime_type=image.mime_type,
                 filename=f"browser-{command.request_id}.{extension}",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
+                timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
             return self._capture_error_response(command, result=execution.result, error=str(exc))
@@ -730,7 +704,7 @@ class DesktopBridge:
                 capture.content,
                 mime_type=capture.mime_type,
                 filename=f"desktop-{command.request_id}.jpg",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
+                timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
             return self._capture_error_response(command, result=result, error=str(exc))
@@ -818,7 +792,7 @@ class DesktopBridge:
         if command.action in DESKTOP_FILE_ACTIONS:
             return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
-            return await self._execute_shell(command)
+            return _Execution(await execute_shell(self.client, self.shell, command))
         return await self._execute_desktop(command)
 
     async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
@@ -845,7 +819,7 @@ class DesktopBridge:
                 self._fit_status(
                     command,
                     status,
-                    self._caller_shell_status(command),
+                    caller_shell_status(self.shell, command),
                     cast("list[dict[str, str]]", folders),
                 ),
             )
@@ -889,179 +863,6 @@ class DesktopBridge:
             msg = "Desktop GUI is unavailable."
             raise DesktopProtocolError(msg)
         return provider
-
-    async def _execute_shell(self, command: DesktopCommand) -> _Execution:
-        """Start a command only after local approval, or read or stop one of the caller's own handles."""
-        shell = self.shell
-        if shell is None:
-            msg = "Local shell access is disabled."
-            raise DesktopProtocolError(msg)
-        parameters = command.parameters
-        if command.action == "check_shell":
-            reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
-            handle = required_str_parameter(parameters, "handle")
-            offset = optional_int_parameter(parameters, "offset")
-            result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
-            return _Execution(await self._shell_result(command, shell, result, offset=offset))
-        if command.action == "kill_shell":
-            reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
-            handle = required_str_parameter(parameters, "handle")
-            force = optional_bool_parameter(parameters, "force")
-            return _Execution(
-                {"state": shell.kill(command.requester_id, command.agent_name, handle, force=force), "handle": handle},
-            )
-        reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
-        timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
-        request = DesktopShellRequest(
-            request_id=command.request_id,
-            requester_id=command.requester_id,
-            agent_name=command.agent_name,
-            command=required_str_parameter(parameters, "command"),
-            cwd=optional_str_parameter(parameters, "cwd", default=str(Path.home())),
-            expires_at_ms=command.expires_at_ms,
-            timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
-        )
-        return _Execution(await self._shell_result(command, shell, await shell.execute(request)))
-
-    async def _shell_result(
-        self,
-        command: DesktopCommand,
-        shell: DesktopShell,
-        result: DesktopShellResult,
-        *,
-        offset: int | None = None,
-    ) -> dict[str, object]:
-        """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
-
-        Output starts at byte ``offset``; without one, a running command shows its newest output. The returned
-        output covers ``[output_start, next_offset)``, and the next check continues from ``next_offset``.
-        """
-        output = result.output
-        size = output.size
-        payload: dict[str, object] = {
-            "state": result.state,
-            "handle": result.handle,
-            "exit_code": result.exit_code,
-            "output": "",
-            "output_bytes": size,
-            "output_truncated": output.truncated,
-            "output_attachment": None,
-            "output_start": offset or 0,
-            "next_offset": size,
-        }
-        if result.state == "running":
-            if offset is None:
-                return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
-            head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
-            return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
-        try:
-            return await self._finished_shell_result(command, shell, result, payload, offset or 0)
-        except BaseException:
-            if command.action == "run_shell":
-                # The caller never learned this handle, so nothing could page from it.
-                shell.hand_over(result)
-            raise
-
-    async def _finished_shell_result(
-        self,
-        command: DesktopCommand,
-        shell: DesktopShell,
-        result: DesktopShellResult,
-        payload: dict[str, object],
-        start: int,
-    ) -> dict[str, object]:
-        """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
-        content = result.output.read(start)
-        # A run_shell reply names its handle only while that handle stays to page from.
-        delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
-        # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
-        if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-            inline = {**delivered, "output": content.decode()}
-            if fits_inline(command, inline):
-                shell.hand_over(result)
-                return inline
-        try:
-            media = await upload_encrypted_media(
-                self.client,
-                content,
-                mime_type=SHELL_OUTPUT_MIME_TYPE,
-                filename=f"shell-{command.request_id}.txt",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
-            )
-        except DesktopMediaError as exc:
-            error = str(exc)
-        except Exception:
-            logger.exception("shell_output_upload_failed", request_id=command.request_id)
-            error = "Shell output upload failed."
-        else:
-            shell.hand_over(result)
-            return {**delivered, "output_attachment": media.to_content()}
-        detail = error[:_MAX_WARNING_DETAIL]
-        if result.handle is None:
-            # Revocation raced this command's registration, so there is no handle to page from.
-            shell.hand_over(result)
-            warning = (
-                f"The output could not be attached ({detail}); only its beginning is shown and the rest is not "
-                "kept. Do not run the command again automatically."
-            )
-        else:
-            warning = (
-                f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
-                "Continue with check_shell from next_offset."
-            )
-        head = content[:MAX_INLINE_RESPONSE_BYTES]
-        return self._fit_output_head(
-            command,
-            {**payload, "warning": warning},
-            head,
-            offset=start,
-            requested=len(content),
-        )
-
-    def _fit_output_tail(
-        self,
-        command: DesktopCommand,
-        payload: dict[str, object],
-        tail: bytes,
-        *,
-        requested: int,
-    ) -> dict[str, object]:
-        """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
-        text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
-
-        def reply(start: int) -> dict[str, object]:
-            shown = text[start:]
-            shown_bytes = len(shown.encode())
-            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-            output_start = cast("int", payload["next_offset"]) - shown_bytes
-            return {**payload, "output": shown, "output_truncated": truncated, "output_start": output_start}
-
-        # Dropping older characters never grows the reply, so search for the fewest to drop.
-        start = leftmost_fitting(command, 0, len(text), reply)
-        return reply(start)
-
-    def _fit_output_head(
-        self,
-        command: DesktopCommand,
-        payload: dict[str, object],
-        head: bytes,
-        *,
-        offset: int,
-        requested: int,
-    ) -> dict[str, object]:
-        """Show the oldest output from ``offset`` whose escaped reply still fits inline, and where to continue."""
-        # The offset starts a character, so only the last one can be cut; ``next_offset`` then points at it.
-        text = head.decode(errors="ignore")
-
-        def reply(dropped: int) -> dict[str, object]:
-            shown = text[: len(text) - dropped]
-            shown_bytes = len(shown.encode())
-            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-            return {**payload, "output": shown, "output_truncated": truncated, "next_offset": offset + shown_bytes}
-
-        # Dropping newer characters never grows the reply, so search for the fewest to drop.
-        dropped = leftmost_fitting(command, 0, len(text), reply)
-        return reply(dropped)
 
     def _fit_status(
         self,
