@@ -152,11 +152,15 @@ def test_failed_auth_ban_returns_500_and_retry_repairs_it(route):
     db.auth.admin.update_user_by_id.side_effect = RuntimeError("Auth unavailable")
     app.dependency_overrides[verify_admin] = lambda: {"user_id": "admin"}
     try:
-        with patch.object(admin, "ensure_supabase", return_value=db), patch.object(admin, "audit_log_entry"):
+        with (
+            patch.object(admin, "ensure_supabase", return_value=db),
+            patch.object(admin, "audit_log_entry") as audit,
+        ):
             client = TestClient(app)
             response = client.put(route, json={"status": "suspended"})
             assert response.status_code == 500
             assert db.row("accounts", id="owner")["status"] == "suspended"
+            audit.assert_called_once()
             db.auth.admin.update_user_by_id.side_effect = None
             response = client.put(route, json={"status": "suspended"})
             assert response.status_code == 200
