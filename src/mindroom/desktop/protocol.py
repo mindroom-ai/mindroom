@@ -8,7 +8,12 @@ from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
 
 from mindroom.desktop.input import DESKTOP_SAFE_KEYS
-from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
+from mindroom.matrix.encrypted_file import (
+    ENCRYPTED_FILE_KEY_ALGORITHM,
+    ENCRYPTED_FILE_KEY_TYPE,
+    ENCRYPTED_FILE_VERSION,
+    encrypted_file_content_from_values,
+)
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
@@ -252,16 +257,20 @@ class EncryptedDesktopMedia:
         content = _object_mapping(raw, kind)
         key = _object_mapping(content.get("key"), f"{kind}.key")
         hashes = _object_mapping(content.get("hashes"), f"{kind}.hashes")
-        if key.get("alg") != "A256CTR" or key.get("kty") != "oct" or key.get("ext") is not True:
-            msg = f"{kind}.key must describe an extractable A256CTR octet key."
+        if (
+            key.get("alg") != ENCRYPTED_FILE_KEY_ALGORITHM
+            or key.get("kty") != ENCRYPTED_FILE_KEY_TYPE
+            or key.get("ext") is not True
+        ):
+            msg = f"{kind}.key must describe an extractable {ENCRYPTED_FILE_KEY_ALGORITHM} octet key."
             raise DesktopProtocolError(msg)
         url = _required_str(content, "url", kind)
         if not url.startswith("mxc://"):
             msg = f"{kind}.url must be an mxc:// URI."
             raise DesktopProtocolError(msg)
         version = _required_str(content, "v", kind)
-        if version != "v2":
-            msg = f"{kind}.v must be v2."
+        if version != ENCRYPTED_FILE_VERSION:
+            msg = f"{kind}.v must be {ENCRYPTED_FILE_VERSION}."
             raise DesktopProtocolError(msg)
         size = _required_int(content, "size", kind)
         if size <= 0 or size > _MEDIA_MAX_BYTES[kind]:

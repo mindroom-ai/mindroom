@@ -1,5 +1,9 @@
 """Dependency-free serialization of Matrix encrypted-file metadata."""
 
+ENCRYPTED_FILE_VERSION = "v2"
+ENCRYPTED_FILE_KEY_ALGORITHM = "A256CTR"
+ENCRYPTED_FILE_KEY_TYPE = "oct"
+
 
 def encrypted_file_content(
     *,
@@ -16,7 +20,7 @@ def encrypted_file_content(
         "key": key,
         "iv": iv,
         "hashes": hashes,
-        "v": "v2",
+        "v": ENCRYPTED_FILE_VERSION,
         "mimetype": mime_type,
         "size": size,
     }
@@ -35,11 +39,11 @@ def encrypted_file_content_from_values(
     return encrypted_file_content(
         url=url,
         key={
-            "alg": "A256CTR",
+            "alg": ENCRYPTED_FILE_KEY_ALGORITHM,
             "ext": True,
             "k": key,
             "key_ops": ["encrypt", "decrypt"],
-            "kty": "oct",
+            "kty": ENCRYPTED_FILE_KEY_TYPE,
         },
         iv=iv,
         hashes={"sha256": sha256},
