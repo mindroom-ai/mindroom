@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import math
 from collections import OrderedDict
@@ -58,18 +59,22 @@ _MAX_SIDECAR_HOPS = 2
 # Failed sidecars are remembered per process, so every agent in a room and every read does not fetch them again.
 # Plaintext is never kept: it belongs to the visible revision the projection stores.
 _SIDECAR_MEMORY_SIZE = 1024
-_TRANSIENT_UNAVAILABLE_SECONDS = 30.0
+# A transient failure pauses retries of its reference, doubling after each further failure up to an hour.
+_TRANSIENT_RETRY_FIRST_SECONDS = 30.0
+_TRANSIENT_RETRY_MAX_SECONDS = 3600.0
 
-# One sidecar reference: the media URL and the canonical JSON of the event's own `file` dict, or None without one.
+# One sidecar reference: the SHA-256 of the media URL and the canonical JSON of the event's own `file` dict.
 # Everything that decides whether the payload decrypts and parses is in it, so one sender's reference cannot decide
-# the outcome of another's.
-type _SidecarReference = tuple[str, str | None]
+# the outcome of another's, and a crafted `file` dict costs the memory no more than any other.
+type _SidecarReference = bytes
 
 
 @dataclass(frozen=True, slots=True)
 class _RememberedFailure:
     permanent: bool
     retry_at: float
+    # The pause this failure imposed, which the next transient failure doubles.
+    pause: float
 
 
 # Media URLs the homeserver answered as missing or too large, which holds for every reference to them.
@@ -87,9 +92,19 @@ def _remember_bounded[Key, Value](memory: OrderedDict[Key, Value], key: Key, val
         memory.popitem(last=False)
 
 
-def _remembered_failure(reference: _SidecarReference) -> MxcUnavailable | None:
+def _sidecar_reference(mxc_url: str, sidecar_content: Mapping[str, Any]) -> _SidecarReference:
+    file_info = sidecar_content.get("file")
+    canonical_file = (
+        json.dumps(file_info, sort_keys=True, separators=(",", ":"), default=repr)
+        if isinstance(file_info, dict)
+        else None
+    )
+    return hashlib.sha256(json.dumps([mxc_url, canonical_file]).encode()).digest()
+
+
+def _remembered_failure(mxc_url: str, reference: _SidecarReference) -> MxcUnavailable | None:
     """Return a remembered failure of this reference, or nothing when it should be downloaded."""
-    if reference[0] in _unavailable_media_urls:
+    if mxc_url in _unavailable_media_urls:
         return MxcUnavailable(permanent=True)
     entry = _reference_failures.get(reference)
     if entry is None or (not entry.permanent and monotonic() >= entry.retry_at):
@@ -101,8 +116,31 @@ def _remember_chain_outcome(reference: _SidecarReference, unavailable: MxcUnavai
     if unavailable is None:
         _reference_failures.pop(reference, None)
         return
-    retry_at = math.inf if unavailable.permanent else monotonic() + _TRANSIENT_UNAVAILABLE_SECONDS
-    _remember_bounded(_reference_failures, reference, _RememberedFailure(unavailable.permanent, retry_at))
+    if unavailable.permanent:
+        _remember_bounded(_reference_failures, reference, _RememberedFailure(True, math.inf, math.inf))
+        return
+    previous = _reference_failures.get(reference)
+    pause = (
+        _TRANSIENT_RETRY_FIRST_SECONDS if previous is None else min(previous.pause * 2, _TRANSIENT_RETRY_MAX_SECONDS)
+    )
+    _remember_bounded(_reference_failures, reference, _RememberedFailure(False, monotonic() + pause, pause))
+
+
+def sidecar_retry_pending(content: Mapping[str, Any]) -> bool:
+    """Return whether this content's sidecar is downloading now, or failed transiently and is not due again yet.
+
+    A caller holding such content can serve its preview without refetching or downloading anything, since
+    a new attempt would only join the running download or repeat a failure before its pause ends.
+    """
+    sidecar_content = sidecar_content_to_resolve(content)
+    mxc_url = None if sidecar_content is None else sidecar_mxc_url(sidecar_content)
+    if sidecar_content is None or mxc_url is None or mxc_url in _unavailable_media_urls:
+        return False
+    reference = _sidecar_reference(mxc_url, sidecar_content)
+    if reference in _inflight_chains:
+        return True
+    entry = _reference_failures.get(reference)
+    return entry is not None and not entry.permanent and monotonic() < entry.retry_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,8 +394,8 @@ async def _resolve_canonical_content(
     first_mxc_url = None if first_sidecar is None else sidecar_mxc_url(first_sidecar)
     if client is None or first_sidecar is None or first_mxc_url is None:
         return _SidecarChain(content=content, changed=False, unavailable=None, failed_download=False)
-    reference = (first_mxc_url, _canonical_file_info(first_sidecar))
-    if (remembered := _remembered_failure(reference)) is not None:
+    reference = _sidecar_reference(first_mxc_url, first_sidecar)
+    if (remembered := _remembered_failure(first_mxc_url, reference)) is not None:
         return _SidecarChain(content=content, changed=False, unavailable=remembered, failed_download=False)
     loop = asyncio.get_running_loop()
     joined = _inflight_chains.get(reference)
@@ -368,13 +406,6 @@ async def _resolve_canonical_content(
     _inflight_chains[reference] = task
     task.add_done_callback(partial(_forget_inflight_chain, reference))
     return await asyncio.shield(task)
-
-
-def _canonical_file_info(sidecar_content: Mapping[str, Any]) -> str | None:
-    file_info = sidecar_content.get("file")
-    if not isinstance(file_info, dict):
-        return None
-    return json.dumps(file_info, sort_keys=True, separators=(",", ":"), default=repr)
 
 
 def _forget_inflight_chain(reference: _SidecarReference, task: asyncio.Task[_SidecarChain]) -> None:

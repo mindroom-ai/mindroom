@@ -30,6 +30,7 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
     resolve_sidecar_content,
+    sidecar_retry_pending,
 )
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, sidecar_mxc_url, unavailable_sidecar_content
 from mindroom.matrix.state import MatrixState
@@ -268,21 +269,40 @@ _SIDECAR_PREVIEW = {
 
 
 @pytest.mark.asyncio
-async def test_transient_sidecar_failures_are_retried_after_their_short_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transient failure is only remembered briefly and never becomes permanent, however often it repeats."""
+async def test_transient_sidecar_failures_back_off_up_to_an_hour_and_never_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each further transient failure doubles the pause before a retry, up to an hour, and never becomes permanent."""
+    pauses = [30, 60, 120, 240, 480, 960, 1920, 3600, 3600]
     client, clock = _clocked_sidecar_client(
         monkeypatch,
-        [*(FakeMediaResponse(status=503) for _ in range(5)), media_response(json.dumps({"body": "whole"}).encode())],
+        [*(FakeMediaResponse(status=503) for _ in pauses), media_response(json.dumps({"body": "whole"}).encode())],
     )
-    for _ in range(5):
+    for pause in pauses:
         failed = await resolve_sidecar_content(_SIDECAR_PREVIEW, client)
+        clock[0] += pause - 1
         remembered = await resolve_sidecar_content(_SIDECAR_PREVIEW, client)
         assert (failed.permanently_unavailable, failed.failed_download) == (False, True)
         assert (remembered.permanently_unavailable, remembered.failed_download) == (False, False)
-        clock[0] += message_content_module._TRANSIENT_UNAVAILABLE_SECONDS + 1
+        assert sidecar_retry_pending(_SIDECAR_PREVIEW)
+        clock[0] += 1
+        assert not sidecar_retry_pending(_SIDECAR_PREVIEW)
 
     assert (await resolve_sidecar_content(_SIDECAR_PREVIEW, client)).content == {"body": "whole"}
-    assert client.send.await_count == 6
+    assert client.send.await_count == len(pauses) + 1
+
+
+@pytest.mark.asyncio
+async def test_a_crafted_file_dict_is_remembered_by_a_fixed_size_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reference's failure memory keeps a digest, not the event's own ``file`` dict, however large it is."""
+    client, _clock = _clocked_sidecar_client(monkeypatch, [FakeMediaResponse(status=503)])
+    crafted = {**_SIDECAR_PREVIEW, "file": {"url": "mxc://server/sidecar", "padding": "x" * 60_000}}
+
+    await resolve_sidecar_content(crafted, client)
+
+    assert [len(key) for key in message_content_module._reference_failures] == [32]
+    assert sidecar_retry_pending(crafted)
+    assert not sidecar_retry_pending(_SIDECAR_PREVIEW)
 
 
 class TestResolvedMessageExtraction:
@@ -321,6 +341,18 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
+
+    @pytest.mark.parametrize(
+        "overlong_url",
+        [f"mxc://{'s' * 256}/media", f"mxc://server/{'m' * 256}", f"mxc://server/{'m' * 100_000}"],
+    )
+    def test_sidecar_url_validation_rejects_parts_past_their_length_limits(self, overlong_url: str) -> None:
+        """A server name or media ID longer than a homeserver could mint never becomes a sidecar reference."""
+        metadata = {"version": 2, "encoding": "matrix_event_content_json"}
+
+        assert sidecar_mxc_url({"io.mindroom.long_text": metadata, "url": overlong_url}) is None
+        assert sidecar_mxc_url({"io.mindroom.long_text": metadata, "file": {"url": overlong_url}}) is None
+        assert sidecar_mxc_url({"io.mindroom.long_text": metadata, "url": f"mxc://{'s' * 255}/{'m' * 255}"})
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:

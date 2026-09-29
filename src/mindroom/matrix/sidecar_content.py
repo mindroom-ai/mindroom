@@ -13,11 +13,21 @@ _SIDECAR_TRANSPORT_KEYS = frozenset(
 )
 
 
+# Matrix caps a server name at 255 characters, and homeservers mint media IDs far shorter than this, so a longer
+# part only comes from a crafted event whose URL would otherwise be carried into every log line and memory key.
+_MAX_MXC_SERVER_NAME_CHARACTERS = 255
+_MAX_MXC_MEDIA_ID_CHARACTERS = 255
+
+
 def _validated_mxc_url(value: object) -> str | None:
-    """Return one structurally complete Matrix content URI."""
+    """Return one structurally complete Matrix content URI within the server-name and media-ID length limits."""
     if not isinstance(value, str) or not value.startswith("mxc://"):
         return None
+    if len(value) > len("mxc://") + _MAX_MXC_SERVER_NAME_CHARACTERS + 1 + _MAX_MXC_MEDIA_ID_CHARACTERS:
+        return None
     server_name, separator, media_id = value[len("mxc://") :].partition("/")
+    if len(server_name) > _MAX_MXC_SERVER_NAME_CHARACTERS or len(media_id) > _MAX_MXC_MEDIA_ID_CHARACTERS:
+        return None
     return value if server_name and separator and media_id else None
 
 

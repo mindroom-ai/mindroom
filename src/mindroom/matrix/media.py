@@ -424,7 +424,10 @@ def _decrypt_validated_media_bytes(
 def _mxc_media_path(mxc_url: str) -> str | None:
     """Return the authenticated media download path for one ``mxc://server/media_id`` URI."""
     server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
-    if not mxc_url.startswith("mxc://") or not separator or not server_name or not media_id or "/" in media_id:
+    if not mxc_url.startswith("mxc://") or not separator or "/" in media_id:
+        return None
+    # Either part is one path segment of the download URL, so a dot segment would name another path.
+    if server_name in {"", ".", ".."} or media_id in {"", ".", ".."}:
         return None
     return nio.Api._build_path(["download", server_name, media_id], {"allow_remote": "true"}, MATRIX_MEDIA_API_PATH)
 
@@ -500,8 +503,8 @@ async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, m
 
     nio's download reads the whole body before a caller can check its size, and any room member
     can point an event at media as large as the homeserver allows.
-    Like nio's request loop, rate limits, lost connections, and timeouts are retried, here a bounded number of times,
-    and each attempt must finish within a deadline scaled to ``max_bytes``.
+    Rate limits and lost connections are retried a bounded number of times. Each attempt must finish within a
+    deadline scaled to ``max_bytes``, and one that runs out is not retried, so a server that stalls costs one deadline.
     """
     path = _mxc_media_path(mxc_url)
     if path is None:
@@ -521,7 +524,10 @@ async def download_bounded_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, m
                 wait_seconds = _rate_limit_wait_seconds(response)
             finally:
                 response.release()
-        except (ClientConnectionError, TimeoutError):
+        except TimeoutError:
+            logger.warning("matrix_media_download_timed_out", mxc_url=mxc_url, attempts=attempt)
+            return MxcUnavailable(permanent=False)
+        except ClientConnectionError:
             if attempt == _MXC_DOWNLOAD_ATTEMPTS:
                 logger.warning("matrix_media_download_interrupted", mxc_url=mxc_url, attempts=attempt)
                 return MxcUnavailable(permanent=False)

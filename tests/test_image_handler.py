@@ -208,8 +208,8 @@ class TestDownloadImage:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_download_retries_timeouts_then_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Timeouts are retried a bounded number of times, then the download fails closed."""
+    async def test_download_does_not_retry_a_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An attempt that runs out of time fails closed at once, so a stalling server costs one deadline."""
         monkeypatch.setattr(media_module, "_MXC_CONNECTION_RETRY_WAIT_SECONDS", 0)
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
@@ -220,7 +220,19 @@ class TestDownloadImage:
 
         result = await image_handler.download_image(client, event)
         assert result is None
-        assert client.send.await_count == 3
+        assert client.send.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("url", ["mxc://./media", "mxc://../media", "mxc://example.org/.", "mxc://example.org/.."])
+    async def test_download_refuses_dot_segments(self, url: str) -> None:
+        """A server name or media ID that is a dot segment would name another download path, so nothing is sent."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = url
+
+        assert await download_media_bytes(client, event) is None
+        client.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_download_recovers_after_a_lost_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
