@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -64,7 +65,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
-from mindroom.matrix.message_content import resolve_sidecar_content
+from mindroom.matrix.message_content import resolve_sidecar_content, sidecar_retry_pending
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, unavailable_sidecar_content
 from mindroom.matrix.transport_progress import is_transport_progress_revision
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -125,6 +126,14 @@ _MAX_FETCHED_EVENTS = 20_000
 _MAX_MESSAGES_REQUESTS = 400
 # Sidecar downloads one strict read may start, so a page of unreadable attachments costs a bounded fetch per read.
 _MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ = 8
+# One strict read's refetches and sidecar downloads end within this, whatever the media behind them does. A debt
+# whose revision was refetched by then is served as its marked preview; one that was not stays missing.
+_REFRESH_READ_SECONDS = 30.0
+# Homeserver requests, and separately sidecar downloads, that one strict read runs at once.
+_CONCURRENT_REFRESH_WORK = 8
+# Debts whose sidecar is downloading or pausing after a transient failure, kept with their marked preview so a later
+# read can serve it without refetching the revision.
+_DEFERRED_SIDECAR_MEMORY_SIZE = 256
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
 # under the fresh epoch is almost always enough; a room whose membership keeps
@@ -455,23 +464,44 @@ def _reduce_current_revision(
     return winner
 
 
+def _concurrent_refresh_work() -> asyncio.Semaphore:
+    return asyncio.Semaphore(_CONCURRENT_REFRESH_WORK)
+
+
 @dataclass(slots=True)
 class _RefreshPass:
     """What one strict read may still spend on sidecar downloads, and the stand-ins it serves instead.
 
     Only failed downloads are charged: a successful one is installed and never repeated. A debt whose sidecar is
     not resolved in this read keeps its token and is served, for this read only, as its preview marked unavailable.
+    The read's concurrent debts share its homeserver requests and its sidecar downloads, each capped at a few at once.
     """
 
     failed_downloads_remaining: int = _MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ
     unavailable_previews: dict[str, VisibleMessage] = field(default_factory=dict)
+    homeserver_requests: asyncio.Semaphore = field(default_factory=_concurrent_refresh_work)
+    sidecar_downloads: asyncio.Semaphore = field(default_factory=_concurrent_refresh_work)
+
+
+# One exact debt: its conversation message, the revision it was raised for, its refresh token, and membership epoch.
+type _DebtKey = tuple[str, str, str, int, int]
+
+
+def _debt_key(request: RefreshRequest) -> _DebtKey:
+    return (
+        request.room_id,
+        request.logical_event_id,
+        request.revision_event_id,
+        request.refresh_token,
+        request.membership_epoch,
+    )
 
 
 @dataclass(frozen=True, slots=True)
-class _RevisionContent:
+class _DeferredSidecar:
+    # The refetched revision's unresolved content, whose sidecar reference says when a retry could succeed.
     content: Mapping[str, object]
-    # Whether the content may be installed for this revision, or only served to the current read.
-    durable: bool
+    preview: VisibleMessage
 
 
 @dataclass
@@ -522,6 +552,11 @@ class ConversationHydrator:
     # conversation are both "this room, no thread", and one of them waiting on
     # the other under a shared key is a deadlock.
     _recoveries: dict[str, asyncio.Task[HistoryRecoveryOutcome]] = field(default_factory=dict, init=False, repr=False)
+    _deferred_sidecars: OrderedDict[_DebtKey, _DeferredSidecar] = field(
+        default_factory=OrderedDict,
+        init=False,
+        repr=False,
+    )
 
     async def cancel_pending(self) -> None:
         """Drain private hydration work when its owning export is cancelled."""
@@ -1138,7 +1173,8 @@ class ConversationHydrator:
         the message hidden and its refresh token durable, so the next strict
         read tries again rather than serving anything stale.
         """
-        original = await self._client().room_get_event(request.room_id, request.logical_event_id)
+        async with refresh_pass.homeserver_requests:
+            original = await self._client().room_get_event(request.room_id, request.logical_event_id)
         if not isinstance(original, nio.RoomGetEventResponse):
             logger.info(
                 "conversation_refresh_unavailable",
@@ -1169,7 +1205,8 @@ class ConversationHydrator:
             # and membership epoch this request was issued under, which
             # projecting the redaction would bypass.
             return await self.store.drop_refetched_message(request)
-        relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
+        async with refresh_pass.homeserver_requests:
+            relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
         if relations.unreadable:
             # An empty relation list is a real answer -- it is how a server that
             # already reclaimed the superseded edits reports the original as
@@ -1185,35 +1222,42 @@ class ConversationHydrator:
             )
             return False
         revision = _reduce_current_revision(projected, relations.events)
-        resolved = await self._resolved_content(revision.event_id, revision.content, refresh_pass)
-        if not resolved.durable:
-            refresh_pass.unavailable_previews[request.logical_event_id] = VisibleMessage(
-                logical_event_id=request.logical_event_id,
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                sender=request.sender,
-                created_ts=request.created_ts,
-                revision_event_id=revision.event_id,
-                revision_ts=revision.origin_server_ts,
-                content=resolved.content,
-            )
+        content = await self._resolved_content(request, revision, refresh_pass)
+        if content is None:
             return False
-        return await self.store.install_refetched_revision(
+        installed = await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
             revision_ts=revision.origin_server_ts,
             revision_sender=revision.sender,
             revision_transaction_id=revision.transaction_id,
-            content=resolved.content,
+            content=content,
         )
+        # Dropped only now, so a read that ends during the install still has a stand-in, and never kept after it,
+        # since a refused install means the debt moved to a revision the stand-in does not show.
+        refresh_pass.unavailable_previews.pop(request.logical_event_id, None)
+        self._deferred_sidecars.pop(_debt_key(request), None)
+        return installed
+
+    async def _refresh_unless_deferred(self, request: RefreshRequest, refresh_pass: _RefreshPass) -> None:
+        """Refresh one debt, unless its sidecar is still downloading or pausing after a transient failure.
+
+        Such a debt is served its remembered preview without any request, because refetching the revision could
+        change nothing until that sidecar can.
+        """
+        deferred = self._deferred_sidecars.get(_debt_key(request))
+        if deferred is not None and sidecar_retry_pending(deferred.content):
+            refresh_pass.unavailable_previews[request.logical_event_id] = deferred.preview
+            return
+        await self.refresh(request, refresh_pass)
 
     async def _resolved_content(
         self,
-        event_id: str,
-        content: Mapping[str, object],
+        request: RefreshRequest,
+        revision: _Revision,
         refresh_pass: _RefreshPass,
-    ) -> _RevisionContent:
-        """Return one revision's whole text, fetching its sidecar when it has one.
+    ) -> Mapping[str, object] | None:
+        """Return one revision's whole text to install, fetching its sidecar when it has one.
 
         A message too large for a single Matrix event carries a preview in its
         content and its real text in an attached file, and the projection
@@ -1234,22 +1278,44 @@ class ConversationHydrator:
         Anything else, such as a rate limit or an unreachable homeserver, may
         clear later, so it is never installed: this read gets the marked preview
         and the refresh token stays for the next.
+
+        The marked preview is recorded before the download starts, so a read
+        whose time runs out while it waits still has it, and later reads find
+        it while the sidecar is downloading or pausing after a failure.
         """
+        content = revision.content
         if not holds_unresolved_sidecar(content):
-            return _RevisionContent(content, durable=True)
-        if refresh_pass.failed_downloads_remaining <= 0:
-            logger.info("conversation_refresh_sidecar_deferred", event_id=event_id)
-            return _RevisionContent(unavailable_sidecar_content(content), durable=False)
-        sidecar: SidecarResolution = await resolve_sidecar_content(content, self._client())
+            return content
+        preview = VisibleMessage(
+            logical_event_id=request.logical_event_id,
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            sender=request.sender,
+            created_ts=request.created_ts,
+            revision_event_id=revision.event_id,
+            revision_ts=revision.origin_server_ts,
+            content=unavailable_sidecar_content(content),
+        )
+        refresh_pass.unavailable_previews[request.logical_event_id] = preview
+        key = _debt_key(request)
+        self._deferred_sidecars[key] = _DeferredSidecar(content=content, preview=preview)
+        self._deferred_sidecars.move_to_end(key)
+        while len(self._deferred_sidecars) > _DEFERRED_SIDECAR_MEMORY_SIZE:
+            self._deferred_sidecars.popitem(last=False)
+        async with refresh_pass.sidecar_downloads:
+            if refresh_pass.failed_downloads_remaining <= 0:
+                logger.info("conversation_refresh_sidecar_deferred", event_id=revision.event_id)
+                return None
+            sidecar: SidecarResolution = await resolve_sidecar_content(content, self._client())
         if sidecar.failed_download:
             refresh_pass.failed_downloads_remaining -= 1
         if not holds_unresolved_sidecar(sidecar.content):
-            return _RevisionContent(sidecar.content, durable=True)
+            return sidecar.content
         if sidecar.permanently_unavailable:
-            logger.info("conversation_refresh_sidecar_unavailable", event_id=event_id)
-            return _RevisionContent(unavailable_sidecar_content(content), durable=True)
-        logger.info("conversation_refresh_sidecar_unresolved", event_id=event_id)
-        return _RevisionContent(unavailable_sidecar_content(content), durable=False)
+            logger.info("conversation_refresh_sidecar_unavailable", event_id=revision.event_id)
+            return preview.content
+        logger.info("conversation_refresh_sidecar_unresolved", event_id=revision.event_id)
+        return None
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> dict[str, VisibleMessage]:
         """Repair exactly the messages one read found missing, returning stand-ins for unresolved sidecars.
@@ -1264,8 +1330,29 @@ class ConversationHydrator:
         The next strict read is what runs this. There is no background refresh
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
+
+        The debts are repaired concurrently, and all of them within one budget
+        of wall-clock time, so the media behind a page of posted messages cannot
+        hold the read that a prompt is waiting for. Whatever is unsettled when
+        the budget runs out is cancelled, and every debt whose revision was
+        refetched by then is served as its marked preview.
         """
         refresh_pass = _RefreshPass()
-        for request in requests:
-            await self.refresh(request, refresh_pass)
+        tasks = [asyncio.create_task(self._refresh_unless_deferred(request, refresh_pass)) for request in requests]
+        budget = asyncio.timeout(_REFRESH_READ_SECONDS)
+        try:
+            async with budget:
+                await asyncio.gather(*tasks)
+        except TimeoutError:
+            if not budget.expired():
+                raise
+            logger.info(
+                "conversation_refresh_budget_spent",
+                debts=len(requests),
+                unavailable_previews=len(refresh_pass.unavailable_previews),
+            )
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         return refresh_pass.unavailable_previews

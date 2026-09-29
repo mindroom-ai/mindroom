@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -24,11 +25,13 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.matrix import conversation_hydration as hydration_module
 from mindroom.matrix import media as media_module
 from mindroom.matrix import message_content as message_content_module
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
+    _CONCURRENT_REFRESH_WORK,
     _MAX_FAILED_SIDECAR_DOWNLOADS_PER_READ,
     _MESSAGES_PAGE_LIMIT,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
@@ -176,6 +179,10 @@ class FakeClient:
     # Media download failures by MXC URL, as HTTP statuses; an absent sidecar answers 404.
     sidecar_statuses: dict[str, int] = field(default_factory=dict)
     downloads: list[str] = field(default_factory=list)
+    # Media whose download never answers until released, and then times out.
+    hanging_sidecars: set[str] = field(default_factory=set)
+    release_hanging: asyncio.Event = field(default_factory=asyncio.Event)
+    event_reads: int = 0
     access_token: str = TEST_ACCESS_TOKEN
     # Whether this device has crypto set up at all. nio only attempts
     # decryption when it does, so neither does anything reading through it.
@@ -207,6 +214,9 @@ class FakeClient:
         assert method == "GET"
         mxc = requested_mxc(path)
         self.downloads.append(mxc)
+        if mxc in self.hanging_sidecars:
+            await self.release_hanging.wait()
+            raise TimeoutError
         if mxc in self.sidecar_statuses:
             return FakeMediaResponse(status=self.sidecar_statuses[mxc])
         payload = self.sidecars.get(mxc)
@@ -219,6 +229,7 @@ class FakeClient:
     ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
         """Return one stored event."""
         del room_id
+        self.event_reads += 1
         if event_id in self.hidden_events:
             errcode = self.hidden_events[event_id]
             return nio.RoomGetEventError(f"{errcode}: Event not found.", errcode)
@@ -1940,6 +1951,56 @@ class TestSidecarResolution:
                 self._unavailable("spam [continues]"),
             ] * (minute + 1)
             clock[0] += 60
+
+    async def test_hanging_attachments_cost_each_read_at_most_its_budget_and_then_nothing(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Attachments whose downloads never finish end each strict read at its budget, then cost no requests.
+
+        The first read starts as many downloads as it runs at once and serves every message as its marked preview
+        when its time runs out. The next read starts the downloads the first never reached. After that, every debt
+        is downloading or pausing after its failure, so reads neither refetch the messages nor download anything.
+        """
+        budget = 0.3
+        monkeypatch.setattr(hydration_module, "_REFRESH_READ_SECONDS", budget)
+        count = _CONCURRENT_REFRESH_WORK + 4
+        events = [
+            self._sidecar_source(f"$m{index}", "preview [continues]", f"mxc://s/hang{index}", ts=1_000 + index)
+            for index in range(count)
+        ]
+        await admit_all(alice, events)
+        client = FakeClient(
+            events={event["event_id"]: event for event in events},
+            hanging_sidecars={f"mxc://s/hang{index}" for index in range(count)},
+        )
+        reader = await self._reader(alice, client)
+        stand_ins = [self._unavailable("preview [continues]")] * count
+
+        async def timed_read() -> tuple[list[object], float]:
+            started = time.monotonic()
+            page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
+            return [message.content["body"] for message in page.messages], time.monotonic() - started
+
+        first, first_seconds = await timed_read()
+        first_downloads = len(client.downloads)
+        second, second_seconds = await timed_read()
+        requests_before_pending_reads = (client.event_reads, len(client.downloads))
+        third, third_seconds = await timed_read()
+        downloading = list(message_content_module._inflight_chains.values())
+        client.release_hanging.set()
+        await asyncio.gather(*downloading)
+        fourth, _ = await timed_read()
+
+        assert first == second == third == fourth == stand_ins
+        assert first_downloads == _CONCURRENT_REFRESH_WORK
+        assert sorted(client.downloads) == sorted(f"mxc://s/hang{index}" for index in range(count))
+        assert max(first_seconds, second_seconds) < budget + 2
+        assert third_seconds < budget
+        assert (client.event_reads, len(client.downloads)) == requests_before_pending_reads
+        stored = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
+        assert len(stored.refresh_pending) == count
 
     async def test_an_edit_after_an_unavailable_attachment_resolves_normally(self, alice: PrincipalStore) -> None:
         """Settling one revision with its preview does not stop a later edit from replacing it."""
