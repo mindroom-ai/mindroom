@@ -99,7 +99,7 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 
 User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
 `GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion (`status` `deleted` with `deleted_at` set) can still see, export, and cancel it; every other inactive account stays rejected there too.
-Suspending an account through the status endpoint bans its Supabase Auth user and blocks platform API calls and new instance and Matrix sign-ins; reactivation lifts the ban.
+Suspending an account through either admin update endpoint bans its Supabase Auth user and blocks platform API calls and new instance and Matrix sign-ins; reactivation lifts the ban.
 Running instances and existing instance-cookie and Matrix sessions continue, so stop instances separately.
 The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
 Rows hold the method, path, status, client IP, and the account and email that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified; the middleware never reads request bodies, and the admin routes record their request data in their own audit entries.

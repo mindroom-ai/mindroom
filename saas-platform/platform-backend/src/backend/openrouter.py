@@ -180,7 +180,10 @@ def set_openrouter_key_disabled(
 def set_openrouter_key_limit(
     *, management_api_key: str, key_hash: str, limit_usd: int, http_patch: HttpPatch = _default_http_patch
 ) -> None:
-    """Update a key's spending limit without resetting its accumulated usage."""
+    """Update a key's spending limit without resetting its accumulated usage.
+
+    OpenRouter's limit is a USD spending limit: null means unlimited, while 0 means a zero-dollar limit.
+    """
     url, headers = _key_request_target(management_api_key, key_hash, "update")
     status, response_body = http_patch(url, headers, json.dumps({"limit": limit_usd}).encode("utf-8"))
     _raise_for_key_status(status, response_body, "update")
