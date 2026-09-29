@@ -16,7 +16,7 @@ SCISSORS_LINE = "# ------------------------ >8 ------------------------"
 MESSAGE_PATTERNS = (
     re.compile(r"^\s*co-authored-by:.*\b(claude|anthropic|codex|openai|gemini)\b", re.IGNORECASE),
     re.compile(r"^\W*generated with \[?(claude code|codex)\b", re.IGNORECASE),
-    re.compile(r"claude\.ai/code/session_|chatgpt\.com/codex/tasks/", re.IGNORECASE),
+    re.compile(r"https://(claude\.ai/code/session_|chatgpt\.com/codex/tasks/)", re.IGNORECASE),
 )
 IDENTITY_PATTERN = re.compile(r"@(anthropic|openai)\.com>$", re.IGNORECASE)
 

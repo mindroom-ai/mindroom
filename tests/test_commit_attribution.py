@@ -56,6 +56,7 @@ def test_commit_message_with_attribution_is_rejected(tmp_path: Path, message: st
     [
         "Fix the bug\n\nCo-authored-by: Ada <ada@example.com>\n",
         "Describe why Co-Authored-By: Claude trailers are rejected\n",
+        "Reject links to claude.ai/code/session_ and chatgpt.com/codex/tasks/ pages\n",
         f"Fix the bug\n# {CLAUDE_TRAILER}\n",
         f"Fix the bug\n{SCISSORS_LINE}\n {CLAUDE_TRAILER}\n",
     ],
