@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -802,6 +803,23 @@ class TestMatrixRegistration:
         http_client.close.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_register_user_keeps_replaced_password_when_logout_hangs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A logout that never answers is abandoned after the timeout instead of blocking registration."""
+        monkeypatch.setattr(matrix_users, "_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS", 0.01)
+        http_client = self._one_time_password_client()
+        http_client.logout.side_effect = asyncio.Event().wait
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client):
+            user_id = await asyncio.wait_for(self._register_provisioned_account(tmp_path), timeout=5)
+
+        assert user_id == "@test_user:localhost"
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("login_result", "change_result"),
         [
@@ -1203,7 +1221,7 @@ class TestMatrixRegistration:
         self,
         tmp_path: Path,
     ) -> None:
-        """A created account is unusable without its one-time password, so an outdated service stops startup."""
+        """A created account is unusable without its one-time password, so a response missing it is a permanent error."""
         with pytest.raises(PermanentMatrixStartupError, match="missing one-time password"):
             await self._register_via_provisioning_with_response(
                 tmp_path,

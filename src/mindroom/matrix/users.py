@@ -43,6 +43,7 @@ from mindroom.matrix_identifiers import agent_username_localpart, extract_server
 
 logger = get_logger(__name__)
 
+_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS = 10
 _INVALID_REGISTRATION_TOKEN_MESSAGE = (
     "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "  # noqa: S105
     "Generate/issue a valid token for bot provisioning and try again."
@@ -960,7 +961,7 @@ async def _replace_one_time_password(
             raise _one_time_password_error(user_id, f" (HTTP {status}): {response}")
         # Best effort: the password is already replaced, so a failed logout only leaves an unused session behind.
         with contextlib.suppress(ClientError, TimeoutError):
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS):
                 await client.logout()
     finally:
         await client.close()
