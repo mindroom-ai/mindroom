@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+import httpcore
 import httpx
 
 from mindroom.bounded_bytes import BytePrefix, ByteStreamDeadlineError, collect_sync_byte_prefix
@@ -20,7 +21,9 @@ if TYPE_CHECKING:
 # The codings httpx decodes, plus the legacy `x-gzip` alias; any of them lets a small body stand for a huge one.
 # Other values, such as `utf-8` or `none`, name no compression, so httpx and these readers ignore them.
 _COMPRESSED_CONTENT_CODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
-_CONNECTED_EVENT = "connection.connect_tcp.complete"
+# httpcore traces `connection.connect_tcp.complete` for direct and HTTP-proxy connections and
+# `socks.connect_tcp.complete` for SOCKS connections, each before any TLS handshake.
+_CONNECTED_EVENT_SUFFIX = ".connect_tcp.complete"
 
 
 class CompressedHttpBodyError(ValueError):
@@ -32,14 +35,22 @@ class HttpExchange:
     """One HTTP exchange's total deadline, headers included, and the request extensions that enforce it.
 
     httpx timeouts apply to each network read, so a server sending one header byte inside every read timeout
-    could hold the calling thread for hours. Every connection the exchange opens is recorded through httpcore's
-    ``trace`` extension, and once the deadline passes its sockets are shut down, which wakes a blocked read.
+    could hold the calling thread for hours. httpcore's ``trace`` extension reports each TCP connection the
+    exchange opens, and the exchange immediately takes its own duplicate descriptor of that socket, before a TLS
+    handshake can wrap and detach it. Once the deadline passes, shutting those duplicates down wakes any read
+    blocked on the connections, plain or TLS.
+
+    The deadline starts before name resolution and connection setup, but a blocked resolution or connect attempt
+    is bounded only by the client's connect timeout for each resolved address, and a connection that completes
+    after the deadline is shut down at once.
+    Each exchange must use its own ``httpx.Client``: connections reused from a shared pool are never reported to
+    it, and shutting them down would break other requests.
     """
 
     deadline: float
     expired: bool = field(default=False, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
-    _sockets: list[socket.socket] = field(default_factory=list, init=False)
+    _duplicates: list[socket.socket] = field(default_factory=list, init=False)
 
     @property
     def extensions(self) -> dict[str, Any]:
@@ -47,41 +58,61 @@ class HttpExchange:
         return {"trace": self._trace}
 
     def _trace(self, event_name: str, info: dict[str, Any]) -> None:
-        if event_name != _CONNECTED_EVENT:
+        if not event_name.endswith(_CONNECTED_EVENT_SUFFIX):
             return
-        connected = info["return_value"].get_extra_info("socket")
+        stream = info["return_value"]
+        connected = stream.get_extra_info("socket")
         if not isinstance(connected, socket.socket):
             return
+        try:
+            duplicate = _owned_duplicate(connected)
+        except OSError as error:
+            # A connection the deadline cannot watch is refused rather than left unbounded.
+            stream.close()
+            msg = "The HTTP exchange could not watch its connection."
+            raise httpcore.ConnectError(msg) from error
         with self._lock:
-            self._sockets.append(connected)
+            self._duplicates.append(duplicate)
             if not self.expired:
                 return
-        _shut_down(connected)
+        _shut_down(duplicate)
 
     def _expire(self) -> None:
         """Mark the deadline as passed and wake every read blocked on the exchange's connections."""
         with self._lock:
             self.expired = True
-            connected = list(self._sockets)
-        for each in connected:
-            _shut_down(each)
+            duplicates = list(self._duplicates)
+        for duplicate in duplicates:
+            _shut_down(duplicate)
+
+    def _close(self) -> None:
+        with self._lock:
+            duplicates, self._duplicates = self._duplicates, []
+        for duplicate in duplicates:
+            duplicate.close()
 
 
-def _shut_down(connected: socket.socket) -> None:
-    # A duplicate descriptor shuts down the same connection without touching the socket object another thread
-    # is reading through, which matters for TLS sockets.
+def _owned_duplicate(connected: socket.socket) -> socket.socket:
+    descriptor = os.dup(connected.fileno())
+    try:
+        return socket.socket(fileno=descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _shut_down(duplicate: socket.socket) -> None:
+    # Shutting down one descriptor ends the connection for every descriptor that shares it.
     with suppress(OSError):
-        descriptor = connected.fileno()
-        if descriptor >= 0:
-            with socket.socket(fileno=os.dup(descriptor)) as duplicate:
-                duplicate.shutdown(socket.SHUT_RDWR)
+        duplicate.shutdown(socket.SHUT_RDWR)
 
 
 @contextmanager
 def http_exchange_deadline(seconds: float) -> Iterator[HttpExchange]:
-    """Bound one whole HTTP exchange, redirects included, to ``seconds``, raising ``httpx.ReadTimeout`` past it.
+    """Bound one HTTP exchange's reads, redirects included, to ``seconds``, raising ``httpx.ReadTimeout`` past it.
 
-    Pass ``exchange.extensions`` to every request and the exchange to ``read_identity_body_prefix``.
+    Pass ``exchange.extensions`` to every request of one exchange-owned client, and the exchange to
+    ``read_identity_body_prefix``.
     """
     exchange = HttpExchange(deadline=monotonic() + seconds)
     timer = threading.Timer(seconds, exchange._expire)
@@ -96,6 +127,8 @@ def http_exchange_deadline(seconds: float) -> Iterator[HttpExchange]:
         raise httpx.ReadTimeout(msg) from error
     finally:
         timer.cancel()
+        timer.join()
+        exchange._close()
 
 
 def read_identity_body_prefix(response: httpx.Response, *, max_bytes: int, exchange: HttpExchange) -> BytePrefix:
