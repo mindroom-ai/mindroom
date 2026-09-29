@@ -731,6 +731,7 @@ Cleanup then removes only recognizable room directories and thread YAML files, l
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
+A long message whose sidecar cannot be read during a pass, for example while its media server is unreachable, is exported as its preview with a `[long message content unavailable]` note, and the file keeps that note until the next pass, which for automatic workspace exports follows the room's next activity.
 A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
 Hydration writes through the runtime's existing journal owner; export does not open another journal or crypto store.
 Normal config reloads wait for manual exports; forced replacement and shutdown cancel them and drain their history reads before closing their Matrix clients.

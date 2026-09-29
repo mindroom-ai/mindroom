@@ -63,7 +63,7 @@ _MAX_REDIRECTS = 10
 # BeautifulSoup builds objects worth up to a few hundred times a tag-dense page, so only a prefix is parsed.
 _MAX_PAGE_BYTES = 1024 * 1024
 _NO_BODY = BytePrefix(b"", truncated=False)
-# httpx timeouts apply per read, so each hop's whole exchange, headers included, must also finish within this total.
+# httpx timeouts apply per read, so each hop's reads, headers and body, must also end this long after the hop starts.
 _PAGE_READ_SECONDS = 30
 _TRUNCATED_PAGE_NOTE = f"[Page truncated: only its first {_MAX_PAGE_BYTES // (1024 * 1024)} MiB was read.]"
 

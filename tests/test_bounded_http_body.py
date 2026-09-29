@@ -258,7 +258,7 @@ def test_website_hops_end_at_their_deadline_through_either_route(
 
 @pytest.mark.parametrize("trickle_server", [_HEADER_TRICKLE], indirect=True)
 def test_worker_media_reads_end_at_their_deadline(trickle_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Worker media URL reads honour the same whole-exchange deadline."""
+    """Worker media URL reads honour the same exchange deadline."""
     monkeypatch.setattr(worker_media, "_READ_URL_SECONDS", _DEADLINE_SECONDS)
     monkeypatch.setattr(worker_media, "ServerFetchHTTPTransport", httpx.HTTPTransport)
     monkeypatch.setattr(worker_media, "get_environment_proxies", dict)

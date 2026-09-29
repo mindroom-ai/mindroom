@@ -21,7 +21,7 @@ from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
 
-# httpx timeouts apply per read, so the whole exchange, redirects and headers included, must finish within this total.
+# httpx timeouts apply per read, so every read of the fetch, across redirects, ends this long after it starts.
 _READ_URL_SECONDS = 60
 _AUDIO_FORMAT_BY_MIME_TYPE = {
     "audio/mpeg": "mp3",

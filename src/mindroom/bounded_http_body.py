@@ -32,7 +32,7 @@ class CompressedHttpBodyError(ValueError):
 
 @dataclass
 class HttpExchange:
-    """One HTTP exchange's total deadline, headers included, and the request extensions that enforce it.
+    """One HTTP exchange's deadline for its reads, headers and body, and the request extensions that enforce it.
 
     httpx timeouts apply to each network read, so a server sending one header byte inside every read timeout
     could hold the calling thread for hours. httpcore's ``trace`` extension reports each TCP connection the
