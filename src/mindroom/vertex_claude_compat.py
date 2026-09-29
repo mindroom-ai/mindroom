@@ -41,6 +41,7 @@ _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
 _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
     {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
 )
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # Before any tools are discovered, Vertex generation reports 213 input tokens
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
 # Keep a small margin because count_tokens cannot count that server-tool prefix.
@@ -142,6 +143,28 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
     return count_messages, referenced_tool_names
 
 
+def _messages_with_thinking_as_text(messages: list[Any]) -> list[Any]:
+    """Count each thinking block as its visible text, dropping empty or opaque ones."""
+    text_messages: list[Any] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            text_messages.append(message)
+            continue
+        text_content: list[Any] = []
+        for block in content:
+            # Agno emits stored turns as dicts and rebuilt turns as SDK block objects.
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type not in _THINKING_BLOCK_TYPES:
+                text_content.append(block)
+                continue
+            thinking = block.get("thinking") if isinstance(block, dict) else getattr(block, "thinking", None)
+            if isinstance(thinking, str) and thinking.strip():
+                text_content.append({"type": "text", "text": thinking})
+        text_messages.append({**message, "content": text_content})
+    return text_messages
+
+
 def _is_vertex_tool_search(tool: object) -> bool:
     """Return whether one wire tool is Vertex's unsupported count entry."""
     return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == TOOL_SEARCH_TOOL_TYPE
@@ -195,7 +218,11 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
         return request_kwargs, 0
     count_kwargs = dict(request_kwargs)
     if count_messages is not None:
-        count_kwargs["messages"] = count_messages
+        # While thinking is on, the endpoint rejects any assistant turn whose
+        # blocks around its signed thinking were rewritten, as the text
+        # conversion above does. Count that thinking as text with thinking off.
+        count_kwargs["messages"] = _messages_with_thinking_as_text(count_messages)
+        count_kwargs.pop("thinking", None)
     if count_tools:
         count_kwargs["tools"] = count_tools
     elif count_tools is not None:
