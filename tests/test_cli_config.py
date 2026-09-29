@@ -183,6 +183,7 @@ def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> No
     assert isinstance(configure.call_args_list[0].kwargs["logger_factory"], structlog.stdlib.LoggerFactory)
     assert loaded_config.agents
     assert uses_default_logging()
+    assert isinstance(structlog.get_config()["logger_factory"], structlog.PrintLoggerFactory)
 
 
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(

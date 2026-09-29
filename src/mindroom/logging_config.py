@@ -122,7 +122,7 @@ def configure_default_logging() -> None:
 
 
 def uses_default_logging() -> bool:
-    """Return whether nothing replaced the logging from `configure_default_logging`."""
+    """Return whether the processors are still the ones `configure_default_logging` installed."""
     return structlog.get_config()["processors"] is _DEFAULT_PROCESSORS
 
 
