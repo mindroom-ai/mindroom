@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -16,12 +17,21 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-# The actor, the call its grant belongs to, and whether that call is the one entering the application.
-_CALL: ContextVar[tuple[ToolExecutionIdentity, FunctionCall, bool] | None] = ContextVar("tool_job_call", default=None)
+
+@dataclass(frozen=True)
+class _BoundCall:
+    """The actor, the call its grant belongs to, and whether that call is the one entering the application."""
+
+    owner: ToolExecutionIdentity
+    call: FunctionCall
+    entering: bool
+
+
+_CALL: ContextVar[_BoundCall | None] = ContextVar("tool_job_call", default=None)
 
 
 @contextmanager
-def _bound_call(current: tuple[ToolExecutionIdentity, FunctionCall, bool]) -> Iterator[None]:
+def _bound_call(current: _BoundCall) -> Iterator[None]:
     token = _CALL.set(current)
     try:
         yield
@@ -32,7 +42,7 @@ def _bound_call(current: tuple[ToolExecutionIdentity, FunctionCall, bool]) -> It
 @contextmanager
 def authorized_tool_call(owner: ToolExecutionIdentity, call: FunctionCall) -> Iterator[None]:
     """Retain the authenticated actor and exact call across hooks, waits, and result consumption."""
-    with _bound_call((owner, call, True)):
+    with _bound_call(_BoundCall(owner, call, entering=True)):
         yield
 
 
@@ -47,15 +57,16 @@ def nested_tool_call(call: FunctionCall, *, own_grant: bool) -> Iterator[None]:
     if current is None:
         yield
         return
-    owner, enclosing, _ = current
-    with _bound_call((owner, call, True) if own_grant else (owner, enclosing, False)):
+    with _bound_call(
+        _BoundCall(current.owner, call, entering=True) if own_grant else replace(current, entering=False),
+    ):
         yield
 
 
 def current_tool_call() -> FunctionCall | None:
     """Return the exact call whose result a management tool consumes."""
     current = _CALL.get()
-    return current[1] if current is not None else None
+    return current.call if current is not None else None
 
 
 def check_current_execution_authority(*, arguments: Mapping[str, Any] | None = None) -> None:
@@ -66,6 +77,6 @@ def check_current_execution_authority(*, arguments: Mapping[str, Any] | None = N
     context = get_tool_runtime_context()
     runtime = get_background_runtime(context.runtime_paths) if context is not None else None
     if runtime is not None:
-        owner, call, entering = current
-        accepted = (call.arguments or {}) if arguments is None or not entering else arguments
-        runtime.authorize_execution(owner, call.function, accepted)
+        # Only the entering call is checked with its accepted arguments; an enclosing grant keeps its own call's.
+        accepted = arguments if arguments is not None and current.entering else current.call.arguments or {}
+        runtime.authorize_execution(current.owner, current.call.function, accepted)

@@ -757,7 +757,7 @@ Enable the instance-wide root option `background_tool_jobs.enabled: true` and re
 Unless `delegate` is listed in `background_tool_jobs.exclude_toolkits`, managed Matrix calls wait until completion or human input, and the shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
 Human input then releases the wait while the child keeps working; it does not automatically pause the child.
 Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](../tools/agent-orchestration.md#background-jobs).
-The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
+The accepted `action` values are `list`, `wait`, and `cancel`; every action except `list` requires `job_id`.
 The `wait` action accepts the same optional `wait_timeout` budget.
 Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
@@ -799,7 +799,8 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Detached managed jobs may overlap; each accepted job owns its execution and exact result independently
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
+- With background jobs enabled, detached children run as independent jobs and may overlap
 
 ## Naming Rules
 
