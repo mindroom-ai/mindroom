@@ -234,7 +234,7 @@ struct LocalAgentsView: View {
                     }.buttonStyle(.borderedProminent).disabled(busy || !setup.canStart(service: state))
                     Button("Check Setup First") { show(.check) }
                 }
-                if !setup.runtimeReady { Text("Install or update the runtime in step 1 before starting.").foregroundStyle(.secondary) }
+                if !setup.runtimeReady && !setup.canStart(service: state) { Text("Install or update the runtime in step 1 before starting.").foregroundStyle(.secondary) }
                 else if !setup.configurationExists && state == .notInstalled { Text("Prepare configuration in step 2 before starting.").foregroundStyle(.secondary) }
                 else if state == .unknown { Text("Refresh Status to determine whether the service can be started.").foregroundStyle(.secondary) }
                 if state == .stopped {

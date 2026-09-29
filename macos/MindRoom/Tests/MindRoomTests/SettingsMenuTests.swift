@@ -39,12 +39,12 @@ final class SettingsMenuTests: XCTestCase {
         }
     }
 
-    func testMenuStartWaitsForMatchingRuntimeButStopDoesNot() async throws {
+    func testMenuServiceControlsStayAvailableWithRuntimeFromAnotherRelease() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         _ = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
         let toggle = NSSelectorFromString("toggleLocalAgents")
-        for (output, enabled) in [("Service installed but not running", false), ("Service: running", true)] {
+        for (output, enabled) in [("Service installed but not running", true), ("Service: running", true)] {
             let runner = MindRoomCommandRunner(
                 runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379"),
                 processRunner: { _, _ in CommandResult(exitCode: 0, output: output) }

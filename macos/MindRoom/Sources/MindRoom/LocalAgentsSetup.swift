@@ -44,8 +44,8 @@ struct LocalAgentsSetupSnapshot: Equatable {
     }
 
     func canStart(service: MindRoomServiceState) -> Bool {
-        // Installed services keep the configuration path saved by the CLI.
-        runtimeReady && (service == .stopped || (service == .notInstalled && configurationExists))
+        // Installed services keep the configuration path and runtime version saved by the CLI.
+        (service == .stopped && runtimeInstalled) || (service == .notInstalled && configurationExists && runtimeReady)
     }
 
     func progress(for step: LocalAgentsSetupStep, service: MindRoomServiceState,

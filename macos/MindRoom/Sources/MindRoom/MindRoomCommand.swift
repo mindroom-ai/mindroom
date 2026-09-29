@@ -92,13 +92,14 @@ enum MindRoomCommand: Equatable {
         }
     }
 
-    /// Setup and service-start commands use the installed runtime's options or run it as the service,
-    /// so they wait for the runtime matching this app. Stop and restart keep controlling an existing service.
+    /// Setup commands use the installed runtime's CLI options, and service install pins the service to
+    /// that runtime, so they wait for the runtime matching this app. Start, stop, and restart only
+    /// control the launchd service, which keeps the version pinned when it was installed.
     var requiresMatchingRuntime: Bool {
         switch self {
-        case .installService, .startService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted:
+        case .installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted:
             return true
-        case .installRuntime, .updateRuntime, .stopService, .restartService, .serviceStatus,
+        case .installRuntime, .updateRuntime, .startService, .stopService, .restartService, .serviceStatus,
              .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return false
         }

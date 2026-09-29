@@ -72,7 +72,9 @@ final class LocalAgentsSetupTests: XCTestCase {
         XCTAssertEqual(setup.progress(for: .install, service: .running, check: nil), .needsAction("Update needed"))
         XCTAssertEqual(setup.nextStep(service: .running, check: nil), .install)
         XCTAssertEqual(setup.nextStep(service: .pairing, check: nil), .install)
-        XCTAssertFalse(setup.canStart(service: .stopped))
+        // Starting an installed service uses the version pinned at service install, not new CLI options.
+        XCTAssertTrue(setup.canStart(service: .stopped))
+        XCTAssertFalse(setup.canStart(service: .notInstalled))
 
         let unknown = LocalAgentsSetupSnapshot(runtimePath: "/example/mindroom", requiredRuntimeVersion: "2026.9.379", configurationExists: true)
         XCTAssertEqual(unknown.runtimeUpdateReason, "This app needs MindRoom runtime 2026.9.379, but the installed runtime version is unknown.")

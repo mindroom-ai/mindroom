@@ -35,6 +35,7 @@ final class LocalAgentPairingTests: XCTestCase {
         }, showSection: { sections.append($0) })
         let observation = runner.$pairingApproval.compactMap { $0 }.prefix(1).sink { _ in approvalArrived.fulfill() }
         runner.onCommandFinished = { _, _ in finished.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [approvalArrived], timeout: 3)
         XCTAssertTrue(runner.isRunningCommand)
@@ -68,6 +69,7 @@ final class LocalAgentPairingTests: XCTestCase {
             CommandResult(exitCode: 2, output: "No such option: --graceful-cancel")
         }, showSection: { sections.append($0) })
         runner.onCommandFinished = { _, _ in finished.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [finished], timeout: 3)
         XCTAssertEqual(runner.feedback?.result.exitCode, 2)
@@ -89,6 +91,7 @@ final class LocalAgentPairingTests: XCTestCase {
                 return CommandResult(exitCode: exitCode, output: output)
             }, showSection: { _ in })
             runner.onCommandFinished = { _, _ in finished.fulfill() }
+            await completeFirstStatusRefresh(runner)
             runner.run(.pairHosted)
             await fulfillment(of: [finished], timeout: 3)
             XCTAssertFalse(runner.pairingCancelled)
@@ -112,6 +115,7 @@ final class LocalAgentPairingTests: XCTestCase {
             ))
         }, showSection: { sections.append($0) })
         runner.onCommandFinished = { _, _ in finished.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [finished], timeout: 3)
         XCTAssertEqual(sections, [.chat, .localAgents])
