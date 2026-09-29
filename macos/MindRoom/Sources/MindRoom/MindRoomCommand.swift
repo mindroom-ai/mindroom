@@ -68,7 +68,7 @@ enum MindRoomCommand: Equatable {
         case .installRuntime:
             return "The command-line runtime is installed. The background service is a separate step. Continue to Configure, or use your existing configuration."
         case .updateRuntime:
-            return "The runtime update finished. In Settings, use Apply Runtime to Service to start or restart local agents with this version."
+            return "The runtime update finished. If the background service is installed, use Apply Runtime to Service in Settings to run local agents on this version."
         case .installService:
             return "The background service was installed and started. Open Chat or Open Dashboard to check that your agents are ready."
         case .startService:
@@ -89,6 +89,19 @@ enum MindRoomCommand: Equatable {
             return "The setup check finished. Review the Check summary before continuing to Start."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
+        }
+    }
+
+    /// Setup commands use the installed runtime's CLI options, and service install pins the service to
+    /// that runtime, so they wait for the runtime matching this app. Start, stop, and restart only
+    /// control the launchd service, which keeps the version pinned when it was installed.
+    var requiresMatchingRuntime: Bool {
+        switch self {
+        case .installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted:
+            return true
+        case .installRuntime, .updateRuntime, .startService, .stopService, .restartService, .serviceStatus,
+             .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
+            return false
         }
     }
 

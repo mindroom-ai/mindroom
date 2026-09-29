@@ -12,7 +12,8 @@ The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its gene
 
 ## Requirements
 
-- macOS 14 Sonoma or later, on Apple silicon or Intel.
+- macOS 14 Sonoma or later, on an Apple silicon Mac.
+  Intel Macs are not supported because the MindRoom runtime depends on packages that no longer publish Intel macOS wheels.
 - Network access to install the MindRoom runtime and connect to your Matrix server.
 - For local agents, a configured model provider credential, local model, or supported provider login.
 - For computer access, an existing Desktop-enabled MindRoom agent; application access also needs the macOS permissions described in the [Desktop guide](../tools/desktop.md).
@@ -44,7 +45,10 @@ Each step shows its own status, and only the selected panel is displayed.
 The app detects the command-line runtime separately from the background service: **Runtime installed · Background service not installed** means step 1 is already done.
 
 1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location.
-   If it is missing, **Install MindRoom** installs it using bundled `uv`.
+   If it is missing, **Install MindRoom** uses bundled `uv` to install the runtime release that matches the app version.
+   If the installed runtime is a different release, for example after an app update, **Install** shows **Update needed** and **Update MindRoom** installs the matching release.
+   Configuring, pairing, checking, and installing the background service, including **Apply Runtime to Service…**, wait until the runtime matches, because the app uses command options from its own release and the service keeps the runtime version it was installed with.
+   Starting, stopping, and restarting an installed service stay available.
    Installing the runtime does not install the background service.
 2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
    The configuration path is shown in the panel.
@@ -54,7 +58,6 @@ The app detects the command-line runtime separately from the background service:
    If needed, sign in there or use the secondary **Open in Browser** option.
    **Cancel** stops the waiting connection without saving new credentials and returns to **Connect Account**.
    If approval is already being collected or saved, the app finishes connecting and shows the result.
-   If the installed runtime is too old for safe cancellation, the connection attempt fails with a hint to use **Update Local Runtime** in **Settings**, then try again.
    On success, the app shows the connection result and refreshes service status.
    An unapproved code expires after 10 minutes.
    If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.
@@ -70,7 +73,8 @@ The app detects the command-line runtime separately from the background service:
    Already installed services use their saved configuration path, including a custom path chosen in the terminal.
    If the service starts before your account is connected, Local agents shows **Waiting for your chat account** until you choose **Connect Account** and approve.
 
-An existing running or stopped service opens directly at **Start**.
+A runtime that needs an update opens at **Install**.
+Otherwise, an existing running or stopped service opens directly at **Start**.
 Existing configuration without a service opens at **Check**.
 Commands show progress and results directly above the selected panel.
 **Refresh Status** rereads the runtime, configuration, and service state, including changes made in a terminal.
@@ -206,7 +210,9 @@ If a runtime action is still in progress, let it finish before quitting.
 
 **Settings** separates app updates from runtime updates.
 **Check App Updates…** uses Sparkle for signed releases configured with an update feed.
-**Update Local Runtime** updates the installed CLI.
+**Update Local Runtime** installs the CLI release that matches the app version, and Settings notes when the installed runtime differs.
+Installs and updates use an arm64 managed Python 3.13, so an update also replaces a runtime that was installed with an Intel Python.
+Because `uv` records that exact version, `uv tool upgrade mindroom` in a terminal keeps it; after the next app update, the app asks for the new matching runtime.
 Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
 

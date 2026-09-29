@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
-from PIL import Image
+from PIL import Image, JpegImagePlugin, PngImagePlugin
 
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
@@ -112,6 +112,34 @@ class TestUploadFileAsMxc:
 
         assert payload is not None
         assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
+
+    @pytest.mark.asyncio
+    async def test_huge_images_upload_without_their_raster_being_decoded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Above the media pixel limit, a PNG without early EXIF omits dimensions, and a JPEG keeps its header ones."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = _upload_response()
+        png = tmp_path / "huge.png"
+        Image.new("1", (8000, 6000)).save(png)
+        jpeg = tmp_path / "huge.jpg"
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new("L", (8000, 6000)).save(jpeg, exif=exif)
+        loads: list[object] = []
+        for image_class in (PngImagePlugin.PngImageFile, JpegImagePlugin.JpegImageFile):
+            monkeypatch.setattr(image_class, "load", loads.append)
+
+        _mxc_uri, png_payload = await _upload_file_as_mxc(client, "!room:localhost", png, mimetype="image/png")
+        _mxc_uri, jpeg_payload = await _upload_file_as_mxc(client, "!room:localhost", jpeg, mimetype="image/jpeg")
+
+        assert png_payload is not None
+        assert png_payload["info"] == {"size": png.stat().st_size, "mimetype": "image/png"}
+        assert jpeg_payload is not None
+        assert (jpeg_payload["info"]["w"], jpeg_payload["info"]["h"]) == (6000, 8000)
+        assert loads == []
 
     @pytest.mark.asyncio
     async def test_undecodable_image_upload_omits_dimensions(self, tmp_path: Path) -> None:

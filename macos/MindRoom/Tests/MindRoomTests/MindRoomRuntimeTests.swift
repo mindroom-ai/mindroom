@@ -42,27 +42,69 @@ final class MindRoomRuntimeTests: XCTestCase {
         let runtime = MindRoomRuntime(
             homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
             bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
-            environment: ["PATH": "/usr/bin:/bin"]
+            environment: ["PATH": "/usr/bin:/bin"],
+            appVersion: "2026.9.378"
         )
 
         let command = runtime.command(for: .installRuntime)
         XCTAssertEqual(command.executableURL.path, "/Applications/MindRoom.app/Contents/Resources/bin/uv")
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "mindroom"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "mindroom==2026.9.378"])
         XCTAssertNil(command.environment["MINDROOM_CONFIG_PATH"])
         XCTAssertNil(command.environment["MINDROOM_STORAGE_PATH"])
         XCTAssertEqual(command.environment["UV_NO_PROGRESS"], "1")
         XCTAssertTrue(command.environment["PATH"]?.hasPrefix("/Users/example/.local/bin:/Applications/MindRoom.app/Contents/Resources/bin:") == true)
     }
 
-    func testRuntimeUpdateForcesLatestMindRoomInstall() {
+    func testRuntimeUpdateForcesRuntimeMatchingAppRelease() {
         let runtime = MindRoomRuntime(
             homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
             bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
-            environment: ["PATH": "/usr/bin:/bin"]
+            environment: ["PATH": "/usr/bin:/bin"],
+            appVersion: "2026.9.378"
         )
 
         let command = runtime.command(for: .updateRuntime)
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.378"])
+    }
+
+    func testDevelopmentBuildsInstallLatestRuntime() {
+        // 0.1.0 is the build script's fallback and also an unrelated old PyPI release.
+        for appVersion in [nil, "0.1.0", "1.0"] as [String?] {
+            let runtime = MindRoomRuntime(
+                homeURL: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+                bundleURL: URL(fileURLWithPath: "/Applications/MindRoom.app", isDirectory: true),
+                environment: ["PATH": "/usr/bin:/bin"],
+                appVersion: appVersion
+            )
+
+            XCTAssertNil(runtime.pinnedRuntimeVersion)
+            XCTAssertEqual(runtime.command(for: .installRuntime).arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "mindroom"])
+            XCTAssertEqual(runtime.command(for: .updateRuntime).arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom"])
+        }
+    }
+
+    func testSnapshotReadsInstalledRuntimeVersionThroughToolLink() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let link = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
+
+        let outdated = MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379").localSetupSnapshot()
+        XCTAssertEqual(outdated.runtimePath, link.path)
+        XCTAssertEqual(outdated.runtimeVersion, "2026.9.378")
+        XCTAssertEqual(outdated.requiredRuntimeVersion, "2026.9.379")
+        XCTAssertFalse(outdated.runtimeReady)
+        let current = MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.378").localSetupSnapshot()
+        XCTAssertTrue(current.runtimeReady)
+    }
+
+    func testSharedPrefixWithSeveralPythonVersionsReportsUnknownRuntimeVersion() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try installFakeUVToolRuntime(home: home, versions: ["python3.12": "2026.9.379", "python3.13": "2026.9.378"])
+
+        let setup = MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379").localSetupSnapshot()
+        XCTAssertNil(setup.runtimeVersion)
+        XCTAssertFalse(setup.runtimeReady)
     }
 
     func testServiceInstallUsesMindRoomServiceInstallNoConfirm() {
@@ -117,4 +159,23 @@ final class MindRoomRuntimeTests: XCTestCase {
             ["mindroom", "config", "init", "--path", "/Users/example/.mindroom/config.yaml", "--matrix-server", "self-hosted", "--no-input"]
         )
     }
+}
+
+/// Installs a fake uv tool runtime linked from `~/.local/bin`, with MindRoom metadata for each Python directory.
+func installFakeUVToolRuntime(home: URL, versions: [String: String]) throws -> URL {
+    let tool = home.appendingPathComponent(".local/share/uv/tools/mindroom")
+    let toolExecutable = tool.appendingPathComponent("bin/mindroom")
+    let link = home.appendingPathComponent(".local/bin/mindroom")
+    try FileManager.default.createDirectory(at: toolExecutable.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+    for (python, version) in versions {
+        try FileManager.default.createDirectory(
+            at: tool.appendingPathComponent("lib/\(python)/site-packages/mindroom-\(version).dist-info"),
+            withIntermediateDirectories: true
+        )
+    }
+    try Data("#!/bin/sh\n".utf8).write(to: toolExecutable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: toolExecutable.path)
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: toolExecutable)
+    return link
 }

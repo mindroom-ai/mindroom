@@ -5110,6 +5110,7 @@ square_root(144)
 ### Notes
 
 - Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
+- `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error payload before any computation.
 - Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
 ## [`reasoning`]
@@ -5283,7 +5284,8 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
+Other durations return an error message without waiting.
 `sleep` defaults to primary execution.
 
 ### Configuration
@@ -6700,6 +6702,7 @@ read_url("https://docs.mindroom.chat")
 - Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
 - Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
 - Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
+- Each page and redirect hop is requested uncompressed and read up to 2 MiB; a larger page, or one the server compresses anyway (`gzip`, `x-gzip`, `deflate`, `br`, or `zstd`), fails instead of being buffered or inflated in the primary process.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
@@ -20174,6 +20177,7 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 - **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
+- **Request bodies are limited to 16 MiB** — the dashboard API, including `/v1`, answers larger requests with HTTP 413; knowledge uploads are exempt and keep their own per-file limit
 
 # Architecture
 
@@ -20319,7 +20323,12 @@ MindRoom's architecture consists of several key components working together.
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
-| `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/bridge.py` | Enforces current local authority, routes app input, folder, and shell actions to their owners, runs browser actions, app launch, and app observation, and coordinates serial execution and response delivery |
+| `desktop/command_parameters.py` | Parses the typed, length-bounded parameters of desktop commands |
+| `desktop/reply_fitting.py` | Builds desktop success replies and fits trimmed replies within one encrypted to-device message |
+| `desktop/file_actions.py` | Runs desktop folder listings and reads and fits them into one reply |
+| `desktop/gui_actions.py` | Runs desktop app input actions (semantic element actions, pointer, text, scroll, and key chords) through the local GUI provider |
+| `desktop/shell_actions.py` | Runs desktop shell actions, reports local and caller-scoped shell status, and delivers output inline or as an encrypted attachment |
 | `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
 | `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
 | `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
@@ -21571,6 +21580,9 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
+| CalculatorTools computes `factorial` for any argument, although `json.dumps` refuses results above 4300 digits, so one call can hold the GIL for minutes. | Tracking gap: refuse factorial arguments whose result cannot be serialized; no matching issue or PR has been verified. | `CalculatorTools.factorial` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned`. |
+| CalculatorTools trial-divides `is_prime` up to the square root of any argument, so one large prime checks for hours. | Tracking gap: bound prime-check work; no matching issue or PR has been verified. | `CalculatorTools.is_prime` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division`. |
+| SleepTools blocks a thread in `time.sleep` for any requested duration. | Tracking gap: bound or await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | DaytonaTools treats a null `verify_ssl` like `false` and then disables certificate checks by patching `daytona_api_client.Configuration.__init__` for the whole process until it restarts. | Tracking gap: disable verification only for an explicit `False` and scope it to the toolkit's own client configuration; no matching issue or PR identified. | `tools/daytona.py` passes only an explicit `false` upstream; `tests/test_tool_config_sync.py` covers unset, null, true, and false values. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
@@ -21656,6 +21668,9 @@ Small owner-adjacent boundaries use the same source records:
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
+| `custom_tools/calculator.py` (`factorial`) | Refuse `factorial()` above 1558 before Agno computes it. | The cap is MindRoom policy for the process shared by every agent; the result shape stays upstream. |
+| `custom_tools/calculator.py` (`is_prime`) | Refuse `is_prime()` above 10**12 before Agno's trial division. | The cap is MindRoom policy for the process shared by every agent; the other calculator functions stay upstream. |
+| `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds before Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the pause itself stays upstream. |
 | `tools/daytona.py` | Map an unset or null `verify_ssl` to `True` before the upstream constructor sees it. | The tool configuration default stays `true`, and the one-time `legacy_tool_credentials.py` cleanup drops `false` values saved with the former default. |
 | `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |

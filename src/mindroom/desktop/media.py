@@ -16,6 +16,8 @@ from mindroom.desktop.protocol import (
 from mindroom.matrix.media import decrypt_media_bytes, prepare_media_upload, upload_content_uri, upload_media_bytes
 
 _IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
+# The bridge's stop drains the action in flight, so every media upload it may wait on must be bounded.
+MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 
 
 class DesktopMediaError(RuntimeError):
@@ -127,6 +129,7 @@ def _validate_payload(payload: bytes, *, mime_type: str) -> None:
 
 
 __all__ = [
+    "MEDIA_UPLOAD_TIMEOUT_SECONDS",
     "DesktopMediaError",
     "download_encrypted_media",
     "download_encrypted_screenshot",

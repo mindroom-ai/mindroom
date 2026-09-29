@@ -10,7 +10,6 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
@@ -18,9 +17,16 @@ from mindroom.desktop.accessibility import (
     AccessibilityError,
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.command_parameters import (
+    reject_unexpected_parameters,
+    required_object_parameter,
+    required_str_parameter,
+)
+from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
-from mindroom.desktop.input import MINDROOM_APP_IDS, normalize_key_chord
-from mindroom.desktop.media import DesktopMediaError, upload_encrypted_media
+from mindroom.desktop.gui_actions import execute_fallback_control, execute_semantic_control
+from mindroom.desktop.input import MINDROOM_APP_IDS
+from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -37,18 +43,17 @@ from mindroom.desktop.protocol import (
     DESKTOP_FILE_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
     DESKTOP_SHELL_ACTIONS,
-    MAX_INLINE_RESPONSE_BYTES,
-    SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
     DesktopObservationMode,
     DesktopProtocolError,
     DesktopResponse,
-    EncryptedDesktopMedia,
     desktop_observation_mode,
     event_content,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
-from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
+from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
+from mindroom.desktop.shell import DesktopShell, DesktopShellError
+from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     OlmToDeviceError,
@@ -61,6 +66,7 @@ from mindroom.matrix.olm_to_device import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
+    from pathlib import Path
 
     import nio
     from nio import AuthenticatedToDeviceEvent
@@ -70,22 +76,7 @@ logger = get_logger(__name__)
 _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
-_MAX_WARNING_DETAIL = 500
-# Stop drains the action in flight, so every media upload it may wait on must be bounded.
-_MEDIA_UPLOAD_TIMEOUT_SECONDS = 30.0
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
-_MAX_PARAMETER_IDENTIFIER_LENGTH = 256
-_MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
-
-
-def _response_metrics(*, elapsed_ms: int, structured_bytes: int, screenshot_bytes: int) -> dict[str, int]:
-    """Build the metrics every executed reply carries."""
-    return {"elapsed_ms": elapsed_ms, "structured_bytes": structured_bytes, "screenshot_bytes": screenshot_bytes}
-
-
-# Replies are fitted before their metrics are known, so fitting reserves the widest value of each metric;
-# JSON consumers hold integers exactly only up to 2**53 - 1.
-_WIDEST_METRICS = _response_metrics(elapsed_ms=2**53 - 1, structured_bytes=2**53 - 1, screenshot_bytes=2**53 - 1)
 
 
 async def _run_macos_application_events() -> None:
@@ -283,14 +274,14 @@ class DesktopBridge:
 
     def _request_status_response(self, command: DesktopCommand) -> DesktopResponse:
         try:
-            return self._success_response(command, result=self._request_status(command))
+            return success_response(command, result=self._request_status(command))
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
 
     def _request_status(self, command: DesktopCommand) -> dict[str, object]:
         """Read a caller's retained receipt without waiting for the action executor."""
-        _reject_unexpected_parameters(command.parameters, allowed=frozenset({"request_id"}))
-        request_id = _required_str_parameter(command.parameters, "request_id")
+        reject_unexpected_parameters(command.parameters, allowed=frozenset({"request_id"}))
+        request_id = required_str_parameter(command.parameters, "request_id")
         entry = self._journal.get(request_id)
         result: dict[str, object] = {"request_id": request_id, "state": "not_found"}
         if (
@@ -354,7 +345,7 @@ class DesktopBridge:
                         response,
                         result={
                             **response.result,
-                            "metrics": _response_metrics(
+                            "metrics": response_metrics(
                                 elapsed_ms=max(0, round((self.monotonic_clock() - started_at) * 1000)),
                                 structured_bytes=len(json.dumps(response.result, ensure_ascii=False).encode()),
                                 screenshot_bytes=response.screenshot.size if response.screenshot is not None else 0,
@@ -445,28 +436,7 @@ class DesktopBridge:
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
-            "shell": self._shell_status(),
-        }
-
-    def _shell_status(self, caller: tuple[str, str] | None = None) -> dict[str, object]:
-        if self.shell is None:
-            return {
-                "enabled": False,
-                "pending": None,
-                "auto_approve_remaining_seconds": 0,
-                "auto_approve_until_revoked": False,
-                "active_request_id": None,
-                "handles": [],
-            }
-        return {"enabled": True, **self.shell.status(caller=caller)}
-
-    def _caller_shell_status(self, command: DesktopCommand) -> dict[str, object]:
-        """Show another allowed caller only whether approval is pending, its own active ID, and its own handles."""
-        status = self._shell_status((command.requester_id, command.agent_name))
-        return {
-            **status,
-            "pending": status["pending"] is not None,
-            "handles": self.shell.handles(command.requester_id, command.agent_name) if self.shell is not None else [],
+            "shell": shell_status(self.shell),
         }
 
     def decide_local_shell(
@@ -631,11 +601,11 @@ class DesktopBridge:
                 result["state"] = {key: value for key, value in state_result.items() if key != "elements"}
             execution = replace(execution, result=result)
             if mode == "tree":
-                return self._success_response(command, result=execution.result)
+                return success_response(command, result=execution.result)
         if execution.browser_image is not None:
             return await self._browser_image_response(command, execution)
         if execution.capture_app is None or execution.capture_state_id is None:
-            return self._success_response(command, result=execution.result)
+            return success_response(command, result=execution.result)
         return await self._capture_response(
             command,
             result=execution.result,
@@ -646,7 +616,7 @@ class DesktopBridge:
     async def _browser_image_response(self, command: DesktopCommand, execution: _Execution) -> DesktopResponse:
         image = execution.browser_image
         if image is None:
-            return self._success_response(command, result=execution.result)
+            return success_response(command, result=execution.result)
         extension = "png" if image.mime_type == "image/png" else "jpg"
         try:
             screenshot = await upload_encrypted_media(
@@ -654,14 +624,14 @@ class DesktopBridge:
                 image.content,
                 mime_type=image.mime_type,
                 filename=f"browser-{command.request_id}.{extension}",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
+                timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
             return self._capture_error_response(command, result=execution.result, error=str(exc))
         except Exception:
             logger.exception("browser_image_upload_failed", action=command.action)
             return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
-        return self._success_response(command, result=execution.result, screenshot=screenshot)
+        return success_response(command, result=execution.result, screenshot=screenshot)
 
     async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:  # noqa: PLR0911
         try:
@@ -713,7 +683,7 @@ class DesktopBridge:
                 "The desktop action completed, but fresh app state could not be read; do not repeat the action "
                 "automatically. Request get_app_state before deciding the next step."
             )
-            return self._success_response(
+            return success_response(
                 command,
                 result={**execution.result, "warning": warning, "follow_up_state": "failed"},
             )
@@ -742,14 +712,14 @@ class DesktopBridge:
                 capture.content,
                 mime_type=capture.mime_type,
                 filename=f"desktop-{command.request_id}.jpg",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
+                timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
             return self._capture_error_response(command, result=result, error=str(exc))
         except Exception:
             logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
             return self._capture_error_response(command, result=result, error="Local screenshot operation failed.")
-        return self._success_response(
+        return success_response(
             command,
             result={
                 **result,
@@ -828,9 +798,9 @@ class DesktopBridge:
 
     async def _execute(self, command: DesktopCommand) -> _Execution:
         if command.action in DESKTOP_FILE_ACTIONS:
-            return await self._execute_file(command)
+            return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
-            return await self._execute_shell(command)
+            return _Execution(await execute_shell(self.client, self.shell, command))
         return await self._execute_desktop(command)
 
     async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
@@ -848,7 +818,7 @@ class DesktopBridge:
             browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
-            _reject_unexpected_parameters(parameters, allowed=frozenset())
+            reject_unexpected_parameters(parameters, allowed=frozenset())
             status: dict[str, object] = (
                 await asyncio.to_thread(self.provider.status) if self.provider is not None else {"gui_available": False}
             )
@@ -857,26 +827,26 @@ class DesktopBridge:
                 self._fit_status(
                     command,
                     status,
-                    self._caller_shell_status(command),
+                    caller_shell_status(self.shell, command),
                     cast("list[dict[str, str]]", folders),
                 ),
             )
         if command.action == "list_apps":
-            _reject_unexpected_parameters(parameters, allowed=frozenset())
+            reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
             return _Execution({"apps": [app.to_result() for app in apps]})
         provider = self._required_gui_provider()
         if command.action == "launch_app":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
-            app_id = _required_str_parameter(parameters, "app")
+            reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
+            app_id = required_str_parameter(parameters, "app")
             await asyncio.to_thread(provider.launch_app, app_id)
             return _Execution(
                 {"action": command.action, "action_completed": True},
                 follow_up_app=app_id,
             )
         if command.action in {"get_app_state", "screenshot"}:
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
-            state = await asyncio.to_thread(provider.get_app_state, _required_str_parameter(parameters, "app"))
+            reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
+            state = await asyncio.to_thread(provider.get_app_state, required_str_parameter(parameters, "app"))
             self._observations.remember(state, command)
             return _Execution(
                 {"action": command.action, "state": state.to_result()},
@@ -884,13 +854,13 @@ class DesktopBridge:
                 capture_state_id=state.state_id,
             )
 
-        app_id = _required_str_parameter(parameters, "app")
-        state_id = _required_str_parameter(parameters, "state_id")
+        app_id = required_str_parameter(parameters, "app")
+        state_id = required_str_parameter(parameters, "state_id")
         with self._agent_input():
             if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
-                await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
+                await execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
             else:
-                await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
+                await execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
         return _Execution(
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
@@ -907,285 +877,11 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
         return provider
 
-    async def _execute_file(self, command: DesktopCommand) -> _Execution:
-        """Read through pinned folder descriptors on a worker thread."""
-        files = self.filesystem
-        if files is None:
-            msg = "Local file access is disabled."
-            raise DesktopProtocolError(msg)
-        parameters = command.parameters
-        if command.action == "list_folders":
-            _reject_unexpected_parameters(parameters, allowed=frozenset())
-            folders = (await asyncio.to_thread(files.list_folders))["folders"]
-            return _Execution(
-                self._fit_listing(
-                    command,
-                    cast("list[dict[str, str]]", folders),
-                    key="folders",
-                    already_truncated=False,
-                ),
-            )
-        if command.action == "list_directory":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path"}))
-            listing = await asyncio.to_thread(
-                files.list_directory,
-                _required_str_parameter(parameters, "root_id"),
-                _optional_str_parameter(parameters, "path", default="."),
-            )
-            return _Execution(
-                self._fit_listing(
-                    command,
-                    cast("list[dict[str, str]]", listing["entries"]),
-                    key="entries",
-                    already_truncated=bool(listing["truncated"]),
-                ),
-            )
-        _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path", "offset"}))
-        read = await asyncio.to_thread(
-            files.read_file,
-            _required_str_parameter(parameters, "root_id"),
-            _required_str_parameter(parameters, "path"),
-            _optional_int_parameter(parameters, "offset") or 0,
-        )
-        return _Execution(self._fit_file_read(command, read))
-
-    async def _execute_shell(self, command: DesktopCommand) -> _Execution:
-        """Start a command only after local approval, or read or stop one of the caller's own handles."""
-        shell = self.shell
-        if shell is None:
-            msg = "Local shell access is disabled."
-            raise DesktopProtocolError(msg)
-        parameters = command.parameters
-        if command.action == "check_shell":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
-            handle = _required_str_parameter(parameters, "handle")
-            offset = _optional_int_parameter(parameters, "offset")
-            result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
-            return _Execution(await self._shell_result(command, shell, result, offset=offset))
-        if command.action == "kill_shell":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
-            handle = _required_str_parameter(parameters, "handle")
-            force = _optional_bool_parameter(parameters, "force")
-            return _Execution(
-                {"state": shell.kill(command.requester_id, command.agent_name, handle, force=force), "handle": handle},
-            )
-        _reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
-        timeout_seconds = _optional_int_parameter(parameters, "timeout_seconds")
-        request = DesktopShellRequest(
-            request_id=command.request_id,
-            requester_id=command.requester_id,
-            agent_name=command.agent_name,
-            command=_required_str_parameter(parameters, "command"),
-            cwd=_optional_str_parameter(parameters, "cwd", default=str(Path.home())),
-            expires_at_ms=command.expires_at_ms,
-            timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
-        )
-        return _Execution(await self._shell_result(command, shell, await shell.execute(request)))
-
-    async def _shell_result(
-        self,
-        command: DesktopCommand,
-        shell: DesktopShell,
-        result: DesktopShellResult,
-        *,
-        offset: int | None = None,
-    ) -> dict[str, object]:
-        """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
-
-        Output starts at byte ``offset``; without one, a running command shows its newest output. The returned
-        output covers ``[output_start, next_offset)``, and the next check continues from ``next_offset``.
-        """
-        output = result.output
-        size = output.size
-        payload: dict[str, object] = {
-            "state": result.state,
-            "handle": result.handle,
-            "exit_code": result.exit_code,
-            "output": "",
-            "output_bytes": size,
-            "output_truncated": output.truncated,
-            "output_attachment": None,
-            "output_start": offset or 0,
-            "next_offset": size,
-        }
-        if result.state == "running":
-            if offset is None:
-                return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
-            head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
-            return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
-        try:
-            return await self._finished_shell_result(command, shell, result, payload, offset or 0)
-        except BaseException:
-            if command.action == "run_shell":
-                # The caller never learned this handle, so nothing could page from it.
-                shell.hand_over(result)
-            raise
-
-    async def _finished_shell_result(
-        self,
-        command: DesktopCommand,
-        shell: DesktopShell,
-        result: DesktopShellResult,
-        payload: dict[str, object],
-        start: int,
-    ) -> dict[str, object]:
-        """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
-        content = result.output.read(start)
-        # A run_shell reply names its handle only while that handle stays to page from.
-        delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
-        # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
-        if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-            inline = {**delivered, "output": content.decode()}
-            if self._fits_inline(command, inline):
-                shell.hand_over(result)
-                return inline
-        try:
-            media = await upload_encrypted_media(
-                self.client,
-                content,
-                mime_type=SHELL_OUTPUT_MIME_TYPE,
-                filename=f"shell-{command.request_id}.txt",
-                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
-            )
-        except DesktopMediaError as exc:
-            error = str(exc)
-        except Exception:
-            logger.exception("shell_output_upload_failed", request_id=command.request_id)
-            error = "Shell output upload failed."
-        else:
-            shell.hand_over(result)
-            return {**delivered, "output_attachment": media.to_content()}
-        detail = error[:_MAX_WARNING_DETAIL]
-        if result.handle is None:
-            # Revocation raced this command's registration, so there is no handle to page from.
-            shell.hand_over(result)
-            warning = (
-                f"The output could not be attached ({detail}); only its beginning is shown and the rest is not "
-                "kept. Do not run the command again automatically."
-            )
-        else:
-            warning = (
-                f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
-                "Continue with check_shell from next_offset."
-            )
-        head = content[:MAX_INLINE_RESPONSE_BYTES]
-        return self._fit_output_head(
-            command,
-            {**payload, "warning": warning},
-            head,
-            offset=start,
-            requested=len(content),
-        )
-
-    def _leftmost_fitting(
-        self,
-        command: DesktopCommand,
-        low: int,
-        high: int,
-        build: Callable[[int], dict[str, object]],
-    ) -> int:
-        """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
-
-        Shared by every trimmed reply (shell output, listings, status), all measured by ``_fits_inline``.
-        Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
-        """
-        while low < high:
-            middle = (low + high) // 2
-            if self._fits_inline(command, build(middle)):
-                high = middle
-            else:
-                low = middle + 1
-        return low
-
-    def _fits_inline(self, command: DesktopCommand, result: dict[str, object]) -> bool:
-        """Report whether ``result`` fits one to-device reply once execution adds its metrics."""
-        reply = self._success_response(command, result={**result, "metrics": _WIDEST_METRICS})
-        return reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
-
-    def _fit_output_tail(
-        self,
-        command: DesktopCommand,
-        payload: dict[str, object],
-        tail: bytes,
-        *,
-        requested: int,
-    ) -> dict[str, object]:
-        """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
-        text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
-
-        def reply(start: int) -> dict[str, object]:
-            shown = text[start:]
-            shown_bytes = len(shown.encode())
-            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-            output_start = cast("int", payload["next_offset"]) - shown_bytes
-            return {**payload, "output": shown, "output_truncated": truncated, "output_start": output_start}
-
-        # Dropping older characters never grows the reply, so search for the fewest to drop.
-        start = self._leftmost_fitting(command, 0, len(text), reply)
-        return reply(start)
-
-    def _fit_output_head(
-        self,
-        command: DesktopCommand,
-        payload: dict[str, object],
-        head: bytes,
-        *,
-        offset: int,
-        requested: int,
-    ) -> dict[str, object]:
-        """Show the oldest output from ``offset`` whose escaped reply still fits inline, and where to continue."""
-        # The offset starts a character, so only the last one can be cut; ``next_offset`` then points at it.
-        text = head.decode(errors="ignore")
-
-        def reply(dropped: int) -> dict[str, object]:
-            shown = text[: len(text) - dropped]
-            shown_bytes = len(shown.encode())
-            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-            return {**payload, "output": shown, "output_truncated": truncated, "next_offset": offset + shown_bytes}
-
-        # Dropping newer characters never grows the reply, so search for the fewest to drop.
-        dropped = self._leftmost_fitting(command, 0, len(text), reply)
-        return reply(dropped)
-
-    def _fit_listing(
-        self,
-        command: DesktopCommand,
-        entries: list[dict[str, str]],
-        *,
-        key: str,
-        already_truncated: bool,
-    ) -> dict[str, object]:
-        """Keep the fitting prefix of ``entries``, in their existing deterministic order, under the inline budget."""
-        total = len(entries)
-
-        def reply(dropped: int) -> dict[str, object]:
-            count = total - dropped
-            return {key: entries[:count], "truncated": already_truncated or count < total}
-
-        # Dropping later entries never grows the reply, so search for the fewest to drop.
-        dropped = self._leftmost_fitting(command, 0, total, reply)
-        return reply(dropped)
-
-    def _fit_file_read(self, command: DesktopCommand, read: dict[str, object]) -> dict[str, object]:
-        """Keep the longest prefix of a file read whose escaped reply fits inline; the next read starts after it."""
-        text = cast("str", read["text"])
-        offset = cast("int", read["offset"])
-
-        def reply(dropped: int) -> dict[str, object]:
-            if not dropped:
-                return read
-            shown = text[: len(text) - dropped]
-            return {**read, "text": shown, "next_offset": offset + len(shown.encode()), "eof": False, "truncated": True}
-
-        # Dropping later characters never grows the reply, so search for the fewest to drop.
-        dropped = self._leftmost_fitting(command, 0, len(text), reply)
-        return reply(dropped)
-
     def _fit_status(
         self,
         command: DesktopCommand,
         provider_status: dict[str, object],
-        shell_status: dict[str, object],
+        caller_shell: dict[str, object],
         folders: list[dict[str, str]],
     ) -> dict[str, object]:
         """Keep the fitting prefix of ``folders`` in the remote reply's ``bridge.file_roots``.
@@ -1203,166 +899,12 @@ class DesktopBridge:
                     **self._bridge_status(),
                     "file_roots": folders[:count],
                     "file_roots_truncated": count < total,
-                    "shell": shell_status,
+                    "shell": caller_shell,
                 },
             }
 
-        dropped = self._leftmost_fitting(command, 0, total, reply)
+        dropped = leftmost_fitting(command, 0, total, reply)
         return reply(dropped)
-
-    async def _execute_semantic_control(
-        self,
-        provider: DesktopProvider,
-        command: DesktopCommand,
-        *,
-        app_id: str,
-        state_id: str,
-    ) -> None:
-        parameters = command.parameters
-        if command.action == "click_element":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "element_index"}))
-            await asyncio.to_thread(
-                provider.click_element,
-                app_id=app_id,
-                state_id=state_id,
-                element_index=_required_int_parameter(parameters, "element_index"),
-            )
-        elif command.action == "set_value":
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset({"app", "state_id", "element_index", "value"}),
-            )
-            await asyncio.to_thread(
-                provider.set_value,
-                app_id=app_id,
-                state_id=state_id,
-                element_index=_required_int_parameter(parameters, "element_index"),
-                value=_required_str_parameter(parameters, "value", allow_empty=True),
-            )
-        elif command.action == "scroll_element":
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset({"app", "state_id", "element_index", "direction", "pages"}),
-            )
-            await asyncio.to_thread(
-                provider.scroll_element,
-                app_id=app_id,
-                state_id=state_id,
-                element_index=_required_int_parameter(parameters, "element_index"),
-                direction=_required_str_parameter(parameters, "direction"),
-                pages=_required_int_parameter(parameters, "pages"),
-            )
-        elif command.action == "perform_action":
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset({"app", "state_id", "element_index", "action_name"}),
-            )
-            await asyncio.to_thread(
-                provider.perform_action,
-                app_id=app_id,
-                state_id=state_id,
-                element_index=_required_int_parameter(parameters, "element_index"),
-                action_name=_required_str_parameter(parameters, "action_name"),
-            )
-        else:
-            msg = f"Unsupported semantic desktop action: {command.action}."
-            raise DesktopProtocolError(msg)
-
-    async def _execute_fallback_control(
-        self,
-        provider: DesktopProvider,
-        command: DesktopCommand,
-        *,
-        app_id: str,
-        state_id: str,
-    ) -> None:
-        parameters = command.parameters
-        if command.action in {"click", "double_click"}:
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset({"app", "state_id", "x", "y", "button"}),
-            )
-            await asyncio.to_thread(
-                provider.double_click if command.action == "double_click" else provider.click,
-                app_id=app_id,
-                state_id=state_id,
-                x=_required_int_parameter(parameters, "x"),
-                y=_required_int_parameter(parameters, "y"),
-                button=_optional_str_parameter(parameters, "button", default="left"),
-            )
-        elif command.action == "hover":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "x", "y"}))
-            await asyncio.to_thread(
-                provider.hover,
-                app_id=app_id,
-                state_id=state_id,
-                x=_required_int_parameter(parameters, "x"),
-                y=_required_int_parameter(parameters, "y"),
-            )
-        elif command.action == "drag":
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset(
-                    {
-                        "app",
-                        "state_id",
-                        "start_x",
-                        "start_y",
-                        "end_x",
-                        "end_y",
-                        "duration_ms",
-                    },
-                ),
-            )
-            await asyncio.to_thread(
-                provider.drag,
-                app_id=app_id,
-                state_id=state_id,
-                start_x=_required_int_parameter(parameters, "start_x"),
-                start_y=_required_int_parameter(parameters, "start_y"),
-                end_x=_required_int_parameter(parameters, "end_x"),
-                end_y=_required_int_parameter(parameters, "end_y"),
-                duration_ms=_required_int_parameter({"duration_ms": 500, **parameters}, "duration_ms"),
-            )
-        elif command.action == "type_text":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "text", "element_index"}))
-            targeting = (
-                {"element_index": _required_int_parameter(parameters, "element_index")}
-                if "element_index" in parameters
-                else {}
-            )
-            await asyncio.to_thread(
-                provider.type_text,
-                app_id=app_id,
-                state_id=state_id,
-                text=_required_str_parameter(parameters, "text"),
-                **targeting,
-            )
-        elif command.action == "scroll":
-            _reject_unexpected_parameters(
-                parameters,
-                allowed=frozenset({"app", "state_id", "direction", "pages", "x", "y"}),
-            )
-            await asyncio.to_thread(
-                provider.scroll,
-                app_id=app_id,
-                state_id=state_id,
-                direction=_required_str_parameter(parameters, "direction"),
-                pages=_required_int_parameter(parameters, "pages"),
-                x=_optional_int_parameter(parameters, "x"),
-                y=_optional_int_parameter(parameters, "y"),
-            )
-        elif command.action == "keypress":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "keys"}))
-            await asyncio.to_thread(
-                provider.keypress,
-                app_id=app_id,
-                state_id=state_id,
-                keys=_required_str_list_parameter(parameters, "keys"),
-            )
-        else:
-            msg = f"Unsupported fallback desktop action: {command.action}."
-            raise DesktopProtocolError(msg)
 
     def _bridge_status(self) -> dict[str, object]:
         """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not).
@@ -1408,7 +950,7 @@ class DesktopBridge:
                 "The state may now be stale; "
                 "request get_app_state again before acting."
             )
-            return self._success_response(
+            return success_response(
                 command,
                 result={**result, "warning": warning, "follow_up_screenshot": "failed"},
             )
@@ -1426,7 +968,7 @@ class DesktopBridge:
             agent_name=command.agent_name,
             error=error,
         )
-        return self._success_response(
+        return success_response(
             command,
             result={**result, "warning": warning, "follow_up_screenshot": "failed"},
         )
@@ -1455,7 +997,7 @@ class DesktopBridge:
             requester_id=command.requester_id,
             agent_name=command.agent_name,
         )
-        return self._success_response(
+        return success_response(
             command,
             result={"action": command.action, "action_outcome": "unknown", "warning": warning},
         )
@@ -1490,28 +1032,6 @@ class DesktopBridge:
             error=error,
         )
 
-    @staticmethod
-    def _success_response(
-        command: DesktopCommand,
-        *,
-        result: dict[str, object],
-        screenshot: EncryptedDesktopMedia | None = None,
-    ) -> DesktopResponse:
-        return DesktopResponse(
-            request_id=command.request_id,
-            session_id=command.session_id,
-            ok=True,
-            result=result,
-            screenshot=screenshot,
-        )
-
-
-def _reject_unexpected_parameters(parameters: dict[str, object], *, allowed: frozenset[str]) -> None:
-    unexpected = sorted(set(parameters) - allowed)
-    if unexpected:
-        msg = f"Unexpected desktop parameters: {', '.join(unexpected)}."
-        raise DesktopProtocolError(msg)
-
 
 def _command_fingerprint(command: DesktopCommand) -> str:
     encoded = json.dumps(
@@ -1524,81 +1044,15 @@ def _command_fingerprint(command: DesktopCommand) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _required_int_parameter(parameters: dict[str, object], key: str) -> int:
-    value = parameters.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"Desktop parameter {key} must be an integer."
-        raise DesktopProtocolError(msg)
-    return value
-
-
-def _optional_int_parameter(parameters: dict[str, object], key: str) -> int | None:
-    if key not in parameters:
-        return None
-    return _required_int_parameter(parameters, key)
-
-
-def _optional_bool_parameter(parameters: dict[str, object], key: str) -> bool:
-    value = parameters.get(key, False)
-    if not isinstance(value, bool):
-        msg = f"Desktop parameter {key} must be a boolean."
-        raise DesktopProtocolError(msg)
-    return value
-
-
-def _required_str_parameter(parameters: dict[str, object], key: str, *, allow_empty: bool = False) -> str:
-    value = parameters.get(key)
-    if not isinstance(value, str) or (not value and not allow_empty):
-        qualifier = "a string" if allow_empty else "a non-empty string"
-        msg = f"Desktop parameter {key} must be {qualifier}."
-        raise DesktopProtocolError(msg)
-    max_length = _MAX_PARAMETER_LENGTHS.get(key, _MAX_PARAMETER_IDENTIFIER_LENGTH)
-    if len(value) > max_length:
-        msg = f"Desktop parameter {key} must not exceed {max_length} characters."
-        raise DesktopProtocolError(msg)
-    return value
-
-
-def _required_object_parameter(parameters: dict[str, object], key: str) -> dict[str, object]:
-    value = parameters.get(key)
-    if not isinstance(value, dict):
-        msg = f"Desktop parameter {key} must be an object with string keys."
-        raise DesktopProtocolError(msg)
-    result: dict[str, object] = {}
-    for item_key, item_value in value.items():
-        if not isinstance(item_key, str):
-            msg = f"Desktop parameter {key} must be an object with string keys."
-            raise DesktopProtocolError(msg)
-        result[item_key] = item_value
-    return result
-
-
 def _browser_command_parameters(parameters: dict[str, object]) -> tuple[str, dict[str, object]]:
-    _reject_unexpected_parameters(
+    reject_unexpected_parameters(
         parameters,
         allowed=frozenset({"browser_action", "browser_parameters"}),
     )
     return (
-        _required_str_parameter(parameters, "browser_action"),
-        _required_object_parameter(parameters, "browser_parameters"),
+        required_str_parameter(parameters, "browser_action"),
+        required_object_parameter(parameters, "browser_parameters"),
     )
-
-
-def _optional_str_parameter(parameters: dict[str, object], key: str, *, default: str) -> str:
-    if key not in parameters:
-        return default
-    return _required_str_parameter(parameters, key)
-
-
-def _required_str_list_parameter(parameters: dict[str, object], key: str) -> list[str]:
-    value = parameters.get(key)
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        msg = f"Desktop parameter {key} must contain a safe app-local key chord."
-        raise DesktopProtocolError(msg)
-    try:
-        return list(normalize_key_chord(cast("list[str]", value)))
-    except ValueError as exc:
-        raise DesktopProtocolError(str(exc)) from exc
 
 
 __all__ = ["DesktopBridge", "DesktopBridgePolicy"]
