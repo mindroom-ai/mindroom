@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
 
 import pytest
+import requests
 from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
 from github import BadCredentialsException, Github, GithubException
@@ -38,6 +39,7 @@ from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oau
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
@@ -754,6 +756,47 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert tool.access_token == ENV_ACCESS_TOKEN
+
+
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+@pytest.mark.parametrize("use_oauth", [False, True])
+def test_worker_github_config_cannot_redirect_primary_token(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    use_oauth: bool,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path, {} if use_oauth else {"GITHUB_ACCESS_TOKEN": ENV_ACCESS_TOKEN})
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target_for_scope("@alice:example.test", worker_scope)
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials("github", {"base_url": "https://worker.example.test"})
+    if use_oauth:
+        _save_scoped_oauth_credentials(
+            "github_oauth",
+            _oauth_credentials("oauth-access"),
+            credentials_manager=manager,
+            worker_target=_oauth_target("@alice:example.test"),
+        )
+    sent: list[tuple[str | None, str | None]] = []
+
+    def send(_session: requests.Session, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        sent.append((request.url, request.headers.get("Authorization")))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"[]"
+        return response
+
+    with patch.object(requests.Session, "send", autospec=True, side_effect=send):
+        tool = get_tool_by_name("github", runtime_paths, credentials_manager=manager, worker_target=target)
+        assert isinstance(tool, GithubTools)
+        try:
+            assert json.loads(tool.list_repositories()) == []
+            assert tool.g.requester.base_url == "https://api.github.com"
+        finally:
+            tool.g.close()
+
+    expected_token = "oauth-access" if use_oauth else ENV_ACCESS_TOKEN
+    assert sent == [("https://api.github.com:443/user/repos", f"token {expected_token}")]
 
 
 @pytest.mark.parametrize(
