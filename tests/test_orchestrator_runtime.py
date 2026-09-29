@@ -45,7 +45,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, RouterConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -3560,6 +3560,7 @@ class TestMultiAgentOrchestrator:
         """Initial startup must wait for router and responder generation first syncs."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock(source_fingerprint=None)
+        orchestrator.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=True)
         responder_started = False
         runtime_support_bound = False
         runtimes_before_sync: list[ToolJobRuntime | None] = []

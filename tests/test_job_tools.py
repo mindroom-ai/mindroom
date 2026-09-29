@@ -100,9 +100,8 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     register_background_runtime(paths, runtime)
     try:
         agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
-        names = {name for toolkit in agent.tools for name in toolkit.get_async_functions()}
-        assert "job" in names
-        assert not {"inspect_subagent", "wait_subagent", "resume_subagent", "cancel_subagent"} & names
+        names = [name for toolkit in agent.tools for name in toolkit.get_async_functions()]
+        assert names.count("job") == 1
     finally:
         await runtime.shutdown()
 

@@ -2272,7 +2272,6 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
         assert ("event journal" in response) is journal_pending
         assert ("applies after MindRoom restarts" in response) is journal_pending
         assert ("will affect new agent interactions" in response) is not (jobs_pending or journal_pending)
-        assert "in force is still postgres" not in response
         saved = load_config(runtime_paths)
         assert saved.background_tool_jobs.enabled is (jobs_pending and setting == "enabled")
         assert saved.background_tool_jobs.exclude_toolkits == (

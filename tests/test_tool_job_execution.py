@@ -745,7 +745,7 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
             release.set()
             result = await cancelling
             assert finished.is_set()
-            assert result.status in {"completed", "cancelled"}
+            assert result.status == "cancelled"
     finally:
         release.set()
         await runtime.shutdown()

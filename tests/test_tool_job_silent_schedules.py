@@ -214,6 +214,12 @@ async def test_silent_join_preserves_the_deliverable_report(
         if enabled and (collect_stream or recovered) and second == "New finding":
             assert answer.index("`job`") < answer.index(second)
         assert await runtime.pending_outcomes() == []
+        if recorder is not None:
+            assert recorder.outcome == "completed"
+            # The recovered prefix's tool belongs to the earlier recorded turn.
+            assert [tool.tool_name for tool in recorder.completed_tools] == [
+                tool.tool_name for tool in trace[int(recovered) :]
+            ]
     finally:
         await runtime.shutdown()
         storage.close()

@@ -74,7 +74,8 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
 
     async def operation() -> BackgroundOutcome:
         await release.wait()
-        (tmp_path / "effect.txt").write_text("once")
+        with (tmp_path / "effect.txt").open("a") as effect:
+            effect.write("once")
         return BackgroundOutcome("completed", "retained output", result_payload={"artifact": [1, 2]})
 
     def fail_outcome(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool = False) -> None:
@@ -138,7 +139,8 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
         reference = resources.acquire()
         assert resources.defer(cleanup)
         await reference.release()
-        (tmp_path / "effect.txt").write_text("completed once")
+        with (tmp_path / "effect.txt").open("a") as effect:
+            effect.write("completed once")
         return BackgroundOutcome("completed", "exact result", result_payload={"retained": [1, 2]})
 
     stopping = None
@@ -177,7 +179,8 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
 
     async def operation() -> BackgroundOutcome:
         await finish.wait()
-        (tmp_path / "effect.txt").write_text("completed once")
+        with (tmp_path / "effect.txt").open("a") as effect:
+            effect.write("completed once")
         returned.set()
         return BackgroundOutcome("completed", "exact result")
 
@@ -206,6 +209,7 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())
         assert snapshot["status"] == "completed"
         assert snapshot["result"] == "exact result"
+        assert (tmp_path / "effect.txt").read_text() == "completed once"
     finally:
         finish.set()
         release.set()
