@@ -22,6 +22,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
@@ -64,7 +65,7 @@ from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_delegation_job, tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -286,10 +287,14 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
             (True, False, "other_parent"),
             (True, False, "same_parent"),
             (True, False, "next_child"),
+            (True, False, "revoked"),
+            (True, False, "denied_retrieval"),
         ]
         for excluded in [False, True]
-        # Both successive children must be managed and remain in their foreground wait.
-        if duplicate != "next_child" or not (detach or human or excluded)
+        # Both successive children must be managed and remain in their foreground wait; a revoked resume is
+        # presented through a later job wait, which needs the detached child.
+        if (duplicate != "next_child" or not (detach or human or excluded))
+        and (duplicate not in {"revoked", "denied_retrieval"} or (detach and not human and not excluded))
     ],
 )
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
@@ -432,12 +437,21 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             execution_identity=identity,
         )
 
-    async def finish_approval_sequence(result: RunOutput) -> RunOutput:
+    async def finish_approval_sequence(result: RunOutput) -> RunOutput:  # noqa: PLR0915 - One ordered approval story.
         nonlocal runtime
         assert result.status == RunStatus.paused
         assert side_effects == []
         state = DelegationState.from_metadata(result.metadata)
         call = _saved_approval_calls(state)[0]
+        # A background child's approval can resume only through its job, even when a later turn shows it again.
+        parent_pause = paused_attempt_from_response(
+            result,
+            fallback_session_id="parent",
+            fallback_run_id=result.run_id,
+            toolkit_owners={},
+        )
+        assert parent_pause is not None
+        assert parent_pause.job_owned_child
         if exclude_after_acceptance and not cancel_approval:
             await runtime.shutdown()
             runtime = tool_job_runtime(tmp_path)
@@ -488,6 +502,14 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 approval_calls=(saved_call,),
             )
 
+        if duplicate_approval == "revoked":
+            # Resuming a presented child approval rechecks current delegation policy, like any other resume.
+            config.agents["leader"].delegate_to = []
+            revoked = await approve(result)
+            assert revoked.status == RunStatus.completed
+            assert side_effects == []
+            assert (await runtime.lookup(child.delegation_id, owner=identity, depth=0)).status == "awaiting_approval"
+            return revoked
         if duplicate_approval:
             first_pause = deepcopy(result)
             if duplicate_approval == "other_parent":
@@ -547,7 +569,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 first = next(message.content for message in result.messages if message.tool_call_id == "first")
             if detach:
                 handle = json.loads(first)
-                assert set(handle) == {"job_id", "subagent_id", "status", "tool"}
+                assert set(handle) == {"job_id", "subagent_id", "status", "tool", "summary", "summary_truncated"}
                 assert handle["job_id"] == child.delegation_id
                 assert handle["subagent_id"] == child.subagent_id
                 assert handle["tool"] == "delegate"
@@ -560,6 +582,33 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 release.set()
                 await asyncio.wait_for(completed.wait(), 5)
                 signal.clear()
+                if duplicate_approval == "denied_retrieval":
+                    # A denied approval for merely retrieving a job must leave its child untouched.
+                    await wait_for_status(runtime, child.delegation_id, "awaiting_approval")
+                    config.tool_approval.rules = [ApprovalRuleConfig(match="job", action="require_approval")]
+                    gated = await drive(parent(_call("job", "gated-wait", action="wait", job_id=child.delegation_id)))
+                    assert gated.status == RunStatus.paused
+                    denied = await drive_delegations(
+                        Agent(
+                            name="leader",
+                            db=storage,
+                            tools=[toolkit, JobTools(paths, identity)],
+                            model=DelegationModel(id="test", responses=[ModelResponse(content="Retrieval denied")]),
+                        ),
+                        gated,
+                        run_child=run_child,
+                        agent_name="leader",
+                        config=config,
+                        runtime_paths=paths,
+                        execution_identity=identity,
+                        decisions={"gated-wait": False},
+                        denial_reasons={"gated-wait": None},
+                    )
+                    assert denied.status == RunStatus.completed
+                    assert DelegationState.from_metadata(denied.metadata).children == []
+                    job = await runtime.lookup(child.delegation_id, owner=identity, depth=0)
+                    assert job.status == "awaiting_approval"
+                    config.tool_approval.rules = []
                 current_parent = parent(_call("job", "wait", action="wait", job_id=child.delegation_id))
                 result = await drive(current_parent)
                 if not approval:
@@ -816,6 +865,157 @@ async def test_early_child_failure_retains_liveness_through_settlement(
     assert retained.delegation_id == child.delegation_id
     with subagent_recovery_lock(child.subagent_id, paths) as acquired:
         assert acquired
+
+
+@pytest.mark.asyncio
+async def test_inline_child_failure_retains_liveness_through_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreground child that fails stays claimed until its failure is durably settled."""
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    storage = create_session_storage("leader", config, paths, owner)
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
+    bind_toolkit_authority(toolkit, authored_name="delegate")
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_subagent", "failing", agent_name="code", task="Research")]),
+            ModelResponse(content="Parent done"),
+        ],
+    )
+    parent = Agent(id="leader", name="leader", model=model, db=storage, tools=[toolkit], telemetry=False)
+    children: list[DelegationChild] = []
+    settling, release = asyncio.Event(), asyncio.Event()
+    original_interrupt = delegation_execution.interrupt_child
+
+    async def interrupt(
+        retained: DelegationChild,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        reason: str,
+        status: Literal["cancelled", "failed"] = "cancelled",
+    ) -> None:
+        settling.set()
+        await release.wait()
+        await original_interrupt(retained, config=config, runtime_paths=runtime_paths, reason=reason, status=status)
+
+    async def run_child(child: DelegationChild, **_kwargs: object) -> str:
+        children.append(child)
+        msg = "startup failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+            paused = await parent.arun("Delegate", session_id=owner.session_id, user_id=owner.requester_id)
+            pending = asyncio.create_task(
+                drive_delegations(
+                    parent,
+                    paused,
+                    run_child=run_child,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=owner,
+                ),
+            )
+            try:
+                await asyncio.wait_for(settling.wait(), 2)
+                with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
+                    assert not acquired, "Failure settlement released its exact live child too early"
+            finally:
+                release.set()
+            response = await pending
+        assert response.status == RunStatus.completed
+        with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
+            assert acquired
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path) -> None:
+    """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    allowed = True
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    storage = create_session_storage("leader", config, paths, owner)
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
+    bind_toolkit_authority(toolkit, authored_name="delegate")
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_subagent", "waiting", agent_name="code", task="Research")]),
+            ModelResponse(content="Parent done"),
+        ],
+    )
+    parent = Agent(id="leader", name="leader", model=model, db=storage, tools=[toolkit], telemetry=False)
+    started = asyncio.Event()
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+            paused = await parent.arun("Delegate", session_id=owner.session_id, user_id=owner.requester_id)
+            pending = asyncio.create_task(
+                drive_delegations(
+                    parent,
+                    paused,
+                    run_child=run_child,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=owner,
+                ),
+            )
+            await asyncio.wait_for(started.wait(), 5)
+            allowed = False
+            await runtime.cancel_revoked(denied=lambda _job: True)
+            response = await asyncio.wait_for(pending, 5)
+        assert response.status == RunStatus.completed
+        result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
+        assert "not available" in str(result)
+        state = DelegationState.from_metadata(response.metadata)
+        assert state.children == []
+        assert all(hook.after_called for hook in state.hooks.values())
+    finally:
+        await runtime.shutdown()
+        storage.close()
 
 
 @pytest.mark.asyncio

@@ -207,14 +207,24 @@ def read_job_snapshot(path: Path) -> BackgroundJob:
     return BackgroundJob(**payload)
 
 
-def format_job_handle(job: BackgroundJob, *, subagent_id: str | None = None, delivery_queued: bool = False) -> str:
-    """Return a stable machine-readable handle without resolving the job."""
-    handle: dict[str, Any] = {"job_id": job.job_id, "tool": job.tool_name, "status": job.status}
-    if subagent_id is not None:
-        handle["subagent_id"] = subagent_id
-    if delivery_queued:
-        handle["delivery_queued"] = True
-    return json.dumps(handle)
+def job_summary(job: BackgroundJob) -> dict[str, Any]:
+    """Describe a job for the model with its bounded outcome summary and, for a subagent, its reusable ID."""
+    summary: dict[str, Any] = {
+        "job_id": job.job_id,
+        "tool": job.tool_name,
+        "status": job.status,
+        "summary": job.result,
+        "summary_truncated": job.summary_truncated,
+    }
+    subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
+    if subagent_id:
+        summary["subagent_id"] = subagent_id
+    return summary
+
+
+def format_job_handle(job: BackgroundJob) -> str:
+    """Return the job's summary as the machine-readable handle a detached or queued call returns."""
+    return json.dumps(job_summary(job))
 
 
 @dataclass(frozen=True)
@@ -223,7 +233,6 @@ class JobWait:
 
     job: BackgroundJob
     claim: JobClaim | None = None
-    delivery_queued: bool = False
 
 
 @dataclass
@@ -656,7 +665,7 @@ class ToolJobRuntime:
             entry = self._entry(job_id, owner, depth)
             claim = entry.claim_for(claim)
             if claim is None:
-                return JobWait(await self._snapshot(entry), delivery_queued=True)
+                return JobWait(await self._snapshot(entry))
             human_notified = asyncio.Event()
 
             def notify_human() -> None:
@@ -676,7 +685,7 @@ class ToolJobRuntime:
                         claim = entry.claim_for(claim)
                         snapshot = await self._snapshot(entry)
                         retained = claim is not None
-                        return JobWait(snapshot, claim, delivery_queued=not retained)
+                        return JobWait(snapshot, claim)
                     remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
                     if human_notified.is_set() or (remaining is not None and remaining <= 0):
                         return JobWait(await self._snapshot(entry))

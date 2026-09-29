@@ -684,7 +684,7 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
             await admission
         assert executing.is_set()
         claimed = await runtime.wait(child.delegation_id, owner=_owner(), depth=0, timeout=0)
-        assert not claimed.delivery_queued
+        assert claimed.claim is None
         finish.set()
         result = await runtime.wait(child.delegation_id, owner=_owner(), depth=0)
         assert result.job.result == "survived admission cancellation"
