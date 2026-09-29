@@ -369,6 +369,34 @@ async def test_recovered_blocking_cancellation_keeps_visible_body_and_trace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_blocking_cancellation_without_a_published_wait_keeps_the_ordinary_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool,
+) -> None:
+    """Only published wait progress makes a blocking cancellation reread its response."""
+    bot = _bot(tmp_path)
+    bot.config.memory.backend = "none"
+    bot.config.background_tool_jobs.enabled = enabled
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = replace(_plain_request(_target(thread_id="$thread")), existing_event_id="$response")
+    read = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner, "_read_response_presentation", read)
+    monkeypatch.setattr(
+        "mindroom.response_runner.ai_response",
+        AsyncMock(side_effect=asyncio.CancelledError("user_stop")),
+    )
+    edit = AsyncMock(return_value=True)
+    monkeypatch.setattr(DeliveryGateway, "edit_text", edit)
+    outcome = await runner._process_and_respond(request)
+    read.assert_not_awaited()
+    assert outcome.delivery.terminal_status == "cancelled"
+    assert edit.await_args.args[0].new_text == outcome.delivery.final_visible_body
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("latest_state", ["readable", "unreadable", "error", "wrong_sender"])
 @pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])

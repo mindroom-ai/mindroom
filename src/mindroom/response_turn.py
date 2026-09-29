@@ -1323,17 +1323,15 @@ def _settle_completed_attempt(
             response_text = decision.limit_message
     elif ctx.allow_no_report_response and (
         not resolution.replayable_text.strip()
-        or (
-            ctx.background_tool_jobs
-            and run.turn_state.prior_assistant_text
-            and is_silent_schedule_no_report_response(resolution.replayable_text)
-        )
+        or (run.turn_state.prior_assistant_text and is_silent_schedule_no_report_response(resolution.replayable_text))
     ):
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
-        # delivery has no final assistant body to publish.
-        response_text = tool_marker_text(response_text) if ctx.background_tool_jobs else ""
-        if ctx.background_tool_jobs:
+        # delivery has no final assistant body to publish. After a job join,
+        # the markers keep this attempt's tools anchored after earlier prose.
+        joined = bool(run.attempted_job_outcomes)
+        response_text = tool_marker_text(response_text) if joined else ""
+        if joined:
             recorded_text = ""
     return _CompletionSettle(
         keep_going=False,

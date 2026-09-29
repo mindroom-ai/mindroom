@@ -40,6 +40,7 @@ from mindroom.response_runner import (
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
+from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -966,10 +967,13 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         initial_presentation=StreamingPresentation(prior_text, tool_trace=(prior_trace,)) if recovered else None,
     )
 
-    with patch(
-        "mindroom.response_runner.team_response",
-        new=AsyncMock(side_effect=asyncio.CancelledError("user_stop")),
-    ):
+    async def wait_then_stop(*_args: object, **_kwargs: object) -> str:
+        # The published wait is what makes Matrix newer than this response's known body.
+        await report_background_wait(StreamingPresentation(latest_text), "⏳ Waiting for background work…")
+        stop = "user_stop"
+        raise asyncio.CancelledError(stop)
+
+    with patch("mindroom.response_runner.team_response", new=wait_then_stop):
         resolution = await coordinator.generate_team_response_helper(
             request,
             team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
@@ -977,10 +981,10 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         )
 
     assert resolution == "$existing"
-    assert len(edits) == 1
-    assert edits[0].event_id == "$existing"
-    assert edits[0].new_text == f"{latest_text}\n\n**[Response cancelled by user]**"
-    assert edits[0].tool_trace == latest_trace
+    assert len(edits) == 2
+    assert all(edit.event_id == "$existing" for edit in edits)
+    assert edits[-1].new_text == f"{latest_text}\n\n**[Response cancelled by user]**"
+    assert edits[-1].tool_trace == latest_trace
 
 
 @pytest.mark.asyncio

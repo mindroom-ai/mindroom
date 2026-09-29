@@ -143,6 +143,7 @@ from mindroom.tool_jobs.completion import (
     admit_job_completion,
     background_wait_edit,
     background_wait_notice,
+    background_wait_published,
     completion_envelope,
     completion_prompt,
 )
@@ -2449,10 +2450,7 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            if initial_presentation is not None or background_tool_jobs_enabled(
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            ):
+            if initial_presentation is not None or background_wait_published():
                 try:
                     initial_presentation = await self._read_response_presentation(
                         room_id=delivery_target.room_id,

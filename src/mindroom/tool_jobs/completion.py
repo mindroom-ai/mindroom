@@ -41,16 +41,21 @@ if TYPE_CHECKING:
 
 # The source kind of a completion whose job started outside any admitted turn.
 _UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
-_WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation, str | None], Awaitable[None]] | None] = ContextVar(
-    "background_wait_notice",
-    default=None,
-)
+
+
+@dataclass
+class _WaitNotice:
+    callback: Callable[[StreamingPresentation, str | None], Awaitable[None]]
+    published: bool = False
+
+
+_WAIT_NOTICE: ContextVar[_WaitNotice | None] = ContextVar("background_wait_notice", default=None)
 
 
 @contextmanager
 def background_wait_notice(callback: Callable[[StreamingPresentation, str | None], Awaitable[None]]) -> Iterator[None]:
     """Bind blocking wait progress to the current serialized response's placeholder."""
-    token = _WAIT_NOTICE.set(callback)
+    token = _WAIT_NOTICE.set(_WaitNotice(callback))
     try:
         yield
     finally:
@@ -59,9 +64,16 @@ def background_wait_notice(callback: Callable[[StreamingPresentation, str | None
 
 async def report_background_wait(presentation: StreamingPresentation, notice: str | None) -> None:
     """Report blocking wait progress through its response owner when present."""
-    callback = _WAIT_NOTICE.get()
-    if callback is not None:
-        await callback(presentation, notice)
+    wait = _WAIT_NOTICE.get()
+    if wait is not None:
+        wait.published = True
+        await wait.callback(presentation, notice)
+
+
+def background_wait_published() -> bool:
+    """Return whether wait progress may have replaced this blocking response's known body."""
+    wait = _WAIT_NOTICE.get()
+    return wait is not None and wait.published
 
 
 def background_wait_edit(

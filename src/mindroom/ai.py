@@ -534,11 +534,23 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
+def _without_quiet_prose(attempt: Sequence[AIStreamChunk]) -> list[AIStreamChunk]:
+    """Keep one quiet attempt's tool events and completion without its prose."""
+    return [
+        replace(item, content=None) if isinstance(item, RunCompletedEvent) else item
+        for item in attempt
+        if not isinstance(item, (str, RunContentEvent))
+    ]
+
+
 async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partials and terminal-only echoes together.
     response_stream: AsyncIterator[AIStreamChunk],
 ) -> AsyncIterator[AIStreamChunk]:
-    """Suppress only completed quiet attempts, retaining tool order and unfinished presentation."""
+    """Suppress quiet attempts beside other attempts, retaining tool order and unfinished presentation."""
     pending: list[AIStreamChunk] = []
+    # A sole quiet attempt stays deliverable; another attempt before or after it suppresses its prose.
+    quiet_attempt: list[AIStreamChunk] = []
+    completed_attempts = 0
     terminal_echo: str | None = None
     try:
         async for incoming in response_stream:
@@ -546,6 +558,9 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
             expected, terminal_echo = terminal_echo, None
             if isinstance(chunk, RunContentEvent) and expected is not None and chunk.content == expected:
                 continue
+            for item in _without_quiet_prose(quiet_attempt):
+                yield item
+            quiet_attempt.clear()
             if isinstance(chunk, StructuredStreamChunk):
                 prose = strip_matching_visible_tool_markers(chunk.content, chunk.tool_trace or ())
                 if is_silent_schedule_no_report_response(prose):
@@ -569,18 +584,22 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
                 terminal_echo = str(chunk.content)
                 pending.append(RunContentEvent(content=terminal_echo))
                 prose = terminal_echo
-            quiet = is_silent_schedule_no_report_response(prose)
-            for item in pending:
-                if not quiet or not isinstance(item, (str, RunContentEvent)):
+            completed_attempts += 1
+            if not is_silent_schedule_no_report_response(prose):
+                for item in (*pending, chunk):
                     yield item
+            elif completed_attempts > 1:
+                for item in _without_quiet_prose((*pending, chunk)):
+                    yield item
+            else:
+                quiet_attempt.extend((*pending, chunk))
             pending.clear()
-            yield replace(chunk, content=None) if quiet else chunk
     except (Exception, asyncio.CancelledError):
         # Approval and interruption still need the exact partial presentation.
-        for item in pending:
+        for item in (*quiet_attempt, *pending):
             yield item
         raise
-    for item in pending:
+    for item in (*quiet_attempt, *pending):
         yield item
 
 

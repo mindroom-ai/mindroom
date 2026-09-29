@@ -801,7 +801,7 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
 
 @pytest.mark.parametrize("background_jobs", [False, True])
 def test_quiet_recording_preserves_disabled_driver_behavior(*, background_jobs: bool) -> None:
-    """Only managed joins normalize a quiet attempt's replay text."""
+    """A quiet attempt without a job join records its replay text as a disabled turn does."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
 
@@ -817,7 +817,7 @@ def test_quiet_recording_preserves_disabled_driver_behavior(*, background_jobs: 
         ),
     )
     assert result == ""
-    assert recorder.completed_calls[-1]["assistant_text"] == ("" if background_jobs else "  ")
+    assert recorder.completed_calls[-1]["assistant_text"] == "  "
 
 
 def test_blocking_completion_skips_collector_without_metadata_content() -> None:

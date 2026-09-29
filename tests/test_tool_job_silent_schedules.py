@@ -219,6 +219,135 @@ async def test_silent_join_preserves_the_deliverable_report(
         storage.close()
 
 
+async def _silent_turn_without_jobs(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    collect_stream: bool,
+    final: str,
+    use_tool: bool,
+) -> tuple[object, ...]:
+    """Run one silent scheduled turn that never starts or joins a job."""
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    paths = _runtime_paths(tmp_path)
+    context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    database = str(tmp_path / "silent.db")
+    storage = SqliteDb(db_file=database)
+
+    async def probe_tool() -> str:
+        """Read evidence."""
+        return "Evidence"
+
+    tool_calls = [ModelResponse(tool_calls=[_call("probe_tool", "read")])] if use_tool else []
+    model = DelegationModel(id="test", responses=[*tool_calls, ModelResponse(content=final)])
+    install_tool_job_execution(model)
+    actor = Agent(
+        id="leader",
+        model=model,
+        tools=[assembled_function(probe_tool) if enabled else probe_tool],
+        db=storage,
+        telemetry=False,
+    )
+    scope = ScopeSessionContext(
+        HistoryScope(kind="agent", scope_id="leader"),
+        storage,
+        None,
+        session_id=context.session_id,
+        storage_factory=lambda: SqliteDb(db_file=database),
+    )
+    ctx = replace(
+        make_turn_context(
+            entity_label="leader",
+            session_id=context.session_id,
+            room_id=owner.room_id,
+            thread_id=owner.resolved_thread_id,
+            requester_id=owner.requester_id,
+        ),
+        allow_no_report_response=True,
+    )
+    trace: list[ToolTraceEntry] = []
+    recorder = TurnRecorder(user_message="Silent check")
+
+    async def prepare(turn: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
+        prompt = str(kwargs["prompt"])
+        prepared = _PreparedAgentRun(
+            agent=actor,
+            messages=(Message(role="user", content=prompt),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+            runtime_model_name="default",
+        )
+        return _AgentRunContext(
+            turn=turn,
+            session_id=context.session_id,
+            prompt=prompt,
+            model_prompt=None,
+            prepared_run=prepared,
+            run_input=prepared.run_input,
+            metadata=turn.matrix_run_metadata,
+        )
+
+    try:
+        with (
+            tool_runtime_context(context),
+            patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+        ):
+            answer = await ai_response(
+                ctx,
+                prompt="Silent check",
+                runtime_paths=paths,
+                config=config,
+                execution_identity=owner,
+                collect_streamed_response=collect_stream,
+                show_tool_calls=True,
+                tool_trace_collector=trace,
+                turn_recorder=recorder,
+            )
+    finally:
+        await runtime.shutdown()
+        storage.close()
+    return (
+        answer,
+        [(tool.tool_name, tool.result_preview) for tool in trace],
+        recorder.outcome,
+        recorder.assistant_text,
+        [(tool.tool_name, tool.result_preview) for tool in recorder.completed_tools],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_stream", [False, True])
+@pytest.mark.parametrize("final", ["NO_REPLY", "Finding", ""])
+@pytest.mark.parametrize("use_tool", [False, True])
+async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
+    tmp_path: Path,
+    *,
+    collect_stream: bool,
+    final: str,
+    use_tool: bool,
+) -> None:
+    """Enabling background jobs changes nothing for a quiet turn that never joins one."""
+    disabled, enabled = [
+        await _silent_turn_without_jobs(
+            tmp_path / str(flag),
+            enabled=flag,
+            collect_stream=collect_stream,
+            final=final,
+            use_tool=use_tool,
+        )
+        for flag in (False, True)
+    ]
+    assert enabled == disabled
+
+
 @pytest.mark.asyncio
 async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: Path) -> None:
     """Recovery remains runtime-owned without turning a quiet check into visible progress."""
