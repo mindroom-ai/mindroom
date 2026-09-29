@@ -51,7 +51,6 @@ from mindroom.entity_resolution import current_internal_sender_ids, entity_ident
 from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalMemoryTurn,
-    EventKind,
     MatrixDelivery,
 )
 from mindroom.event_journal import (
@@ -2994,12 +2993,7 @@ class ResponseRunner:
             self.deps.agent_name,
         ) or not await admit_job_completion(request.response_envelope, self.deps.runtime_paths):
             if request.on_no_response_handled is not None:
-
-                async def settle() -> None:
-                    assert request.on_no_response_handled is not None
-                    await request.on_no_response_handled()
-
-                await run_coroutine_until_complete(settle())
+                await request.on_no_response_handled()
             return None
 
         async def report_wait(presentation: StreamingPresentation, notice: str | None) -> None:
@@ -3089,9 +3083,6 @@ class ResponseRunner:
 
     async def handoff_tool_job_completion(self, event: JournalEvent) -> bool:
         """Transfer an internal outcome source to the existing serialized response owner."""
-        if event.kind is not EventKind.TOOL_JOB_COMPLETION:
-            msg = "Expected an internal tool-job completion source"
-            raise ValueError(msg)
         completion = parse_completion_event_id(event.event_id)
         if completion is None:
             msg = "Invalid internal tool-job completion identity"
@@ -3121,9 +3112,6 @@ class ResponseRunner:
             await self.deps.approval_store.settle(event.event_id)
             return
         envelope = completion_envelope(job, sender_id=self.deps.matrix_full_id)
-        if envelope.agent_name != self.deps.agent_name or envelope.room_id != event.room_id:
-            msg = "Internal tool-job completion owner does not match its journal"
-            raise ValueError(msg)
         original_source_id = job.source_event_id
         if original_source_id is not None and original_source_id != event.event_id:
             original = await self.deps.approval_store.load_event(original_source_id)
