@@ -67,6 +67,17 @@ _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
+# Reading a thread from source walks room history back to its root, and anyone
+# who can post in the room decides how old that root is.
+_MAX_THREAD_ROOM_SCAN_PAGES = 100
+
+
+class _ThreadRoomScanBoundError(RuntimeError):
+    """Raised when a thread room scan reaches its page bound before seeing every requested root.
+
+    Unlike ``ThreadRoomScanRootNotFoundError`` this proves nothing about the
+    root, so callers treat it as an unavailable read and fail closed.
+    """
 
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
@@ -584,6 +595,18 @@ async def bulk_scan_thread_event_sources(
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
+        if page_count >= _MAX_THREAD_ROOM_SCAN_PAGES:
+            msg = (
+                f"thread room scan in {room_id} reached its {_MAX_THREAD_ROOM_SCAN_PAGES}-page bound "
+                "with history left, so the requested roots are unproven"
+            )
+            logger.warning(
+                "Thread room scan reached its page bound before finding every root",
+                room_id=room_id,
+                user_id=client.user_id,
+                missing_root_ids=sorted(remaining_root_ids),
+            )
+            raise _ThreadRoomScanBoundError(msg)
         response = await client.room_messages(
             room_id,
             start=from_token,
