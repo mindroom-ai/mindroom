@@ -254,10 +254,11 @@ async def join_approval_jobs[RunT](
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
     presentation: Callable[[], StreamingPresentation],
     agent_names: Sequence[str] | None = None,
+    continuation_count: int = 0,
 ) -> RunT:
-    """Keep reconstructed agent/team approvals at the ordinary bounded join boundary."""
+    """Join ready jobs after a reconstructed approval, within the continuation budget its turn has left."""
     attempted: set[tuple[str, int]] = set()
-    for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT):
+    for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT - continuation_count):
         if not is_complete(response):
             break
         prompt = None

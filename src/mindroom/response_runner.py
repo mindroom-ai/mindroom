@@ -2332,6 +2332,7 @@ class ResponseRunner:
                         show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,
                         progress=progress,
+                        continuation_count=continuation.continuation_count,
                     )
 
                 async with _response_typing_indicator(

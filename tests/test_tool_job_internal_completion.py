@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.visible_body import visible_body_from_content
@@ -24,6 +25,7 @@ from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
     background_wait_edit,
     background_wait_notice,
+    join_approval_jobs,
     join_conversation_jobs,
     report_background_wait,
 )
@@ -844,4 +846,44 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         finish.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("used", [DYNAMIC_TOOL_CONTINUATION_LIMIT - 1, DYNAMIC_TOOL_CONTINUATION_LIMIT])
+async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_path: Path, used: int) -> None:
+    """A resumed approval that already used its turn's continuations joins no further ready results."""
+    paths = test_runtime_paths(tmp_path)
+    owner = _job().owner
+    runtime = tool_job_runtime(tmp_path)
+    context = replace(
+        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    continued: list[str] = []
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "done")
+
+    async def continue_response(response: str, prompt: str) -> str:
+        continued.append(prompt)
+        return response
+
+    try:
+        await start_job(runtime, "ready", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait("ready", owner=owner, depth=0)
+        await runtime.release_wait("ready", waited.claim)
+        with tool_runtime_context(context):
+            await join_approval_jobs(
+                "completed run",
+                is_complete=lambda _response: True,
+                continue_response=continue_response,
+                presentation=lambda: StreamingPresentation(response_text=""),
+                continuation_count=used,
+            )
+        assert len(continued) == DYNAMIC_TOOL_CONTINUATION_LIMIT - used
+    finally:
         await runtime.shutdown()

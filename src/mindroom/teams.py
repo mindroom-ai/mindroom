@@ -2766,6 +2766,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     progress: ProgressPublisher | None,
+    continuation_count: int = 0,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
@@ -2899,6 +2900,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             continued = await join_approval_jobs(
                 continued,
                 agent_names=member_names,
+                continuation_count=continuation_count,
                 is_complete=lambda result: result.status == RunStatus.completed,
                 continue_response=partial(
                     _retrieve_team_job_results,
