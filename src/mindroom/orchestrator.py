@@ -722,6 +722,12 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         self._thread_export_runner.queue_full_pass()
 
+    async def _start_runtime_support(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Bind live-callback support, then start the job and script runtimes that deliver through those bots."""
+        self._bind_started_runtime_support_services(bots)
+        await self._tool_job_runtime.sync()
+        await self._script_runtime.start()
+
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
         await run_with_retry(
@@ -1688,7 +1694,7 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.schedule_reply_authorized_call_reconciliation()
 
-    async def _start_runtime(self) -> None:  # noqa: PLR0915
+    async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
@@ -1724,9 +1730,7 @@ class _MultiAgentOrchestrator:
         self._log_mcp_degraded_entities(config)
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
-        self._bind_started_runtime_support_services(started_bots)
-        await self._tool_job_runtime.sync()
-        await self._script_runtime.start()
+        await self._start_runtime_support(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         async with self.config_reload.startup_publication_admission():
