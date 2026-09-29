@@ -207,6 +207,7 @@ Runs that model history hides, such as errored, cancelled, or paused runs, are l
 When compaction has replaced older turns with a summary, the digest starts with that summary, as a Hermes review sees the compressed conversation.
 
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+Set `context_window` on the agent's model so long conversations can still be forked; without it, a final request of more than about 30,000 input tokens is replayed as a digest.
 Like Hermes, each request adds the input tokens the provider reported, prompt-cache reads included, and the review ends before a request once the total reached the budget.
 A digest replay's transcript may use a quarter of that budget, estimated at four characters per token.
 A review makes at most 16 tool calls and stops after `timeout_seconds`.
@@ -255,10 +256,9 @@ Before each review, learned skills with no use, creation, or `skill_manage` edit
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
-A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill or one of its files through the skill tools.
-A record that does not validate, for example after a hand edit, reads as absent without affecting other records.
-A telemetry write that fails, for example on a full disk, is logged and never fails the skill change it records.
-A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.
+A use is recorded in `skills/.usage.json` whenever an agent loads a workspace skill or one of its files through the skill tools, also for agents without skill learning.
+Minimal-mode agents read skills through their command line, which records no use, so a learned skill used only in minimal mode is archived after `archive_after_days`.
+Usage records that cannot be read, for example after a hand edit, read as absent, and a usage write that fails is logged and never fails the skill change it records.
 `skill_manage` rewrites of skill files keep their existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response stopped it after its writes landed; a review stopped by shutdown posts none.

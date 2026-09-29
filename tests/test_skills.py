@@ -999,12 +999,13 @@ def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_pat
     assert skills is not None
     get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
     assert get_instructions is not None
+    assert _get_skill_reference(skills, "local", "notes.md")["content"] == "notes"
+    read = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["last_used_at"]
     get_instructions(skill_name="local")
     get_instructions(skill_name="shared")
-    assert _get_skill_reference(skills, "local", "notes.md")["content"] == "notes"
 
     usage = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))
-    assert usage["local"]["use_count"] == 2
+    assert usage["local"]["last_used_at"] > read
     assert "shared" not in usage
     assert not (tmp_path / "global" / ".usage.json").exists()
 
@@ -1030,4 +1031,4 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
         assert await wait_for_background_tasks(5)
     assert writers
     assert threading.main_thread() not in writers
-    assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1
+    assert "last_used_at" in json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]

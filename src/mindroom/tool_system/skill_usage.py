@@ -35,9 +35,7 @@ class SkillUsage(BaseModel):
 
     created_by: Literal["learner"] | None = None
     created_at: AwareDatetime | None = None
-    use_count: int = 0
     last_used_at: AwareDatetime | None = None
-    patch_count: int = 0
     last_patched_at: AwareDatetime | None = None
 
     def last_activity_at(self) -> datetime | None:
@@ -51,7 +49,7 @@ def _records(root_fd: int) -> dict[str, object] | None:
         records = json.loads(read_regular_file_within_root(root_fd, _USAGE_FILENAME, max_bytes=_MAX_USAGE_FILE_BYTES))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError, RecursionError) as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("Ignoring unreadable skill usage records", error=str(exc))
         return None
     return records if isinstance(records, dict) else None
@@ -97,23 +95,18 @@ def forget_missing_skill_usage(root_fd: int, present: set[str]) -> None:
 def _write(root_fd: int, records: dict[str, object]) -> None:
     try:
         atomic_write_bytes_at(root_fd, _USAGE_FILENAME, json.dumps(records, separators=(",", ":")).encode())
-    except (OSError, ValueError) as exc:
-        # A hand-edited record may hold a value JSON cannot write back, such as an integer too long to print.
+    except OSError as exc:
         logger.warning("Could not write skill usage records", error=str(exc))
 
 
 def record_skill_use(skill_path: Path) -> None:
-    """Count one agent load of a workspace skill; telemetry failures never fail the load."""
+    """Record one agent load of a workspace skill; telemetry failures never fail the load."""
     now = datetime.now(UTC)
     try:
         with open_directory_within_root(skill_path.parent.parent, skill_path.parent.name) as root_fd:
             update_skill_usages(
                 root_fd,
-                {
-                    skill_path.name: lambda usage: usage.model_copy(
-                        update={"use_count": usage.use_count + 1, "last_used_at": now},
-                    ),
-                },
+                {skill_path.name: lambda usage: usage.model_copy(update={"last_used_at": now})},
             )
     except OSError as exc:
         logger.warning("Could not record workspace skill use", path=str(skill_path), error=str(exc))

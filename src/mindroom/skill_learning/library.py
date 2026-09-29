@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -202,21 +202,11 @@ def _read_text(directory_fd: int, relative_path: str) -> str | None:
     return data.decode("utf-8")
 
 
-@contextmanager
-def _open_skill(root_fd: int, directory: str) -> Iterator[int]:
-    """Open one visible skill directory; new learned skills are named by the stricter creation rule."""
-    if "/" in directory or directory.startswith("."):
-        msg = f"Invalid skill directory {directory!r}."
-        raise SkillEditError(msg)
-    with open_directory_within_root(root_fd, directory) as skill_fd:
-        yield skill_fd
-
-
 def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FILENAME) -> SkillFile | None:
     """Return one workspace skill file and whether its skill is learner-owned, or None when absent."""
     _split_relative_path(relative_path)
     try:
-        with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        with _open_skills_root(skills_root) as root_fd, open_directory_within_root(root_fd, name) as skill_fd:
             return _read_skill_file(skill_fd, name, relative_path, load_skill_usage(root_fd).get(name, SkillUsage()))
     except FileNotFoundError:
         return None
@@ -253,7 +243,7 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
             usage = load_skill_usage(root_fd)
             for directory in directories:
                 try:
-                    with _open_skill(root_fd, directory) as skill_fd:
+                    with open_directory_within_root(root_fd, directory) as skill_fd:
                         markdown = _read_skill_file(
                             skill_fd,
                             directory,
@@ -272,7 +262,7 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
     """Return the support files one workspace skill offers as ``directory/filename``, like its skill loading lists them."""
-    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, open_directory_within_root(root_fd, name) as skill_fd:
         return [
             f"{directory}/{filename}"
             for directory in sorted(_SUPPORT_DIRECTORIES)
@@ -318,7 +308,7 @@ def write_skill_file(
     """Replace or add one file of a skill whose current version the write is based on."""
     directory, filename = _split_relative_path(relative_path)
     _validate_content(relative_path, content)
-    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, open_directory_within_root(root_fd, name) as skill_fd:
         markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
         if current is not None and current.content == content:
             # Like Hermes, an unchanged file is refused, so it never reads as an update or resets the skill's age.
@@ -352,7 +342,7 @@ def remove_skill_file(
     if directory is None:
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
-    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, open_directory_within_root(root_fd, name) as skill_fd:
         _markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
         if current is None:
             msg = f"{relative_path} does not exist."
@@ -411,7 +401,7 @@ def _record_patch(root_fd: int, name: str) -> None:
     now = datetime.now(UTC)
     update_skill_usages(
         root_fd,
-        {name: lambda usage: usage.model_copy(update={"patch_count": usage.patch_count + 1, "last_patched_at": now})},
+        {name: lambda usage: usage.model_copy(update={"last_patched_at": now})},
     )
 
 
@@ -421,9 +411,7 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
     with open_directory_within_root(root_fd, f"{_HISTORY_DIRNAME}/{name}", create=True) as history_fd:
         atomic_write_bytes_at(history_fd, f"{stamp}--{relative_path.replace('/', '--')}", content.encode())
         for stale in _entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
-            # Another process sharing the workspace may prune the same snapshot first.
-            with suppress(FileNotFoundError):
-                os.unlink(stale, dir_fd=history_fd)
+            os.unlink(stale, dir_fd=history_fd)
 
 
 def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: datetime) -> list[str]:

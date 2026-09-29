@@ -400,7 +400,7 @@ def test_a_write_that_changes_nothing_is_refused(tmp_path: Path) -> None:
         )
     assert not (root / ".history").exists()
     usage = json.loads((root / ".usage.json").read_text())["deploy-checks"]
-    assert "patch_count" not in usage
+    assert "last_patched_at" not in usage
 
 
 def test_support_files_stay_directly_under_support_directories(tmp_path: Path) -> None:

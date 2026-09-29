@@ -194,6 +194,8 @@ class SkillReviewRunner:
             if settings.notify and progress.changes and not self._stopped:
                 create_background_task(self._notify(scope, progress.changes), name=f"skill_notice:{scope.agent}")
             raise
+        except TimeoutError:
+            logger.info("Skill review reached its timeout", agent=scope.agent, session_id=scope.session)
         except Exception:
             logger.exception("Skill review failed", agent=scope.agent, session_id=scope.session)
         logger.info(

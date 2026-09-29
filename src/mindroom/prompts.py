@@ -143,7 +143,6 @@ Step-by-step instructions...
 
 Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
 A workspace skill you create or edit becomes available on your next run, without any config change.
-If you have the skill_manage tool, use it to create and change workspace skills: it checks the frontmatter, refuses literal credentials, and keeps the previous version under `skills/.history/`.
 Workspace skill scripts cannot be executed through get_skill_script; run them with your shell tools if you have them.
 """
 

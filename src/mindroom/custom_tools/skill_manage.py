@@ -44,7 +44,8 @@ class SkillManageTools(Toolkit):
 
         Skills are folders under skills/ in your workspace, and configured skills are read-only. A new SKILL.md
         starts with YAML frontmatter whose name is exactly the directory name and whose description is one
-        trigger-first sentence of at most 60 characters. Files that contain a literal credential are refused.
+        trigger-first sentence of at most 60 characters. Files that contain a literal credential are refused, and a
+        replaced or removed file's previous version is kept under skills/.history/.
 
         Args:
             action: "create" a new skill from content, "patch" old_string to new_string in SKILL.md or file_path,
