@@ -406,6 +406,33 @@ async def test_authoritative_departure_revokes_current_invite_before_join(
         release_invite_fence.set()
 
 
+@pytest.mark.asyncio
+async def test_reconciliation_forgets_refused_invites_and_survives_a_failing_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Refused inviters leave no pending entries, and one failing join does not stop the pass."""
+    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    config.router.accept_invites = ["@owner:localhost"]
+    bot.client.invited_rooms = {}
+    failing, refused, joinable = "!a-failing:localhost", "!b-refused:localhost", "!c-joinable:localhost"
+    _cache_current_invite(bot, failing, "@owner:localhost")
+    _cache_current_invite(bot, refused, "@outsider:localhost")
+    _cache_current_invite(bot, joinable, "@owner:localhost")
+    bot._room_lifecycle.record_pending_room_invite(refused, "@outsider:localhost")
+
+    async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
+        return RoomJoinOutcome.RETRYABLE_FAILURE if room_id == failing else RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=join_room))
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert bot._room_lifecycle.invited_rooms == {joinable}
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {failing: "@owner:localhost"}
+
+
 @pytest.fixture
 def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with agents and teams."""

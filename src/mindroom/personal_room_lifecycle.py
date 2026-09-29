@@ -17,7 +17,7 @@ from mindroom.matrix.personal_room_store import (
     read_personal_room,
     retained_personal_rooms,
 )
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError
+from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomValidationError
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
@@ -167,6 +167,30 @@ class PersonalRoomLifecycle:
             reinvite_departed_owner=reinvite_departed_owner,
         )
 
+    async def _onboard_live(
+        self,
+        user_id: str,
+        source_room_id: str,
+        *,
+        reinvite_departed_owner: bool = False,
+    ) -> None:
+        """Serve one onboarding-room trigger without letting a broken personal room hold that room's lane.
+
+        A room no retry can fix is logged and the event settles; reconciliation,
+        which runs at startup and after a configuration reload, retries it after
+        doubling delays up to hourly. Transient failures still raise so the
+        journal retries the event.
+        """
+        try:
+            await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)
+        except PersonalRoomValidationError as error:
+            logger.warning(
+                "Personal-room validation failed for an onboarding trigger",
+                user_id=user_id,
+                room_id=source_room_id,
+                error=str(error),
+            )
+
     async def handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
         """Recognize exact self-onboarding commands through trusted requester resolution."""
         settings = self.runtime.config.personal_rooms
@@ -187,7 +211,7 @@ class PersonalRoomLifecycle:
             self.runtime.config,
             self.runtime_paths,
         ):
-            await self._onboard(event.sender, room.room_id)
+            await self._onboard_live(event.sender, room.room_id)
         return True
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
@@ -198,7 +222,7 @@ class PersonalRoomLifecycle:
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
         if self.observes_onboarding_joins and event.prev_membership is not None:
-            await self._onboard(
+            await self._onboard_live(
                 event.state_key,
                 room.room_id,
                 reinvite_departed_owner=event.prev_membership == "leave",
@@ -207,7 +231,7 @@ class PersonalRoomLifecycle:
     async def baseline_join(self, join: RoomMemberJoin) -> None:
         """Onboard unknown prior membership only after the existing durable baseline gate."""
         if join.prev_membership is None:
-            await self._onboard(join.user_id, join.room_id)
+            await self._onboard_live(join.user_id, join.room_id)
 
     def _recorded_candidates(self, agent_name: str) -> tuple[set[tuple[str, str]], bool]:
         """Read each retained intent independently; keep damaged files retryable."""

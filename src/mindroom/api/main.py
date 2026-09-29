@@ -40,6 +40,7 @@ from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
+from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
 from mindroom.api.response_activity import router as response_activity_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
@@ -688,6 +689,8 @@ app = FastAPI(
     openapi_url=_api_docs["openapi_url"],
 )
 initialize_api_app(app, _runtime_paths)
+# Added before CORS, so a 413 still carries the dashboard's CORS headers.
+app.add_middleware(RequestBodyLimitMiddleware)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 
 

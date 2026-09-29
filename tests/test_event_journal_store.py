@@ -5474,7 +5474,7 @@ class TestOutbox:
         # Registration and deletion share the echo writer's real ledger and
         # reservations, while the outbox retains its earlier immutable input.
         await store.register_edit_revision(source, (30, later))
-        await store.mark_source_redacted(later)
+        await store.mark_source_redacted(later, room_id=ROOM)
         durable = {
             index: TurnRecordCodec._from_ledger_record(index, json.loads(raw))
             for index, _, raw in await store.deps.turn_records.load_all()

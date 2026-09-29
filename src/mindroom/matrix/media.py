@@ -40,6 +40,8 @@ _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+# The decoded-pixel limit media delivery applies to images it prepares.
+_MAX_EXIF_READ_PIXELS = 40_000_000
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -201,23 +203,32 @@ def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
 class _PreparedMediaUpload:
     """Upload bytes and metadata after the caller has resolved room encryption."""
 
+    media_bytes: bytes
+    mimetype: str
     data: bytes
     content_type: str
     filename: str
-    info: dict[str, Any]
     encryption_keys: dict[str, Any] | None
 
-    def encrypted_file_content(self) -> dict[str, Any] | None:
-        """Build encrypted metadata separately so callers retain their error boundaries."""
+    def info(self) -> dict[str, Any]:
+        """Build Matrix event info, decoding image dimensions only for callers that send it."""
+        return {
+            "size": len(self.media_bytes),
+            "mimetype": self.mimetype,
+            **_image_dimensions(self.media_bytes, self.mimetype),
+        }
+
+    def encrypted_file_content(self, *, url: str) -> dict[str, Any] | None:
+        """Build the Matrix encrypted-file object with the given MXC ``url``, or None for unencrypted uploads."""
         if self.encryption_keys is None:
             return None
         return encrypted_file_content(
-            url="",
+            url=url,
             key=self.encryption_keys["key"],
             iv=self.encryption_keys["iv"],
             hashes=self.encryption_keys["hashes"],
-            mime_type=self.info["mimetype"],
-            size=self.info["size"],
+            mime_type=self.mimetype,
+            size=len(self.media_bytes),
         )
 
 
@@ -231,6 +242,9 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
     try:
         with Image.open(io.BytesIO(media_bytes)) as image:
             width, height = image.size
+            # A PNG whose eXIf chunk follows its image data decodes the whole raster to read EXIF.
+            if image.format == "PNG" and "exif" not in image.info and width * height > _MAX_EXIF_READ_PIXELS:
+                return {}
             orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return {}
@@ -251,10 +265,11 @@ def prepare_media_upload(
         crypto.attachments.encrypt_attachment(media_bytes) if encrypt else (media_bytes, None)
     )
     return _PreparedMediaUpload(
+        media_bytes=media_bytes,
+        mimetype=mimetype,
         data=upload_bytes,
         content_type="application/octet-stream" if encrypt else mimetype,
         filename=f"{filename}.enc" if encrypt else filename,
-        info={"size": len(media_bytes), "mimetype": mimetype, **_image_dimensions(media_bytes, mimetype)},
         encryption_keys=encryption_keys,
     )
 
@@ -355,6 +370,16 @@ def extract_media_caption(
     return default
 
 
+def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:
+    """Verify the ciphertext SHA-256, then decrypt with the given key and IV.
+
+    Raises nio's ``EncryptionError`` on a digest mismatch or an undecodable key or IV,
+    and ``binascii.Error`` when the SHA-256 is not valid base64.
+    A well-formed wrong key or IV yields garbage, so callers must validate the plaintext.
+    """
+    return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+
+
 def _decrypt_encrypted_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,
@@ -369,7 +394,7 @@ def _decrypt_encrypted_media_bytes(
         return None
 
     try:
-        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+        return decrypt_media_bytes(encrypted_bytes, key=key, sha256=sha256, iv=iv)
     except Exception:
         logger.exception("Media decryption failed", event_id=_event_id_for_log(event))
         return None

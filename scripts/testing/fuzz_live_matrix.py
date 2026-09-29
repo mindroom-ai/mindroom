@@ -9794,7 +9794,7 @@ def _install_runtime_redaction_observer(path: Path) -> None:
 
     original = TurnStore.mark_source_redacted
 
-    def observed(self: TurnStore, source_event_id: str) -> Coroutine[Any, Any, TurnRecord | None]:
+    def observed(self: TurnStore, source_event_id: str, *, room_id: str) -> Coroutine[Any, Any, TurnRecord | None]:
         try:
             entry = RuntimeRedactionEntry(
                 self.deps.agent_name,
@@ -9816,7 +9816,7 @@ def _install_runtime_redaction_observer(path: Path) -> None:
         except Exception as exc:
             msg = f"runtime redaction observation failed before mutation: {exc}"
             raise SystemExit(msg) from exc
-        return original(self, source_event_id)
+        return original(self, source_event_id, room_id=room_id)
 
     TurnStore.mark_source_redacted = observed
 

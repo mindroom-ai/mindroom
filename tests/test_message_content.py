@@ -1001,7 +1001,7 @@ class TestDownloadMxcText:
         client.download.return_value = response
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
 
-        with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment") as mock_decrypt:
+        with patch("mindroom.matrix.message_content.decrypt_media_bytes") as mock_decrypt:
             result = await _download_mxc_text(client, "mxc://server/encrypted-oversized", file_info)
 
         assert result is None
@@ -1017,7 +1017,7 @@ class TestDownloadMxcText:
         client.download.return_value = response
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
 
-        with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
+        with patch("mindroom.matrix.message_content.decrypt_media_bytes", return_value=b"123456"):
             result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
 
         assert result is None

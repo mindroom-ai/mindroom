@@ -497,18 +497,30 @@ class BotRoomLifecycle:
         await self._handle_invite(room, sender)
 
     async def reconcile_pending_invites(self) -> None:
-        """Re-evaluate durable and cached invites after configuration changes."""
+        """Re-evaluate durable and cached invites after configuration changes.
+
+        Each room is handled on its own, so one whose join keeps failing is
+        logged and stays pending without stopping the rest of the pass.
+        """
         client = self._client()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         for room in tuple(client.invited_rooms.values()):
-            if room.inviter is not None:
+            if room.inviter is not None and is_inviter_allowed(
+                self._config(),
+                self.deps.runtime_paths,
+                self.deps.agent_name,
+                room.inviter,
+            ):
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
-            await self._handle_invite(room, sender)
+            try:
+                await self._handle_invite(room, sender)
+            except Exception:
+                self._logger().exception("Pending invite reconciliation failed", room_id=room_id, sender=sender)
 
     def _allowed_current_inviter(self, room_id: str) -> str | None:
         """Return the current Matrix inviter when the latest policy allows it."""
@@ -558,6 +570,11 @@ class BotRoomLifecycle:
                     user_id=sender,
                     room_id=room.room_id,
                 )
+                current_invite = self._client().invited_rooms.get(room.room_id)
+                if not joined and current_invite is not None and current_invite.inviter is not None:
+                    # The policy refuses the current inviter, and keeping its
+                    # entry would only let refused inviters grow the ledger.
+                    self._forget_pending_room_invite(room.room_id)
                 return
             sender = allowed_sender
 

@@ -211,6 +211,26 @@ def test_encrypted_media_requires_matrix_uri_and_expected_key_algorithm() -> Non
         EncryptedDesktopMedia.from_content(content)
 
 
+@pytest.mark.parametrize(("key_field", "value"), [("kty", "RSA"), ("ext", False)])
+def test_encrypted_media_rejects_keys_the_serializer_never_emits(key_field: str, value: object) -> None:
+    """Receivers accept only the octet, extractable key description the shared serializer writes."""
+    content = _media().to_content()
+    assert isinstance(content["key"], dict)
+    content["key"][key_field] = value
+
+    with pytest.raises(
+        DesktopProtocolError,
+        match=r"^screenshot\.key must describe an extractable A256CTR octet key\.$",
+    ):
+        EncryptedDesktopMedia.from_content(content)
+
+
+def test_encrypted_media_rejects_envelope_versions_the_serializer_never_emits() -> None:
+    """Receivers accept only the encrypted-file version the shared serializer writes."""
+    with pytest.raises(DesktopProtocolError, match=r"^screenshot\.v must be v2\.$"):
+        EncryptedDesktopMedia.from_content({**_media().to_content(), "v": "v1"})
+
+
 @pytest.mark.parametrize(
     ("action", "parameters"),
     [

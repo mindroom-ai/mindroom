@@ -23,27 +23,36 @@ struct MindRoomCommandInvocation: Equatable {
 
 struct MindRoomRuntime {
     private static let bundledUVRelativePath = "Contents/Resources/bin/uv"
-    #if arch(arm64)
-    private static let desktopHelperArchitecture = "arm64"
-    #elseif arch(x86_64)
-    private static let desktopHelperArchitecture = "x86_64"
-    #else
-    #error("Unsupported desktop helper architecture")
-    #endif
+    // uv also accepts an existing Intel Python on Apple silicon, which cannot install the runtime's wheels.
+    private static let runtimePython = "cpython-3.13-macos-aarch64-none"
     private static let desktopHelperRelativePath =
-        "Contents/Helpers/\(desktopHelperArchitecture)/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+        "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
     private let homeURL: URL
     private let bundleURL: URL
     private let baseEnvironment: [String: String]
+    private let appVersion: String?
 
     init(
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         bundleURL: URL = Bundle.main.bundleURL,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        appVersion: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     ) {
         self.homeURL = homeURL
         self.bundleURL = bundleURL
         self.baseEnvironment = environment
+        self.appVersion = appVersion
+    }
+
+    /// Release builds are stamped with their CalVer release tag, which is also the
+    /// runtime's PyPI version, so the app installs exactly the runtime it was built
+    /// with. Other builds, such as the build script's 0.1.0 development fallback,
+    /// have no matching runtime release and install the latest one.
+    var pinnedRuntimeVersion: String? {
+        guard let appVersion, appVersion.range(of: #"^[0-9]{4}\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return appVersion
     }
 
     var bundledUVURL: URL {
@@ -93,9 +102,9 @@ struct MindRoomRuntime {
     func command(for action: MindRoomRuntimeAction) -> MindRoomCommandInvocation {
         switch action {
         case .installRuntime:
-            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", "3.13", "mindroom"])
+            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", Self.runtimePython, runtimeRequirement])
         case .updateRuntime:
-            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom"])
+            return uvCommand(arguments: ["tool", "install", "--managed-python", "--python", Self.runtimePython, "--force", runtimeRequirement])
         case .installService:
             return mindroomCommand(arguments: ["service", "install", "--no-confirm"])
         case .startService:
@@ -140,13 +149,34 @@ struct MindRoomRuntime {
             try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         }
         return LocalAgentsSetupSnapshot(
-            runtimePath: executable, configurationExists: configuration?.isRegularFile == true,
+            runtimePath: executable, runtimeVersion: executable.flatMap(Self.installedRuntimeVersion(executablePath:)),
+            requiredRuntimeVersion: pinnedRuntimeVersion, configurationExists: configuration?.isRegularFile == true,
             configurationDisplayPath: config.path.hasPrefix(homeURL.path + "/")
                 ? "~" + config.path.dropFirst(homeURL.path.count) : config.path,
             configurationStamp: LocalAgentsConfigurationStamp(
                 configurationURL: config, storagePath: serviceEnvironment["MINDROOM_STORAGE_PATH"], modificationDates: dates
             )
         )
+    }
+
+    private var runtimeRequirement: String {
+        pinnedRuntimeVersion.map { "mindroom==\($0)" } ?? "mindroom"
+    }
+
+    /// Reads the installed version from the package metadata in the executable's
+    /// Python environment, so status refreshes do not have to start the runtime.
+    private static func installedRuntimeVersion(executablePath: String) -> String? {
+        let fileManager = FileManager.default
+        let lib = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("lib")
+        let metadata = ((try? fileManager.contentsOfDirectory(atPath: lib.path)) ?? []).filter { $0.hasPrefix("python") }.flatMap { python -> [String] in
+            let sitePackages = lib.appendingPathComponent(python).appendingPathComponent("site-packages")
+            return ((try? fileManager.contentsOfDirectory(atPath: sitePackages.path)) ?? [])
+                .filter { $0.hasPrefix("mindroom-") && $0.hasSuffix(".dist-info") }
+        }
+        // A prefix shared by several Python versions does not say which one the executable runs.
+        guard metadata.count == 1, let entry = metadata.first else { return nil }
+        return String(entry.dropFirst("mindroom-".count).dropLast(".dist-info".count))
     }
 
     private func uvCommand(arguments: [String]) -> MindRoomCommandInvocation {

@@ -10,6 +10,7 @@ final class CommandRunnerTests: XCTestCase {
             CommandResult(exitCode: 0, output: "! OPENAI_API_KEY not set\n6 passed, 0 failed, 1 warning")
         })
         runner.onCommandFinished = { _, _ in finished.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [finished], timeout: 2)
         XCTAssertEqual(runner.feedback?.result.isSuccess, true)
@@ -73,6 +74,7 @@ final class CommandRunnerTests: XCTestCase {
             }
         )
         runner.onCommandFinished = { _, _ in checked.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [checked], timeout: 2)
         XCTAssertEqual(runner.setupCheck?.isSuccess, true)
@@ -106,6 +108,7 @@ final class CommandRunnerTests: XCTestCase {
             }
         )
         runner.onCommandFinished = { _, _ in checked.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.checkSetup)
         await fulfillment(of: [checked], timeout: 2)
         XCTAssertEqual(runner.setupCheck?.isSuccess, false)
@@ -166,6 +169,61 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeFromAnotherReleaseBlocksSetupAndServiceInstallButNotServiceControl() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(
+            runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379"),
+            processRunner: { invocation, _ in
+                recorder.record(invocation.arguments)
+                return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
+            }, showSection: { _ in }
+        )
+        await completeFirstStatusRefresh(runner)
+
+        for command in [MindRoomCommand.installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted] {
+            XCTAssertTrue(runner.isBlockedByRuntimeUpdate(command), command.title)
+            runner.run(command)
+            XCTAssertFalse(runner.isRunningCommand, command.title)
+        }
+        for command in [MindRoomCommand.updateRuntime, .startService, .stopService, .restartService] {
+            XCTAssertFalse(runner.isBlockedByRuntimeUpdate(command), command.title)
+        }
+        let updated = expectation(description: "Runtime updated")
+        runner.onCommandFinished = { _, _ in updated.fulfill() }
+        runner.run(.updateRuntime)
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.379"]))
+        XCTAssertFalse(recorder.arguments.contains { $0.contains("install") && $0.contains("service") || $0.contains("connect") })
+    }
+
+    @MainActor
+    func testServiceInstallWaitsForFirstStatusRefresh() async {
+        let started = expectation(description: "Status started")
+        let release = DispatchSemaphore(value: 0)
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(processRunner: { invocation, _ in
+            recorder.record(invocation.arguments)
+            if invocation.arguments.contains("status") {
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 3)
+            }
+            return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
+        })
+        runner.refreshStatus()
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(runner.isBlockedByRuntimeUpdate(.installService))
+        runner.run(.installService)
+        XCTAssertFalse(runner.isRunningCommand)
+        release.signal()
+        await waitForStatusRefresh(runner)
+        XCTAssertFalse(runner.isBlockedByRuntimeUpdate(.installService))
+        XCTAssertEqual(recorder.arguments, [["mindroom", "service", "status", "--logs", "0"]])
+    }
+
+    @MainActor
     func testWebActionsNavigateInsideApp() {
         var sections: [AppSection] = []
         let runner = MindRoomCommandRunner(processRunner: { _, _ in
@@ -202,6 +260,7 @@ final class CommandRunnerTests: XCTestCase {
             return CommandResult(exitCode: 0, output: "Paired")
         }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel"]))
@@ -218,6 +277,7 @@ final class CommandRunnerTests: XCTestCase {
                 : CommandResult(exitCode: 0, output: "MindRoom service: running (pid 123)")
         }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.pairHosted)
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertTrue(runner.needsReconnectConfirmation)
@@ -234,6 +294,7 @@ final class CommandRunnerTests: XCTestCase {
             return CommandResult(exitCode: 0, output: "Paired")
         }, showSection: { _ in })
         runner.onCommandFinished = { _, _ in completed.fulfill() }
+        await completeFirstStatusRefresh(runner)
         runner.run(.reconnectHosted)
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertTrue(recorder.arguments.contains(["mindroom", "connect", "--graceful-cancel", "--force"]))
@@ -269,4 +330,20 @@ private final class StatusRefreshCalls: @unchecked Sendable {
         count += 1
         return count
     }
+}
+
+/// Completes the first status refresh, which commands that need the app's runtime wait for.
+@MainActor
+func completeFirstStatusRefresh(_ runner: MindRoomCommandRunner) async {
+    runner.refreshStatus()
+    await waitForStatusRefresh(runner)
+}
+
+/// Waits for a status refresh that is already in flight to publish.
+@MainActor
+func waitForStatusRefresh(_ runner: MindRoomCommandRunner) async {
+    for _ in 0..<300 where !runner.hasRefreshedStatus {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(runner.hasRefreshedStatus)
 }

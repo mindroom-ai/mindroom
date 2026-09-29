@@ -514,6 +514,33 @@ async def test_response_preparation_does_not_sanitize_unrelated_turns(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted_event_id", ["$user_msg", "$physical-edit"])
+async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversation_untouched(
+    journal_store: EventJournalStore,
+    redacted_event_id: str,
+) -> None:
+    """A redaction names its target by ID alone, so one delivered in another room must not erase this one."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "Edited message"},
+            source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        ),
+    )
+    before = store.get_turn_record("$user_msg")
+
+    assert await store.mark_source_redacted(redacted_event_id, room_id="!elsewhere:example.org") is None
+
+    assert store.get_turn_record("$user_msg") == before
+    assert not store.is_revision_redacted(redacted_event_id)
+    assert store._ledger.pending_redaction_cleanup_event_ids() == ()
+    assert await store.mark_source_redacted(redacted_event_id, room_id=target.room_id) is not None
+    assert store.is_revision_redacted(redacted_event_id)
+
+
+@pytest.mark.asyncio
 async def test_redaction_sanitizes_only_turns_referencing_that_revision(journal_store: EventJournalStore) -> None:
     """One physical edit invalidates both its source and context consumers, not unrelated history."""
     store = await _store(journal_store)
@@ -534,12 +561,12 @@ async def test_redaction_sanitizes_only_turns_referencing_that_revision(journal_
             requester_id="@user:example.org",
             source_event_prompts={"$context-consumer": "Surviving message"},
             revision_replay={"$physical-edit": RevisionReplay("$user_msg", 10)},
-            conversation_target=MessageTarget.resolve("!other:example.org", "$other-thread", "$context-consumer"),
+            conversation_target=MessageTarget.resolve("!room:example.org", "$other-thread", "$context-consumer"),
         ),
     )
 
     with patch.object(store, "_sanitize_candidate", wraps=store._sanitize_candidate) as sanitize:
-        await store.mark_source_redacted("$physical-edit")
+        await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
 
     for source_id in ("$user_msg", "$context-consumer"):
         current = store.get_turn_record(source_id)
@@ -579,7 +606,7 @@ async def test_response_preparation_repairs_interrupted_redaction_in_its_convers
             patch.object(store, "_reconcile_revision_tombstones", side_effect=asyncio.CancelledError),
             pytest.raises(asyncio.CancelledError),
         ):
-            await store.mark_source_redacted(edit_id)
+            await store.mark_source_redacted(edit_id, room_id="!room:example.org")
 
     with patch.object(store, "_remove_redacted_event_from_recorded_scopes", return_value=True):
         assert not await store.prepare_pending_response_source(
@@ -613,7 +640,7 @@ async def _prepare_redaction(
     redacted_event_id: str = "$user_msg",
 ) -> bool:
     """Tombstone one source and run the next response's locked cleanup gate."""
-    await store.mark_source_redacted(redacted_event_id)
+    await store.mark_source_redacted(redacted_event_id, room_id="!room:example.org")
     return await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
@@ -1322,7 +1349,7 @@ async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(
     )
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
-    marked = await store.mark_source_redacted("$user_msg")
+    marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     assert marked is not None
     assert marked.conversation_target is None
     assert marked.pending_redaction_cleanup_event_ids == ()
@@ -1409,7 +1436,7 @@ async def test_redaction_before_response_registration_tombstones_pending_coalesc
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
 
-    await store.mark_source_redacted("$first")
+    await store.mark_source_redacted("$first", room_id="!room:example.org")
     pending = await store.record_pending_turn(
         TurnRecord.create(
             ["$first", "$second"],
@@ -1458,7 +1485,7 @@ async def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_co
         ),
     )
 
-    marked = await store.mark_source_redacted("$first")
+    marked = await store.mark_source_redacted("$first", room_id="!room:example.org")
 
     assert marked is not None
     assert marked.source_event_ids == ("$first",)
@@ -1490,7 +1517,7 @@ async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
         conversation_target=target,
     )
     await store.record_pending_turn(pending)
-    await store.mark_source_redacted("$first")
+    await store.mark_source_redacted("$first", room_id="!room:example.org")
     await store.record_turn(
         TurnRecord.create(
             ["$second"],
@@ -1571,7 +1598,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
         ),
     )
 
-    projected = await store.mark_source_redacted(human_event_id)
+    projected = await store.mark_source_redacted(human_event_id, room_id="!room:example.org")
 
     assert projected is not None
     assert projected.source_event_ids == (human_event_id,)
@@ -1640,7 +1667,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
         conversation_target=target,
     )
     await store.record_pending_turn(response_record)
-    await store.mark_source_redacted("$user_msg")
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
     await store.record_turn(replace(response_record, response_event_id="$reply"))
 
     should_suppress = await store._prepare_response_for_redactions(
@@ -1673,7 +1700,7 @@ async def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(journal_
         ),
     )
 
-    sanitized = await store.mark_source_redacted("$first")
+    sanitized = await store.mark_source_redacted("$first", room_id="!room:example.org")
 
     assert sanitized is not None
     assert sanitized.redacted_source_event_ids == ("$first",)
@@ -1759,8 +1786,8 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
         agent_name="unrelated",
     )
 
-    owner_marked = await owner_store.mark_source_redacted("$user_msg")
-    unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg")
+    owner_marked = await owner_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+    unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     assert owner_marked is not None
     assert owner_marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
@@ -1819,7 +1846,7 @@ async def test_redaction_tombstone_persists_across_ledger_reload(journal_store: 
         ),
     )
 
-    await store.mark_source_redacted("$event")
+    await store.mark_source_redacted("$event", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reloaded_store = await _store(journal_store)
 
@@ -1853,7 +1880,7 @@ async def test_warm_preserves_lazy_cleanup_until_next_response(
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_turn(_owned_turn_record(target))
-    marked = await store.mark_source_redacted("$user_msg")
+    marked = await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     assert marked is not None
     assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
@@ -1902,7 +1929,7 @@ async def test_locked_response_preparation_sanitizes_and_acknowledges_history_cl
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_turn(_owned_turn_record(target))
-    await store.mark_source_redacted("$user_msg")
+    await store.mark_source_redacted("$user_msg", room_id="!room:example.org")
 
     should_suppress = await store._prepare_response_for_redactions(
         target=target,
@@ -2339,7 +2366,7 @@ async def test_routed_alias_redaction_marks_owning_relay_under_lock(journal_stor
         ),
     )
 
-    marked = await store.mark_source_redacted("$human")
+    marked = await store.mark_source_redacted("$human", room_id="!room:example.org")
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
@@ -3136,7 +3163,7 @@ async def test_absent_source_import_declines_occupied_discovery_alias(
                 ),
             )
         else:
-            await store.mark_source_redacted("$selection")
+            await store.mark_source_redacted("$selection", room_id="!room:example.org")
         owner = store.get_turn_record("$selection")
         assert owner is not None
         return owner
@@ -3253,7 +3280,7 @@ async def test_absent_row_import_returns_concurrent_redaction_tombstone_unchange
         nonlocal current, tombstone_recorded
         if not tombstone_recorded:
             tombstone_recorded = True
-            await store.mark_source_redacted("$event")
+            await store.mark_source_redacted("$event", room_id="!room:example.org")
             current = store.get_turn_record("$event")
         return await real_update(*args, **kwargs)
 
@@ -3553,7 +3580,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     ).arun("BASELINE_INPUT", session_id=target.session_id)
     assert "DELETED_EDIT_MARKER" in str(before_model.requests)
     storage.close()
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reopened = TurnStore(store.deps)
     await reopened.warm()
@@ -3599,7 +3626,7 @@ async def test_edit_tombstone_sanitizes_recovery_before_revision_tags_are_stripp
         source_event_revisions={"$user_msg": (10, "$physical-edit")},
     )
     await store.record_turn(edited)
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     recovered = await _load_with_recovery(
         store,
         original_event_id="$user_msg",
@@ -3623,9 +3650,9 @@ async def test_edit_tombstone_registration_crash_reopens_cleanup_owner(
     if crash_before_join:
         await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
         with patch.object(store, "_reconcile_revision_tombstones"):
-            await store.mark_source_redacted("$physical-edit")
+            await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     else:
-        await store.mark_source_redacted("$physical-edit")
+        await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
         await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store)
@@ -3668,7 +3695,7 @@ async def test_late_completed_edit_keeps_consumption_proof_without_restoring_tex
         source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
         source_event_revisions={"$user_msg": (10, "$physical-edit")},
     )
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store.record_responded_turn(snapshot)
     owner = store.get_turn_record("$user_msg")
     assert owner is not None
@@ -3725,7 +3752,7 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
             source_event_revisions={"$user_msg": (20, "$surviving-edit")},
         ),
     )
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     stored = _stored(storage, session)
     assert [run.run_id for run in stored.runs or []] == ["newest"]
@@ -3754,7 +3781,7 @@ async def test_edit_cleanup_failure_keeps_debt_through_reopen(
             source_event_revisions={"$user_msg": (10, "$physical-edit")},
         ),
     )
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     failure = asyncio.CancelledError() if cancel else OSError("storage unavailable")
     with (
         patch.object(store, "_remove_redacted_event_from_recorded_scopes", side_effect=failure),
@@ -3827,7 +3854,10 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
         if mutation == "newer":
             await store.register_edit_revision("$user_msg", (30, "$newer-edit"))
         else:
-            await store.mark_source_redacted("$driving-edit" if mutation == "driver" else "$sibling-edit")
+            await store.mark_source_redacted(
+                "$driving-edit" if mutation == "driver" else "$sibling-edit",
+                room_id="!room:example.org",
+            )
         preparation_release.set()
         result = await task
     assert result is (True if mutation == "driver" else EditPreparation.REBUILD)
@@ -3893,7 +3923,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
     store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
-    await store.mark_source_redacted("$physical-edit")
+    await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()
     persisted = get_agent_session(storage, target.session_id)
@@ -3965,7 +3995,10 @@ async def test_prepared_voice_dropped_by_terminal_authority(journal_store: Event
     if terminal == "completed":
         await store.record_turn(TurnRecord.create(["$voice"]))
     else:
-        await store.mark_source_redacted("$alias" if terminal == "alias_redacted" else "$voice")
+        await store.mark_source_redacted(
+            "$alias" if terminal == "alias_redacted" else "$voice",
+            room_id="!room:example.org",
+        )
     assert store.prepared_voice_for_source("$voice") is None
     assert await store.record_prepared_voice("$voice", snapshot) is None
     _reset_handled_turn_ledger_runtime()

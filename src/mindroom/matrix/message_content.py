@@ -19,9 +19,9 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import nio
-from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import decrypt_media_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
@@ -169,13 +169,12 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
         if file_info and "key" in file_info:
             # Decrypt the content
             try:
-                decrypted = crypto.attachments.decrypt_attachment(
+                text_bytes = decrypt_media_bytes(
                     response.body,
-                    file_info["key"]["k"],
-                    file_info["hashes"]["sha256"],
-                    file_info["iv"],
+                    key=file_info["key"]["k"],
+                    sha256=file_info["hashes"]["sha256"],
+                    iv=file_info["iv"],
                 )
-                text_bytes = decrypted
             except Exception:
                 logger.exception("Failed to decrypt attachment")
                 return None

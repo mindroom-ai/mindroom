@@ -991,7 +991,7 @@ async def test_deleted_initial_cannot_demote_another_principals_eventless_turn(
         event_id=INITIAL,
         delivered_projections=(),
     )
-    await first_store.mark_source_redacted(SOURCE)
+    await first_store.mark_source_redacted(SOURCE, room_id=ROOM_ID)
     await first.retire_deleted_initial(delivery_id=SOURCE)
     if own_final:
         await second.enqueue_matrix_delivery(
@@ -1002,7 +1002,7 @@ async def test_deleted_initial_cannot_demote_another_principals_eventless_turn(
             payload={"msgtype": "m.text", "body": "B's own answer"},
         )
     await second_store.record_turn(TurnRecord.create([SOURCE], completed=True, conversation_target=target))
-    await second_store.mark_source_redacted(SOURCE)
+    await second_store.mark_source_redacted(SOURCE, room_id=ROOM_ID)
     record = second_store.get_turn_record(SOURCE)
     assert record.completed
     assert record.response_event_id is None
@@ -1232,7 +1232,7 @@ async def test_recovery_respects_existing_source_and_final_owners(  # noqa: C901
         await store.record_user_stopped_response(INITIAL, 20, delivery_settled=True)
         visible[INITIAL] = "Stopped by user"
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
-        await store.mark_source_redacted(SOURCE)
+        await store.mark_source_redacted(SOURCE, room_id=ROOM_ID)
     if owner in {"owed_final", "completed_final", "mixed"}:
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
     try:

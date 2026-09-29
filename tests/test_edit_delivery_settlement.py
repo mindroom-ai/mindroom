@@ -488,9 +488,9 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
 
     async def mutate() -> None:
         if mutation == "revision_redaction":
-            await store.mark_source_redacted("$edit")
+            await store.mark_source_redacted("$edit", room_id="!room:localhost")
         elif mutation == "source_redaction":
-            await store.mark_source_redacted("$source")
+            await store.mark_source_redacted("$source", room_id="!room:localhost")
         elif mutation == "newer":
             await store.register_edit_revision("$source", (30, "$newer"))
         else:

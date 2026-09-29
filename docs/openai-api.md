@@ -240,3 +240,4 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 - **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
+- **Request bodies are limited to 16 MiB** — the dashboard API, including `/v1`, answers larger requests with HTTP 413; knowledge uploads are exempt and keep their own per-file limit

@@ -61,13 +61,18 @@ _GUEST_REMOVAL_NOTICE = (
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
+_UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
 class _PolicyChangedError(Exception):
     """Current policy no longer authorizes this provisioning attempt."""
 
 
-class PersonalRoomRosterMismatchError(RuntimeError):
+class PersonalRoomValidationError(RuntimeError):
+    """A personal room fails an ownership check that no retry passes until someone repairs the room or its alias."""
+
+
+class PersonalRoomRosterMismatchError(PersonalRoomValidationError):
     """An imported room holds people outside its attested roster until someone removes them."""
 
     def __init__(self, room_id: str, unexpected_user_ids: Iterable[str]) -> None:
@@ -317,9 +322,7 @@ class PersonalRoomService:
         client = self._client()
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
-            record.room_id = response.room_id
-            await self._validate_room(record)
-            return response.room_id
+            return await self._adopt_aliased_room(record, response.room_id)
         if not isinstance(response, nio.RoomResolveAliasError) or response.status_code != "M_NOT_FOUND":
             msg = "Personal-room alias lookup failed"
             raise RuntimeError(msg)
@@ -342,22 +345,35 @@ class PersonalRoomService:
         # Concurrent creators and ambiguous create responses converge on the alias.
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
-            record.room_id = response.room_id
-            await self._validate_room(record)
-            return response.room_id
+            return await self._adopt_aliased_room(record, response.room_id)
         msg = "Personal-room creation failed"
         raise RuntimeError(msg)
+
+    async def _adopt_aliased_room(self, record: PersonalRoomRecord, room_id: str) -> str:
+        """Reuse the room the personal alias names only if this agent owns it."""
+        record.room_id = room_id
+        try:
+            await self._validate_room(record)
+        except PersonalRoomValidationError as error:
+            # Any local account can bind the deterministic alias first.
+            msg = f"Personal-room alias {record.alias} names room {room_id}, which this agent does not own"
+            raise PersonalRoomValidationError(msg) from error
+        return room_id
 
     async def _validate_room(self, record: PersonalRoomRecord) -> dict[str, str]:
         assert record.room_id is not None
         response = await self._client().room_get_state(record.room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
+            # A room this agent cannot read, such as one another account bound
+            # to the alias, stays unreadable; other failures are transient.
+            hidden = isinstance(response, nio.RoomGetStateError) and response.status_code in _UNREADABLE_ROOM_ERRCODES
             msg = "Personal-room ownership state unavailable"
-            raise RuntimeError(msg)  # noqa: TRY004 - a Matrix transport failure is retryable, not a caller type error
+            raise (PersonalRoomValidationError if hidden else RuntimeError)(msg)
         visibility = await self._client().room_get_visibility(record.room_id)
         if not isinstance(visibility, nio.RoomGetVisibilityResponse) or visibility.visibility != "private":
+            public = isinstance(visibility, nio.RoomGetVisibilityResponse)
             msg = "Personal-room directory must remain private"
-            raise RuntimeError(msg)
+            raise (PersonalRoomValidationError if public else RuntimeError)(msg)
         state = {(event["type"], event.get("state_key", "")): event for event in response.events}
         creator = state.get(("m.room.create", ""), {}).get("sender")
         marker = state.get((_OWNERSHIP_EVENT, ""), {})
@@ -391,7 +407,7 @@ class PersonalRoomService:
                 .full_id
             ):
                 msg = "Personal-room adopted ownership identity does not match"
-                raise RuntimeError(msg)
+                raise PersonalRoomValidationError(msg)
             if router_id is not None:
                 permitted_members.add(router_id)
         power = state.get(("m.room.power_levels", ""), {}).get("content", {})
@@ -407,7 +423,7 @@ class PersonalRoomService:
             != expected_history
         ):
             msg = "Personal-room ownership or membership does not match"
-            raise RuntimeError(msg)
+            raise PersonalRoomValidationError(msg)
         guests = joined_or_invited - permitted_members
         if guests:
             # Only a room this agent created is removed from; an imported room

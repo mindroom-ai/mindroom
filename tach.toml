@@ -1453,6 +1453,11 @@ path = "mindroom.api.open_access"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.request_body_limit"
+depends_on = []
+visibility = ["mindroom.api.main"]
+
+[[modules]]
 path = "mindroom.api.frontend"
 depends_on = [
     "mindroom.api.auth",
@@ -1672,6 +1677,7 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
+    "mindroom.api.request_body_limit",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
     "mindroom.api.skills",
@@ -3562,17 +3568,67 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.desktop.command_parameters"
+depends_on = ["mindroom.desktop.protocol"]
+visibility = [
+    "mindroom.desktop.bridge",
+    "mindroom.desktop.file_actions",
+    "mindroom.desktop.gui_actions",
+    "mindroom.desktop.shell_actions",
+]
+
+[[modules]]
+path = "mindroom.desktop.reply_fitting"
+depends_on = ["mindroom.desktop.protocol"]
+visibility = ["mindroom.desktop.bridge", "mindroom.desktop.file_actions", "mindroom.desktop.shell_actions"]
+
+[[modules]]
+path = "mindroom.desktop.file_actions"
+depends_on = [
+    "mindroom.desktop.command_parameters",
+    "mindroom.desktop.protocol",
+    "mindroom.desktop.reply_fitting",
+]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
+path = "mindroom.desktop.gui_actions"
+depends_on = [
+    "mindroom.desktop.command_parameters",
+    "mindroom.desktop.input",
+    "mindroom.desktop.protocol",
+]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
+path = "mindroom.desktop.shell_actions"
+depends_on = [
+    "mindroom.desktop.command_parameters",
+    "mindroom.desktop.media",
+    "mindroom.desktop.protocol",
+    "mindroom.desktop.reply_fitting",
+    "mindroom.desktop.shell",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
 path = "mindroom.desktop.bridge"
 depends_on = [
     "mindroom.desktop.observations",
     "mindroom.desktop.accessibility",
     "mindroom.desktop.command_journal",
+    "mindroom.desktop.command_parameters",
+    "mindroom.desktop.file_actions",
+    "mindroom.desktop.gui_actions",
     "mindroom.desktop.media",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.protocol",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.shell",
+    "mindroom.desktop.shell_actions",
     "mindroom.desktop.provider",
+    "mindroom.desktop.reply_fitting",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
  "mindroom.desktop.input"]
@@ -3643,6 +3699,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.message_content"
 depends_on = [
+    "mindroom.matrix.media",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
 ]

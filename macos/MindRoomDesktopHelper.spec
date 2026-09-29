@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onedir bundle for the fixed-identity desktop helper."""
 
-import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
@@ -37,7 +36,7 @@ executable = EXE(
     strip=False,
     upx=False,
     console=True,
-    target_arch=os.environ.get("MINDROOM_HELPER_TARGET_ARCH") or None,
+    target_arch="arm64",
 )
 collected = COLLECT(
     executable,

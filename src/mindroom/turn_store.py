@@ -23,6 +23,7 @@ from mindroom.handled_turns import (
 )
 from mindroom.history.storage import remove_redacted_event_from_compaction
 from mindroom.legacy_revision_replay import summary_source_id
+from mindroom.logging_config import get_logger
 from mindroom.session_ids import create_session_id
 from mindroom.turn_record import (
     EditPreparation,
@@ -37,7 +38,7 @@ from mindroom.turn_record import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     import nio
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -683,11 +686,39 @@ class TurnStore:
                 claim_changed = self._pending_claim_changed
             await claim_changed.wait()
 
+    def _revision_owners(self, event_id: str) -> Iterator[TurnRecord]:
+        """Yield every turn that selected or consumed one physical revision."""
+        for record in self._ledger.all_turn_records():
+            if event_id in (record.revision_replay or {}) or any(
+                revision[1] == event_id for revision in (record.source_event_revisions or {}).values()
+            ):
+                yield record
+
     async def mark_source_redacted(
         self,
         source_event_id: str,
+        *,
+        room_id: str,
     ) -> TurnRecord | None:
-        """Durably tombstone one source event before later replay cleanup."""
+        """Durably tombstone one event redacted in ``room_id`` before later replay cleanup.
+
+        A redaction names its target by event ID alone, and a homeserver can
+        deliver one it did not apply, including one naming another room's
+        event. Returns None, changing nothing, when a turn that owns or consumed
+        the event is recorded in a different room.
+        """
+        own_record = self._ledger.get_turn_record(source_event_id)
+        if not all(
+            _recorded_in_room(record, room_id)
+            for record in (own_record, *self._revision_owners(source_event_id))
+            if record is not None
+        ):
+            logger.warning(
+                "Ignoring redaction of an event recorded in another room",
+                room_id=room_id,
+                redacted_event_id=source_event_id,
+            )
+            return None
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
@@ -709,12 +740,7 @@ class TurnStore:
             (source_event_id,),
             redacted_record,
         )
-        await self._reconcile_revision_tombstones(
-            record
-            for record in self._ledger.all_turn_records()
-            if source_event_id in (record.revision_replay or {})
-            or any(revision[1] == source_event_id for revision in (record.source_event_revisions or {}).values())
-        )
+        await self._reconcile_revision_tombstones(self._revision_owners(source_event_id))
         return tombstone
 
     def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
@@ -800,7 +826,7 @@ class TurnStore:
             return
         redacted = await self.deps.redacted_event_ids(target.room_id, tuple(sorted(event_ids)))
         for event_id in sorted(redacted):
-            await self.mark_source_redacted(event_id)
+            await self.mark_source_redacted(event_id, room_id=target.room_id)
 
     async def _acknowledge_revision_cleanup(self, source_event_id: str, revision_id: str) -> None:
         """Acknowledge only after all affected scopes are durably sanitized."""
@@ -1312,6 +1338,12 @@ def _merged_redaction_markers(
         event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
     )
     return merged_redacted_event_ids, merged_pending_event_ids
+
+
+def _recorded_in_room(turn_record: TurnRecord, room_id: str) -> bool:
+    """Return whether a turn's recorded conversation, if it has one yet, is in this room."""
+    target = turn_record.conversation_target
+    return target is None or target.room_id == room_id
 
 
 def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
