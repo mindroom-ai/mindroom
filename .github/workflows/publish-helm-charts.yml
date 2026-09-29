@@ -22,6 +22,11 @@ env:
   TUWUNEL_CHART_DIR: cluster/k8s/tuwunel
   CLIENT_CHART_DIR: cluster/k8s/client
 
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   runtime-chart:
     runs-on: ubuntu-latest
