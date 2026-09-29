@@ -1,9 +1,14 @@
+import AppKit
 import SwiftUI
+
+/// Approval controls stay disabled this long after a request appears or replaces another one.
+private let desktopShellApprovalArmingDelay = Duration.seconds(1)
 
 /// Local shell approval, auto-approval, and running commands; shown above every Computer access step.
 struct DesktopShellApprovalView: View {
     @ObservedObject var store: DesktopControlStore
     @State private var confirmation: DesktopShellConfirmation?
+    @State private var armedRequestID: String?
 
     var body: some View {
         AppSectionCard {
@@ -41,22 +46,23 @@ struct DesktopShellApprovalView: View {
     private func pendingRequest(_ request: DesktopShellRequest) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Shell command waiting for your approval", systemImage: "terminal").font(.headline)
-            ScrollView {
-                Text(request.displayCommand)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-            }
-            .frame(maxHeight: 160)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
+            // The whole command is shown, never clipped, so the decision buttons always come after all of it.
+            DesktopLeftToRightText(text: request.displayCommand, textStyle: .body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
+            Text("The command is \(request.commandSizeLabel).").font(.callout).foregroundStyle(.secondary)
             if request.hasEscapedCharacters {
-                Label("This request contains control or text-direction characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
+                Label("This request contains control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
-            detail("Working folder", request.displayCwd)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Working folder").font(.callout)
+                DesktopLeftToRightText(text: request.displayCwd, textStyle: .callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             detail("Agent", request.displayAgentName)
             detail("Requester", request.displayRequesterID)
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -68,15 +74,22 @@ struct DesktopShellApprovalView: View {
                 Button("Reject") { store.decideShell(request, .reject) }
                 Button("Approve Once") { store.decideShell(request, .approveOnce) }
                     .buttonStyle(.borderedProminent)
+                    .disabled(armedRequestID != request.requestID)
                 Menu("Approve & Allow…") {
                     ForEach(DesktopShellAutoApproval.choices) { approval in
                         Button(approval.title) { confirmation = DesktopShellConfirmation(request: request, approval: approval) }
                     }
                 }
                 .fixedSize()
+                .disabled(armedRequestID != request.requestID)
                 Spacer()
                 revokeButton
             }
+        }
+        // A click aimed at the previous request, or made just as this one appears, must not approve it.
+        .task(id: request.requestID) {
+            try? await Task.sleep(for: desktopShellApprovalArmingDelay)
+            if !Task.isCancelled { armedRequestID = request.requestID }
         }
     }
 
@@ -140,6 +153,50 @@ struct DesktopShellApprovalView: View {
         LabeledContent(title) {
             Text(value).font(.system(.callout, design: .monospaced)).textSelection(.enabled).multilineTextAlignment(.trailing)
         }
+    }
+}
+
+/// Selectable monospaced text whose every line is laid out left to right, so a leading right-to-left letter cannot
+/// reverse how a line of a command reads. Only the layout direction is set; the text, and so any copy of it, is unchanged.
+struct DesktopLeftToRightText: NSViewRepresentable {
+    let text: String
+    let textStyle: NSFont.TextStyle
+
+    static func attributedText(_ text: String, textStyle: NSFont.TextStyle) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.baseWritingDirection = .leftToRight
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byWordWrapping
+        let size = NSFont.preferredFont(forTextStyle: textStyle).pointSize
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+    }
+
+    /// The height all lines of the field need at this width, so the whole text is always shown.
+    @MainActor
+    static func height(of field: NSTextField, width: CGFloat) -> CGFloat {
+        let bounds = NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
+        return ceil(field.cell?.cellSize(forBounds: bounds).height ?? 0)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.isSelectable = true
+        field.baseWritingDirection = .leftToRight
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        field.attributedStringValue = Self.attributedText(text, textStyle: textStyle)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite else { return nil }
+        return CGSize(width: width, height: Self.height(of: field, width: width))
     }
 }
 

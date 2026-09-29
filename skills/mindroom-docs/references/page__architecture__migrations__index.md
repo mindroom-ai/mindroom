@@ -61,7 +61,6 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
-| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
@@ -88,7 +87,6 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
-| [`script_runs/legacy_recovery.py`][script-legacy-recovery] and [`workers/backends/kubernetes.py`][kubernetes-worker-backend] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [Kubernetes worker tests][kubernetes-worker-tests] cover byte-compatible unset RuntimeClass authority and rejection after configuration changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
@@ -291,6 +289,15 @@ find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, pair every private agent with its root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/\(notes/notes_data\|mail/inbox\)"`, because a run per root would print the other agents' own workspace links, and roots listed without their agents would also skip a directory of that name under any other agent.
 The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
+### Config-free runners and workers
+
+MindRoom no longer mounts the primary's config into the `static_runner` sidecar or dedicated Kubernetes workers, which take agent settings only from the allowlisted snapshot each request carries.
+The runtime chart's `workers.kubernetes.configMapName`, `configKey`, and `configPath` values and the matching `MINDROOM_KUBERNETES_WORKER_CONFIG_*` settings are removed.
+Every script recovery signature written by an older release covers those removed worker settings, so background scripts still running on Kubernetes workers during the upgrade no longer verify and are interrupted once when the primary starts.
+For the same reason the unversioned and pre-seccomp recovery-signature migrations were removed: no record they could adopt still verifies.
+Kubernetes workers pick up their new pod template when they are next recreated.
+Plugin directories beside a file-sourced config are no longer visible to the sidecar or Kubernetes workers, so install proxied plugins as Python packages in the runner image.
+
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
@@ -335,7 +342,6 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
-[kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
@@ -377,8 +383,6 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
-[script-legacy-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_recovery.py
-[script-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_runtime_lifecycle.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py

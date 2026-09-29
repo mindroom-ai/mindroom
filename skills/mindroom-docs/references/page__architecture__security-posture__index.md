@@ -24,6 +24,9 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, or a ConfigMap holding it.
+The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
+Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
 Which workspaces a worker mounts follows its scope.

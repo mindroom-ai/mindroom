@@ -127,7 +127,7 @@ def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
         ConfigField(
             name="headers",
             label="Headers",
-            type="text",
+            type="password",
             required=False,
             default=None,
         ),

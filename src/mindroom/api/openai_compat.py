@@ -282,11 +282,20 @@ class _ModelListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _authenticate_request(
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedCaller:
+    """One authenticated `/v1` caller."""
+
+    # Full digest of the validated key, or "noauth" when no keys are configured.
+    session_namespace: str
+    requester_id: str | None
+
+
+def _authenticate_request(  # noqa: PLR0911
     request: Request,
     authorization: str | None,
     runtime_paths: RuntimePaths,
-) -> JSONResponse | str | None:
+) -> JSONResponse | _AuthenticatedCaller:
     """Authenticate one `/v1` request."""
     keys_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEYS", default="") or ""
     allow_unauthenticated = runtime_env_flag(
@@ -300,7 +309,7 @@ def _authenticate_request(
             rejection = open_access_rejection(request.headers, request.method, runtime_paths)
             if rejection is not None:
                 return _error_response(rejection.status_code, rejection.detail, code="permission_denied")
-            return None
+            return _AuthenticatedCaller(session_namespace="noauth", requester_id=None)
         return _error_response(
             401,
             "OpenAI-compatible API keys are not configured",
@@ -320,7 +329,13 @@ def _authenticate_request(
     if token not in valid_keys:
         return _error_response(401, "Invalid API key", code="invalid_api_key")
 
-    return _api_key_requester(token, runtime_paths)
+    requester_id = _api_key_requester(token, runtime_paths)
+    if isinstance(requester_id, JSONResponse):
+        return requester_id
+    return _AuthenticatedCaller(
+        session_namespace=hashlib.sha256(token.encode()).hexdigest(),
+        requester_id=requester_id,
+    )
 
 
 def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse | str | None:
@@ -466,13 +481,13 @@ async def list_models(
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(request, authorization, runtime_paths)
-    if isinstance(auth_error, JSONResponse):
-        return auth_error
+    caller = _authenticate_request(request, authorization, runtime_paths)
+    if isinstance(caller, JSONResponse):
+        return caller
 
     config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
 
-    authority = _requester_authority(request, auth_error, config, runtime_paths)
+    authority = _requester_authority(request, caller.requester_id, config, runtime_paths)
     if isinstance(authority, JSONResponse):
         return authority
 
@@ -533,15 +548,15 @@ async def chat_completions(
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(request, authorization, runtime_paths)
-    if isinstance(auth_error, JSONResponse):
-        return auth_error
+    caller = _authenticate_request(request, authorization, runtime_paths)
+    if isinstance(caller, JSONResponse):
+        return caller
 
     parsed = _parse_chat_request(request, await request.body(), runtime_paths=runtime_paths)
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, runtime_paths, prompt, thread_history = parsed
-    authority = _requester_authority(request, auth_error, config, runtime_paths)
+    authority = _requester_authority(request, caller.requester_id, config, runtime_paths)
     if isinstance(authority, JSONResponse):
         return authority
     with detached_requester_context(authority):
@@ -554,6 +569,7 @@ async def chat_completions(
             thread_history,
             authority,
             activity,
+            session_namespace=caller.session_namespace,
         )
     if isinstance(response, StreamingResponse):
         body_iterator = response.body_iterator
@@ -573,6 +589,8 @@ async def _chat_completions(  # noqa: C901, PLR0912
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     authority: DetachedRequesterContext | None,
     activity: ResponseIdentity,
+    *,
+    session_namespace: str,
 ) -> JSONResponse | StreamingResponse:
     """Execute a completion inside its authenticated requester boundary."""
     # Resolve auto-routing if model is "auto"
@@ -595,8 +613,8 @@ async def _chat_completions(  # noqa: C901, PLR0912
     activity.responder = agent_name
     activity.requester_id = authority.requester_id if authority is not None else None
 
-    # Derive a namespaced session ID from request headers or fallback UUID.
-    session_id = _derive_session_id(agent_name, request)
+    # Derive a key-namespaced session ID from request headers or fallback UUID.
+    session_id = _derive_session_id(agent_name, request, session_namespace)
     if authority is not None:
         requester_digest = hashlib.sha256(authority.requester_id.encode()).hexdigest()
         session_id = f"requester:{requester_digest}:{session_id}"
@@ -638,7 +656,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                     config,
                     runtime_paths,
                     thread_history,
-                    req.user,
                     execution_identity=execution_identity,
                     refresh_scheduler=knowledge_refresh_scheduler,
                 )
@@ -652,7 +669,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                         config,
                         runtime_paths,
                         thread_history,
-                        req.user,
                         execution_identity=execution_identity,
                         refresh_scheduler=knowledge_refresh_scheduler,
                     )
@@ -682,7 +698,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                     config,
                     runtime_paths,
                     thread_history,
-                    req.user,
                     knowledge,
                     execution_identity=execution_identity,
                     refresh_scheduler=knowledge_refresh_scheduler,
@@ -696,7 +711,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
                         config,
                         runtime_paths,
                         thread_history,
-                        req.user,
                         knowledge,
                         execution_identity=execution_identity,
                         refresh_scheduler=knowledge_refresh_scheduler,
@@ -740,7 +754,6 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -790,7 +803,6 @@ async def _stream_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1018,7 +1030,6 @@ async def _non_stream_team_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
@@ -1093,7 +1104,7 @@ async def _non_stream_team_completion(
                     response = await team.arun(
                         prepared_team_run.prompt,
                         session_id=session_id,
-                        user_id=user,
+                        user_id=execution_identity.requester_id if execution_identity else None,
                         metadata=prepared_team_run.run_metadata,
                     )
             except Exception:
@@ -1142,7 +1153,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
@@ -1241,7 +1251,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                                 stream=True,
                                 stream_events=True,
                                 session_id=session_id,
-                                user_id=user,
+                                user_id=execution_identity.requester_id if execution_identity else None,
                                 metadata=prepared_team_run.run_metadata,
                             ),
                         ),

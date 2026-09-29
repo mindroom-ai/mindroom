@@ -52,8 +52,6 @@ _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 _DEFAULT_STORAGE_SUBPATH_PREFIX = "workers"
-_DEFAULT_CONFIG_KEY = "config.yaml"
-_DEFAULT_CONFIG_PATH = "/app/config.yaml"
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_SERVICE_ACCOUNT_NAME = "default"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
@@ -81,9 +79,6 @@ _RUNTIME_CLASS_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["runtime_c
 _STORAGE_PVC_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_pvc"]
 _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_mount_path"]
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
-_CONFIG_MAP_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["config_map_name"]
-_CONFIG_KEY_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["config_key"]
-_CONFIG_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["config_path"]
 _IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
 _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
@@ -375,9 +370,6 @@ class KubernetesWorkerBackendConfig:
     storage_pvc_name: str
     storage_mount_path: str
     storage_subpath_prefix: str
-    config_map_name: str | None
-    config_key: str
-    config_path: str
     idle_timeout_seconds: float
     ready_timeout_seconds: float
     name_prefix: str
@@ -451,7 +443,6 @@ class KubernetesWorkerBackendConfig:
             msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        config_map_name = read_env(env, _CONFIG_MAP_NAME_ENV) or None
         resource_requests = {
             "memory": read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
             "cpu": read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
@@ -474,9 +465,6 @@ class KubernetesWorkerBackendConfig:
             or _DEFAULT_STORAGE_MOUNT_PATH,
             storage_subpath_prefix=read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
-            config_map_name=config_map_name,
-            config_key=read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
-            config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
             idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
@@ -538,9 +526,6 @@ def kubernetes_backend_config_signature(
         config.storage_pvc_name,
         config.storage_mount_path,
         config.storage_subpath_prefix,
-        config.config_map_name or "",
-        config.config_key,
-        config.config_path,
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,

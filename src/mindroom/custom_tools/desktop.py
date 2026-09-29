@@ -132,7 +132,15 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "end_x": {"type": "integer", "minimum": 0, "maximum": 1000},
         "end_y": {"type": "integer", "minimum": 0, "maximum": 1000},
         "duration_ms": {"type": "integer", "minimum": 100, "maximum": 2000, "default": 500},
-        "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": (
+                "Text for type_text. Without element_ref or element_index it must not contain line breaks, tabs, "
+                "or other control characters; send Enter or Tab with keypress."
+            ),
+        },
         "direction": {"type": "string", "enum": sorted(DESKTOP_SCROLL_DIRECTIONS)},
         "pages": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
         "keys": {

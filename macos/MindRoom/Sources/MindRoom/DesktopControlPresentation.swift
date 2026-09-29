@@ -125,10 +125,17 @@ extension DesktopShellRequest {
     var hasEscapedCharacters: Bool {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
+
+    /// Counted like the helper and the terminal prompt: Unicode scalars, and lines split at newlines.
+    var commandSizeLabel: String {
+        let characters = command.unicodeScalars.count
+        let lines = command.unicodeScalars.filter { $0 == "\n" }.count + 1
+        return "\(characters) \(characters == 1 ? "character" : "characters") on \(lines) \(lines == 1 ? "line" : "lines")"
+    }
 }
 
-/// Escapes control, invisible-format, and text-direction characters so remote text cannot hide what runs.
-/// Ordinary newlines stay readable; everything escaped appears as `\u{…}`.
+/// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
+/// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
 func desktopSafePreview(_ text: String) -> String {
     var preview = ""
     for scalar in text.unicodeScalars {
@@ -145,11 +152,18 @@ func desktopPreviewEscapes(_ text: String) -> Bool {
     text.unicodeScalars.contains(where: isHiddenPreviewScalar)
 }
 
+/// Symbols that render as empty space without being default-ignorable; the helper refuses long runs of them too.
+private let desktopBlankSymbols: Set<Unicode.Scalar> = ["\u{2800}", "\u{1D159}"]
+
 private func isHiddenPreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
+    // Default-ignorable letters and marks, such as Hangul fillers and variation selectors, render as nothing.
+    if scalar.properties.isDefaultIgnorableCodePoint || desktopBlankSymbols.contains(scalar) { return true }
     switch scalar.properties.generalCategory {
-    case .control: scalar != "\n"
-    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: true
-    default: false
+    case .control: return scalar != "\n"
+    // Look-alike and wide spaces could disguise a command or pad it out of view.
+    case .spaceSeparator: return scalar != " "
+    case .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned: return true
+    default: return false
     }
 }
 

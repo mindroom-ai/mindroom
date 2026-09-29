@@ -61,8 +61,16 @@ For applications, the local bridge starts in observe-only mode unless a person a
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
 Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
+MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and a bridge whose allowlist names either refuses to start.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
+
+!!! warning "Some allowlisted apps give an agent your own authority"
+    Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
+    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
+    Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
+    Allowlist these only when you would also approve everything the agent could run or send as you.
+
 The local bridge executes actions serially and revalidates each target immediately before input.
 Matrix polling, durable admission, and response delivery continue independently during slow actions.
 Cloud configuration cannot enable control, extend a running lease, change any local allowlist or selected folder, enable shell commands, or approve one.
@@ -95,9 +103,15 @@ The control actions are:
 - `hover` moves the pointer within the validated app window.
 - `drag` moves with the left button held between two normalized points in the same window, over 100–2,000 milliseconds.
 - `type_text` types up to 2,000 characters into the validated and focused app; an optional `element_ref` or `element_index` requires that exact element to have focus.
+  Without an element, the text must not contain line breaks, tabs, or other control characters, so send Enter or Tab with `keypress`.
+  Without an element, macOS typing also checks before each 20-character chunk that the app is still frontmost; it fails without typing anything if the app lost focus first, and stops with an unknown outcome if it lost focus partway.
 - `scroll` scrolls a bounded number of pages up, down, left, or right at the app or an optional normalized app coordinate.
 - `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
-  Global switching, quit, launch, and address-bar shortcuts are rejected.
+  Global switching, quit, launch, and address-bar shortcuts are rejected, and the chord is not sent once the app is no longer frontmost.
+
+From the moment a shell command needs local approval until it is answered, every control action above except `launch_app` is refused, and the request is shown for approval only one second after a control action already in progress finishes, so events it posted have time to reach their target.
+Input from this bridge's agents therefore never reaches its waiting approval card or terminal prompt.
+The pause covers only the approvals of the bridge that sends the input, so run at most one bridge in each logged-in graphical session; another bridge's agents could otherwise click or type into this bridge's approval.
 
 Folder reads and shell commands are separate opt-in capabilities with their own limits, described in [Read-Only Folders](#read-only-folders) and [Shell Commands](#shell-commands).
 The bridge does not expose a clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
@@ -155,6 +169,8 @@ Shell requests are off by default.
 Enable them locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`; cloud configuration and model output cannot enable them.
 
 - `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the local home directory.
+  A `command` or `cwd` with more than 64 whitespace or invisible characters in a row, more than two blank lines in a row, or more than 8 combining marks on one character is refused before approval, because such padding could push part of the request out of the approver's view.
+  Before approval only the form of `cwd` is checked; whether it exists is checked after approval, so an unapproved request reveals nothing about local directories.
   Its `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
 - `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it has finished.
   With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
@@ -165,7 +181,8 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 ### Local Approval
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
-The approver sees the exact command, working directory, requester, agent, and expiry, with control and text-direction characters shown escaped.
+The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
+The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
 The cloud call waits up to 120 seconds, the command's lifetime, and a request that nobody approves in time expires without running.
@@ -291,6 +308,7 @@ Stop and Revoke remain available while another setup operation is waiting.
 The menu displays the current mode, remaining lease, and active action without exposing its arguments.
 Each shell command opens a separate approval window without taking keyboard focus from your current app.
 It shows the exact command, working folder, agent, requester, and expiry, with **Reject**, **Approve Once**, and **Approve & Allow…** choices.
+The whole command appears above the choices, never clipped, and **Approve Once** and **Approve & Allow…** stay disabled for one second after a request appears or replaces another one.
 Timed or until-stopped approval still requires a second confirmation describing its scope.
 Closing the window or choosing **Later** leaves the command waiting until it expires.
 The approval card also stays above the **Computer access** steps; **Review Command** in the app or menu bar reopens the separate window.
@@ -479,6 +497,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 
 Add only the applications needed for the current task.
 Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
+Controlling `primary-screen`, a terminal emulator, a scripting or automation app, or a browser or Matrix client signed in as you hands the agent your own authority, as the [Security Model](#security-model) warning explains.
 `primary-screen` has no semantic elements.
 On Linux, `primary-screen` is currently the only usable state target.
 
@@ -560,7 +579,8 @@ Each request then appears with its ID, expiry, requester, agent, working directo
 ```
 
 The timed and until-stopped answers also approve later commands from every allowed requester and agent, as the prompt says.
-Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, and backslash characters in the request are shown escaped.
+Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, invisible, non-ASCII space, and backslash characters in the request are shown escaped.
+The command's length in characters and lines appears right above the answer prompt, so scroll up when the request is longer than the terminal.
 If standard input is not an interactive terminal, input reaches its end, or the bridge runs as a background job of its terminal, requests are rejected with guidance instead of waiting.
 To approve commands without asking for part of a run, start it with `--shell-auto-approve-minutes`, from 1 to 60; this requires saved shell access and is never saved itself.
 `Ctrl+C` stops the bridge, revokes auto-approval, and stops waiting and running shell commands.

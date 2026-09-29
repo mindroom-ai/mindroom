@@ -53,6 +53,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             description="Optional Google Cloud credentials object passed directly to the toolkit",
+            authored_override=False,
         ),
         ConfigField(
             name="list_tables",

@@ -2118,9 +2118,12 @@
             "type": "string"
           },
           "default": {},
-          "description": "Extra token request params",
+          "description": "Extra token request params; may include credentials",
           "title": "Extra Token Params",
-          "type": "object"
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
         },
         "client_config_services": {
           "default": [],

@@ -705,6 +705,51 @@ def test_delivery_preparation_builds_thread_relation_only_for_initial_send(confi
     assert edit_kwargs["latest_thread_event_id"] is None
 
 
+def test_streaming_edits_hide_an_interactive_block_until_it_closes(config: Config) -> None:
+    """A question block still arriving is raw JSON, so edits show the text before it until the block closes."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    def display_text() -> str:
+        snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+        assert snapshot is not None
+        return streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
+
+    streaming.accumulated_text = 'Two things need you.\n\n```interactive\n{"question": "What next?", "options": ['
+    assert display_text() == "Two things need you."
+    streaming.accumulated_text += '{"emoji": "📊", "label": "Pull the numbers", "value": "numbers"}]}\n```'
+    shown = display_text()
+    assert "What next?" in shown
+    assert "Pull the numbers" in shown
+    assert "```" not in shown
+
+
+def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Config) -> None:
+    """A reply that is only an unfinished block shows the placeholder; a final edit shows the text as written."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = '```interactive\n{"question": "What next?"'
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    final = streaming._delivery_snapshot(
+        is_final=True,
+        allow_empty_progress=False,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    assert progress is not None
+    assert final is not None
+
+    in_progress = streaming_mod._prepare_delivery_from_snapshot(progress)
+    assert in_progress.display_text == "Thinking..."
+    assert in_progress.committed_state.visible_body_state == "placeholder_only"
+    assert "```interactive" in streaming_mod._prepare_delivery_from_snapshot(final).display_text
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])

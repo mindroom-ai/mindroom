@@ -82,10 +82,48 @@ final class DesktopApprovalWindowTests: XCTestCase {
         XCTAssertFalse(controller.window?.isVisible == true)
     }
 
-    private func request(_ id: String, expiresIn: TimeInterval = 60) -> DesktopShellRequest {
+    func testWholeCommandIsShownLeftToRightWithoutClipping() async throws {
+        _ = NSApplication.shared
+        let helper = DesktopBridgeProcess()
+        let store = DesktopControlStore(helper: helper)
+        let controller = DesktopApprovalWindowController(store: store)
+        controller.start()
+        defer { controller.stop() }
+        let command = (1 ... 60).map { "\u{05D0}; echo line \($0) # \u{05D1}" }.joined(separator: "\n")
+        let pending = request("long", command: command)
+        try publish(pending, through: helper)
+        // The first SwiftUI window can take seconds to render on a cold CI runner.
+        let deadline = Date().addingTimeInterval(5)
+        var field: NSTextField?
+        while field == nil && Date() < deadline {
+            await settle()
+            field = controller.window?.contentView.flatMap { textField(showing: command, in: $0) }
+        }
+        let shown = try XCTUnwrap(field, "The command appears in its own left-to-right text field")
+        shown.window?.layoutIfNeeded()
+
+        XCTAssertGreaterThan(shown.frame.width, 0)
+        XCTAssertGreaterThanOrEqual(
+            shown.frame.height + 1, DesktopLeftToRightText.height(of: shown, width: shown.frame.width),
+            "The field is tall enough for every line of the command"
+        )
+        let style = shown.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.baseWritingDirection, .leftToRight)
+        XCTAssertNotNil(controller.window?.contentView.flatMap { textField(showing: "/Users/test", in: $0) })
+    }
+
+    private func textField(showing text: String, in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.stringValue == text { return field }
+        for subview in view.subviews {
+            if let field = textField(showing: text, in: subview) { return field }
+        }
+        return nil
+    }
+
+    private func request(_ id: String, command: String = "printf hello", expiresIn: TimeInterval = 60) -> DesktopShellRequest {
         DesktopShellRequest(
             requestID: id, requesterID: "@person:example.org", agentName: "assistant",
-            command: "printf hello", cwd: "/Users/test",
+            command: command, cwd: "/Users/test",
             expiresAtMilliseconds: Date().addingTimeInterval(expiresIn).timeIntervalSince1970 * 1000
         )
     }

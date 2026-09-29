@@ -89,6 +89,8 @@ from tests.conftest import requires_linux
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
@@ -2011,23 +2013,26 @@ def test_subprocess_worker_encodes_browser_media_results(
 
 
 def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() -> None:
-    """Built-in tools should receive required effective policy without unrelated agent definitions."""
+    """Built-in tools should receive required effective policy without agents, MCP servers, or plugin settings."""
     config = Config.model_validate(
         {
             "agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)},
             "defaults": {"worker_grantable_credentials": ["github_private"]},
+            "plugins": [{"path": "./plugins/demo", "settings": {"key": "plugin-setting-secret"}}],
+            "mcp_servers": {
+                "files": {"transport": "stdio", "command": "npx", "env": {"AWS_SECRET_ACCESS_KEY": "mcp-secret"}},
+            },
         },
     )
 
-    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "calculator"))
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "python"))
 
     assert payload == {
-        "plugins": [],
+        "plugins": [{"path": "./plugins/demo", "enabled": True}],
         "defaults": {
             "worker_grantable_credentials": ["github_private"],
             "tool_output_auto_save_threshold_bytes": 51200,
         },
-        "mcp_servers": {},
     }
 
 
@@ -2977,6 +2982,113 @@ def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
+
+
+def _write_snapshot_only_plugin(tmp_path: Path) -> dict[str, object]:
+    """Write a plugin beside the runner's config path and return a snapshot that enables it."""
+    plugin_root = tmp_path / "plugins" / "snapshot-only"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "snapshot_only_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class SnapshotOnlyTool(Toolkit):\n"
+        "    def __init__(self, greeting: str = 'hello') -> None:\n"
+        "        self.greeting = greeting\n"
+        "        super().__init__(name='snapshot_only_plugin', tools=[self.greet])\n"
+        "\n"
+        "    def greet(self) -> str:\n"
+        "        return self.greeting\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='snapshot_only_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Snapshot Only Plugin',\n"
+        "    description='Greets with the configured greeting',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='greeting', label='Greeting', type='text', required=False)],\n"
+        "    function_names=('greet',),\n"
+        ")\n"
+        "def snapshot_only_plugin_tools():\n"
+        "    return SnapshotOnlyTool\n",
+        encoding="utf-8",
+    )
+    return {"plugins": [{"path": "./plugins/snapshot-only", "enabled": True}]}
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A runner started without any config registers plugin tools, and validates their overrides, from the snapshot."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
+    # The runner gets no config file, as in every chart; the plugin directory is visible beside its config path.
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    assert sandbox_runner_module.app_runtime_config(sandbox_runner_app).plugins == []
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "snapshot_only_plugin",
+                "function_name": "greet",
+                "tool_config_overrides": {"greeting": "from the snapshot"},
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "result": "from the snapshot", "error": None, "failure_kind": None}
+
+
+def test_sandbox_runner_loads_snapshot_plugins_once_per_distinct_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every request carries the snapshot, so plugins reload only when their entries change."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "inprocess")
+    _set_sandbox_token(monkeypatch)
+    loads: list[list[str]] = []
+    load_registry = sandbox_runner_module._ensure_registry_loaded_with_config
+
+    def record_load(runtime_paths: RuntimePaths, config: Config) -> None:
+        loads.append([entry.path for entry in config.plugins])
+        load_registry(runtime_paths, config)
+
+    monkeypatch.setattr(sandbox_runner_module, "_ensure_registry_loaded_with_config", record_load)
+
+    def greet(config_snapshot: dict[str, object]) -> httpx.Response:
+        return client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={"tool_name": "snapshot_only_plugin", "function_name": "greet", "config_snapshot": config_snapshot},
+        )
+
+    with TestClient(sandbox_runner_app) as client, capture_logs() as logs:
+        results = [greet(snapshot).json()["result"] for _ in range(3)]
+        disabled = greet({"plugins": [{"path": "./plugins/snapshot-only", "enabled": False}]})
+
+    assert results == ["hello"] * 3
+    assert disabled.status_code == 404
+    # Startup loads the empty startup config, the three identical snapshots load once, and the changed entry reloads.
+    assert loads == [[], ["./plugins/snapshot-only"], ["./plugins/snapshot-only"]]
+    assert [entry for entry in logs if entry["event"] == "Loaded plugins"] == [
+        {"event": "Loaded plugins", "log_level": "info", "plugins": ["snapshot_only_plugin"]},
+    ]
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

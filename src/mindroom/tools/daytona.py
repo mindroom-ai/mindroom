@@ -109,7 +109,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
         ConfigField(
             name="sandbox_env_vars",
             label="Sandbox Environment Variables",
-            type="text",
+            type="password",
             required=False,
             placeholder='{"ENV_VAR": "value"}',
             description="Environment variables for the sandbox (JSON format)",
