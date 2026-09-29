@@ -13,6 +13,7 @@ from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.matrix import mentions as mentions_module
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
@@ -118,6 +119,27 @@ class TestMentionParsing:
         assert processed == "plain **markdown** text"
         assert markdown == "plain **markdown** text"
         assert mentions == []
+
+    def test_parse_validates_at_most_one_user_id_length_of_an_overlong_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 64 KiB single-token body validates only prefixes a Matrix user ID could be, not every prefix."""
+        config = _make_config(_default_runtime_paths())
+        validated: list[str] = []
+        original = mentions_module._is_valid_explicit_matrix_user_id
+
+        def counting_validation(candidate: str) -> bool:
+            validated.append(candidate)
+            return original(candidate)
+
+        monkeypatch.setattr(mentions_module, "_is_valid_explicit_matrix_user_id", counting_validation)
+        token = "@calculator:localhost" + "x" * (64 * 1024)
+
+        _parse_mentions_in_text(token, config)
+
+        assert len(validated) <= 255
+        assert max(map(len, validated)) <= 255
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""

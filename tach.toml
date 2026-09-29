@@ -1453,6 +1453,11 @@ path = "mindroom.api.open_access"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.request_body_limit"
+depends_on = []
+visibility = ["mindroom.api.main"]
+
+[[modules]]
 path = "mindroom.api.frontend"
 depends_on = [
     "mindroom.api.auth",
@@ -1672,6 +1677,7 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
+    "mindroom.api.request_body_limit",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
     "mindroom.api.skills",

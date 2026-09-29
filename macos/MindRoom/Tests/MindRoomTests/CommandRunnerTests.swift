@@ -195,7 +195,7 @@ final class CommandRunnerTests: XCTestCase {
         runner.onCommandFinished = { _, _ in updated.fulfill() }
         runner.run(.updateRuntime)
         await fulfillment(of: [updated], timeout: 2)
-        XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom==2026.9.379"]))
+        XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.379"]))
         XCTAssertFalse(recorder.arguments.contains { $0.contains("start") || $0.contains("connect") })
         withExtendedLifetime(observation) {}
     }

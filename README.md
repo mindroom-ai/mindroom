@@ -148,7 +148,7 @@ Matrix E2EE support is installed by default.
 
 The macOS app provides a native window and menu bar companion for local agents and computer access.
 It bundles `uv`, uses `~/.mindroom` for config and state, and manages the `mindroom service` launchd service.
-The signed universal app supports both Apple silicon and Intel Macs.
+The signed app requires an Apple silicon Mac.
 
 ```bash
 brew install --cask mindroom-ai/tap/mindroom

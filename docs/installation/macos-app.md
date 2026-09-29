@@ -12,7 +12,8 @@ The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its gene
 
 ## Requirements
 
-- macOS 14 Sonoma or later, on Apple silicon or Intel.
+- macOS 14 Sonoma or later, on an Apple silicon Mac.
+  Intel Macs are not supported because the MindRoom runtime depends on packages that no longer publish Intel macOS wheels.
 - Network access to install the MindRoom runtime and connect to your Matrix server.
 - For local agents, a configured model provider credential, local model, or supported provider login.
 - For computer access, an existing Desktop-enabled MindRoom agent; application access also needs the macOS permissions described in the [Desktop guide](../tools/desktop.md).
@@ -211,6 +212,7 @@ If a runtime action is still in progress, let it finish before quitting.
 **Settings** separates app updates from runtime updates.
 **Check App Updates…** uses Sparkle for signed releases configured with an update feed.
 **Update Local Runtime** installs the CLI release that matches the app version, and Settings notes when the installed runtime differs.
+Installs and updates use an arm64 managed Python 3.13, so an update also replaces a runtime that was installed with an Intel Python.
 Because `uv` records that exact version, `uv tool upgrade mindroom` in a terminal keeps it; after the next app update, the app asks for the new matching runtime.
 Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.

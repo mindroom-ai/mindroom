@@ -48,7 +48,7 @@ final class MindRoomRuntimeTests: XCTestCase {
 
         let command = runtime.command(for: .installRuntime)
         XCTAssertEqual(command.executableURL.path, "/Applications/MindRoom.app/Contents/Resources/bin/uv")
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "mindroom==2026.9.378"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "mindroom==2026.9.378"])
         XCTAssertNil(command.environment["MINDROOM_CONFIG_PATH"])
         XCTAssertNil(command.environment["MINDROOM_STORAGE_PATH"])
         XCTAssertEqual(command.environment["UV_NO_PROGRESS"], "1")
@@ -64,7 +64,7 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .updateRuntime)
-        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom==2026.9.378"])
+        XCTAssertEqual(command.arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom==2026.9.378"])
     }
 
     func testDevelopmentBuildsInstallLatestRuntime() {
@@ -78,8 +78,8 @@ final class MindRoomRuntimeTests: XCTestCase {
             )
 
             XCTAssertNil(runtime.pinnedRuntimeVersion)
-            XCTAssertEqual(runtime.command(for: .installRuntime).arguments, ["tool", "install", "--managed-python", "--python", "3.13", "mindroom"])
-            XCTAssertEqual(runtime.command(for: .updateRuntime).arguments, ["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom"])
+            XCTAssertEqual(runtime.command(for: .installRuntime).arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "mindroom"])
+            XCTAssertEqual(runtime.command(for: .updateRuntime).arguments, ["tool", "install", "--managed-python", "--python", "cpython-3.13-macos-aarch64-none", "--force", "mindroom"])
         }
     }
 

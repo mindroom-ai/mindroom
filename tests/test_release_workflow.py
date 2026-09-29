@@ -25,22 +25,12 @@ def macos_build_script() -> str:
     return MACOS_BUILD_SCRIPT.read_text(encoding="utf-8")
 
 
-def test_release_builds_universal_macos_app(release_workflow: str, macos_build_script: str) -> None:
-    """Published app binaries must support both Apple silicon and Intel Macs."""
-    universal_uv_script = (ROOT / "macos" / "build-universal-uv.sh").read_text(encoding="utf-8")
-    assert 'macos/build-universal-uv.sh "$RUNNER_TEMP/uv-universal"' in release_workflow
-    assert "for architecture in aarch64 x86_64; do" in universal_uv_script
-    assert 'archive="uv-${architecture}-apple-darwin.tar.gz"' in universal_uv_script
-    assert "shasum --algorithm 256 --check" in universal_uv_script
-    assert '"$BUILD_DIR/uv-aarch64-apple-darwin/uv"' in universal_uv_script
-    assert '"$BUILD_DIR/uv-x86_64-apple-darwin/uv"' in universal_uv_script
-    assert 'lipo "$OUTPUT" -verify_arch arm64 x86_64' in universal_uv_script
-    assert "UV_BINARY: ${{ runner.temp }}/uv-universal" in release_workflow
-    assert "macos/build-macos-app.sh --universal --dmg" in release_workflow
-    assert "--arch arm64 --arch x86_64" in macos_build_script
-    assert "Required universal binary not found: $binary" in macos_build_script
-    assert "Could not inspect architectures for required universal binary: $binary" in macos_build_script
-    assert 'require_architectures "$binary" arm64 x86_64' in macos_build_script
+def test_release_builds_apple_silicon_macos_app(release_workflow: str, macos_build_script: str) -> None:
+    """Published app binaries target Apple silicon only, so no Intel runtime or helper is ever built."""
+    assert "NOTARIZE=1 macos/build-macos-app.sh --dmg" in release_workflow
+    assert '--product "$APP_NAME" --arch arm64)' in macos_build_script
+    assert "x86_64" not in release_workflow
+    assert "x86_64" not in macos_build_script
 
 
 def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) -> None:
