@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Attachment records that reference the registered caller file in place.
 # Legacy format: `attachments/<id>.json` whose `local_path` is the resolved workspace or absolute source path, selected when its parent is not the current `incoming_media/` directory.
 # Last legacy release: v2026.9.272 registered local files in place; replacement: the next release retains an opaque copy in `incoming_media/` and records only that copy.
-# Handling: The first load opens the recorded canonical path through a no-follow walk from the filesystem root, copies it under the retained-media cap only when its bytes match the recorded SHA-256, and rewrites the record to the copy; unverifiable records are logged and rejected until retention cleanup removes them.
-# Coverage: tests/test_attachments.py::test_load_attachment_adopts_verified_legacy_record, tests/test_attachments.py::test_load_attachment_rejects_legacy_record_that_cannot_be_verified, tests/test_attachments.py::test_load_attachment_rejects_records_outside_retained_media.
+# Handling: The first load opens the recorded canonical path through a no-follow walk from the filesystem root, copies it under the retained-media cap only when its bytes match the recorded SHA-256, and rewrites the record to the copy; a record without a usable digest, whose source is gone, has a link on its path, or no longer matches is logged once and deleted so retention sweeps and later turns do not retry it, while other I/O failures leave the record for a later load.
+# Coverage: tests/test_attachments.py::test_load_attachment_adopts_verified_legacy_record, tests/test_attachments.py::test_load_attachment_rejects_legacy_record_that_cannot_be_verified, tests/test_attachments.py::test_load_attachment_rejects_records_outside_retained_media, tests/test_attachments.py::test_attachment_cleanup_does_not_retry_unadoptable_legacy_record, tests/test_attachments.py::test_load_attachment_keeps_legacy_record_after_retained_media_write_failure.
 
 
 def legacy_attachment_source(raw_payload: Mapping[str, object]) -> tuple[Path, str] | None:

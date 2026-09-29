@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import mimetypes
 import os
 import time
+from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -593,6 +595,8 @@ def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
         name="attachment_cleanup",
         owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
         log_exceptions=False,
+        # The sweep covers every room's records, so it must not log under the turn that scheduled it.
+        context=Context(),
     )
     cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
     logger.debug(
@@ -964,6 +968,12 @@ async def register_audio_attachment(
     )
 
 
+def _discard_unadoptable_legacy_record(storage_path: Path, attachment_id: str) -> None:
+    """Remove a legacy record that can never verify, so retention sweeps and later turns stop retrying it."""
+    with contextlib.suppress(OSError):
+        _attachment_record_path(storage_path, attachment_id).unlink(missing_ok=True)
+
+
 def _adopt_legacy_attachment(
     storage_path: Path,
     attachment_id: str,
@@ -973,6 +983,7 @@ def _adopt_legacy_attachment(
     source = legacy_attachment_source(raw_payload)
     if source is None:
         logger.warning("Legacy attachment record has no verifiable source", attachment_id=attachment_id)
+        _discard_unadoptable_legacy_record(storage_path, attachment_id)
         return None
     source_path, content_sha256 = source
     mime_type = raw_payload.get("mime_type")
@@ -991,6 +1002,10 @@ def _adopt_legacy_attachment(
             path=str(source_path),
             error=str(exc),
         )
+        # Rejected bytes, a missing source, or a link on its path never becomes the registered file again;
+        # other I/O errors, such as a full disk while copying, leave the record for a later load.
+        if isinstance(exc, ValueError) or exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            _discard_unadoptable_legacy_record(storage_path, attachment_id)
         return None
     filename = raw_payload.get("filename")
     adopted_payload = {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+import structlog
 
 import mindroom.attachments as attachments_module
 import mindroom.matrix.media as media_module
@@ -37,6 +39,7 @@ from mindroom.attachments import (
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
+from mindroom.logging_config import bound_log_context
 from tests.conftest import make_visible_message
 
 
@@ -450,12 +453,64 @@ def test_load_attachment_rejects_legacy_record_that_cannot_be_verified(tmp_path:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         del payload["content_sha256"]
         record_path.write_text(json.dumps(payload), encoding="utf-8")
-    original_record = record_path.read_text(encoding="utf-8")
 
     assert load_attachment(storage, "att_legacy") is None
     assert resolve_attachments(storage, ["att_legacy"]) == []
     assert list((storage / "incoming_media").glob("*")) == []
+    # The record is dropped rather than rewritten, so it never names the planted target.
+    assert not record_path.exists()
+
+
+@pytest.mark.parametrize("change", ["missing", "relocated_parent", "content"])
+def test_attachment_cleanup_does_not_retry_unadoptable_legacy_record(tmp_path: Path, change: str) -> None:
+    """A legacy record whose source can never verify again is dropped by one sweep instead of retried by every sweep."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+    if change == "missing":
+        source.unlink()
+    elif change == "relocated_parent":
+        # A relocated directory whose old name became a link, which adoption must not follow.
+        workspace.rename(tmp_path / "relocated")
+        workspace.symlink_to(tmp_path / "relocated")
+    else:
+        source.write_bytes(b"edited")
+
+    with patch("mindroom.attachments.logger.warning") as mock_warning:
+        attachments_module._cleanup_attachment_storage(storage)
+        attachments_module._cleanup_attachment_storage(storage)
+
+    assert [call.args[0] for call in mock_warning.call_args_list] == [
+        "Legacy attachment cannot be adopted into retained media",
+    ]
+    assert not record_path.exists()
+    assert list((storage / "incoming_media").glob("*")) == []
+    assert load_attachment(storage, "att_legacy") is None
+
+
+def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(tmp_path: Path) -> None:
+    """A failure writing the retained copy says nothing about the source, so a later load still adopts it."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+    original_record = record_path.read_text(encoding="utf-8")
+
+    with patch(
+        "mindroom.attachments.atomic_write_file_at",
+        side_effect=OSError(errno.ENOSPC, "No space left on device"),
+    ):
+        assert load_attachment(storage, "att_legacy") is None
+
     assert record_path.read_text(encoding="utf-8") == original_record
+    record = load_attachment(storage, "att_legacy")
+    assert record is not None
+    assert record.local_path.read_bytes() == b"notes"
 
 
 def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
@@ -643,6 +698,36 @@ async def test_attachment_cleanup_does_not_resolve_storage_path_on_event_loop(tm
         assert registered is not None
         assert not slow_resolution_timed_out.is_set()
         assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_does_not_inherit_triggering_turn_log_context(tmp_path: Path) -> None:
+    """The sweep covers every room's records, so its logs must not carry the turn that happened to schedule it."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    cleanup_log_contexts: list[dict[str, object]] = []
+
+    def capture_log_context(_storage_path: Path) -> None:
+        cleanup_log_contexts.append(structlog.contextvars.get_contextvars())
+
+    with (
+        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=capture_log_context),
+        bound_log_context(requester_id="@alice:example.org", room_id="!room:example.org"),
+    ):
+        registered = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_turn_context",
+            room_id="!room:example.org",
+        )
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert registered is not None
+    assert len(cleanup_log_contexts) == 1
+    assert "requester_id" not in cleanup_log_contexts[0]
+    assert "room_id" not in cleanup_log_contexts[0]
 
 
 @pytest.mark.asyncio
