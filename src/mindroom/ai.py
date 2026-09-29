@@ -546,11 +546,11 @@ def _without_quiet_prose(attempt: Sequence[AIStreamChunk]) -> list[AIStreamChunk
 async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partials and terminal-only echoes together.
     response_stream: AsyncIterator[AIStreamChunk],
 ) -> AsyncIterator[AIStreamChunk]:
-    """Suppress quiet attempts beside other attempts, retaining tool order and unfinished presentation."""
+    """Suppress quiet attempts beside other reply output, retaining tool order and unfinished presentation."""
     pending: list[AIStreamChunk] = []
-    # A sole quiet attempt stays deliverable; another attempt before or after it suppresses its prose.
+    # A sole quiet attempt stays deliverable; earlier or later output in the same reply suppresses its prose.
     quiet_attempt: list[AIStreamChunk] = []
-    completed_attempts = 0
+    earlier_output = False
     terminal_echo: str | None = None
     try:
         async for incoming in response_stream:
@@ -565,6 +565,9 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
                 prose = strip_matching_visible_tool_markers(chunk.content, chunk.tool_trace or ())
                 if is_silent_schedule_no_report_response(prose):
                     chunk = replace(chunk, content=tool_marker_text(chunk.content))
+                else:
+                    # Recovered prose already belongs to this reply.
+                    earlier_output = True
             if isinstance(chunk, (StructuredStreamChunk, BackgroundWaitChunk)):
                 for item in pending:
                     yield item
@@ -584,19 +587,20 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
                 terminal_echo = str(chunk.content)
                 pending.append(RunContentEvent(content=terminal_echo))
                 prose = terminal_echo
-            completed_attempts += 1
             if not is_silent_schedule_no_report_response(prose):
                 for item in (*pending, chunk):
                     yield item
-            elif completed_attempts > 1:
+            elif earlier_output:
                 for item in _without_quiet_prose((*pending, chunk)):
                     yield item
             else:
                 quiet_attempt.extend((*pending, chunk))
+            earlier_output = True
             pending.clear()
     except (Exception, asyncio.CancelledError):
-        # Approval and interruption still need the exact partial presentation.
-        for item in (*quiet_attempt, *pending):
+        # The reply continued past a held quiet attempt, so only its tools remain; approval and interruption still
+        # need the exact unfinished presentation.
+        for item in (*_without_quiet_prose(quiet_attempt), *pending):
             yield item
         raise
     for item in (*quiet_attempt, *pending):

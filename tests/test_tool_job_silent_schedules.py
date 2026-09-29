@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -54,32 +54,25 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("collect_stream", [False, True])
-@pytest.mark.parametrize("record_turn", [False, True])
-@pytest.mark.parametrize("recovered", [False, True])
-@pytest.mark.parametrize(
-    ("first", "second", "expected"),
-    [
-        ("NO_REPLY", "NO_REPLY", "NO_REPLY"),
-        ("NO_REPLY", "New finding", "New finding"),
-        ("First finding", "NO_REPLY", "First finding"),
-        ("The report mentions NO_REPLY", "More findings", "The report mentions NO_REPLY\n\nMore findings"),
-    ],
-)
-async def test_silent_join_preserves_the_deliverable_report(  # noqa: PLR0915
+@dataclass
+class _SilentTurn:
+    answer: str
+    trace: list[ToolTraceEntry]
+    recorder: TurnRecorder | None
+    pending_outcomes: list[object]
+
+
+async def _run_silent_turn(
     tmp_path: Path,
+    responses: list[ModelResponse],
     *,
     enabled: bool,
     collect_stream: bool,
-    record_turn: bool,
-    recovered: bool,
-    first: str,
-    second: str,
-    expected: str,
-) -> None:
-    """Quiet SDK replies preserve tool placement with managed joins enabled or disabled."""
+    record_turn: bool = True,
+    quiet_job: bool = False,
+    recovered: bool = False,
+) -> _SilentTurn:
+    """Run one silent scheduled agent turn; `quiet_job` leaves one finished job for the reply to join."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"leader": AgentConfig(display_name="Leader")},
@@ -97,19 +90,7 @@ async def test_silent_join_preserves_the_deliverable_report(  # noqa: PLR0915
         """Read evidence using the ordinary disabled execution path."""
         return "Job evidence"
 
-    model = DelegationModel(
-        id="test",
-        responses=(
-            [
-                ModelResponse(tool_calls=[_call("probe_tool", "first-read")]),
-                ModelResponse(content=first),
-                ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)]),
-                ModelResponse(content=second),
-            ]
-            if enabled
-            else [ModelResponse(tool_calls=[_call("probe_tool", "read")]), ModelResponse(content=expected)]
-        ),
-    )
+    model = DelegationModel(id="test", responses=responses)
     install_tool_job_execution(model)
     actor = Agent(
         id="leader",
@@ -169,7 +150,7 @@ async def test_silent_join_preserves_the_deliverable_report(  # noqa: PLR0915
         )
 
     try:
-        if enabled:
+        if quiet_job:
             await start_job(
                 runtime,
                 "quiet",
@@ -198,140 +179,108 @@ async def test_silent_join_preserves_the_deliverable_report(  # noqa: PLR0915
                 tool_trace_collector=trace,
                 turn_recorder=recorder,
             )
-        assert tool_markers_match_trace(answer, trace)
-        clean = strip_matching_visible_tool_markers(answer, trace).strip()
-        if recovered:
-            expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" or not enabled else "")
-        if expected == "NO_REPLY":
-            assert is_silent_schedule_no_report_response(clean)
-        else:
-            assert [line for line in clean.splitlines() if line.strip()] == [
-                line for line in expected.splitlines() if line.strip()
-            ]
-            assert not is_silent_schedule_no_report_response(clean)
-        assert [(tool.tool_name, tool.result_preview) for tool in trace] == (
-            ([("earlier_check", None)] if recovered else [])
-            + [("probe_tool", "Job evidence")]
-            + ([("job", "Job evidence")] if enabled else [])
-        )
-        if enabled and first == "First finding":
-            assert answer.index(first) < answer.index("`job`")
-        if enabled and (collect_stream or recovered) and second == "New finding":
-            assert answer.index("`job`") < answer.index(second)
-        assert await runtime.pending_outcomes() == []
-        if recorder is not None:
-            assert recorder.outcome == "completed"
-            # The recovered prefix's tool belongs to the earlier recorded turn.
-            assert [tool.tool_name for tool in recorder.completed_tools] == [
-                tool.tool_name for tool in trace[int(recovered) :]
-            ]
+        return _SilentTurn(answer, trace, recorder, await runtime.pending_outcomes())
     finally:
         await runtime.shutdown()
         storage.close()
 
 
-async def _silent_turn_without_jobs(
+def _job_wait_call() -> ModelResponse:
+    return ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("collect_stream", [False, True])
+@pytest.mark.parametrize("record_turn", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("NO_REPLY", "NO_REPLY", "NO_REPLY"),
+        ("NO_REPLY", "New finding", "New finding"),
+        ("First finding", "NO_REPLY", "First finding"),
+        ("The report mentions NO_REPLY", "More findings", "The report mentions NO_REPLY\n\nMore findings"),
+    ],
+)
+async def test_silent_join_preserves_the_deliverable_report(
     tmp_path: Path,
     *,
     enabled: bool,
     collect_stream: bool,
-    final: str,
-    use_tool: bool,
-) -> tuple[object, ...]:
-    """Run one silent scheduled turn that never starts or joins a job."""
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
-        agents={"leader": AgentConfig(display_name="Leader")},
-    )
-    paths = _runtime_paths(tmp_path)
-    context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(paths.storage_root)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    database = str(tmp_path / "silent.db")
-    storage = SqliteDb(db_file=database)
-
-    async def probe_tool() -> str:
-        """Read evidence."""
-        return "Evidence"
-
-    tool_calls = [ModelResponse(tool_calls=[_call("probe_tool", "read")])] if use_tool else []
-    model = DelegationModel(id="test", responses=[*tool_calls, ModelResponse(content=final)])
-    install_tool_job_execution(model)
-    actor = Agent(
-        id="leader",
-        model=model,
-        tools=[assembled_function(probe_tool) if enabled else probe_tool],
-        db=storage,
-        telemetry=False,
-    )
-    scope = ScopeSessionContext(
-        HistoryScope(kind="agent", scope_id="leader"),
-        storage,
-        None,
-        session_id=context.session_id,
-        storage_factory=lambda: SqliteDb(db_file=database),
-    )
-    ctx = replace(
-        make_turn_context(
-            entity_label="leader",
-            session_id=context.session_id,
-            room_id=owner.room_id,
-            thread_id=owner.resolved_thread_id,
-            requester_id=owner.requester_id,
+    record_turn: bool,
+    recovered: bool,
+    first: str,
+    second: str,
+    expected: str,
+) -> None:
+    """Quiet SDK replies preserve tool placement with managed joins enabled or disabled."""
+    turn = await _run_silent_turn(
+        tmp_path,
+        (
+            [
+                ModelResponse(tool_calls=[_call("probe_tool", "first-read")]),
+                ModelResponse(content=first),
+                _job_wait_call(),
+                ModelResponse(content=second),
+            ]
+            if enabled
+            else [ModelResponse(tool_calls=[_call("probe_tool", "read")]), ModelResponse(content=expected)]
         ),
-        allow_no_report_response=True,
+        enabled=enabled,
+        collect_stream=collect_stream,
+        record_turn=record_turn,
+        quiet_job=enabled,
+        recovered=recovered,
     )
-    trace: list[ToolTraceEntry] = []
-    recorder = TurnRecorder(user_message="Silent check")
-
-    async def prepare(turn: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
-        prompt = str(kwargs["prompt"])
-        prepared = _PreparedAgentRun(
-            agent=actor,
-            messages=(Message(role="user", content=prompt),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-            runtime_model_name="default",
-        )
-        return _AgentRunContext(
-            turn=turn,
-            session_id=context.session_id,
-            prompt=prompt,
-            model_prompt=None,
-            prepared_run=prepared,
-            run_input=prepared.run_input,
-            metadata=turn.matrix_run_metadata,
-        )
-
-    try:
-        with (
-            tool_runtime_context(context),
-            patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
-            patch("mindroom.ai._prepare_agent_run_context", new=prepare),
-        ):
-            answer = await ai_response(
-                ctx,
-                prompt="Silent check",
-                runtime_paths=paths,
-                config=config,
-                execution_identity=owner,
-                collect_streamed_response=collect_stream,
-                show_tool_calls=True,
-                tool_trace_collector=trace,
-                turn_recorder=recorder,
-            )
-    finally:
-        await runtime.shutdown()
-        storage.close()
-    return (
-        answer,
-        [(tool.tool_name, tool.result_preview) for tool in trace],
-        recorder.outcome,
-        recorder.assistant_text,
-        [(tool.tool_name, tool.result_preview) for tool in recorder.completed_tools],
+    answer, trace = turn.answer, turn.trace
+    assert tool_markers_match_trace(answer, trace)
+    clean = strip_matching_visible_tool_markers(answer, trace).strip()
+    if recovered:
+        expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" or not enabled else "")
+    if expected == "NO_REPLY":
+        assert is_silent_schedule_no_report_response(clean)
+    else:
+        assert [line for line in clean.splitlines() if line.strip()] == [
+            line for line in expected.splitlines() if line.strip()
+        ]
+        assert not is_silent_schedule_no_report_response(clean)
+    assert [(tool.tool_name, tool.result_preview) for tool in trace] == (
+        ([("earlier_check", None)] if recovered else [])
+        + [("probe_tool", "Job evidence")]
+        + ([("job", "Job evidence")] if enabled else [])
     )
+    if enabled and first == "First finding":
+        assert answer.index(first) < answer.index("`job`")
+    if enabled and (collect_stream or recovered) and second == "New finding":
+        assert answer.index("`job`") < answer.index(second)
+    assert turn.pending_outcomes == []
+    if turn.recorder is not None:
+        assert turn.recorder.outcome == "completed"
+        # The recovered prefix's tool belongs to the earlier recorded turn.
+        assert [tool.tool_name for tool in turn.recorder.completed_tools] == [
+            tool.tool_name for tool in trace[int(recovered) :]
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_stream", [False, True])
+async def test_recovered_single_quiet_attempt_keeps_only_the_recovered_report(
+    tmp_path: Path,
+    *,
+    collect_stream: bool,
+) -> None:
+    """Recovered prose already belongs to the reply, so a lone quiet attempt after it adds no `NO_REPLY`."""
+    turn = await _run_silent_turn(
+        tmp_path,
+        [_job_wait_call(), ModelResponse(content="NO_REPLY")],
+        enabled=True,
+        collect_stream=collect_stream,
+        quiet_job=True,
+        recovered=True,
+    )
+    assert tool_markers_match_trace(turn.answer, turn.trace)
+    assert strip_matching_visible_tool_markers(turn.answer, turn.trace).strip() == "Earlier finding"
 
 
 @pytest.mark.asyncio
@@ -346,17 +295,26 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
     use_tool: bool,
 ) -> None:
     """Enabling background jobs changes nothing for a quiet turn that never joins one."""
-    disabled, enabled = [
-        await _silent_turn_without_jobs(
-            tmp_path / str(flag),
-            enabled=flag,
+    tool_calls = [ModelResponse(tool_calls=[_call("probe_tool", "read")])] if use_tool else []
+    observed = []
+    for enabled in (False, True):
+        turn = await _run_silent_turn(
+            tmp_path / str(enabled),
+            [*tool_calls, ModelResponse(content=final)],
+            enabled=enabled,
             collect_stream=collect_stream,
-            final=final,
-            use_tool=use_tool,
         )
-        for flag in (False, True)
-    ]
-    assert enabled == disabled
+        assert turn.recorder is not None
+        observed.append(
+            (
+                turn.answer,
+                [(tool.tool_name, tool.result_preview) for tool in turn.trace],
+                turn.recorder.outcome,
+                turn.recorder.assistant_text,
+                [(tool.tool_name, tool.result_preview) for tool in turn.recorder.completed_tools],
+            ),
+        )
+    assert observed[1] == observed[0]
 
 
 @pytest.mark.asyncio
