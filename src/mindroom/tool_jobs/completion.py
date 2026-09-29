@@ -126,11 +126,27 @@ def completion_event(job: BackgroundJob, *, sender_id: str) -> InboundEvent:
     )
 
 
+def completion_origin(job: BackgroundJob, *, sender_id: str) -> TurnOrigin:
+    """Identify input as runtime-owned work while retaining its requester's authority."""
+    owner = job.owner
+    assert owner.requester_id is not None
+    return TurnOrigin(
+        transport_sender_id=sender_id,
+        requester_id=owner.requester_id,
+        sender_entity_name=owner.recipient,
+        requester_entity_name=None,
+        sender_kind=SenderKind.MANAGED_ENTITY,
+        requester_kind=SenderKind.USER,
+        intent=TurnIntent.TOOL_JOB_COMPLETION,
+        source_kind=job.source_kind or _UNSOURCED_COMPLETION_SOURCE_KIND,
+        trust=TurnTrust.TRUSTED_INTERNAL,
+    )
+
+
 def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelope:
-    """Retain requester authority while identifying input as runtime-owned work."""
+    """Address one job's completion to its exact owner conversation."""
     owner = job.owner
     assert owner.room_id is not None
-    assert owner.requester_id is not None
     assert owner.session_id is not None
     return MessageEnvelope(
         source_event_id=completion_event_id(job),
@@ -139,17 +155,7 @@ def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelop
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=owner.recipient,
-        origin=TurnOrigin(
-            transport_sender_id=sender_id,
-            requester_id=owner.requester_id,
-            sender_entity_name=owner.recipient,
-            requester_entity_name=None,
-            sender_kind=SenderKind.MANAGED_ENTITY,
-            requester_kind=SenderKind.USER,
-            intent=TurnIntent.TOOL_JOB_COMPLETION,
-            source_kind=job.source_kind or _UNSOURCED_COMPLETION_SOURCE_KIND,
-            trust=TurnTrust.TRUSTED_INTERNAL,
-        ),
+        origin=completion_origin(job, sender_id=sender_id),
     )
 
 

@@ -143,6 +143,7 @@ from mindroom.tool_jobs.completion import (
     background_wait_edit,
     background_wait_notice,
     completion_envelope,
+    completion_origin,
     completion_prompt,
     published_wait_presentation,
 )
@@ -3768,7 +3769,7 @@ class ResponseRunner:
                 "Do not repeat it:\n" + initial_presentation.response_text
             )
         origin = replace(
-            completion_envelope(jobs[0], sender_id=self.deps.matrix_full_id).origin,
+            completion_origin(jobs[0], sender_id=self.deps.matrix_full_id),
             source_kind=envelope.source_kind,
         )
         return replace(
