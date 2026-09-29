@@ -632,7 +632,7 @@ async def _upload_media_bytes_as_mxc(
     except Exception:
         logger.exception("Failed to encrypt Matrix media upload", filename=filename)
         return None, None
-    encrypted_file_payload = prepared.encrypted_file_content()
+    encrypted_file_payload = prepared.encrypted_file_content(url="")
 
     try:
         upload_response = await upload_media_bytes(

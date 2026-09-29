@@ -216,12 +216,8 @@ class _PreparedMediaUpload:
             **_image_dimensions(self.media_bytes, self.mimetype),
         }
 
-    def encrypted_file_content(self, *, url: str = "") -> dict[str, Any] | None:
-        """Build the Matrix encrypted-file object, or None for unencrypted uploads.
-
-        Callers that build it before uploading, so malformed SDK metadata fails before any upload,
-        leave ``url`` empty and set it once the upload returns; callers that build it afterwards pass the MXC URI.
-        """
+    def encrypted_file_content(self, *, url: str) -> dict[str, Any] | None:
+        """Build the Matrix encrypted-file object with the given MXC ``url``, or None for unencrypted uploads."""
         if self.encryption_keys is None:
             return None
         return encrypted_file_content(

@@ -167,7 +167,7 @@ class TestPrepareMediaUpload:
         monkeypatch.setattr("PIL.Image.open", tracking_open)
         prepared = prepare_media_upload(png.getvalue(), filename="chart.png", mimetype="image/png", encrypt=True)
 
-        assert prepared.encrypted_file_content() is not None
+        assert prepared.encrypted_file_content(url="mxc://server/chart") is not None
         assert opened == []
         assert prepared.info() == {"size": len(png.getvalue()), "mimetype": "image/png", "w": 16, "h": 9}
         assert len(opened) == 1
