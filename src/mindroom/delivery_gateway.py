@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import ChainMap
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -2061,9 +2062,6 @@ class DeliveryGateway:
         # makes the answer visible, so that one becomes durable; every earlier
         # edit stays transport.
         delivery_turn_id = request.identity.response_envelope.source_event_id
-        # The caller keeps filling its run metadata into this dict while the stream runs, so extend it in place.
-        extra_content = request.extra_content if request.extra_content is not None else {}
-        extra_content.update(self._acting_requester_content(request.identity))
         latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
             room_id=request.target.room_id,
             thread_id=request.target.resolved_thread_id,
@@ -2081,7 +2079,11 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            extra_content=extra_content,
+            # A live view, because the caller keeps adding run metadata to its dict while the stream runs.
+            extra_content=ChainMap(
+                self._acting_requester_content(request.identity),
+                request.extra_content if request.extra_content is not None else {},
+            ),
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,

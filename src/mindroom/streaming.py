@@ -54,7 +54,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     import nio
 
@@ -427,7 +427,7 @@ class _StreamingDeliverySnapshot:
     show_tool_calls: bool
     tool_trace: tuple[ToolTraceEntry, ...]
     presentation_state: dict[str, object] | None
-    extra_content: dict[str, Any] | None
+    extra_content: Mapping[str, Any] | None
     warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
     interactive_creator_agent: str | None
@@ -546,7 +546,7 @@ class StreamingResponse:
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     presentation_state: dict[str, object] | None = None
-    extra_content: dict[str, Any] | None = None
+    extra_content: Mapping[str, Any] | None = None
     interactive_creator_agent: str | None = None
     interactive_source_event_id: str | None = None
     stream_started_at: float | None = None
@@ -2029,7 +2029,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
     show_tool_calls: bool = True,
-    extra_content: dict[str, Any] | None = None,
+    extra_content: Mapping[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,

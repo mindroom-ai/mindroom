@@ -2055,22 +2055,25 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert stream.await_args.kwargs["terminal_send"] is not None
 
     async def test_streamed_reply_names_its_human_requester(self, tmp_path: Path) -> None:
-        """A streamed reply carries its human requester like a sent one, for whichever event it lands in."""
+        """A streamed reply carries its human requester like a sent one, without freezing the caller's metadata."""
         gateway = _gateway(tmp_path, FakeOutbox())
+        run_metadata: dict[str, object] = {}
         request = StreamingDeliveryRequest(
             target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
             response_stream=_empty_stream(),
             identity=_identity(),
-            extra_content={"io.mindroom.example": True},
+            extra_content=run_metadata,
         )
 
         with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
             await gateway.deliver_stream(request)
+        run_metadata["io.mindroom.ai_run"] = {"model": "late"}
 
-        assert stream.await_args.kwargs["extra_content"] == {
-            "io.mindroom.example": True,
+        assert dict(stream.await_args.kwargs["extra_content"]) == {
+            "io.mindroom.ai_run": {"model": "late"},
             ACTING_REQUESTER_KEY: "@user:localhost",
         }
+        assert ACTING_REQUESTER_KEY not in run_metadata
 
     async def test_a_stream_that_only_ever_said_thinking_does_not_settle_the_turn(
         self,

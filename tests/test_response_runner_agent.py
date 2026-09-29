@@ -25,6 +25,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
@@ -827,8 +828,8 @@ class TestAgentBot(AgentBotTestBase):
         # Metadata was populated during generator iteration (not synchronously),
         # proving the mutable reference is preserved through _merge_response_extra_content.
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
-        # The extra_content dict IS the same object as the collector
-        assert sent_extra_content is captured_collector["ref"]
+        # The stream sees the collector's live contents plus the human the reply was written for.
+        assert dict(sent_extra_content) == {**captured_collector["ref"], ACTING_REQUESTER_KEY: "@user:localhost"}
 
     def test_merge_response_extra_content_preserves_mutable_reference(self) -> None:
         """_merge_response_extra_content must return the SAME dict object when extra_content is provided."""
