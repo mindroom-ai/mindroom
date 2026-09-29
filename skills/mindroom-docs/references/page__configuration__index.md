@@ -396,6 +396,7 @@ When Matrix transport is available, startup terminally expires or denies those o
 If recovery cannot prove whether a claimed tool already executed, it fails closed instead of risking a duplicate side effect.
 If an entity account was removed, the router posts a related terminal notice because Matrix forbids it from editing the removed account's original waiting event, which can therefore retain its old pending decoration.
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
+An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
