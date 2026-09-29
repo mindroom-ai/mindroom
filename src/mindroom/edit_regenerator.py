@@ -199,6 +199,9 @@ class EditRegenerator:
         # record mixing senders would run their messages as the editor.
         if not turn_record.replay_sources_all_from_requester(requester_user_id):
             return None
+        # A requester owns replies an entity wrote for them without having written them.
+        if any(metadata.speaker is not None for metadata in (turn_record.source_event_metadata or {}).values()):
+            return None
         context = await self._edit_regeneration_context(
             context,
             room,

@@ -28,6 +28,7 @@ from mindroom.coalescing_batch import (
     build_prepared_turn,
     is_active_follow_up_coalescing_key,
     requester_coalescing_key,
+    tagged_coalesced_prompt,
 )
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -42,6 +43,7 @@ from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.ingress_lanes import LaneDelivery, ReceiptLaneKey
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.turn_record import SourceEventMetadata
 from tests.conftest import make_pending_event
 
 if TYPE_CHECKING:
@@ -194,6 +196,25 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
     assert '<msg event_id="$r1:localhost" from="@mindroom_research:localhost"' in turn.event.body
     assert '<msg event_id="$r2:localhost" from="@mindroom_research:localhost"' in turn.event.body
     assert "@owner:localhost" not in turn.event.body
+
+    # The persisted record keeps both identities: the human owns each source, the agent stays its speaker.
+    record = turn.handled_turn
+    assert record.source_event_metadata is not None
+    persisted = {
+        event_id: SourceEventMetadata._from_raw(metadata._to_record())
+        for event_id, metadata in record.source_event_metadata.items()
+    }
+    assert all(record.requester_id_for_source(event_id) == "@owner:localhost" for event_id in persisted)
+    regenerated = tagged_coalesced_prompt(
+        record.source_event_ids,
+        dict(record.source_event_prompts or {}),
+        {event_id: metadata for event_id, metadata in persisted.items() if metadata is not None},
+        timestamp_formatter=lambda _timestamp_ms: None,
+        member_display_names={},
+    )
+    assert regenerated is not None
+    assert '<msg event_id="$r1:localhost" from="@mindroom_research:localhost">' in regenerated
+    assert "@owner:localhost" not in regenerated
 
 
 def test_prepared_turn_carries_structured_flag_and_metadata() -> None:

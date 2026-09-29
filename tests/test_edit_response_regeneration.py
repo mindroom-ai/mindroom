@@ -1472,6 +1472,77 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
 
 
 @pytest.mark.asyncio
+async def test_handle_message_edit_ignores_edits_of_replies_an_agent_wrote_for_the_editor(tmp_path: Path) -> None:
+    """A human owns an agent reply written for them but cannot rewrite it through an edit event."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
+    stored_target = MessageTarget.resolve(
+        room_id="!test:example.com",
+        thread_id=None,
+        reply_to_event_id="$agent-reply:example.com",
+    )
+    await _record_handled_turn(
+        bot._turn_store,
+        ["$agent-reply:example.com"],
+        response_event_id="$response:example.com",
+        source_event_prompts={"$agent-reply:example.com": "please take this over"},
+        source_event_metadata={
+            "$agent-reply:example.com": SourceEventMetadata(
+                sender="@user:example.com",
+                speaker="@mindroom_research:example.com",
+            ),
+        },
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=stored_target,
+    )
+    content = {
+        "body": "* do something else",
+        "msgtype": "m.text",
+        "m.new_content": {"body": "do something else", "msgtype": "m.text"},
+        "m.relates_to": {"event_id": "$agent-reply:example.com", "rel_type": "m.replace"},
+    }
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": "$forged-edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    mock_generate_response = AsyncMock()
+    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+
+    with patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context:
+        mock_context.return_value = MagicMock(is_thread=False, thread_id=None, thread_history=[])
+        result = await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    assert result is None
+    mock_generate_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edit(
     tmp_path: Path,
 ) -> None:

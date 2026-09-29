@@ -92,9 +92,12 @@ class PreparedVoiceSource:
 class SourceEventMetadata:
     """Durable model-facing metadata for one source Matrix event."""
 
+    # The requester that owns this source.
     sender: str
     timestamp_ms: float | None = None
     discovery_event_id: str | None = None
+    # The entity that wrote this source for ``sender``, which stays its speaker.
+    speaker: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize the timestamp once for every physical representation."""
@@ -107,6 +110,8 @@ class SourceEventMetadata:
             record["timestamp_ms"] = self.timestamp_ms
         if self.discovery_event_id is not None:
             record["discovery_event_id"] = self.discovery_event_id
+        if self.speaker is not None:
+            record["speaker"] = self.speaker
         return record
 
     @classmethod
@@ -119,7 +124,12 @@ class SourceEventMetadata:
         if not isinstance(sender, str) or not sender:
             return None
         timestamp_ms = normalize_timestamp_ms(metadata.get("timestamp_ms"))
-        return cls(sender, timestamp_ms, canonical_optional_string(metadata.get("discovery_event_id")))
+        return cls(
+            sender,
+            timestamp_ms,
+            canonical_optional_string(metadata.get("discovery_event_id")),
+            canonical_optional_string(metadata.get("speaker")),
+        )
 
 
 SourceEventRevision = tuple[int, str]

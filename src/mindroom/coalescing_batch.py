@@ -219,13 +219,14 @@ def tagged_coalesced_prompt(
         metadata = source_event_metadata.get(source_event_id)
         if prompt is None or metadata is None:
             return None
+        speaker = metadata.speaker or metadata.sender
         rendered_messages.append(
             render_msg_tag(
-                sender=metadata.sender,
+                sender=speaker,
                 body=prompt,
                 event_id=source_event_id,
                 ts=timestamp_formatter(metadata.timestamp_ms),
-                display_name=member_display_names.get(metadata.sender),
+                display_name=member_display_names.get(speaker),
             ),
         )
     return _messages_envelope(
@@ -431,6 +432,7 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
             sender=pending_event.event.requester_user_id or pending_event.event.sender,
             timestamp_ms=normalize_timestamp_ms(pending_event.event.server_timestamp),
             discovery_event_id=pending_event.event.discovery_event_id,
+            speaker=pending_event.event.sender if pending_event.event.acts_for_requester else None,
         )
         for pending_event in ordered_pending_events
     }
@@ -464,7 +466,11 @@ def build_prepared_turn(
             source_event_ids,
             discovery_event_ids=routed_aliases,
             source_event_prompts=source_event_prompts,
-            source_event_metadata=source_event_metadata if len(source_event_ids) > 1 or routed_aliases else None,
+            source_event_metadata=(
+                source_event_metadata
+                if len(source_event_ids) > 1 or routed_aliases or primary_pending_event.event.acts_for_requester
+                else None
+            ),
             requester_id=requester_user_id,
         ),
         ingress=DispatchIngressMetadata(
