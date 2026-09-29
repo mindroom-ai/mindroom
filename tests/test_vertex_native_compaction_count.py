@@ -132,7 +132,7 @@ async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search()
         )
         model = MindroomVertexAIClaude(id="claude-opus-5-5", async_client=client, thinking={"type": "adaptive"})
         turn_blocks = [
-            {"type": "thinking", "thinking": "Find the tool first.", "signature": "sig-1"},
+            {"type": "thinking", "thinking": "Find the tool first.", "signature": "a" * 400},
             {
                 "type": "server_tool_use",
                 "id": "srvtoolu_1",
@@ -147,7 +147,7 @@ async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search()
                     "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
                 },
             },
-            {"type": "thinking", "thinking": "", "signature": "sig-2"},
+            {"type": "thinking", "thinking": "", "signature": "b" * 800},
             {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
         ]
         messages = [
@@ -162,7 +162,7 @@ async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search()
                         "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
                     },
                 ],
-                provider_data={"content_blocks": turn_blocks, "signature": "sig-2"},
+                provider_data={"content_blocks": turn_blocks, "signature": "b" * 800},
             ),
             Message(role="tool", content="18C and sunny", tool_call_id="toolu_1", tool_name="get_weather"),
         ]
@@ -183,15 +183,15 @@ async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search()
             compress_tool_results=False,
         )
 
-    assert count == 100
+    # Signatures encrypt the full reasoning: one token per four base64 characters each.
+    assert count == 100 + 400 // 4 + 800 // 4
     counted = requests[-1]
     assert "thinking" not in counted
     counted_blocks = [
         block for message in counted["messages"] if isinstance(message["content"], list) for block in message["content"]
     ]
-    # Signatures carry the full reasoning, so they count too, even for empty visible thinking.
-    assert {"type": "text", "text": "Find the tool first.\nsig-1"} in counted_blocks
-    assert {"type": "text", "text": "sig-2"} in counted_blocks
+    assert {"type": "text", "text": "Find the tool first."} in counted_blocks
+    assert not any(block["type"] == "text" and not block["text"].strip() for block in counted_blocks)
     assert not any(block["type"] in {"thinking", "redacted_thinking"} for block in counted_blocks)
     assert [message.model_dump() for message in messages] == original
 
@@ -203,8 +203,8 @@ def test_thinking_counts_as_text_for_sdk_blocks_and_drops_emptied_messages() -> 
         {
             "role": "assistant",
             "content": [
-                ThinkingBlock(type="thinking", thinking="Plan the lookup.", signature="sig-a"),
-                RedactedThinkingBlock(type="redacted_thinking", data="opaque-reasoning"),
+                ThinkingBlock(type="thinking", thinking="Plan the lookup.", signature="s" * 40),
+                RedactedThinkingBlock(type="redacted_thinking", data="r" * 80),
                 {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
             ],
         },
@@ -212,18 +212,20 @@ def test_thinking_counts_as_text_for_sdk_blocks_and_drops_emptied_messages() -> 
         {"role": "user", "content": "Continue."},
     ]
 
-    assert _messages_with_thinking_as_text(messages) == [
-        {"role": "user", "content": "Start."},
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "Plan the lookup.\nsig-a"},
-                {"type": "text", "text": "opaque-reasoning"},
-                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
-            ],
-        },
-        {"role": "user", "content": "Continue."},
-    ]
+    assert _messages_with_thinking_as_text(messages) == (
+        [
+            {"role": "user", "content": "Start."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Plan the lookup."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+                ],
+            },
+            {"role": "user", "content": "Continue."},
+        ],
+        40 // 4 + 80 // 4,
+    )
 
 
 @pytest.mark.asyncio

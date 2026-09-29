@@ -144,24 +144,22 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
     return count_messages, referenced_tool_names
 
 
-def _thinking_block_text(block: object) -> str:
-    """Return countable text for one thinking block.
+def _thinking_block_field(block: object, field: str) -> str:
+    value = cast("dict[str, Any]", block).get(field) if isinstance(block, dict) else getattr(block, field, None)
+    return value if isinstance(value, str) else ""
 
-    The signature (or redacted data) carries the full reasoning even when the
-    visible text is a summary or empty. Its base64 text tokenizes larger than
-    that reasoning, which keeps the count conservative.
+
+def _messages_with_thinking_as_text(messages: list[Any]) -> tuple[list[Any], int]:
+    """Count thinking as its visible text, and return an allowance for its hidden reasoning.
+
+    The visible text is a summary, possibly empty; the base64 signature (or a
+    redacted block's data) encrypts the full reasoning that generation counts.
+    Measured on live Opus 5.5 tool turns, allowing one token per four base64
+    characters (three decoded bytes) stays just above the real input. Messages
+    left without blocks are dropped.
     """
-    fields = ("thinking", "signature", "data")
-    values = [
-        cast("dict[str, Any]", block).get(field) if isinstance(block, dict) else getattr(block, field, None)
-        for field in fields
-    ]
-    return "\n".join(value for value in values if isinstance(value, str) and value.strip())
-
-
-def _messages_with_thinking_as_text(messages: list[Any]) -> list[Any]:
-    """Count each thinking block as text, dropping any message left empty."""
     text_messages: list[Any] = []
+    hidden_tokens = 0
     for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
@@ -173,11 +171,13 @@ def _messages_with_thinking_as_text(messages: list[Any]) -> list[Any]:
             block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
             if block_type not in _THINKING_BLOCK_TYPES:
                 text_content.append(block)
-            elif text := _thinking_block_text(block):
-                text_content.append({"type": "text", "text": text})
+                continue
+            if (thinking := _thinking_block_field(block, "thinking")).strip():
+                text_content.append({"type": "text", "text": thinking})
+            hidden_tokens += len(_thinking_block_field(block, "signature") or _thinking_block_field(block, "data")) // 4
         if text_content:
             text_messages.append({**message, "content": text_content})
-    return text_messages
+    return text_messages, hidden_tokens
 
 
 def _is_vertex_tool_search(tool: object) -> bool:
@@ -232,18 +232,19 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     if count_messages is None and count_tools is None:
         return request_kwargs, 0
     count_kwargs = dict(request_kwargs)
+    hidden_thinking_tokens = 0
     if count_messages is not None:
         # With thinking enabled, the endpoint rejects a request whose rewritten
         # blocks sit among signed thinking blocks, as the text conversion above
         # does. Count that thinking as text and send no thinking setting.
-        count_kwargs["messages"] = _messages_with_thinking_as_text(count_messages)
+        count_kwargs["messages"], hidden_thinking_tokens = _messages_with_thinking_as_text(count_messages)
         count_kwargs.pop("thinking", None)
     if count_tools:
         count_kwargs["tools"] = count_tools
     elif count_tools is not None:
         count_kwargs.pop("tools", None)
     reserve = _VERTEX_TOOL_SEARCH_TOKEN_RESERVE if has_native_search else 0
-    return count_kwargs, reserve
+    return count_kwargs, reserve + hidden_thinking_tokens
 
 
 @dataclass
@@ -344,10 +345,10 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
+        count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
         client = self.get_async_client()
         response = await client.messages.count_tokens(**count_kwargs)
-        return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
+        return response.input_tokens + reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
     def _replay_trim_candidates(messages: list[Message]) -> list[int]:
