@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   markdown-code-runner:
     runs-on: ubuntu-latest
@@ -32,23 +35,13 @@ jobs:
           uv sync
           uv run python docs/run_markdown_code_runner.py
 
-      - name: Commit updated docs
-        id: commit
+      # This job runs dependency code, so it never holds a write token; regenerate stale docs locally instead.
+      - name: Check that generated docs are up to date
         run: |
-          git add -A
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "No changes in docs, skipping commit."
-            echo "commit_status=skipped" >> $GITHUB_ENV
-          else
-            git commit -m "Update auto-generated docs"
-            echo "commit_status=committed" >> $GITHUB_ENV
+          git add -A -- '*.md'
+          if ! git diff --cached --quiet; then
+            echo "::error::Generated docs are stale. Run 'uv run python docs/run_markdown_code_runner.py' locally and commit the result."
+            git diff --cached --stat
+            git diff --cached
+            exit 1
           fi
-
-      - name: Push changes
-        if: env.commit_status == 'committed'
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.head_ref }}

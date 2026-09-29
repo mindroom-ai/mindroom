@@ -28,6 +28,7 @@ from mindroom.desktop.accessibility import (
     MacAccessibilityBackend,
 )
 from mindroom.desktop.bridge import (
+    _WIDEST_METRICS,
     DesktopBridge,
     DesktopBridgePolicy,
     _DesktopBridgeStoppedError,
@@ -460,11 +461,12 @@ async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
     assert status["bridge"]["shell"] == {
         "enabled": False,
         "pending": False,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
     }
+    assert type(status["bridge"]["shell"]["auto_approve_remaining_seconds"]) is int
     await _handle(bridge, _event(_command("list_apps", request_id="r6", sequence=6)))
     assert _response(transport).result == {"apps": [], "metrics": _response(transport).result["metrics"]}
     await _handle(bridge, _event(_command("get_app_state", request_id="r7", sequence=7)))
@@ -568,6 +570,45 @@ async def test_remote_status_file_roots_is_bounded_while_local_status_keeps_ever
     assert 0 < len(file_roots) < len(roots)
     # The native NDJSON channel the Mac app reads has no to-device limit, so it keeps every root.
     assert len(bridge.local_status()["file_roots"]) == len(roots)
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_read_file_replies_fit_as_recorded_and_sent_and_rebuild_the_file(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Escape-heavy text arrives in replies within the budget, and reading on from next_offset rebuilds it exactly."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    content = ("é" * 20_000 + "€" * 5_000 + "\U0001f600" * 3_000 + '"\\\t\n' * 2_000).encode()
+    (root / "notes.txt").write_bytes(content)
+    files = DesktopFilesystem((root,))
+    bridge = _local_bridge(filesystem=files)
+    root_id = _root_id(files)
+    received, offset, reads = b"", 0, 0
+    while not received or offset < len(content):
+        reads += 1
+        request_id = _longest_request_id(f"read-{reads}-")
+        command = _command(
+            "read_file",
+            request_id=request_id,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=reads,
+            parameters={"root_id": root_id, "path": "notes.txt", "offset": offset},
+        )
+        await _handle(bridge, _event(command))
+        sent = _response(transport)
+        assert sent.to_content() == bridge._journal.get(request_id).response.to_content()
+        assert sent.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+        shown = str(sent.result["text"]).encode()
+        assert shown
+        assert (sent.result["offset"], sent.result["next_offset"]) == (offset, offset + len(shown))
+        assert sent.result["eof"] is (offset + len(shown) == len(content))
+        assert sent.result["truncated"] is not sent.result["eof"]
+        received, offset = received + shown, offset + len(shown)
+    assert received == content
+    assert reads > len(content) // 16_384 + 1
     bridge.close()
 
 
@@ -923,7 +964,7 @@ async def test_other_callers_see_shell_state_without_pending_command(transport: 
     assert status.result["bridge"]["shell"] == {
         "enabled": True,
         "pending": True,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
@@ -1157,20 +1198,21 @@ def _without_metrics(result: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in result.items() if key != "metrics"}
 
 
-async def _check_until_completed(
+async def _check_until_finished(
     bridge: DesktopBridge,
     transport: AsyncMock,
     handle: str,
     *,
     first_sequence: int,
+    **parameters: object,
 ) -> tuple[dict[str, object], int]:
     for sequence in range(first_sequence, first_sequence + 600):
-        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence)))
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, **parameters)))
         result = _response(transport).result
-        if result["state"] == "completed":
+        if result["state"] != "running":
             return result, sequence
         await asyncio.sleep(0.01)
-    pytest.fail("shell handle never completed")
+    pytest.fail("shell handle never finished")
 
 
 async def _wait_until_gone(pid: int) -> None:
@@ -1194,7 +1236,7 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
     transport: AsyncMock,
     tmp_path: Path,
 ) -> None:
-    """A command past its inline wait becomes a handle, and one completed check returns its complete output."""
+    """A command past its inline wait becomes a handle, and one completed check returns its output from the offset."""
     shell = _local_shell()
     shell.grant(60)
     bridge = _local_bridge(shell=shell)
@@ -1211,23 +1253,221 @@ async def test_shell_handle_lifecycle_returns_full_output_through_the_bridge(
         "output_bytes": 6,
         "output_truncated": False,
         "output_attachment": None,
+        "output_start": 0,
+        "next_offset": 6,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=2)))
     assert _response(transport).result["state"] == "running"
 
     (tmp_path / "release").touch()
-    completed, sequence = await _check_until_completed(bridge, transport, handle, first_sequence=3)
+    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=3, offset=6)
     assert _without_metrics(completed) == {
         "state": "completed",
         "handle": handle,
         "exit_code": 3,
-        "output": "early\nlate",
+        "output": "late",
         "output_bytes": 10,
         "output_truncated": False,
         "output_attachment": None,
+        "output_start": 6,
+        "next_offset": 10,
     }
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
     assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    bridge.close()
+
+
+_LONGEST_SESSION_ID = "s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
+
+
+def _longest_request_id(prefix: str) -> str:
+    return prefix + "x" * (_MAX_PROTOCOL_IDENTIFIER_LENGTH - len(prefix))
+
+
+@pytest.mark.asyncio
+async def test_fitted_shell_replies_fit_the_budget_as_recorded_and_sent(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tail, offset, and upload-fallback shell replies fit with their metrics and maximum-length IDs."""
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge.upload_encrypted_media",
+        AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
+    )
+    (tmp_path / "output").write_bytes(("\u00e9" * 30_000).encode())
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = "cat output; while [ ! -f release ]; do sleep 0.05; done; cat output"
+    run_id = _longest_request_id("run")
+    started = replace(_run_shell(command, tmp_path, request_id=run_id), session_id=_LONGEST_SESSION_ID)
+    await _handle(bridge, _event(started))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    request_ids = [run_id]
+
+    async def check(sequence: int, **parameters: object) -> None:
+        request_id = _longest_request_id(f"check-{sequence}-")
+        command = _command(
+            "check_shell",
+            request_id=request_id,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=sequence,
+            parameters={"handle": handle, **parameters},
+        )
+        await _handle(bridge, _event(command))
+        request_ids.append(request_id)
+
+    await check(2, offset=0)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await check(3)
+    for request_id in request_ids:
+        recorded = bridge._journal.get(request_id).response
+        assert recorded is not None
+        assert "metrics" in recorded.result
+        assert recorded.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    final = _response(transport)
+    assert (final.result["state"], final.result["output_truncated"]) == ("completed", True)
+    assert "could not be attached" in str(final.result["warning"])
+    await bridge.stop()
+    bridge.close()
+
+
+async def _wait_for_finished_handle(bridge: DesktopBridge, handle: str) -> None:
+    for _ in range(600):
+        entries = {entry["handle"]: entry["state"] for entry in bridge.local_status()["shell"]["handles"]}
+        if entries.get(handle) != "running":
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail("shell handle never finished")
+
+
+@pytest.mark.asyncio
+async def test_running_tail_reports_where_its_output_starts_so_skipped_output_stays_readable(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A trimmed newest-output reply says where it begins, and polling from 0 still returns the beginning."""
+    content = b"".join(f"line {number:05}\n".encode() for number in range(10_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("cat log; while [ ! -f release ]; do sleep 0.05; done", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence)))
+        tail = _response(transport).result
+        if tail["output_bytes"] == len(content):
+            break
+        await asyncio.sleep(0.01)
+    shown = str(tail["output"]).encode()
+    assert 0 < tail["output_start"] == len(content) - len(shown)
+    assert (tail["next_offset"], content[tail["output_start"] :]) == (len(content), shown)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=700, offset=0)))
+    head = _response(transport).result
+    assert (head["output_start"], content.startswith(str(head["output"]).encode())) == (0, True)
+    assert head["next_offset"] == len(str(head["output"]).encode())
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_offset_polls_leave_later_output_of_a_running_command_intact(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded offset read never moves where the still-running command's next output is written."""
+    upload = AsyncMock(return_value=replace(MEDIA, mime_type="text/plain"))
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    first, second = b"a" * 50_000 + b"\n", b"b" * 50_000 + b"\n"
+    (tmp_path / "first").write_bytes(first)
+    (tmp_path / "second").write_bytes(second)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    command = "cat first; while [ ! -f release ]; do sleep 0.05; done; cat second"
+    await _handle(bridge, _event(_run_shell(command, tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=0)))
+        polled = _response(transport).result
+        if polled["output_bytes"] == len(first):
+            break
+        await asyncio.sleep(0.01)
+    assert (polled["output_bytes"], polled["next_offset"] < len(first)) == (len(first), True)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=700, offset=0)))
+    completed = _response(transport).result
+    assert (completed["state"], completed["output_bytes"]) == ("completed", len(first) + len(second))
+    assert upload.await_args.args[1] == first + second
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_check_shell_offset_polls_every_byte_once_without_splitting_characters(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Polling from each next_offset returns contiguous whole characters, and the completed slice may be attached."""
+    media = replace(MEDIA, mime_type="text/plain")
+    upload = AsyncMock(return_value=media)
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    first = ("\u00e9" * 30_000).encode()  # More than one inline reply, in two-byte characters.
+    rest = ("\u00fc" * 30_000 + "end").encode()
+    printer = f"{shlex.quote(sys.executable)} -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))'"
+    (tmp_path / "first").write_text(first.hex())
+    (tmp_path / "rest").write_text(rest.hex())
+    command = f"{printer} < first; while [ ! -f release ]; do sleep 0.05; done; {printer} < rest"
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell(command, tmp_path)))
+    started = _response(transport).result
+    handle = started["handle"]
+    assert isinstance(handle, str)
+    assert started["next_offset"] == started["output_bytes"]
+
+    received, offset, polls = b"", 0, 0
+    for sequence in range(2, 600):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+        reply = _response(transport)
+        assert reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+        shown = str(reply.result["output"]).encode()
+        assert (reply.result["output_start"], reply.result["next_offset"]) == (offset, offset + len(shown))
+        assert reply.result["output_truncated"] is (reply.result["next_offset"] < reply.result["output_bytes"])
+        received, offset = received + shown, offset + len(shown)
+        polls += bool(shown)
+        if offset == len(first):
+            break
+        await asyncio.sleep(0.01)
+    assert (received, polls > 1) == (first, True)
+
+    for sequence, bad_offset, error in (
+        (700, len(first) + 1, "past the captured output"),
+        (701, 1, "start of a UTF-8 character"),
+        (702, -1, "nonnegative"),
+    ):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=bad_offset)))
+        assert error in str(_response(transport).error)
+
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=703, offset=offset)))
+    completed = _response(transport).result
+    assert (completed["state"], completed["exit_code"], completed["output"]) == ("completed", 0, "")
+    assert (completed["output_bytes"], completed["next_offset"]) == (len(first) + len(rest), len(first) + len(rest))
+    assert completed["output_attachment"] == media.to_content()
+    assert upload.await_args.args[1] == rest
     await bridge.stop()
     bridge.close()
 
@@ -1245,7 +1485,8 @@ async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
     handle = _response(transport).result["handle"]
     assert isinstance(handle, str)
     (tmp_path / "release").touch()
-    completed, sequence = await _check_until_completed(bridge, transport, handle, first_sequence=2)
+    completed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=2)
+    assert completed["state"] == "completed"
     await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence + 1)))
     assert _response(transport).error == "Unknown shell handle."
 
@@ -1287,8 +1528,32 @@ async def test_other_callers_cannot_check_or_kill_a_handle(transport: AsyncMock,
 
     await _handle(bridge, _event(_handle_command("kill_shell", handle, sequence=6)))
     assert _without_metrics(_response(transport).result) == {"state": "killed", "handle": handle}
-    completed, _ = await _check_until_completed(bridge, transport, handle, first_sequence=7)
-    assert completed["exit_code"] == -signal.SIGTERM
+    killed, sequence = await _check_until_finished(bridge, transport, handle, first_sequence=7)
+    assert (killed["state"], killed["exit_code"]) == ("killed", -signal.SIGTERM)
+    query = _command(
+        "request_status",
+        request_id="query",
+        sequence=sequence + 1,
+        parameters={"request_id": f"check_shell-{sequence}"},
+    )
+    await _handle(bridge, _event(query))
+    assert _response(transport).result["response"]["result"]["state"] == "killed"
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_local_handle_kill_reaches_the_agent_as_killed(transport: AsyncMock, tmp_path: Path) -> None:
+    """After the person at the computer kills a handle, the agent's next check reports killed, not unknown."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("printf before; sleep 30", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    assert [entry["handle"] for entry in bridge.kill_local_shell_handle(handle)["shell"]["handles"]] == [handle]
+    killed, _ = await _check_until_finished(bridge, transport, handle, first_sequence=2)
+    assert (killed["state"], killed["exit_code"], killed["output"]) == ("killed", -signal.SIGKILL, "before")
     await bridge.stop()
     bridge.close()
 
@@ -1410,14 +1675,14 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
     handle = running.result["handle"]
     assert isinstance(handle, str)
     shown = str(running.result["output"])
-    assert running.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+    assert running.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     assert expected.decode().endswith(shown)
     assert 0 < len(shown.encode()) < len(expected)
     assert (running.result["output_bytes"], running.result["output_truncated"]) == (len(expected), True)
     assert running.result["output_attachment"] is None
 
     (tmp_path / "release").touch()
-    completed, _ = await _check_until_completed(bridge, transport, handle, first_sequence=2)
+    completed, _ = await _check_until_finished(bridge, transport, handle, first_sequence=2)
     assert {key: value for key, value in _without_metrics(completed).items() if key != "output_attachment"} == {
         "state": "completed",
         "handle": handle,
@@ -1425,6 +1690,8 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output": "",
         "output_bytes": len(expected),
         "output_truncated": False,
+        "output_start": 0,
+        "next_offset": len(expected),
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
@@ -1437,12 +1704,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
 
 
 @pytest.mark.asyncio
-async def test_failed_output_upload_keeps_exit_code_and_newest_output(
+async def test_failed_upload_of_a_finished_run_shell_keeps_exit_code_and_a_first_page(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An attachment failure never hides that the command completed or what it printed last."""
+    """An attachment failure still shows the exit code and the output's start, with a handle to page on from."""
     monkeypatch.setattr(
         "mindroom.desktop.bridge.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
@@ -1459,10 +1726,13 @@ async def test_failed_output_upload_keeps_exit_code_and_newest_output(
     assert response.ok
     result = response.result
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 4, None)
-    assert str(result["output"]).endswith("tail")
+    assert isinstance(result["handle"], str)
+    assert (result["output_start"], set(str(result["output"]))) == (0, {"x"})
+    assert result["next_offset"] == len(str(result["output"]))
     assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "Matrix media upload failed: offline" in str(result["warning"])
-    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES + 256
+    assert "Continue with check_shell from next_offset" in str(result["warning"])
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     await bridge.stop()
     bridge.close()
 
@@ -1515,14 +1785,124 @@ _LARGE_OUTPUT = "import sys; sys.stdout.write('x' * 100_000 + 'tail')"
 
 def _assert_upload_fallback(result: dict[str, object]) -> None:
     assert (result["state"], result["exit_code"], result["output_attachment"]) == ("completed", 0, None)
-    assert str(result["output"]).endswith("tail")
+    assert isinstance(result["handle"], str)
+    assert (result["output_start"], set(str(result["output"]))) == (0, {"x"})
+    assert result["next_offset"] == len(str(result["output"]))
     assert (result["output_bytes"], result["output_truncated"]) == (100_004, True)
     assert "upload did not finish within 0.2 seconds" in str(result["warning"])
 
 
+@pytest.mark.parametrize("later_uploads", ["fail", "succeed"])
+@pytest.mark.asyncio
+async def test_failed_upload_keeps_a_finished_handle_until_its_output_is_delivered(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    later_uploads: str,
+) -> None:
+    """After a failed attachment the agent pages on from next_offset, and only a complete page consumes the handle."""
+    media = replace(MEDIA, mime_type="text/plain")
+    failure = DesktopMediaError("Matrix media upload failed: offline")
+    upload = AsyncMock(side_effect=[failure, *([failure] * 10 if later_uploads == "fail" else [media])])
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("while [ ! -f release ]; do sleep 0.05; done; cat log", tmp_path)))
+    handle = _response(transport).result["handle"]
+    assert isinstance(handle, str)
+    (tmp_path / "release").touch()
+    await _wait_for_finished_handle(bridge, handle)
+    received, offset = b"", 0
+    for sequence in range(2, 20):
+        await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+        page = _response(transport).result
+        assert (page["state"], page["exit_code"], page["output_start"]) == ("completed", 0, offset)
+        attached = page["output_attachment"] is not None
+        shown = upload.await_args.args[1] if attached else str(page["output"]).encode()
+        assert page["next_offset"] == offset + len(shown)
+        received, offset = received + shown, offset + len(shown)
+        if offset == len(content):
+            assert "warning" not in page
+            break
+        assert "could not be attached" in str(page["warning"])
+        assert [entry["handle"] for entry in bridge.local_status()["shell"]["handles"]] == [handle]
+    assert received == content
+    assert bridge.local_status()["shell"]["handles"] == []
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=30, offset=offset)))
+    assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    bridge.close()
+
+
+@pytest.mark.parametrize("ending", ["paged", "revoked"])
+@pytest.mark.asyncio
+async def test_failed_upload_turns_an_inline_finished_run_shell_into_a_pageable_handle(
+    transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Undeliverable output of a finished run_shell stays behind a handle until paged in full or revoked."""
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge.upload_encrypted_media",
+        AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
+    )
+    released: list[DesktopShellOutput] = []
+    release = DesktopShellOutput.release
+
+    def record_release(output: DesktopShellOutput) -> None:
+        released.append(output)
+        release(output)
+
+    monkeypatch.setattr(DesktopShellOutput, "release", record_release)
+    content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
+    (tmp_path / "log").write_bytes(content)
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_run_shell("cat log", tmp_path)))
+    first = _response(transport)
+    handle = first.result["handle"]
+    assert isinstance(handle, str)
+    assert (first.result["state"], first.result["exit_code"], first.result["output_start"]) == ("completed", 0, 0)
+    assert "Continue with check_shell from next_offset" in str(first.result["warning"])
+    received, offset = str(first.result["output"]).encode(), first.result["next_offset"]
+    assert received == content[:offset]
+    spool = Path(str(shell._directory))
+    await _handle(
+        bridge,
+        _event(_command("request_status", request_id="query", sequence=2, parameters={"request_id": "run"})),
+    )
+    assert _response(transport).result["response"] == first.to_content()
+    assert released == []
+    if ending == "revoked":
+        bridge.revoke_local_shell()
+    else:
+        for sequence in range(3, 20):
+            await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=sequence, offset=offset)))
+            page = _response(transport).result
+            shown = str(page["output"]).encode()
+            assert (page["output_start"], page["next_offset"]) == (offset, offset + len(shown))
+            received, offset = received + shown, offset + len(shown)
+            if offset == len(content):
+                break
+            assert released == []
+        assert received == content
+    assert [output.stdout.file.closed for output in released] == [True]
+    assert bridge.local_status()["shell"]["handles"] == []
+    await _handle(bridge, _event(_handle_command("check_shell", handle, sequence=30, offset=offset)))
+    assert _response(transport).error == "Unknown shell handle."
+    await bridge.stop()
+    assert not spool.exists()
+    bridge.close()
+
+
 @pytest.mark.parametrize("action", ["run_shell", "check_shell"])
 @pytest.mark.asyncio
-async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_bound(
+async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound(
     transport: AsyncMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1542,9 +1922,10 @@ async def test_stalled_output_upload_falls_back_to_the_newest_output_within_the_
         handle = _response(transport).result["handle"]
         assert isinstance(handle, str)
         (tmp_path / "release").touch()
-        result, _ = await asyncio.wait_for(_check_until_completed(bridge, transport, handle, first_sequence=2), 5)
+        result, _ = await asyncio.wait_for(_check_until_finished(bridge, transport, handle, first_sequence=2), 5)
     _assert_upload_fallback(result)
-    assert [output.closed for output in released] == [True]
+    # The handle keeps its output for the next page.
+    assert released == []
     await bridge.stop()
     bridge.close()
 
@@ -1572,7 +1953,7 @@ async def test_bridge_stop_during_a_stalled_output_upload_returns_within_the_bou
 
 
 def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
-    """Size the exact completed reply shape the bridge measures before metrics are added."""
+    """Size the exact completed reply shape the bridge measures, with the metrics room it reserves."""
     return DesktopResponse(
         request_id=command.request_id,
         session_id=command.session_id,
@@ -1585,6 +1966,9 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
             "output_bytes": len(output.encode()),
             "output_truncated": False,
             "output_attachment": None,
+            "output_start": 0,
+            "next_offset": len(output.encode()),
+            "metrics": _WIDEST_METRICS,
         },
     ).content_bytes()
 
@@ -1629,10 +2013,14 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
             shell=shell,
             clock=lambda: NOW_SECONDS,
         )
-        probe = _run_shell("true", tmp_path, request_id="inline", expires_at_ms=120_000)
+        inline_id, attached_id = "i" * _MAX_PROTOCOL_IDENTIFIER_LENGTH, "a" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
+        probe = replace(
+            _run_shell("true", tmp_path, request_id=inline_id, expires_at_ms=120_000),
+            session_id=_LONGEST_SESSION_ID,
+        )
         count = _largest_inline_count(probe, character)
         results = []
-        for sequence, (request_id, repeat) in enumerate((("inline", count), ("attached", count + 1)), start=1):
+        for sequence, (request_id, repeat) in enumerate(((inline_id, count), (attached_id, count + 1)), start=1):
             script = f"import sys; sys.stdout.buffer.write(({character!r} * {repeat}).encode())"
             command = _run_shell(
                 f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
@@ -1642,14 +2030,22 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
                 timeout_seconds=30,
                 expires_at_ms=120_000,
             )
-            await bridge.on_to_device_event(_event(command))
+            await bridge.on_to_device_event(_event(replace(command, session_id=_LONGEST_SESSION_ID)))
             await _execute(bridge)
             await bridge.deliver_pending()
             body = requests[-1]["body"]
             assert "/sendToDevice/m.room.encrypted/" in requests[-1]["path"]
             assert len(json.dumps(body, separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
-            results.append(bridge._journal.get(request_id).response.result)
-        receipt = _command("request_status", request_id="receipt", sequence=3, parameters={"request_id": "inline"})
+            recorded = bridge._journal.get(request_id).response
+            assert recorded.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+            results.append(recorded.result)
+        receipt = _command(
+            "request_status",
+            request_id="q" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+            session_id=_LONGEST_SESSION_ID,
+            sequence=3,
+            parameters={"request_id": inline_id},
+        )
         await bridge.on_to_device_event(_event(receipt))
         await bridge.deliver_pending()
         assert len(json.dumps(requests[-1]["body"], separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
@@ -1739,17 +2135,17 @@ async def test_local_shell_controls_require_enabled_running_shell() -> None:
     assert gui_only.local_status()["shell"] == {
         "enabled": False,
         "pending": None,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
     }
     gui_only.close()
     bridge = _local_bridge(shell=_local_shell())
-    assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] > 59
+    assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] == 60
     assert bridge.grant_local_shell(until_revoked=True)["shell"]["auto_approve_until_revoked"] is True
     revoked = bridge.revoke_local_shell()["shell"]
-    assert (revoked["auto_approve_remaining_seconds"], revoked["auto_approve_until_revoked"]) == (0.0, False)
+    assert (revoked["auto_approve_remaining_seconds"], revoked["auto_approve_until_revoked"]) == (0, False)
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         bridge.kill_local_shell_handle("shell:missing")
     await bridge.stop()
@@ -2048,7 +2444,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
 
     await _handle(bridge, _event(_command("status", request_id="request-2", sequence=2)))
     assert _response(transport).result["bridge"] == {
-        "mode": "control",
+        "gui_mode": "control",
         "control_available": True,
         "emergency_stop_latched": False,
         "allowed_app_count": 1,
@@ -2059,7 +2455,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "shell": {
             "enabled": False,
             "pending": False,
-            "auto_approve_remaining_seconds": 0.0,
+            "auto_approve_remaining_seconds": 0,
             "auto_approve_until_revoked": False,
             "active_request_id": None,
             "handles": [],
@@ -2068,6 +2464,22 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "observation_modes": ["tree", "screenshot", "both"],
         "durable_commands": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_status_names_gui_mode_so_shell_access_never_reads_as_read_only(transport: AsyncMock) -> None:
+    """Observe-only describes only app control; live shell auto-approval is reported beside it."""
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell)
+    await _handle(bridge, _event(_command("status")))
+    for status in (_response(transport).result["bridge"], bridge.local_status()):
+        assert "mode" not in status
+        assert status["gui_mode"] == "observe_only"
+        assert status["shell"]["auto_approve_remaining_seconds"] > 0
+    await bridge.stop()
+    assert bridge.local_status()["gui_mode"] == "stopped"
+    bridge.close()
 
 
 @pytest.mark.asyncio

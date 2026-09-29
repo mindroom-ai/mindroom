@@ -8,7 +8,7 @@ from backend.deps import ensure_supabase, limiter
 from backend.entitlements import db_subscription_status
 from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
-from backend.services.instance_lifecycle import reconcile_account_instances
+from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, reconcile_account_instances
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
@@ -135,6 +135,38 @@ def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) ->
     return rows[0]["account_id"] if rows else None
 
 
+def _without_repeated_trial(subscription: dict) -> dict | None:
+    """Return the subscription to store, or None when it duplicates an earlier trial and was cancelled.
+
+    Checkout grants one trial per customer, but checkout sessions opened side by side can each carry one. Only the
+    earliest trial counts: a later one is cancelled while the earlier subscription still runs, since the customer
+    would otherwise pay twice, and otherwise it ends at once so the subscription is paid from the start.
+    """
+    if subscription.get("trial_start") is None:
+        return subscription
+    order = (subscription["created"], subscription["id"])
+    history = stripe.Subscription.list(customer=subscription["customer"], status="all", limit=100).auto_paging_iter()
+    earlier = [other for other in history if other.trial_start is not None and (other.created, other.id) < order]
+    if not earlier:
+        return subscription
+    current = stripe.Subscription.retrieve(subscription["id"])
+    if current["status"] in ENDED_STRIPE_STATUSES:
+        # A redelivered event for a duplicate this handler already cancelled; the account keeps its binding.
+        return None
+    if current["status"] != "trialing":
+        return current
+    if any(other.status not in ENDED_STRIPE_STATUSES for other in earlier):
+        logger.warning("Cancelling Stripe subscription %s: it duplicates an earlier trial", subscription["id"])
+        stripe.Subscription.cancel(subscription["id"])
+        return None
+    logger.warning(
+        "Ending the trial of Stripe subscription %s: customer %s already had one",
+        subscription["id"],
+        subscription["customer"],
+    )
+    return stripe.Subscription.modify(subscription["id"], trial_end="now")
+
+
 def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     """Handle Stripe subscription creation events.
 
@@ -154,8 +186,6 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         return False, None
 
     account_id = account_result.data["id"]
-    subscription_data = _subscription_fields(subscription)
-    subscription_data["account_id"] = account_id
 
     # Check if subscription already exists for this account
     existing = sb.table("subscriptions").select("id,stripe_subscription_id").eq("account_id", account_id).execute()
@@ -169,6 +199,11 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
             )
             return True, account_id
 
+    stored = _without_repeated_trial(subscription)
+    if stored is None:
+        return True, account_id
+    subscription_data = _subscription_fields(stored)
+    subscription_data["account_id"] = account_id
     if existing.data:
         # Update existing subscription
         sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()

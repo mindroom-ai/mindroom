@@ -1,15 +1,37 @@
 """Stripe payment and subscription routes."""
 
+from dataclasses import dataclass
 from typing import Annotated, Any
 
+import anyio
 from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
+from backend.services import provisioner_service
+from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
+
+
+@dataclass(frozen=True)
+class _CustomerSubscriptions:
+    """What checkout needs from a Stripe customer's subscription history."""
+
+    running_subscription_id: str | None  # An active or trialing subscription, managed through the portal instead
+    had_trial: bool
+
+
+def _subscription_history(customer_id: str) -> _CustomerSubscriptions:
+    running_subscription_id = None
+    had_trial = False
+    for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
+        had_trial = had_trial or sub.trial_start is not None
+        if running_subscription_id is None and sub.status in ["active", "trialing"]:
+            running_subscription_id = sub.id
+    return _CustomerSubscriptions(running_subscription_id, had_trial)
 
 
 class CheckoutRequest(BaseModel):
@@ -36,6 +58,7 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail=f"No price found for {payload.tier} ({payload.billing_cycle})")
 
     sb = ensure_supabase()
+    provisioner_service.refuse_pending_deletion(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
     if result.data and result.data.get("stripe_customer_id"):
         customer_id = result.data["stripe_customer_id"]
@@ -44,19 +67,20 @@ async def create_checkout_session(
         customer_id = customer.id
         sb.table("accounts").update({"stripe_customer_id": customer_id}).eq("id", user["account_id"]).execute()
 
-    # Check if customer already has an active subscription
-    subscriptions = stripe.Subscription.list(customer=customer_id, status="all", limit=10)
-    for sub in subscriptions.data:
-        if sub.status in ["active", "trialing"]:
-            # Customer already has a subscription - they should use the portal to manage it
-            logger.warning(
-                "Customer %s already has an active subscription %s, redirecting to portal", customer_id, sub.id
-            )
-            # Create a portal session instead
-            portal_session = stripe.billing_portal.Session.create(
-                customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"
-            )
-            return {"url": portal_session.url}
+    # Check if customer already has an active subscription, and whether any past one had a trial
+    history = await anyio.to_thread.run_sync(_subscription_history, customer_id)
+    if history.running_subscription_id is not None:
+        # Customer already has a subscription - they should use the portal to manage it
+        logger.warning(
+            "Customer %s already has an active subscription %s, redirecting to portal",
+            customer_id,
+            history.running_subscription_id,
+        )
+        # Create a portal session instead
+        portal_session = stripe.billing_portal.Session.create(
+            customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"
+        )
+        return {"url": portal_session.url}
 
     checkout_params = {
         "line_items": [{"price": price_id, "quantity": 1}],
@@ -74,8 +98,8 @@ async def create_checkout_session(
         },
     }
 
-    # Add trial period if enabled for this plan
-    if is_trial_enabled_for_plan(payload.tier):
+    # Add trial period if enabled for this plan; each customer gets one trial, since cancelling keeps it in Stripe
+    if is_trial_enabled_for_plan(payload.tier) and not history.had_trial:
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
 
     checkout_params["customer"] = customer_id
@@ -96,6 +120,7 @@ async def create_portal_session(request: Request, user: Annotated[dict, Depends(
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
     sb = ensure_supabase()
+    provisioner_service.refuse_pending_deletion(sb, user["account_id"], PENDING_DELETION_BILLING_DETAIL)
 
     # Stripe customer ID is stored on the accounts table
     result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()

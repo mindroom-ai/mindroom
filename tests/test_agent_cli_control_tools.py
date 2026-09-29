@@ -313,6 +313,105 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
+    tmp_path,
+    monkeypatch,
+    approved,
+) -> None:
+    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
+    config = with_responder_access(
+        Config(
+            agents={
+                "helper": AgentConfig(display_name="Helper", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval={"default": "require_approval"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    paths = _runtime_paths(tmp_path)
+
+    async def run_subagent(agent_name: str, task: str) -> str:
+        pytest.fail("external raw body")
+
+    function = Function.from_callable(run_subagent)
+    function.owning_toolkit = "delegate"
+    function.external_execution = True
+    catalog = await _catalog(tmp_path, [function])
+    asked = []
+
+    async def decide(paused):
+        asked.extend(str(tool.tool_call_id) for tool in paused.tools)
+        return tuple(
+            apply_exact_approval_decisions(
+                paused.requirements,
+                decisions=dict.fromkeys(asked, approved),
+                denial_reasons=dict.fromkeys(asked, "denied"),
+            ),
+        )
+
+    runtime = _delegate_runtime_context(config, paths)
+    runtime = replace(
+        runtime,
+        agent_name="helper",
+        target=replace(runtime.target, session_id="session"),
+        cli_approval_handler=decide,
+    )
+    catalog.runtime_context = runtime
+    catalog._bindings.clear()
+    await catalog.prepare([function])
+    identity = build_execution_identity_from_runtime_context(runtime)
+    catalog.agent.db = create_session_storage("helper", config, paths, identity)
+    catalog.agent.db.upsert_session(catalog.session)
+    catalog.run_response.agent_id = "helper"
+    catalog.run_response.user_id = identity.requester_id
+    call_id = uuid4()
+    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
+    catalog.run_response.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    children = []
+
+    async def child_response(child, **kwargs):
+        children.append(child)
+        return "child done"
+
+    async def authorize(key, arguments):
+        return None
+
+    owner = LiveTurnTools(
+        CliTurnOwner(identity, "turn", "run", "worker"),
+        catalog=catalog,
+        worker=None,
+        authorize=authorize,
+        run_child=child_response,
+    )
+
+    async def checkpoint(parent):
+        assert parent == "bash-parent"
+
+    monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
+    async with owner._window("bash-parent"):
+        await owner.operation(
+            ToolCallOperation(
+                operation="tools.call",
+                call_id=call_id,
+                toolkit="delegate",
+                function="run_subagent",
+                arguments={"agent_name": "code", "task": "a task nobody approved"},
+            ),
+        )
+    receipt = await owner.get_call(str(call_id))
+
+    assert asked == [str(call_id)]
+    assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
+    assert receipt["status"] == "completed", receipt
+    await owner.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["live", "recover", "recover_again", "deny", "cancel", "control"])
 async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mode) -> None:  # noqa: C901
     # Delegation records fsync every event; disk flush latency under parallel runs is not under test.

@@ -25,6 +25,12 @@ class TestInstancesEndpoints:
             mock.return_value = sb
             yield sb
 
+    @pytest.fixture(autouse=True)
+    def account_not_pending_deletion(self):
+        """These tests use accounts that are not pending deletion; test_instance_lifecycle covers the refusal."""
+        with patch("backend.services.provisioner_service.account_pending_deletion", return_value=False):
+            yield
+
     @pytest.fixture
     def mock_verify_user(self):
         """Mock user verification."""
@@ -180,6 +186,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         instance_mock = MagicMock()
@@ -256,6 +263,7 @@ class TestInstancesEndpoints:
         mock_supabase.table.side_effect = table_side_effect
         mock_sub_chain.select.return_value = mock_sub_chain
         mock_sub_chain.eq.return_value = mock_sub_chain
+        mock_sub_chain.limit.return_value = mock_sub_chain
         mock_inst_chain.select.return_value = mock_inst_chain
         mock_inst_chain.eq.return_value = mock_inst_chain
         mock_inst_chain.limit.return_value = mock_inst_chain
@@ -297,6 +305,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         # Setup mock chain for instance query
@@ -359,6 +368,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         instance_mock = MagicMock()
@@ -653,6 +663,7 @@ class TestInstancesEndpoints:
         subscription_mock = MagicMock()
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
         subscription_mock.execute.return_value = Mock(data=[subscription])
 
         # Setup mock chain for instance query

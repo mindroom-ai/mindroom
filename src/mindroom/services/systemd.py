@@ -68,6 +68,9 @@ def _get_recent_logs(num_lines: int = 10) -> list[str]:
 
 def _quote_environment_assignment(name: str, value: str) -> str:
     """Return one safely quoted systemd Environment assignment."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in f"{name}{value}"):
+        msg = f"Refusing to write {name} to the systemd unit: it contains a control character"
+        raise ValueError(msg)
     escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
     return f'"{name}={escaped_value}"'
 
@@ -153,12 +156,12 @@ def _install_service() -> InstallResult:
     unit_path = _get_unit_path()
     unit_name = _get_unit_name()
     try:
-        service_environment = resolve_service_environment(uv_path)
-    except ServiceConfigMissingError as exc:
+        unit_content = _generate_unit_file(uv_path, resolve_service_environment(uv_path))
+    except (ServiceConfigMissingError, ValueError) as exc:
         return InstallResult(success=False, message=str(exc))
 
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(_generate_unit_file(uv_path, service_environment), encoding="utf-8")
+    unit_path.write_text(unit_content, encoding="utf-8")
 
     subprocess.run(["systemctl", "--user", "stop", unit_name], capture_output=True, check=False)
 

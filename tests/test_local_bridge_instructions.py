@@ -1,9 +1,10 @@
-"""Check that printed registration instructions preserve their executable payloads."""
+"""Check the bridge manager's printed registration instructions and generated bridge access."""
 
 from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 import shlex
 import socket
@@ -14,11 +15,13 @@ from typing import TYPE_CHECKING
 
 import dotenv
 import pytest
+import yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
 from rich.console import Console
 from typer.main import get_command
+from typer.testing import CliRunner, Result
 
 
 @pytest.fixture
@@ -103,3 +106,183 @@ def test_tuwunel_start_hint_parses_for_selected_instance(bridge_manager: ModuleT
     with command.make_context("start", shlex.split(start_line)[2:]) as context:
         assert context.params["bridge_type"] == bridge_manager.BridgeType.TELEGRAM
         assert context.params["instance"] == "alpha"
+
+
+_BRIDGE_ADMIN = "@alice:m-alpha.example.com"
+_BRIDGE_CREDENTIAL_ARGS = {
+    "telegram": [
+        "--api-id",
+        "12345",
+        "--api-hash",
+        "telegram-hash-for-tests",
+        "--bot-token",
+        "telegram-token-for-tests",
+    ],
+    "slack": ["--app-token", "slack-app-for-tests", "--bot-token", "slack-bot-for-tests", "--team-id", "T0TEST"],
+}
+# Levels each bridge's config loader accepts: legacy mautrix-telegram and bridgev2 mautrix-slack.
+_BRIDGE_PERMISSION_LEVELS = {
+    "telegram": {"relaybot", "user", "puppeting", "full", "admin"},
+    "slack": {"block", "relay", "commands", "user", "admin"},
+}
+_BRIDGE_RELAY_LEVEL = {"telegram": "relaybot", "slack": "relay"}
+
+
+def _add_bridge(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *args: str,
+) -> Result:
+    monkeypatch.setattr(bridge_manager, "BRIDGE_REGISTRY_FILE", tmp_path / "bridge_instances.json")
+    monkeypatch.setattr(
+        bridge_manager,
+        "load_instances",
+        lambda: {"alpha": {"matrix_type": "synapse", "domain": "alpha.example.com", "data_dir": str(tmp_path)}},
+    )
+    monkeypatch.setattr(bridge_manager, "_find_next_port", lambda *_args: 29317)
+    return CliRunner().invoke(bridge_manager.app, ["add", *args, "--instance", "alpha"])
+
+
+@pytest.mark.parametrize("bridge_type", ["telegram", "slack"])
+def test_added_bridge_grants_admin_only_to_the_designated_operator(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bridge_type: str,
+) -> None:
+    """Self-registered homeserver accounts, including an unreserved @admin, get only the bridge's relay level."""
+    credential_args = _BRIDGE_CREDENTIAL_ARGS[bridge_type]
+    result = _add_bridge(
+        bridge_manager,
+        tmp_path,
+        monkeypatch,
+        bridge_type,
+        *credential_args,
+        "--admin",
+        _BRIDGE_ADMIN,
+    )
+
+    assert result.exit_code == 0, result.output
+    config_file = tmp_path / "bridges" / bridge_type / "data" / "config.yaml"
+    permissions = yaml.safe_load(config_file.read_text())["bridge"]["permissions"]
+    assert permissions == {"*": _BRIDGE_RELAY_LEVEL[bridge_type], _BRIDGE_ADMIN: "admin"}
+    assert set(permissions.values()) <= _BRIDGE_PERMISSION_LEVELS[bridge_type]
+    assert config_file.stat().st_mode & 0o777 == 0o600
+    registry = (tmp_path / "bridge_instances.json").read_text()
+    assert all(value not in registry for value in credential_args[1::2])
+
+
+def test_bridge_add_rejects_an_admin_that_is_not_a_matrix_user_id(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare localpart would silently grant nobody, or whoever later registers a matching account."""
+    result = _add_bridge(
+        bridge_manager,
+        tmp_path,
+        monkeypatch,
+        "telegram",
+        *_BRIDGE_CREDENTIAL_ARGS["telegram"],
+        "--admin",
+        "admin",
+    )
+
+    assert result.exit_code == 1
+    assert not (tmp_path / "bridges").exists()
+    assert not (tmp_path / "bridge_instances.json").exists()
+
+
+def test_registration_rewrite_keeps_appservice_tokens_owner_only(bridge_manager: ModuleType, tmp_path: Path) -> None:
+    """The registration holds the homeserver and appservice tokens, so it must not stay world-readable."""
+    registration_file = tmp_path / "registration.yaml"
+    registration_file.write_text("id: telegram\nas_token: as-token-for-tests\nurl: http://localhost:29317\n")
+    registration_file.chmod(0o644)
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type="telegram",
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
+
+    bridge_manager._point_registration_at_bridge_container(bridge, registration_file)
+
+    assert yaml.safe_load(registration_file.read_text()) == {
+        "id": "telegram",
+        "as_token": "as-token-for-tests",
+        "url": "http://alpha-telegram-bridge:29317",
+    }
+    assert registration_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_start_strips_tokens_and_world_read_left_by_older_versions(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older registries copied platform tokens, and older bridge files were written at the umask."""
+    data_dir = tmp_path / "bridges" / "telegram"
+    (data_dir / "data").mkdir(parents=True)
+    secret_files = [data_dir / "data" / "config.yaml", data_dir / "data" / "registration.yaml"]
+    for path in secret_files:
+        path.write_text("as_token: as-token-for-tests\n")
+        path.chmod(0o644)
+    registry_file = tmp_path / "bridge_instances.json"
+    bridge = {
+        "bridge_type": "telegram",
+        "instance_name": "alpha",
+        "port": 29317,
+        "data_dir": str(data_dir),
+        "credentials": {"bot_token": "telegram-token-for-tests"},
+    }
+    registry_file.write_text(json.dumps({"bridges": {"alpha": [bridge]}}))
+    registry_file.chmod(0o644)
+    monkeypatch.setattr(bridge_manager, "BRIDGE_REGISTRY_FILE", registry_file)
+    monkeypatch.setattr(
+        bridge_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess("docker compose up -d", 0, "", ""),
+    )
+
+    result = CliRunner().invoke(bridge_manager.app, ["start", "telegram", "--instance", "alpha"])
+
+    assert result.exit_code == 0, result.output
+    assert "telegram-token-for-tests" not in registry_file.read_text()
+    assert {path.name: path.stat().st_mode & 0o777 for path in [*secret_files, registry_file]} == {
+        "config.yaml": 0o600,
+        "registration.yaml": 0o600,
+        "bridge_instances.json": 0o600,
+    }
+
+
+def test_unrestrictable_bridge_file_prints_the_exact_fix(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable bridge file the operator cannot chmod gets the command that can; owner-only files are left alone."""
+    config_file = tmp_path / "data" / "config.yaml"
+    config_file.parent.mkdir()
+    config_file.write_text("bridge: {}\n")
+    config_file.chmod(0o644)
+    registration_file = tmp_path / "data" / "registration.yaml"
+    registration_file.write_text("as_token: as-token-for-tests\n")
+    registration_file.chmod(0o600)
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type="telegram",
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
+
+    def _refuse_chmod(*_args: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(bridge_manager.Path, "chmod", _refuse_chmod)
+
+    bridge_manager._protect_bridge_secret_files(bridge)
+
+    output = bridge_manager.console.export_text()
+    assert f"sudo chmod 600 {shlex.quote(str(config_file))}" in output
+    assert "registration.yaml" not in output

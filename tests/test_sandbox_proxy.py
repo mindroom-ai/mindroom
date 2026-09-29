@@ -6433,6 +6433,7 @@ class TestWorkerToolsOverride:
             "google_docs",
             "google_drive",
             "google_sheets",
+            "google_tasks",
             "homeassistant",
             "invite_router",
             "mem0",

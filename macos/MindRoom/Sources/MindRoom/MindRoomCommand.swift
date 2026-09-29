@@ -22,6 +22,10 @@ enum MindRoomCommand: Equatable {
     /// Matches `_CONNECT_ALREADY_CONNECTED_EXIT_CODE` in src/mindroom/cli/main.py.
     static let alreadyConnectedExitCode: Int32 = 3
 
+    /// Pairing was cancelled before credentials were received.
+    /// Matches `_CONNECT_CANCELLED_EXIT_CODE` in src/mindroom/cli/main.py.
+    static let pairingCancelledExitCode: Int32 = 130
+
     var title: String {
         switch self {
         case .installRuntime:

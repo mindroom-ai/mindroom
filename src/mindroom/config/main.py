@@ -73,7 +73,7 @@ from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
 )
-from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint
+from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -390,7 +390,8 @@ def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
-    model_config = ConfigDict(extra="forbid")
+    # Config carries API keys, so rendered validation errors must never echo input values.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
     _uses_includes: bool = PrivateAttr(default=False)
@@ -1150,6 +1151,10 @@ class Config(BaseModel):
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
         )
         return _strip_empty_root_sections(payload)
+
+    def redacted_authored_model_dump(self) -> dict[str, Any]:
+        """Serialize authored config for display, masking schema-marked secrets and credential-named keys."""
+        return redact_authored_config(self.authored_model_dump())
 
     def with_runtime_knowledge_base_overlay(
         self,
@@ -2020,6 +2025,11 @@ class Config(BaseModel):
 def dashboard_config_schema() -> dict[str, Any]:
     """Return the Config JSON schema with dashboard hints and default-factory values."""
     return Config.model_json_schema(schema_generator=DashboardJsonSchema)
+
+
+def redact_authored_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """Redact one authored config payload for display, letting the config schema decide for typed fields."""
+    return cast("dict[str, Any]", redact_config_for_display(payload, dashboard_config_schema()))
 
 
 def failed_config_source_fingerprint(exc: BaseException) -> str | None:

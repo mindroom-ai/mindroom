@@ -100,7 +100,7 @@ class FakeRuntime:
 
     def status(self) -> dict[str, object]:
         return {
-            "mode": "observe_only" if self.running else "stopped",
+            "gui_mode": "observe_only" if self.running else "stopped",
             "control_available": False,
             "lease_remaining_seconds": 0,
             "lease_expires_at_ms": None,
@@ -477,11 +477,12 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     assert response["status"]["shell"] == {
         "enabled": True,
         "pending": None,
-        "auto_approve_remaining_seconds": 0.0,
+        "auto_approve_remaining_seconds": 0,
         "auto_approve_until_revoked": False,
         "active_request_id": None,
         "handles": [],
     }
+    assert type(response["status"]["shell"]["auto_approve_remaining_seconds"]) is int
     assert load_native_config(native_config_path(tmp_path)).to_payload() == before | {
         "revision": 2,
         "files": {"roots": [str(root.resolve())]},
@@ -728,7 +729,7 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
     with pytest.raises(NativeProtocolError) as caught:
         await host.handle(_request("decide_shell", command_id="shell-1", approved=True, auto_approve_seconds=0))
     assert caught.value.code == "shell_denied"
-    assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0.0
+    assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0
 
     stopped = await host.handle(_request("stop"))
     assert stopped["status"]["bridge"]["state"] == "stopped"
@@ -764,13 +765,13 @@ async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transpor
             await host.handle(_request("grant_shell", **parameters))
         assert caught.value.code == "invalid_request"
     granted = await host.handle(_request("grant_shell", duration_seconds=900))
-    assert 899 < granted["status"]["shell"]["auto_approve_remaining_seconds"] <= 900
+    assert granted["status"]["shell"]["auto_approve_remaining_seconds"] == 900
     await bridge.on_to_device_event(_shell_event("printf granted > granted", tmp_path))
     await bridge.execute_pending(shell_starts=True)
     assert (tmp_path / "granted").read_text() == "granted"
 
     revoked = await host.handle(_request("revoke_shell"))
-    assert revoked["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
+    assert revoked["status"]["shell"]["auto_approve_remaining_seconds"] == 0
     await bridge.on_to_device_event(_shell_event("touch after-revoke", tmp_path, request_id="shell-2", sequence=2))
     execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     await _wait_for_native_pending(host)
@@ -783,7 +784,7 @@ async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transpor
 
     forever = await host.handle(_request("grant_shell", until_revoked=True))
     assert forever["status"]["shell"]["auto_approve_until_revoked"] is True
-    assert forever["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
+    assert forever["status"]["shell"]["auto_approve_remaining_seconds"] == 0
     await bridge.on_to_device_event(_shell_event("printf kept > kept", tmp_path, request_id="shell-3", sequence=3))
     await bridge.execute_pending(shell_starts=True)
     assert (tmp_path / "kept").read_text() == "kept"
@@ -823,7 +824,7 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
         assert caught.value.code == "shell_denied"
 
         killed = await host.handle(_request("kill_shell_handle", handle=handle))
-        assert killed["status"]["shell"]["handles"] == []
+        assert [entry["handle"] for entry in killed["status"]["shell"]["handles"]] == [handle]
         leader = int(pid_file.read_text())
         for _ in range(400):
             try:
@@ -833,6 +834,13 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
             await asyncio.sleep(0.005)
         else:
             pytest.fail("locally killed handle kept running")
+        # The handle stays, so the agent's next check learns the person at the computer killed it.
+        for _ in range(400):
+            [entry] = host.status()["shell"]["handles"]
+            if entry["state"] != "running":
+                break
+            await asyncio.sleep(0.005)
+        assert entry["state"] == "killed"
     finally:
         if pid_file.exists() and pid_file.read_text().strip():
             with suppress(ProcessLookupError):
@@ -896,7 +904,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         # Both replies precede the end of termination: the TERM-resistant child still holds the command open.
         assert (revoke_active, status_active) == ("shell-1", "shell-1")
         assert revoked["ok"] is True
-        assert status["result"]["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
+        assert status["result"]["status"]["shell"]["auto_approve_remaining_seconds"] == 0
         assert stopped["ok"] is True
         assert stopped["result"]["status"]["bridge"]["state"] == "stopped"
         restarted = _attach_shell_runtime(host, tmp_path)._bridge
@@ -1060,7 +1068,7 @@ async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
     assert offline_runtime_session.client.to_device_callbacks == []
     with pytest.raises(DesktopFilesystemError, match="closed"):
         filesystem.list_folders()
-    assert runtime.status()["mode"] == "stopped"
+    assert runtime.status()["gui_mode"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1098,7 @@ async def test_runtime_start_failure_releases_pinned_folders(
     with pytest.raises(DesktopFilesystemError, match="closed"):
         opened[0].list_folders()
     assert offline_runtime_session.closed is True
-    assert runtime.status()["mode"] == "stopped"
+    assert runtime.status()["gui_mode"] == "stopped"
 
 
 async def _native(
@@ -1214,7 +1222,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         await _native(host, "decide_shell", {"command_id": leased, "approved": True, "auto_approve_seconds": 300})
         assert (await _reply(bridge_transport, leased)).result["exit_code"] == 0
         assert marker.read_text() == "onceleased"
-        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 300.0
+        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 300
 
         # Under the lease, a command that outlives its inline wait becomes a handle whose large output arrives encrypted.
         expected = b"attachment\n" * 8_000
@@ -1249,7 +1257,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
 
         # The lease ends on the monotonic clock, and revoking rejects the request waiting after it.
         monotonic[0] += 301
-        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0.0
+        assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0
         expired = await send("run_shell", command="echo $$ >> pids; printf expired >> marker", cwd=str(work))
         assert (await _wait_for_native_pending(host))["request_id"] == expired
         await _native(host, "revoke_shell")
@@ -1258,7 +1266,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
 
         # Stopping the bridge kills a background handle and its children and removes the private output spool.
         granted = await _native(host, "grant_shell", {"duration_seconds": 60})
-        assert granted["status"]["shell"]["auto_approve_remaining_seconds"] == 60.0
+        assert granted["status"]["shell"]["auto_approve_remaining_seconds"] == 60
         background = await call(
             "run_shell",
             command="sleep 30 & echo $! >> pids; echo $$ >> pids; wait",

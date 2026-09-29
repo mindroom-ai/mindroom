@@ -113,7 +113,11 @@ class DesktopFilesystem:
             raise DesktopFilesystemError(message) from exc
 
     def read_file(self, root_id: str, path: str, offset: int = 0) -> dict[str, object]:
-        """Read one bounded UTF-8 chunk from a regular file."""
+        """Read one bounded UTF-8 chunk from a regular file.
+
+        The caller (the bridge, which knows the command envelope) trims this further to fit the
+        inline reply budget.
+        """
         _, root_fd = self._root(root_id)
         relative = self._relative(path)
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:

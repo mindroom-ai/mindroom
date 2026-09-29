@@ -8,6 +8,8 @@ from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import decorate_subscription_for_response, is_expired_trial
 from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
 from backend.pricing import get_plan_limits_from_metadata
+from backend.services import provisioner_service
+from backend.services.instance_lifecycle import DELETION_BILLING_MARKER, PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -69,6 +71,7 @@ async def cancel_subscription(
     """Cancel subscription."""
     sb = ensure_supabase()
     account_id = user["account_id"]
+    provisioner_service.refuse_pending_deletion(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
 
     # Get current subscription
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
@@ -90,7 +93,10 @@ async def cancel_subscription(
     try:
         if request.cancel_at_period_end:
             # Cancel at end of billing period
-            cancelled_sub = stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=True)
+            # The customer's own cancellation is theirs to keep, so a later deletion must not resume it.
+            cancelled_sub = stripe.Subscription.modify(
+                stripe_sub_id, cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: ""}
+            )
         else:
             # Cancel immediately
             cancelled_sub = stripe.Subscription.delete(stripe_sub_id)
@@ -114,6 +120,7 @@ async def reactivate_subscription(request: Request, user: Annotated[dict, Depend
     """Reactivate a cancelled subscription (if still in billing period)."""
     sb = ensure_supabase()
     account_id = user["account_id"]
+    provisioner_service.refuse_pending_deletion(sb, account_id, PENDING_DELETION_BILLING_DETAIL)
 
     # Get current subscription
     sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
@@ -134,7 +141,9 @@ async def reactivate_subscription(request: Request, user: Annotated[dict, Depend
 
     try:
         # Reactivate by removing the cancel_at_period_end flag
-        reactivated_sub = stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=False)
+        reactivated_sub = stripe.Subscription.modify(
+            stripe_sub_id, cancel_at_period_end=False, metadata={DELETION_BILLING_MARKER: ""}
+        )
 
         # Update local database
         sb.table("subscriptions").update(

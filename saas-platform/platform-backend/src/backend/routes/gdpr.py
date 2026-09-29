@@ -6,17 +6,18 @@ KISS principle - simple, straightforward implementation.
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from backend.deps import ensure_supabase, verify_user
+from backend.config import ACCOUNT_DELETION_GRACE_DAYS, logger, stripe
+from backend.deps import ensure_supabase, invalidate_account_auth_cache, verify_user, verify_user_allow_deleted
 from backend.models import (
     GdprCancelDeletionResponse,
     GdprConsentResponse,
     GdprDeletionResponse,
     GdprExportResponse,
 )
-from backend.services import instances_data
+from backend.services import instance_lifecycle, instances_data
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ class DeletionRequest(BaseModel):
 
 
 @router.get("/my/gdpr/export-data", response_model=GdprExportResponse)
-async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def export_user_data(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Export all user data for GDPR compliance.
     Returns all personal data in machine-readable format.
@@ -103,11 +104,19 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
                 "After successful account deletion, a deletion audit record retains your account UUID. "
                 "Separate audit-log cleanup may remove it later."
             ),
-            "payment_info": "Payment and webhook records retain account references and payment identifiers.",
-            "invoices": "Payment and webhook records are not removed by account cleanup and can prevent deletion.",
+            "payment_info": (
+                "Payment records keep the invoice, amount, and Stripe customer and subscription identifiers for "
+                "accounting after account deletion; only their account_id column is cleared."
+            ),
+            "invoices": (
+                "Stripe webhook event records are kept after account deletion with their Stripe payloads, which can "
+                "include your account ID, Stripe customer ID, and invoice contact details; only their account_id "
+                "column is cleared."
+            ),
             "external_data": (
-                "Account cleanup does not delete the authentication user, Stripe customer or subscription data, "
-                "Matrix data, or persistent volumes; separate processor and operator policies apply."
+                "Account cleanup uninstalls hosted instances with their Matrix homeserver data and persistent volumes "
+                "and deletes the authentication user, but does not delete Stripe customer or subscription records or "
+                "copies held by other Matrix homeservers; separate processor and operator policies apply."
             ),
         },
         "third_party_processors": [
@@ -134,8 +143,9 @@ async def request_account_deletion(
             "status": "confirmation_required",
             "message": "Please confirm deletion by setting confirmation=true",
             "warning": (
-                "Scheduled cleanup becomes eligible after 7 days. "
-                "You can request cancellation while your account is still pending deletion. "
+                "Confirming stops your hosted instances immediately and lets paid subscriptions end at the end of "
+                "their current billing period. Scheduled cleanup becomes eligible after 7 days. "
+                "You can cancel the request within those 7 days, which keeps your subscription. "
                 "Completed application-database deletion cannot be undone; "
                 "retained and external data have separate limits."
             ),
@@ -144,48 +154,113 @@ async def request_account_deletion(
     account_id = user["account_id"]
     sb = ensure_supabase()
 
-    # Log the deletion request
-    sb.table("audit_logs").insert(
-        {
-            "account_id": account_id,
-            "action": "gdpr_deletion_requested",
-            "resource_type": "account",
-            "resource_id": account_id,
-            "success": True,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-    ).execute()
+    # Schedule the end of billing first, so a Stripe failure leaves the account untouched and can simply be retried.
+    try:
+        scheduled = await instance_lifecycle.end_account_billing_at_period_end(account_id)
+    except stripe.StripeError as exc:
+        detail = "Stripe could not schedule the end of your subscription, so your account was not deleted. Try again."
+        raise HTTPException(status_code=502, detail=detail) from exc
 
-    # Soft-delete now; the optional cleanup scheduler attempts database deletion after 7 days.
-    # Payment/webhook references can block cleanup; external data is outside this RPC.
-    sb.rpc(
-        "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
-    ).execute()
+    try:
+        # Log the deletion request
+        sb.table("audit_logs").insert(
+            {
+                "account_id": account_id,
+                "action": "gdpr_deletion_requested",
+                "resource_type": "account",
+                "resource_id": account_id,
+                "success": True,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        ).execute()
+        # Soft-delete now; the optional cleanup scheduler uninstalls the instances and deletes the rows after 7 days.
+        # External data is outside this RPC.
+        sb.rpc(
+            "soft_delete_account",
+            {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id},
+        ).execute()
+    except Exception as exc:
+        logger.exception("Could not record the deletion request of account %s", account_id)
+        # The soft delete may have committed before its response was lost; then the deletion stands.
+        if not _deletion_recorded_after_all(sb, account_id, scheduled):
+            raise HTTPException(status_code=500, detail=await _undo_scheduled_billing_end(scheduled)) from exc
+    # The account is pending deletion now, so its cached sign-in must not keep full access.
+    invalidate_account_auth_cache(account_id)
+    # An account pending deletion never runs instances, so this holds them until cleanup.
+    hold_errors = await instance_lifecycle.reconcile_account_instances(account_id)
+    # Cancelling cannot be undone, so subscriptions without a paid period are cancelled only now the deletion is
+    # recorded. The deletion stands whatever fails here, and the nightly cleanup repeats this step.
+    try:
+        await instance_lifecycle.cancel_unpaid_subscriptions(account_id)
+    except Exception:
+        logger.exception("Could not cancel the unpaid subscriptions of account %s; cleanup retries", account_id)
+    instances = (
+        "Stopping your hosted instances failed and is retried automatically."
+        if hold_errors
+        else "Your hosted instances were stopped."
+    )
 
     return {
         "status": "deletion_scheduled",
-        "message": "Your account has been scheduled for deletion",
-        "grace_period_days": 7,
+        "message": (
+            f"Your account is scheduled for deletion. {instances} "
+            "Paid subscriptions end at the end of their current billing period unless you cancel the deletion."
+        ),
+        "grace_period_days": ACCOUNT_DELETION_GRACE_DAYS,
         "deletion_date": (
             "Eligible for scheduled application-database cleanup after 7 days, when cleanup is enabled; "
             "completion is not guaranteed"
         ),
         "cancellation": (
-            "While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings, "
-            "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion."
+            f"Within {ACCOUNT_DELETION_GRACE_DAYS} days, sign in and select Cancel Deletion Request in Settings, "
+            "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion. "
+            "Cancelling keeps a subscription that has not reached the end of its billing period."
         ),
         "data_deleted": (
-            "Cleanup targets application-database account, subscription, instance, "
-            "existing account-linked audit-log, and subscription-linked usage records"
+            "Cleanup uninstalls hosted instances with their Matrix homeserver data, persistent volumes, and "
+            "platform-paid AI keys, then targets application-database account, subscription, instance, "
+            "existing account-linked audit-log, and subscription-linked usage records, and finally deletes the "
+            "authentication user"
         ),
         "data_retained": (
             "After successful account deletion, a deletion audit record retains your account UUID. "
             "Separate audit-log cleanup may remove it later. "
-            "Payment and webhook records retain account references and can prevent cleanup. "
-            "Cleanup does not delete the authentication user, Stripe customer or subscription data, "
-            "Matrix data, or persistent volumes; separate processor and operator policies apply."
+            "Payment records and Stripe webhook event records are kept for accounting with only their account_id "
+            "column cleared; they keep Stripe identifiers and event payloads that can include your account ID and "
+            "invoice contact details. "
+            "Cleanup deletes the authentication user last, but does not delete Stripe customer or subscription records "
+            "or copies held by other Matrix homeservers; separate processor and operator policies apply."
         ),
     }
+
+
+def _deletion_recorded_after_all(
+    sb: Any, account_id: str, scheduled: list[instance_lifecycle.ScheduledBillingEnd]
+) -> bool:
+    """Return whether a deletion whose recording raised was stored anyway; answer 500 when that is unknown."""
+    try:
+        return instance_lifecycle.account_pending_deletion(sb, account_id)
+    except Exception as lookup_error:
+        logger.exception("Could not check whether the deletion of account %s was recorded", account_id)
+        billing = "is unchanged" if not scheduled else "may be set to end at the end of its billing period"
+        detail = (
+            "We could not confirm whether your deletion request was recorded, and your subscription "
+            f"{billing}. Reload your settings: cancel the deletion if it is pending, or request it again."
+        )
+        raise HTTPException(status_code=500, detail=detail) from lookup_error
+
+
+async def _undo_scheduled_billing_end(scheduled: list[instance_lifecycle.ScheduledBillingEnd]) -> str:
+    """Resume the billing a failed deletion request had set to end, and describe what the customer is left with."""
+    try:
+        await instance_lifecycle.resume_subscriptions(scheduled)
+    except stripe.StripeError:
+        logger.exception("Could not resume the Stripe subscriptions a failed deletion request set to end")
+        return (
+            "Your account was not deleted, but your subscription is still set to end at the end of its billing "
+            "period; resume it from the billing page or try the deletion again."
+        )
+    return "Your account was not deleted and your billing is unchanged. Try again."
 
 
 @router.post("/my/gdpr/consent", response_model=GdprConsentResponse)
@@ -232,7 +307,7 @@ async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: C
 
 
 @router.post("/my/gdpr/cancel-deletion", response_model=GdprCancelDeletionResponse)
-async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Cancel a pending account deletion request.
     Only works if account is still in soft-delete state.
@@ -240,12 +315,36 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     account_id = user["account_id"]
     sb = ensure_supabase()
 
-    # Check if account is soft-deleted
-    account_result = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
-    if not account_result.data or not account_result.data[0].get("deleted_at"):
+    if not instance_lifecycle.account_pending_deletion(sb, account_id):
         return {"status": "not_pending", "message": "No deletion request found for this account"}
 
-    # The RPC restores the account and records the cancellation in one transaction.
-    sb.rpc("restore_account", {"target_account_id": account_id}).execute()
+    # The RPC restores the account and records the cancellation in one transaction. It refuses after the grace
+    # period, when cleanup may already have uninstalled the instances, and for a suspended account.
+    restored = sb.rpc("restore_account", {"target_account_id": account_id}).execute().data
+    if not restored:
+        raise HTTPException(status_code=409, detail="This account deletion can no longer be cancelled")
+    # The account is active again, so a cached pending-deletion sign-in must not limit its next request.
+    invalidate_account_auth_cache(account_id)
+    try:
+        await instance_lifecycle.resume_account_billing(account_id)
+    except stripe.StripeError:
+        logger.exception("Could not resume Stripe billing after account %s cancelled its deletion", account_id)
+        billing = (
+            " Stripe could not resume your subscription, so it still ends at the end of its billing period; "
+            "resume it from the billing page."
+        )
+    else:
+        billing = ""
+    # Instances held for the deletion restart only while their subscription is entitled.
+    restart_errors = await instance_lifecycle.reconcile_account_instances(account_id)
+    instances = (
+        " Restarting your hosted instances failed and is retried automatically."
+        if restart_errors
+        else " Hosted instances run again while your subscription is active; choose a plan again if it has ended."
+    )
 
-    return {"status": "success", "message": "Account deletion request has been cancelled", "account_status": "active"}
+    return {
+        "status": "success",
+        "message": f"Account deletion request has been cancelled.{billing}{instances}",
+        "account_status": "active",
+    }

@@ -64,7 +64,7 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
 
     model = get_model_instance(config, runtime_paths)
     assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-5"
+    assert model.id == "claude-sonnet-5-5"
     assert model.region == expected_region
     if authored_region is not None and not replace_existing:
         assert model.project_id == "authored-project"

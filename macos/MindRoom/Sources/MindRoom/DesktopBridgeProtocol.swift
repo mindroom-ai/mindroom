@@ -208,7 +208,8 @@ struct DesktopShellHandle: Codable, Equatable, Identifiable {
 struct DesktopShellStatus: Codable, Equatable {
     var enabled = false
     var pending: DesktopShellRequest?
-    var autoApproveRemainingSeconds = 0.0
+    /// Whole seconds; the bridge already rounds a live lease up so it never reads as zero.
+    var autoApproveRemainingSeconds = 0
     var autoApproveUntilRevoked = false
     var activeRequestID: String?
     var handles: [DesktopShellHandle] = []
@@ -226,7 +227,7 @@ extension DesktopShellStatus {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         pending = try container.decodeIfPresent(DesktopShellRequest.self, forKey: .pending)
-        autoApproveRemainingSeconds = try container.decodeIfPresent(Double.self, forKey: .autoApproveRemainingSeconds) ?? 0
+        autoApproveRemainingSeconds = try container.decodeIfPresent(Int.self, forKey: .autoApproveRemainingSeconds) ?? 0
         autoApproveUntilRevoked = try container.decodeIfPresent(Bool.self, forKey: .autoApproveUntilRevoked) ?? false
         activeRequestID = try container.decodeIfPresent(String.self, forKey: .activeRequestID)
         handles = try container.decodeIfPresent([DesktopShellHandle].self, forKey: .handles) ?? []

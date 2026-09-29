@@ -56,7 +56,7 @@ def _workspace_plugin(tmp_path: Path) -> Path:
         "    display_name='Secondary',\n"
         "    client_config_service='secondary_google_oauth_client',\n"
         "    allowed_hosted_domains=('secondary.example',),\n"
-        "    services=('gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets'),\n"
+        "    services=('gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_tasks'),\n"
         ")\n",
     )
     (plugin / "tools.py").write_text(
@@ -115,11 +115,13 @@ def workspace_portal(
                     "google_calendar",
                     "google_docs",
                     "google_sheets",
+                    "google_tasks",
                     "secondary_gmail",
                     "secondary_google_drive",
                     "secondary_google_calendar",
                     "secondary_google_docs",
                     "secondary_google_sheets",
+                    "secondary_google_tasks",
                 ],
                 "private": {"per": "user_agent"},
                 "access": {"users": ["@alice:example.org", "@bob:example.org"]},
@@ -155,7 +157,7 @@ def workspace_portal(
 
 
 def test_connections_catalog_shows_both_google_workspace_service_sets(workspace_portal: dict[str, Any]) -> None:
-    """Each account has five labeled rows backed by independent service connections."""
+    """Each account has six labeled rows backed by independent service connections."""
     response = workspace_portal["client"].get(
         "/api/connections",
         headers=workspace_portal["headers"]["alice"],
@@ -170,14 +172,16 @@ def test_connections_catalog_shows_both_google_workspace_service_sets(workspace_
         "google_calendar": "Google Calendar",
         "google_docs": "Google Docs",
         "google_sheets": "Google Sheets",
+        "google_tasks": "Google Tasks",
         "secondary_google_gmail": "Secondary Gmail",
         "secondary_google_drive": "Secondary Google Drive",
         "secondary_google_calendar": "Secondary Google Calendar",
         "secondary_google_docs": "Secondary Google Docs",
         "secondary_google_sheets": "Secondary Google Sheets",
+        "secondary_google_tasks": "Secondary Google Tasks",
     }
     tools = {tool["name"]: tool for tool in agent["tools"] if tool["provider"] is not None}
-    assert len(tools) == 10
+    assert len(tools) == 12
     for provider, service in services.items():
         assert len(service["tools"]) == 1
         tool = tools[service["tools"][0]]
@@ -193,11 +197,13 @@ def test_connections_catalog_shows_both_google_workspace_service_sets(workspace_
         ("google_calendar", "primary-client"),
         ("google_docs", "primary-client"),
         ("google_sheets", "primary-client"),
+        ("google_tasks", "primary-client"),
         ("secondary_google_gmail", "secondary-client"),
         ("secondary_google_drive", "secondary-client"),
         ("secondary_google_calendar", "secondary-client"),
         ("secondary_google_docs", "secondary-client"),
         ("secondary_google_sheets", "secondary-client"),
+        ("secondary_google_tasks", "secondary-client"),
     ],
 )
 def test_connect_uses_provider_specific_client_and_callback(

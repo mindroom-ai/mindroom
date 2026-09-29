@@ -247,12 +247,16 @@ class _ContextSwapLock:
         return None
 
 
+def _supabase_settings(url: str | None, anon_key: str | None) -> auth._ApiAuthSettings:
+    return auth._ApiAuthSettings(supabase_url=url, supabase_anon_key=anon_key, account_id=None, mindroom_api_key=None)
+
+
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
     """Supabase auth should stay disabled when credentials are incomplete."""
     runtime_paths = _runtime_paths(tmp_path)
-    assert auth._init_supabase_auth(runtime_paths, None, None) is None
-    assert auth._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
-    assert auth._init_supabase_auth(runtime_paths, None, "anon-key") is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, "anon-key")) is None
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -276,7 +280,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
 
@@ -299,7 +303,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
@@ -335,7 +339,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
 
-    supabase_auth = auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+    supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert isinstance(supabase_auth, FakeClient)
     assert imported_modules == ["supabase", "supabase"]
@@ -1566,6 +1570,7 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
         ("google_calendar", "shared", frozenset({"google_calendar"})),
         ("google_docs", "shared", frozenset({"google_docs"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
+        ("google_tasks", "shared", frozenset({"google_tasks"})),
         ("gmail", "shared", frozenset({"gmail"})),
         # Agent-scoped OAuth token services no longer inject themselves into the
         # shared allowlist; they fall through to the context allowlist unchanged.
@@ -1615,6 +1620,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
     assert tools_by_name["google_docs"]["execution_scope_supported"] is True
     assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
+    assert tools_by_name["google_tasks"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
@@ -2979,6 +2985,19 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
     assert detail[0]["loc"] == ["config"]
     assert "hooks.py" in detail[0]["msg"]
     assert detail[0]["type"] == "value_error"
+
+
+def test_save_config_validation_error_omits_submitted_api_keys(test_client: TestClient) -> None:
+    """Validation errors must describe the problem without echoing secrets from the payload."""
+    model = {"provider": "openai", "id": "model", "api_key": "sk-secret1", "extra_kwargs": {"api_key": "sk-secret2"}}
+    response = test_client.put(
+        "/api/config/save",
+        json={"models": {"default": model}, "router": {"model": "default"}, "agents": {}},
+    )
+
+    assert response.status_code == 422
+    assert "either api_key or extra_kwargs.api_key" in response.text
+    assert "sk-secret" not in response.text
 
 
 def test_save_config_can_recover_from_invalid_reload(

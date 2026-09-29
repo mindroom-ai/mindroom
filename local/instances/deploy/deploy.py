@@ -52,6 +52,8 @@ PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 # start and restart add missing runtime secrets to env files written by older versions.
 RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
 SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
+# Instance containers run as this user.
+CONTAINER_UID = 1000
 
 
 # Pydantic Models
@@ -202,6 +204,42 @@ def _find_next_ports(registry: Registry) -> tuple[int, int]:
     return mindroom_port, matrix_port
 
 
+def _write_private_file(path: Path, content: str) -> None:
+    """Write a secret-bearing file that only its owner can read, whatever the umask or its previous mode."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(content)
+
+
+def _give_to_container_user(path: Path) -> None:
+    """Make the container user own a path, changing only its owner so operators outside that user's group can too."""
+    if path.stat().st_uid != CONTAINER_UID:
+        os.chown(path, CONTAINER_UID, -1)
+
+
+def _restrict_to_container_user(path: Path) -> None:
+    """Give a secret-bearing file to the container user and make it readable by nobody else."""
+    quoted = shlex.quote(str(path))
+    fixes: list[str] = []
+    try:
+        _give_to_container_user(path)
+    except OSError:
+        fixes.append(f"sudo chown {CONTAINER_UID} {quoted}")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        fixes.append(f"sudo chmod 600 {quoted}")
+    if fixes:
+        console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
+        console.print(f"  Run: {' && '.join(fixes)}", markup=False, highlight=False, soft_wrap=True)
+
+
+def _protect_synapse_config(config_path: Path) -> None:
+    """Keep homeserver.yaml, which holds datastore passwords and the macaroon key, readable only by Synapse's user."""
+    _restrict_to_container_user(config_path)
+
+
 def _prepare_matrix_config(
     instance: Instance,
     matrix_type: MatrixType,
@@ -240,8 +278,9 @@ def _prepare_matrix_config(
                 matrix_server_name=matrix_server_name,
             )
 
-        with (target_dir / config_file_name).open("w") as f:
-            f.write(content)
+        config_path = target_dir / config_file_name
+        _write_private_file(config_path, content)
+        _protect_synapse_config(config_path)
 
     # Copy other files (like signing.key, log.config, etc.)
     for file in template_dir.glob("*"):
@@ -268,8 +307,9 @@ def _prepare_matrix_config(
 
 
 def _ensure_env_dir() -> None:
-    """Create the env directory lazily when generated files are needed."""
-    ENV_DIR.mkdir(parents=True, exist_ok=True)
+    """Create the owner-only env directory lazily when generated files are needed."""
+    ENV_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ENV_DIR.chmod(0o700)
 
 
 def _get_docker_compose_files(instance: Instance) -> str:
@@ -362,6 +402,8 @@ def _read_env_values(env_file: Path) -> dict[str, str]:
 
 def _ensure_env_secrets(env_file: Path, names: tuple[str, ...]) -> list[str]:
     """Append a random value for each named secret the env file leaves empty and return the generated names."""
+    # The env file holds provider keys and instance secrets, including ones written by older versions at the umask.
+    env_file.chmod(0o600)
     values = _read_env_values(env_file)
     generated = [name for name in names if not values.get(name)]
     if generated:
@@ -516,10 +558,7 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
     """Create and configure the environment file for an instance."""
     _ensure_env_dir()
     env_file = ENV_DIR / f"{name}.env"
-    if ENV_TEMPLATE.exists():
-        shutil.copy(ENV_TEMPLATE, env_file)
-    else:
-        env_file.touch()
+    _write_private_file(env_file, ENV_TEMPLATE.read_text() if ENV_TEMPLATE.exists() else "")
 
     # data_dir is already absolute from the registry defaults
     abs_data_dir = (
@@ -807,6 +846,10 @@ def _bring_up_instance(
     generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if generated_secrets:
         console.print(f"[yellow]i[/yellow] Added {', '.join(generated_secrets)} to {env_file}")
+    synapse_config = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
+    if instance.matrix_type == MatrixType.SYNAPSE and synapse_config.exists():
+        # Older versions wrote it at the umask.
+        _protect_synapse_config(synapse_config)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
@@ -858,12 +901,12 @@ def _bring_up_instance(
         )
 
 
-def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
-    """Create a directory with proper ownership and permissions."""
+def _create_directory_with_permissions(path: Path, mode: int = 0o755) -> None:
+    """Create a directory owned by the container user with the given mode."""
     path.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError, PermissionError):
-        os.chown(path, uid, gid)
-        path.chmod(0o755)
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+        _give_to_container_user(path)
 
 
 def _copy_credentials_to_instance(instance: Instance) -> None:
@@ -874,15 +917,12 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
 
     target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
 
-    # Copy all credential files
+    # Copy all credential files; the container user owns them, and nobody else may read them.
     for cred_file in source_dir.glob("*.json"):
         target_file = target_dir / cred_file.name
         if not target_file.exists():
             shutil.copy2(cred_file, target_file)
-            # Set proper permissions for Docker
-            with contextlib.suppress(OSError, PermissionError):
-                os.chown(target_file, 1000, 1000)
-                target_file.chmod(0o644)
+        _restrict_to_container_user(target_file)
 
 
 def _copy_config_to_instance(instance: Instance) -> None:
@@ -899,7 +939,7 @@ def _copy_config_to_instance(instance: Instance) -> None:
         shutil.copy2(source_config, target_config)
         # Set proper permissions for Docker
         with contextlib.suppress(OSError, PermissionError):
-            os.chown(target_config, 1000, 1000)
+            _give_to_container_user(target_config)
             target_config.chmod(0o644)
         console.print("[green]✓[/green] Copied config.yaml to instance")
 
@@ -920,7 +960,7 @@ def _create_instance_directories(instance: Instance) -> None:
 
     for subdir in base_dirs:
         dir_path = Path(f"{instance.data_dir}/{subdir}")
-        _create_directory_with_permissions(dir_path)
+        _create_directory_with_permissions(dir_path, 0o700 if subdir == "mindroom_data/credentials" else 0o755)
 
     # Copy credentials from ~/.mindroom/credentials if they exist
     _copy_credentials_to_instance(instance)

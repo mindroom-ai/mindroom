@@ -132,7 +132,7 @@ struct DesktopShellApprovalView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(desktopSafePreview(handle.commandPreview))
                             .font(.system(.callout, design: .monospaced)).textSelection(.enabled).lineLimit(3)
-                        Text("\(desktopSafePreview(handle.agentName)) · \(desktopSafePreview(handle.requesterID)) · \(desktopDurationLabel(Int(handle.elapsedSeconds))) · \(handle.state == "running" ? "Running" : "Finished")")
+                        Text("\(desktopSafePreview(handle.agentName)) · \(desktopSafePreview(handle.requesterID)) · \(desktopDurationLabel(Int(handle.elapsedSeconds))) · \(handle.stateLabel)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

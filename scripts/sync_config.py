@@ -26,7 +26,7 @@ def saas_config() -> dict:
 
     # Hosted tenants choose from the central OpenRouter presets in the dashboard.
     config["models"] = {name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()}
-    config["router"]["model"] = "gpt5luna"
+    config["router"]["model"] = "luna"
 
     # The instance image does not ship sentence_transformers (torch), and Hobby/Pro
     # tenants may only have an OpenRouter key, so semantic memory search embeds via OpenRouter.

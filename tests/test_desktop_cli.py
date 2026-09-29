@@ -918,7 +918,7 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
         await asyncio.gather(task, return_exceptions=True)
     shell = bridge.shell
     assert shell is not None
-    assert shell.status()["auto_approve_remaining_seconds"] == 0.0
+    assert shell.status()["auto_approve_remaining_seconds"] == 0
     with pytest.raises(DesktopShellError, match="closed"):
         shell.grant(60)
     assert client.to_device_callbacks == []

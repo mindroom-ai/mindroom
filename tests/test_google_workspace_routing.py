@@ -61,6 +61,7 @@ _SERVICE_CALLS = {
         "secondary_read_sheet",
         {"spreadsheet_id": "test", "spreadsheet_range": "A1"},
     ),
+    "google_tasks": ("secondary_google_tasks_list_tasks", {}),
 }
 
 

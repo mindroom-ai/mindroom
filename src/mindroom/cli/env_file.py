@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# str.splitlines, which reads the file back for the next upsert, breaks lines at each of these characters.
+_LINE_BREAK_CHARACTERS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
 
 def env_path_for_config(config_path: str | Path) -> Path:
     """Return the `.env` path next to the active config file."""
@@ -39,6 +42,10 @@ def write_private_env_text(env_path: Path, content: str) -> None:
 
 def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
     """Upsert KEY=value entries while preserving unrelated lines."""
+    for key, value in values.items():
+        if "\x00" in value or not _LINE_BREAK_CHARACTERS.isdisjoint(value):
+            msg = f"Refusing to write {key} to the env file: its value contains a line break or NUL character"
+            raise ValueError(msg)
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
 

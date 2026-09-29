@@ -28,7 +28,7 @@ Current and empty storage need no migration and do not trigger worker API calls 
 6. Resume admission, scheduling, and worker creation only after startup migration succeeds.
 
 Kubernetes primary service accounts need `list` access to `deployments` and `replicasets` in the `apps` API group and `pods` in the core API group within the configured worker namespace.
-The bundled worker-manager chart roles include these reads; apply the updated roles before starting the upgraded primary.
+The runtime chart's worker-manager Role includes these reads; apply the updated Role before starting the upgraded primary.
 Externally managed RBAC must supply the same permissions; verification failure never becomes success.
 
 Static external sandbox runners must be stopped separately through their deployment lifecycle.

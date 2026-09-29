@@ -12,7 +12,7 @@ import tempfile
 import time
 import unicodedata
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -22,8 +22,8 @@ from mindroom.shell_execution import (
     ProcessRecord,
     discard_background_record,
     kill_all_records,
-    kill_command,
     run_command,
+    signal_record,
 )
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
@@ -98,16 +98,31 @@ class DesktopShellOutput(ShellOutputCapture):
         """Report output dropped past the cap or lost to a capture error."""
         return self.stdout.error is not None
 
-    def read(self) -> bytes:
-        """Return all retained output."""
-        return self.tail(self.size)
+    def read(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        """Return retained output from byte *offset*, at most *max_bytes* of it.
+
+        ``pread`` leaves the file position where the engine's next write appends.
+        """
+        size = self.size
+        return os.pread(self.stdout.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
 
     def tail(self, max_bytes: int) -> bytes:
         """Return at most the newest *max_bytes* bytes; the first character may be partial."""
+        return self.read(max(0, self.size - max_bytes))
+
+    def check_offset(self, offset: int) -> None:
+        """Reject an offset that is negative, past the retained output, or inside a character."""
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            message = "Shell output offset must be a nonnegative integer."
+            raise DesktopShellError(message)
         size = self.size
-        self.stdout.file.seek(max(0, size - max_bytes))
-        # Reading to the end leaves the engine's next write appending after existing output.
-        return self.stdout.file.read()
+        if offset > size:
+            message = f"Shell output offset is past the captured output ({size} bytes)."
+            raise DesktopShellError(message)
+        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
+        if offset < size and self.read(offset, 1)[0] & 0xC0 == 0x80:
+            message = "Shell output offset must be at the start of a UTF-8 character."
+            raise DesktopShellError(message)
 
     def publish(self, return_code: int | None) -> str:
         """Record completion; the bridge transfers the spool instead of writing a workspace file."""
@@ -127,9 +142,12 @@ class DesktopShellOutput(ShellOutputCapture):
 
 @dataclass(frozen=True)
 class DesktopShellResult:
-    """One command's state; a completed result hands its output to the caller to transfer and release."""
+    """One command's state; a finished result's output stays behind its handle until ``DesktopShell.hand_over``.
 
-    state: Literal["completed", "running"]
+    ``killed`` means ``kill_shell`` stopped the command; ``completed`` means it exited on its own.
+    """
+
+    state: Literal["completed", "killed", "running"]
     handle: str | None
     exit_code: int | None
     output: DesktopShellOutput
@@ -142,6 +160,12 @@ class _ShellHandle:
     command: str
     started_at: float
     output: DesktopShellOutput
+    killed: bool = False
+
+    def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
+        if not record.finished:
+            return "running"
+        return "killed" if self.killed else "completed"
 
 
 def _validate_command(command: object) -> None:
@@ -262,8 +286,9 @@ class DesktopShell:
                 if pending
                 else None
             ),
+            # Rounded up, so a live lease never reads as zero seconds.
             "auto_approve_remaining_seconds": (
-                0.0 if until_revoked else max(0.0, self._lease_until - self._monotonic_clock())
+                0 if until_revoked else max(0, math.ceil(self._lease_until - self._monotonic_clock()))
             ),
             "auto_approve_until_revoked": until_revoked,
             "active_request_id": self._active_request_id if owns_active else None,
@@ -286,7 +311,7 @@ class DesktopShell:
                     "agent_name": entry.agent_name,
                     "command_preview": entry.command[:_COMMAND_PREVIEW_CHARS],
                     "elapsed_seconds": round(max(0.0, ended_at - entry.started_at), 1),
-                    "state": "completed" if record.finished else "running",
+                    "state": entry.state(record),
                 },
             )
         return entries
@@ -469,6 +494,8 @@ class DesktopShell:
                 stdin=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.STDOUT,
                 kill_group_after_exit=True,
+                # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
+                register_finished=True,
             ),
         )
         cancelled = asyncio.create_task(self._cancel_event.wait())
@@ -485,31 +512,47 @@ class DesktopShell:
             raise DesktopShellError(_STOPPED)
         result = run.result()
         self._prune()
-        if result.handle is not None:
-            if self._cancel_event.is_set():
-                # Revocation raced the new handle's registration and has already killed it.
-                output.release()
-                raise DesktopShellError(_STOPPED)
-            self._handles[result.handle] = _ShellHandle(
-                request.requester_id,
-                request.agent_name,
-                request.command,
-                started_at,
-                output,
-            )
-            return DesktopShellResult("running", result.handle, None, output)
-        if not output.completed:
+        if result.handle is None:
             output.release()
             raise DesktopShellError(result.message.removeprefix("Error: "))
-        return DesktopShellResult("completed", None, output.exit_code, output)
+        if self._cancel_event.is_set():
+            # Revocation raced the new handle's registration and has already killed and forgotten it.
+            discard_background_record(self._records, result.handle)
+            if not output.completed:
+                output.release()
+                raise DesktopShellError(_STOPPED)
+            return DesktopShellResult("completed", None, output.exit_code, output)
+        entry = _ShellHandle(request.requester_id, request.agent_name, request.command, started_at, output)
+        self._handles[result.handle] = entry
+        record = self._records[result.handle]
+        return DesktopShellResult(entry.state(record), result.handle, record.return_code, output)
 
-    def check(self, requester_id: str, agent_name: str, handle: str) -> DesktopShellResult:
-        """Report the caller's own handle; a completed handle is handed over once and forgotten."""
+    def check(
+        self,
+        requester_id: str,
+        agent_name: str,
+        handle: str,
+        *,
+        offset: int | None = None,
+    ) -> DesktopShellResult:
+        """Report the caller's own handle; a finished one stays until ``hand_over`` confirms its output arrived.
+
+        An invalid output ``offset`` is rejected without changing the handle, so a corrected check still gets the output.
+        """
         record = self._caller_record(requester_id, agent_name, handle)
+        entry = self._handles[handle]
+        if offset is not None:
+            entry.output.check_offset(offset)
         if not record.finished:
-            return DesktopShellResult("running", handle, None, self._handles[handle].output)
-        self._records.pop(handle)
-        return DesktopShellResult("completed", handle, record.return_code, self._handles.pop(handle).output)
+            return DesktopShellResult("running", handle, None, entry.output)
+        return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)
+
+    def hand_over(self, result: DesktopShellResult) -> None:
+        """Forget a finished result's handle and release its output once the rest of it reached the caller."""
+        if result.handle is not None and result.handle in self._handles:
+            self._records.pop(result.handle, None)
+            self._handles.pop(result.handle)
+        result.output.release()
 
     def kill(
         self,
@@ -519,19 +562,22 @@ class DesktopShell:
         *,
         force: bool = False,
     ) -> Literal["killed", "completed"]:
-        """Signal the caller's own running handle, keeping its output for a later check."""
-        record = self._caller_record(requester_id, agent_name, handle)
-        if record.process.returncode is not None:
-            return "completed"
-        kill_command(self._records, namespace=record.namespace, handle=handle, force=force)
-        return "killed"
+        """Signal the caller's own running handle, keeping its output for a later check that reports it killed."""
+        return self._signal(self._caller_record(requester_id, agent_name, handle), handle, force=force)
 
     def kill_handle(self, handle: str) -> None:
-        """Kill and forget any handle from the local management channel."""
+        """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""
         self._prune()
         if handle not in self._handles:
             raise DesktopShellError(_UNKNOWN_HANDLE)
-        self._discard(handle)
+        self._signal(self._records[handle], handle, force=True)
+
+    def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
+        # Only a delivered signal makes the handle killed; a process that exited first ended on its own.
+        if record.process.returncode is None and signal_record(record, force=force):
+            self._handles[handle] = replace(self._handles[handle], killed=True)
+        # An earlier kill stays the reason it ended, matching what the next check reports.
+        return "killed" if self._handles[handle].killed else "completed"
 
     def _caller_record(self, requester_id: str, agent_name: str, handle: str) -> ProcessRecord:
         self._prune()

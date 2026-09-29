@@ -66,6 +66,9 @@ provisioner:
   instanceCredentialsEncryptionSecret: ""
   instanceBaseDomain: ""
   instanceStorageClassName: ""
+  # Namespace of the ingress-nginx controller pods that instance NetworkPolicies admit; empty keeps the instance
+  # chart default (ingress-nginx). kube-hetzner's nginx addon installs into `nginx` unless ingress_target_namespace is set.
+  instanceIngressControllerNamespace: ""
   instanceMindroomImage: ""
   instanceMindroomImagePullPolicy: ""
   instanceImagePullSecretNames: []

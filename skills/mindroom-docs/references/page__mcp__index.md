@@ -94,6 +94,8 @@ Use `stdio` for local subprocess servers.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
+Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value except whole `${ENV_VAR}` placeholders, but show `args` as written, and `args` support no placeholders.
 Static `headers` are process-global and shared by every requester.
 Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
 Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
@@ -110,7 +112,7 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
-| `args` | list[string] | `[]` | Optional `stdio` arguments |
+| `args` | list[string] | `[]` | Optional `stdio` arguments; shown unmasked, so never put credentials here |
 | `cwd` | string | `null` | Optional `stdio` working directory |
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
@@ -255,6 +257,8 @@ The bridge functions let an agent trigger the normal MindRoom OAuth connect flow
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
 When token refresh fails without a terminal credential rejection, the bridge raises an ordinary tool error that says OAuth token refresh failed and asks callers to retry shortly.
 MindRoom retains the credentials and does not return an OAuth-required payload or reconnect link for that temporary failure.
+MindRoom sends the authorization code and later refresh tokens only to the token endpoint that discovery resolved when the connection started.
+If a later discovery resolves a different token endpoint, for example because the server's protected-resource metadata now names another authorization server, the callback fails or the stored credential is deleted, and the user must reconnect.
 Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
@@ -267,7 +271,11 @@ If the protected-resource metadata does not advertise an authorization server, M
 The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
 
 If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
-The generated client registration is stored in the generated OAuth client config service and reused for later users.
+The generated client registration is stored in the generated OAuth client config service with the token endpoint it was issued for, and reused for later users.
+When discovery later resolves a different token endpoint, MindRoom registers a new client at the new authorization server and logs `oauth_dynamic_client_reregistered` with both endpoint origins; credentials issued to the previous client must be reconnected.
+MindRoom refuses the flow instead when `dynamic_client_registration` is disabled or the new server offers no registration endpoint.
+MindRoom never re-registers an operator-configured client, so its `client_id` and `client_secret` would go to whatever token endpoint discovery resolves.
+For a confidential operator-configured client, pin `auth.authorization_server` or `auth.token_url` so the MCP server's protected-resource metadata cannot redirect those credentials.
 Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
 Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
 

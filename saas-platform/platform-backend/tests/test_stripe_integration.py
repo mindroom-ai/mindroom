@@ -100,7 +100,10 @@ class TestCheckoutEndpoint:
             return {"account_id": "acc_test_123", "email": "test@example.com"}
 
         app.dependency_overrides[verify_user] = override_verify_user
-        with patch("backend.routes.stripe_routes.ensure_supabase") as mock:
+        with (
+            patch("backend.routes.stripe_routes.ensure_supabase") as mock,
+            patch("backend.services.provisioner_service.account_pending_deletion", return_value=False),
+        ):
             sb = Mock()
             sb.table().select().eq().single().execute.return_value = Mock(data={"stripe_customer_id": "cus_test_123"})
             mock.return_value = sb
@@ -126,7 +129,7 @@ class TestCheckoutEndpoint:
             mock_stripe.checkout.Session.create.return_value = mock_session
             # Mock other required methods
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
-            mock_stripe.Subscription.list.return_value = Mock(data=[])
+            mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = []
 
             response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
@@ -168,7 +171,7 @@ class TestCheckoutEndpoint:
             mock_session.url = "https://checkout.stripe.com/test_session"
             mock_stripe.checkout.Session.create.return_value = mock_session
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
-            mock_stripe.Subscription.list.return_value = Mock(data=[])
+            mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = []
 
             response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "yearly"})
 

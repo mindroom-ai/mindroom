@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
-from typing import TYPE_CHECKING
+from pathlib import Path
+from threading import Barrier, Thread
 
 import pytest
 
@@ -19,9 +20,6 @@ from mindroom.private_instance_identity import (
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _scope_root(tmp_path: Path, worker_key: str) -> Path:
@@ -358,6 +356,49 @@ def test_load_rejects_a_non_regular_identity_record(tmp_path: Path) -> None:
 
     with pytest.raises(PrivateInstanceIdentityError):
         load_private_instance_identity(tmp_path, scope_root)
+
+
+def test_load_never_blocks_on_a_fifo_swapped_in_after_the_type_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that swaps a FIFO over the record between its type check and open cannot stall the loader."""
+    worker_key = "v1:tenant-a:user:~requester-a"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+    scope_root = _scope_root(tmp_path, worker_key)
+    record = scope_root / ".mindroom-private-instance.json"
+    checked_lstat = Path.lstat
+
+    def swap_after_check(path: Path) -> os.stat_result:
+        status = checked_lstat(path)
+        if path == record:
+            record.unlink()
+            os.mkfifo(record)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", swap_after_check)
+    outcomes: list[BaseException | None] = []
+
+    def load() -> None:
+        try:
+            load_private_instance_identity(tmp_path, scope_root)
+        except BaseException as exc:
+            outcomes.append(exc)
+        else:
+            outcomes.append(None)
+
+    loader = Thread(target=load, daemon=True)
+    loader.start()
+    loader.join(timeout=5)
+    blocked = loader.is_alive()
+    if blocked:
+        # Give the stuck open its writer so the thread can finish.
+        os.close(os.open(record, os.O_WRONLY | os.O_NONBLOCK))
+        loader.join(timeout=5)
+
+    assert not blocked
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], PrivateInstanceIdentityError)
 
 
 def test_load_rejects_duplicate_json_record_fields(tmp_path: Path) -> None:

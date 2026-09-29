@@ -77,7 +77,11 @@ class MCPOAuthConfig(BaseModel):
     pkce_code_challenge_method: Literal["S256"] | None = Field(default="S256", description="PKCE challenge method")
     scopes: list[str] = Field(default_factory=list, description="OAuth scopes")
     extra_auth_params: dict[str, str] = Field(default_factory=dict, description="Extra authorization request params")
-    extra_token_params: dict[str, str] = Field(default_factory=dict, description="Extra token request params")
+    extra_token_params: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra token request params; may include credentials",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
     shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
 

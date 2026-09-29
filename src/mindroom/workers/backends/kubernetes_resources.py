@@ -115,6 +115,11 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
+# /tmp is the only writable path outside the volumes on the read-only root filesystem.
+# It stays disk-backed, so its size limit is not a hard write limit like the Docker worker
+# tmpfs: kubelet measures usage periodically and evicts only this pod once it exceeds the
+# limit, instead of the node running out of ephemeral storage.
+_WORKER_TMP_SIZE_LIMIT = "1Gi"
 # Agent Vault per-worker egress: an init container in the worker pod mints the
 # worker's proxy-role token into a shared in-pod volume; the sandbox runner
 # composes http://<token>:<vault>@<proxy host> for python/shell. No separate bridge pod.
@@ -1778,7 +1783,7 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
-            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {}},
+            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {"sizeLimit": _WORKER_TMP_SIZE_LIMIT}},
         ]
         if self.config.config_map_name is not None:
             volumes.append(

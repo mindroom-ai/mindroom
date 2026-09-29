@@ -44,13 +44,14 @@ CREATE TABLE accounts (
     stripe_customer_id TEXT UNIQUE,
     tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
     is_admin BOOLEAN DEFAULT FALSE,
-    status TEXT DEFAULT 'active', -- active, suspended, deleted, pending_verification
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'deleted', 'pending_verification')),
 
     -- Soft delete support (GDPR compliance)
     deleted_at TIMESTAMPTZ NULL,
     deletion_reason TEXT NULL,
     deletion_requested_by UUID NULL,
     deletion_requested_at TIMESTAMPTZ NULL,
+    hard_delete_started_at TIMESTAMPTZ NULL, -- Set once cleanup claims the account; it can no longer be restored
 
     -- Consent tracking (GDPR)
     consent_marketing BOOLEAN DEFAULT FALSE,
@@ -105,7 +106,7 @@ CREATE INDEX idx_subscriptions_stripe_subscription_id ON subscriptions(stripe_su
 CREATE TABLE instances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id UUID REFERENCES accounts(id) ON DELETE CASCADE,
-    subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    subscription_id UUID NOT NULL UNIQUE REFERENCES subscriptions(id) ON DELETE CASCADE, -- One instance per subscription
 
     -- Instance identification
     instance_id INTEGER UNIQUE NOT NULL DEFAULT nextval('instance_id_seq'), -- Numeric K8s instance id
@@ -155,7 +156,6 @@ CREATE TABLE instances (
 );
 
 CREATE INDEX idx_instances_account_id ON instances(account_id);
-CREATE INDEX idx_instances_subscription_id ON instances(subscription_id);
 CREATE INDEX idx_instances_status ON instances(status);
 CREATE INDEX idx_instances_subdomain ON instances(subdomain);
 CREATE INDEX idx_instances_instance_id ON instances(instance_id);
@@ -186,7 +186,7 @@ CREATE INDEX idx_usage_metrics_subscription_date ON usage_metrics(subscription_i
 -- ============================================================================
 CREATE TABLE payments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID REFERENCES accounts(id), -- For tenant isolation
+    account_id UUID REFERENCES accounts(id) ON DELETE SET NULL, -- For tenant isolation; kept after account deletion
     invoice_id TEXT UNIQUE,
     subscription_id TEXT,
     customer_id TEXT,
@@ -205,7 +205,7 @@ CREATE INDEX idx_payments_account_id ON payments(account_id);
 -- ============================================================================
 CREATE TABLE webhook_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID REFERENCES accounts(id), -- For tenant isolation
+    account_id UUID REFERENCES accounts(id) ON DELETE SET NULL, -- For tenant isolation; kept after account deletion
     stripe_event_id TEXT UNIQUE NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -352,7 +352,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- SOFT DELETE FUNCTIONS (GDPR Compliance)
 -- ============================================================================
 
--- Soft delete function for accounts
+-- Soft delete function for accounts.
+-- Only the account changes: the backend cancels Stripe billing and the instance lifecycle stops the
+-- account's instances, so subscription status keeps coming from Stripe alone.
 CREATE OR REPLACE FUNCTION soft_delete_account(
     target_account_id UUID,
     reason TEXT DEFAULT 'user_request',
@@ -366,7 +368,8 @@ BEGIN
         deletion_reason = reason,
         deletion_requested_by = COALESCE(requested_by, target_account_id),
         deletion_requested_at = NOW(),
-        status = 'deleted',
+        -- A suspension outlives the deletion request, so restoring the account cannot lift it.
+        status = CASE WHEN status = 'suspended' THEN status ELSE 'deleted' END,
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NULL;
@@ -384,24 +387,14 @@ BEGIN
         ),
         TRUE
     );
-
-    -- Mark related data while avoiding unnecessary churn
-    UPDATE subscriptions
-    SET status = 'cancelled', updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status != 'cancelled';
-
-    UPDATE instances
-    SET status = 'deprovisioned', updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status NOT IN ('deprovisioned', 'stopped');
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Restore function (for accidental deletions within grace period)
+-- Restore function (for accidental deletions within the 7-day grace period); returns whether it restored.
+-- Only the account changes; held instances resume through the instance lifecycle while their subscription is entitled.
 CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
-) RETURNS VOID AS $$
+) RETURNS BOOLEAN AS $$
 BEGIN
     -- Restore account
     UPDATE accounts
@@ -413,22 +406,16 @@ BEGIN
         status = 'active',
         updated_at = NOW()
     WHERE id = target_account_id
-    AND deleted_at IS NOT NULL;
+    AND deleted_at IS NOT NULL
+    -- Only what soft delete set is undone; a suspended account stays suspended and pending deletion.
+    AND status = 'deleted'
+    -- After the grace period, cleanup may already have uninstalled everything the account ran.
+    AND deleted_at > NOW() - INTERVAL '7 days'
+    AND hard_delete_started_at IS NULL;
 
-    -- Restore related data that was cancelled/deprovisioned during soft delete
-    UPDATE subscriptions
-    SET
-        status = 'active',
-        updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status = 'cancelled';
-
-    UPDATE instances
-    SET
-        status = 'running',
-        updated_at = NOW()
-    WHERE account_id = target_account_id
-    AND status = 'deprovisioned';
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
 
     -- Audit log entry
     INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
@@ -440,6 +427,22 @@ BEGIN
         jsonb_build_object('status', 'restored'),
         TRUE
     );
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Claim an account whose grace period ended for teardown, using the database clock like restore_account.
+-- A claimed account can no longer be restored, and it stays claimed so a failed teardown is simply retried.
+CREATE OR REPLACE FUNCTION claim_account_hard_delete(
+    target_account_id UUID
+) RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE accounts
+    SET hard_delete_started_at = COALESCE(hard_delete_started_at, NOW())
+    WHERE id = target_account_id
+    AND deleted_at IS NOT NULL
+    AND deleted_at <= NOW() - INTERVAL '7 days';
+    RETURN FOUND;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -448,23 +451,35 @@ CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    -- Only an account cleanup claimed is deleted, so a restored account keeps its rows.
+    IF NOT EXISTS (
+        SELECT 1 FROM accounts WHERE id = target_account_id AND hard_delete_started_at IS NOT NULL
+    ) THEN
+        RETURN;
+    END IF;
+
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
     DELETE FROM subscriptions WHERE account_id = target_account_id;
     DELETE FROM audit_logs WHERE account_id = target_account_id;
 
-    -- Finally delete the account
-    DELETE FROM accounts WHERE id = target_account_id;
+    -- The accounts row goes last, with its auth user (ON DELETE CASCADE), which the backend deletes through the
+    -- Supabase admin API; until then the claimed row is what lets the next cleanup run finish the deletion.
 
-    -- Audit entry for hard delete (system action)
-    INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
-    VALUES (
-        'gdpr_account_hard_deleted',
-        'account',
-        target_account_id::text,
-        jsonb_build_object('source', 'hard_delete_account'),
-        TRUE
-    );
+    -- Audit entry for hard delete (system action), once per account, however often a failed deletion is retried.
+    IF NOT EXISTS (
+        SELECT 1 FROM audit_logs
+        WHERE action = 'gdpr_account_hard_deleted' AND resource_id = target_account_id::text
+    ) THEN
+        INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
+        VALUES (
+            'gdpr_account_hard_deleted',
+            'account',
+            target_account_id::text,
+            jsonb_build_object('source', 'hard_delete_account'),
+            TRUE
+        );
+    END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -587,6 +602,7 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
 GRANT EXECUTE ON FUNCTION is_admin() TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION soft_delete_account TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
+GRANT EXECUTE ON FUNCTION claim_account_hard_delete TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 
 GRANT ALL ON TABLE accounts TO service_role;

@@ -97,14 +97,24 @@ def completed_output(result: DesktopShellResult) -> str:
         result.output.release()
 
 
-async def check_until_completed(shell: DesktopShell, handle: str) -> DesktopShellResult:
+async def check_until_finished(shell: DesktopShell, handle: str) -> DesktopShellResult:
     """Poll one handle until its process has been reaped."""
     for _ in range(600):
         result = shell.check(REQUESTER, AGENT, handle)
-        if result.state == "completed":
+        if result.state != "running":
             return result
         await asyncio.sleep(0.01)
-    pytest.fail("handle never completed")
+    pytest.fail("handle never finished")
+
+
+async def wait_until_handles_finish(shell: DesktopShell) -> dict[str, object]:
+    """Wait until no retained handle is running, then return every handle's state."""
+    for _ in range(600):
+        states = {entry["handle"]: entry["state"] for entry in shell.status()["handles"]}
+        if "running" not in states.values():
+            return states
+        await asyncio.sleep(0.01)
+    pytest.fail("handles never finished")
 
 
 @pytest.mark.asyncio
@@ -121,9 +131,12 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
     shell.decide("r1", approved=True)
     result = await task
     assert marker.read_text() == "approved"
-    assert (result.exit_code, result.handle) == (0, None)
+    assert (result.state, result.exit_code) == ("completed", 0)
+    # A finished command is retained as a handle until its caller hands its output over.
+    assert [entry["handle"] for entry in shell.status()["handles"]] == [result.handle]
     assert completed_output(result) == "done"
-    assert shell.status()["pending"] is None
+    shell.hand_over(result)
+    assert (shell.status()["pending"], shell.status()["handles"]) == (None, [])
     await shell.close()
 
 
@@ -183,6 +196,21 @@ async def test_lease_expires_using_monotonic_clock(tmp_path: Path) -> None:
     await shell.close()
 
 
+def test_auto_approval_remaining_seconds_is_whole_and_never_zero_while_live() -> None:
+    """The remaining lease rounds up, so its last fraction of a second still reads as one second."""
+    now = [100.0]
+    shell = local_shell(monotonic_clock=lambda: now[0])
+    shell.grant(60)
+    readings = []
+    for elapsed in (0.0, 0.5, 59.25, 0.25):
+        now[0] += elapsed
+        readings.append(shell.status()["auto_approve_remaining_seconds"])
+    shell.grant(until_revoked=True)
+    readings.append(shell.status()["auto_approve_remaining_seconds"])
+    assert readings == [60, 60, 1, 0, 0]
+    assert {type(reading) for reading in readings} == {int}
+
+
 @pytest.mark.asyncio
 async def test_until_revoked_grant_outlives_any_timed_lease_until_revoke(tmp_path: Path) -> None:
     """An until-revoked grant is still active after an hour of fake monotonic time, and revoke ends it."""
@@ -191,7 +219,7 @@ async def test_until_revoked_grant_outlives_any_timed_lease_until_revoke(tmp_pat
     shell.grant(until_revoked=True)
     now[0] += 3_601
     status = shell.status()
-    assert (status["auto_approve_until_revoked"], status["auto_approve_remaining_seconds"]) == (True, 0.0)
+    assert (status["auto_approve_until_revoked"], status["auto_approve_remaining_seconds"]) == (True, 0)
     first = DesktopShellRequest("r1", REQUESTER, AGENT, "printf still-approved", str(tmp_path), 150_000)
     assert completed_output(await shell.execute(first)) == "still-approved"
     shell.revoke()
@@ -238,7 +266,7 @@ async def test_grant_requires_exactly_one_bounded_or_until_revoked_choice(grant:
     shell = local_shell()
     with pytest.raises(DesktopShellError):
         shell.grant(**grant)
-    assert shell.status()["auto_approve_remaining_seconds"] == 0.0
+    assert shell.status()["auto_approve_remaining_seconds"] == 0
     assert shell.status()["auto_approve_until_revoked"] is False
     await shell.close()
 
@@ -346,8 +374,11 @@ async def test_command_past_inline_wait_becomes_a_handle_with_full_output(tmp_pa
     assert entry["elapsed_seconds"] >= 1
     assert shell.check(REQUESTER, AGENT, running.handle).state == "running"
     (tmp_path / "release").touch()
-    completed = await check_until_completed(shell, running.handle)
-    assert (completed.exit_code, completed_output(completed)) == (7, "early\nlate")
+    completed = await check_until_finished(shell, running.handle)
+    assert (completed.state, completed.exit_code, completed.output.read()) == ("completed", 7, b"early\nlate")
+    # A finished handle stays until its caller confirms the output arrived.
+    assert shell.check(REQUESTER, AGENT, running.handle).state == "completed"
+    shell.hand_over(completed)
     assert shell.status()["handles"] == []
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.check(REQUESTER, AGENT, running.handle)
@@ -384,8 +415,30 @@ async def test_handles_belong_to_the_exact_requester_and_agent(tmp_path: Path) -
             shell.kill(requester_id, agent_name, handle)
     assert shell.check(REQUESTER, AGENT, running.handle).state == "running"
     assert shell.kill(REQUESTER, AGENT, running.handle, force=True) == "killed"
-    completed = await check_until_completed(shell, running.handle)
-    assert completed.exit_code == -signal.SIGKILL
+    killed = await check_until_finished(shell, running.handle)
+    assert (killed.state, killed.exit_code) == ("killed", -signal.SIGKILL)
+    killed.output.release()
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_only_kill_shell_reports_killed_and_a_self_signalled_command_completes(tmp_path: Path) -> None:
+    """A handle stopped by kill_shell finishes as killed; one that signals itself still completed."""
+    shell = local_shell()
+    shell.grant(60)
+    stopped = await shell.execute(request("printf before; sleep 30", tmp_path, timeout=1))
+    command = "while [ ! -f release ]; do sleep 0.05; done; kill -TERM $$"
+    ended = await shell.execute(request(command, tmp_path, request_id="r2", timeout=1))
+    assert stopped.handle is not None
+    assert ended.handle is not None
+    assert shell.kill(REQUESTER, AGENT, stopped.handle) == "killed"
+    (tmp_path / "release").touch()
+    assert await wait_until_handles_finish(shell) == {stopped.handle: "killed", ended.handle: "completed"}
+    killed = shell.check(REQUESTER, AGENT, stopped.handle)
+    assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGTERM, b"before")
+    killed.output.release()
+    completed = shell.check(REQUESTER, AGENT, ended.handle)
+    assert (completed.state, completed.exit_code) == ("completed", -signal.SIGTERM)
     completed.output.release()
     await shell.close()
 
@@ -406,10 +459,39 @@ async def test_kill_reports_an_already_completed_handle(tmp_path: Path) -> None:
     await shell.close()
 
 
-@pytest.mark.parametrize("stop", ["revoke", "close", "local_kill"])
 @pytest.mark.asyncio
-async def test_revoke_close_and_local_kill_stop_handles(tmp_path: Path, pids: Path, stop: str) -> None:
-    """Every local stop control kills handle process groups and forgets them."""
+async def test_invalid_output_offset_is_rejected_before_a_completed_handle_is_handed_over(tmp_path: Path) -> None:
+    """A check with a bad offset changes nothing, so a corrected check still receives the finished output."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(
+        request("printf 'é'; while [ ! -f release ]; do sleep 0.05; done; printf ab", tmp_path, timeout=1),
+    )
+    assert running.handle is not None
+    (tmp_path / "release").touch()
+    for _ in range(600):
+        if shell.status()["handles"][0]["state"] == "completed":
+            break
+        await asyncio.sleep(0.01)
+    for offset, message in (
+        (-1, "nonnegative"),
+        (True, "nonnegative"),
+        (5, "past the captured output"),
+        (1, "start of a UTF-8 character"),
+    ):
+        with pytest.raises(DesktopShellError, match=message):
+            shell.check(REQUESTER, AGENT, running.handle, offset=offset)
+    completed = shell.check(REQUESTER, AGENT, running.handle, offset=4)
+    assert (completed.state, completed.exit_code) == ("completed", 0)
+    assert completed.output.read(2) == b"ab"
+    assert completed_output(completed) == "éab"
+    await shell.close()
+
+
+@pytest.mark.parametrize("stop", ["revoke", "close"])
+@pytest.mark.asyncio
+async def test_revoke_and_close_kill_and_forget_handles(tmp_path: Path, pids: Path, stop: str) -> None:
+    """Revoking or closing the shell kills every handle process group and forgets the handles."""
     shell = local_shell()
     shell.grant(60)
     running = await shell.execute(request(f"echo $$ > {pids / 'leader.pid'}; sleep 30", tmp_path, timeout=1))
@@ -417,16 +499,95 @@ async def test_revoke_close_and_local_kill_stop_handles(tmp_path: Path, pids: Pa
     leader = int(await wait_for_file(pids / "leader.pid"))
     if stop == "revoke":
         shell.revoke()
-    elif stop == "close":
-        await asyncio.wait_for(shell.close(), timeout=2)
     else:
-        shell.kill_handle(running.handle)
-        with pytest.raises(DesktopShellError, match="Unknown shell handle"):
-            shell.kill_handle(running.handle)
+        await asyncio.wait_for(shell.close(), timeout=2)
     await wait_until_gone(leader)
     assert shell.status()["handles"] == []
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.check(REQUESTER, AGENT, running.handle)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path: Path, pids: Path) -> None:
+    """The Mac app's per-handle Kill stops the process group, and the owner's next check reports it killed."""
+    shell = local_shell()
+    shell.grant(60)
+    command = f"printf before; echo $$ > {pids / 'leader.pid'}; sleep 30"
+    running = await shell.execute(request(command, tmp_path, timeout=1))
+    assert running.handle is not None
+    leader = int(await wait_for_file(pids / "leader.pid"))
+    shell.kill_handle(running.handle)
+    shell.kill_handle(running.handle)
+    await wait_until_gone(leader)
+    assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
+    killed = shell.check(REQUESTER, AGENT, running.handle)
+    assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGKILL, b"before")
+    shell.hand_over(killed)
+    with pytest.raises(DesktopShellError, match="Unknown shell handle"):
+        shell.kill_handle(running.handle)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_kill_marks_a_handle_killed_only_when_its_signal_was_delivered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that exits before the signal reaches it is reported by how it really ended."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, timeout=1))
+    assert running.handle is not None
+
+    def vanished(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "killpg", vanished)
+        assert shell.kill(REQUESTER, AGENT, running.handle) == "completed"
+        shell.kill_handle(running.handle)
+    assert shell.status()["handles"][0]["state"] == "running"
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = await check_until_finished(shell, running.handle)
+    assert (killed.state, killed.exit_code) == ("killed", -signal.SIGTERM)
+    killed.output.release()
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_killed_handle_keeps_the_exit_code_its_process_returned(tmp_path: Path) -> None:
+    """A command that traps TERM and exits cleanly still finishes as killed, with the code it chose."""
+    shell = local_shell()
+    shell.grant(60)
+    command = "trap 'exit 0' TERM; printf ready > ready; while :; do sleep 0.05; done"
+    running = await shell.execute(request(command, tmp_path, timeout=1))
+    assert running.handle is not None
+    await wait_for_file(tmp_path / "ready")
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = await check_until_finished(shell, running.handle)
+    assert (killed.state, killed.exit_code) == ("killed", 0)
+    killed.output.release()
+    await shell.close()
+
+
+@pytest.mark.parametrize("first_kill", ["local", "kill_shell"])
+@pytest.mark.asyncio
+async def test_kill_shell_after_an_earlier_kill_still_replies_killed(tmp_path: Path, first_kill: str) -> None:
+    """Once a handle is killed, a later kill_shell never contradicts the check that follows it."""
+    shell = local_shell()
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, timeout=1))
+    assert running.handle is not None
+    if first_kill == "local":
+        shell.kill_handle(running.handle)
+    else:
+        assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
+    assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
+    killed = shell.check(REQUESTER, AGENT, running.handle)
+    assert killed.state == "killed"
+    killed.output.release()
     await shell.close()
 
 
