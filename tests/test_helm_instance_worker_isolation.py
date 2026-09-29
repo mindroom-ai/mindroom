@@ -65,11 +65,7 @@ def _run_helm_template(
 
 
 def _render_instance_chart() -> list[dict[str, Any]]:
-    return _render_chart(
-        Path("cluster/k8s/instance"),
-        "workerBackend=kubernetes",
-        "storageAccessMode=ReadWriteMany",
-    )
+    return _render_chart(Path("cluster/k8s/instance"))
 
 
 def _render_runtime_chart() -> list[dict[str, Any]]:
@@ -184,15 +180,164 @@ def _instance_secret_hash(**overrides: str) -> str:
     return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
 
 
-def test_instance_chart_worker_network_policy_allows_runner_ingress_only_from_control_plane() -> None:
-    """Worker runner ingress should not allow every pod carrying the instance label."""
-    docs = _render_instance_chart()
-    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
-    worker_rule = next(
-        rule for rule in policy["spec"]["ingress"] if any(port.get("port") == 8766 for port in rule.get("ports", []))
+@pytest.mark.parametrize("worker_backend", ["kubernetes", "docker"])
+def test_instance_chart_refuses_dedicated_workers_in_the_shared_tenant_namespace(worker_backend: str) -> None:
+    """A tenant's worker manager would control every tenant's Deployments and Services in the shared namespace."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        f"workerBackend={worker_backend}",
+        "storageAccessMode=ReadWriteMany",
     )
 
-    assert worker_rule["from"] == [{"podSelector": {"matchLabels": {"app": "mindroom", "customer": "demo"}}}]
+    assert completed.returncode != 0
+    assert "workerBackend must be static_runner" in completed.stderr
+
+
+def test_instance_chart_grants_tenant_pods_no_kubernetes_api_access() -> None:
+    """No tenant pod may hold a Kubernetes API credential or a namespace role."""
+    docs = _render_instance_chart()
+    pod_specs = [doc["spec"]["template"]["spec"] for doc in docs if doc["kind"] == "Deployment"]
+
+    assert {doc["kind"] for doc in docs}.isdisjoint({"Role", "RoleBinding", "ServiceAccount"})
+    assert [pod.get("automountServiceAccountToken") for pod in pod_specs] == [False, False]
+    assert all("serviceAccountName" not in pod for pod in pod_specs)
+
+
+_BASELINE_CAPABILITIES = {
+    "AUDIT_WRITE",
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "MKNOD",
+    "NET_BIND_SERVICE",
+    "SETFCAP",
+    "SETGID",
+    "SETPCAP",
+    "SETUID",
+    "SYS_CHROOT",
+}
+
+
+def test_instance_chart_pods_satisfy_the_tenant_namespace_pod_security_baseline() -> None:
+    """The tenant namespace enforces the Pod Security baseline profile, so every chart pod must pass it."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
+    templates = [doc["spec"]["template"] for doc in docs if doc["kind"] == "Deployment"]
+
+    assert len(templates) == 2
+    for template in templates:
+        pod = template["spec"]
+        annotations = template["metadata"].get("annotations", {})
+        assert not any(key.startswith("container.apparmor.security.beta.kubernetes.io/") for key in annotations)
+        for host_field in ("hostNetwork", "hostPID", "hostIPC"):
+            assert not pod.get(host_field)
+        assert all("hostPath" not in volume for volume in pod["volumes"])
+        containers = [*pod.get("initContainers", []), *pod["containers"]]
+        for security_context in [pod.get("securityContext", {}), *(c.get("securityContext", {}) for c in containers)]:
+            assert security_context.get("seccompProfile", {}).get("type") != "Unconfined"
+            assert security_context.get("appArmorProfile", {}).get("type") != "Unconfined"
+            assert "seLinuxOptions" not in security_context
+            assert "windowsOptions" not in security_context
+        assert "sysctls" not in pod.get("securityContext", {})
+        for container in containers:
+            security_context = container.get("securityContext", {})
+            assert not security_context.get("privileged")
+            assert set(security_context.get("capabilities", {}).get("add", [])) <= _BASELINE_CAPABILITIES
+            assert "procMount" not in security_context
+            assert all("hostPort" not in port for port in container.get("ports", []))
+
+
+def _hcl_block(text: str, header: str) -> str:
+    start = text.index(header)
+    depth = 0
+    for index in range(text.index("{", start), len(text)):
+        depth += {"{": 1, "}": -1}.get(text[index], 0)
+        if depth == 0:
+            return text[start : index + 1]
+    msg = f"unterminated block {header!r}"
+    raise AssertionError(msg)
+
+
+def test_tenant_namespace_enforces_the_pod_security_baseline() -> None:
+    """Admission must reject privileged or host-reaching pods in the namespace that runs tenant code."""
+    terraform = Path("cluster/terraform/terraform-k8s/cert-manager.tf").read_text(encoding="utf-8")
+    namespace = _hcl_block(terraform, 'resource "kubernetes_namespace" "mindroom_instances"')
+    kind_install = Path("cluster/k8s/kind/install_platform.sh").read_text(encoding="utf-8")
+
+    assert '"pod-security.kubernetes.io/enforce" = "baseline"' in namespace
+    assert "kubectl label namespace mindroom-instances pod-security.kubernetes.io/enforce=baseline" in kind_install
+
+
+def test_instance_chart_limits_web_egress_to_public_addresses_and_the_ingress_controller() -> None:
+    """Tenant code must not reach metadata services, private networks, or other pods over HTTP(S)."""
+    docs = _render_instance_chart()
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    web_rules = [
+        rule for rule in policy["spec"]["egress"] if {port.get("port") for port in rule.get("ports", [])} & {80, 443}
+    ]
+
+    assert web_rules == [
+        {
+            "to": [
+                {
+                    "ipBlock": {
+                        "cidr": "0.0.0.0/0",
+                        "except": [
+                            "10.0.0.0/8",
+                            "100.64.0.0/10",
+                            "169.254.0.0/16",
+                            "172.16.0.0/12",
+                            "192.168.0.0/16",
+                        ],
+                    },
+                },
+                {"ipBlock": {"cidr": "::/0", "except": ["fc00::/7", "fe80::/10"]}},
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/component": "controller",
+                            "app.kubernetes.io/name": "ingress-nginx",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 80}, {"port": 443}],
+        },
+    ]
+    assert all(
+        "to" in rule for rule in policy["spec"]["egress"] if {port.get("port") for port in rule["ports"]} != {53}
+    )
+
+
+def _ingress_controller_peers(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = [*policy["spec"]["ingress"], *policy["spec"]["egress"]]
+    peers = [peer for rule in rules for peer in [*rule.get("from", []), *rule.get("to", [])]]
+    return [peer for peer in peers if "namespaceSelector" in peer]
+
+
+@pytest.mark.parametrize(("namespace", "expected"), [(None, "ingress-nginx"), ("nginx", "nginx")])
+def test_instance_chart_admits_the_configured_ingress_controller_namespace(
+    namespace: str | None,
+    expected: str,
+) -> None:
+    """Both controller rules follow one chart value, whose default keeps the namespace existing releases admit."""
+    set_args = () if namespace is None else (f"ingressControllerNamespace={namespace}",)
+    policy = _resource(
+        _render_chart(Path("cluster/k8s/instance"), *set_args),
+        "NetworkPolicy",
+        "instance-traffic-controls-demo",
+    )
+
+    assert _ingress_controller_peers(policy) == 2 * [
+        {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": expected}},
+            "podSelector": {
+                "matchLabels": {"app.kubernetes.io/component": "controller", "app.kubernetes.io/name": "ingress-nginx"},
+            },
+        },
+    ]
 
 
 def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instance_pods() -> None:
@@ -222,63 +367,6 @@ def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instan
             "ports": [{"port": 8765}, {"port": 8008}],
         },
     ]
-
-
-def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
-    """The control plane should configure generated worker pod specs with service links disabled."""
-    docs = _render_instance_chart()
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-
-    assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
-    assert "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON" not in env_values
-    assert "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME" not in env_values
-
-
-def test_instance_chart_passes_localhost_seccomp_profile_to_worker_manager() -> None:
-    """Hosted instances can select the node-installed profile for main worker containers."""
-    docs = _render_chart(
-        Path("cluster/k8s/instance"),
-        "workerBackend=kubernetes",
-        "storageAccessMode=ReadWriteMany",
-        "kubernetesWorkerSeccompProfile.type=Localhost",
-        "kubernetesWorkerSeccompProfile.localhostProfile=profiles/worker-computer.json",
-    )
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
-    env = _env_by_name(_container(deployment, "mindroom"))
-
-    assert json.loads(env["MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON"]["value"]) == {
-        "type": "Localhost",
-        "localhostProfile": "profiles/worker-computer.json",
-    }
-
-
-def test_instance_chart_passes_worker_runtime_class_to_worker_manager() -> None:
-    """Hosted instances can opt the whole generated worker pool into one RuntimeClass."""
-    docs = _render_chart(
-        Path("cluster/k8s/instance"),
-        "workerBackend=kubernetes",
-        "storageAccessMode=ReadWriteMany",
-        "kubernetesWorkerRuntimeClassName=sandboxed",
-    )
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
-    env = _env_by_name(_container(deployment, "mindroom"))
-
-    assert env["MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME"]["value"] == "sandboxed"
-
-
-def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
-    """The hosted chart rejects profiles that would disable syscall filtering."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/instance"),
-        "workerBackend=kubernetes",
-        "storageAccessMode=ReadWriteMany",
-        "kubernetesWorkerSeccompProfile.type=Unconfined",
-    )
-
-    assert completed.returncode != 0
-    assert "kubernetesWorkerSeccompProfile" in completed.stderr
 
 
 def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
@@ -356,17 +444,10 @@ def test_instance_chart_closes_public_synapse_registration(oidc_args: tuple[str,
 
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
     """Private registry credentials should be available before pulling instance images."""
-    docs = _render_chart(
-        Path("cluster/k8s/instance"),
-        "workerBackend=kubernetes",
-        "storageAccessMode=ReadWriteMany",
-        "imagePullSecrets[0].name=ghcr-pull",
-    )
+    docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
     deployment = _resource(docs, "Deployment", "mindroom-demo")
-    worker_manager_account = _resource(docs, "ServiceAccount", "mindroom-worker-manager-demo")
 
     assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
-    assert worker_manager_account["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
 def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_containers(tmp_path: Path) -> None:
@@ -652,51 +733,6 @@ def test_runtime_chart_rejects_content_bundle_target_path_equal_root_storage() -
     assert "contentBundles[0].targetPath cannot be equal to storage.mountPath /" in completed.stderr
 
 
-def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
-    """Shared-namespace instances must not get cross-tenant Secret permissions."""
-    docs = _render_instance_chart()
-    role = _resource(docs, "Role", "mindroom-worker-manager-demo")
-
-    secret_rules = [rule for rule in role["rules"] if "secrets" in rule.get("resources", [])]
-    assert secret_rules == [
-        {
-            "apiGroups": [""],
-            "resources": ["secrets"],
-            "resourceNames": ["mindroom-worker-auth-demo"],
-            "verbs": ["get", "patch"],
-        },
-    ]
-
-
-def test_instance_chart_mounts_api_tokens_only_where_the_api_is_used() -> None:
-    """Only the dedicated-worker control plane needs a Kubernetes API token in its pod."""
-    worker_docs = _render_instance_chart()
-    sidecar_docs = _render_chart(Path("cluster/k8s/instance"))
-    worker_pod = _resource(worker_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
-    sidecar_pod = _resource(sidecar_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
-    synapse_pod = _resource(sidecar_docs, "Deployment", "synapse-demo")["spec"]["template"]["spec"]
-
-    assert worker_pod["serviceAccountName"] == "mindroom-worker-manager-demo"
-    assert "automountServiceAccountToken" not in worker_pod
-    assert sidecar_pod["automountServiceAccountToken"] is False
-    assert "serviceAccountName" not in sidecar_pod
-    assert synapse_pod["automountServiceAccountToken"] is False
-
-
-def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
-    """Shared-namespace instances should reference a pre-created tenant token Secret."""
-    docs = _render_instance_chart()
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
-    worker_auth_secret = _resource(docs, "Secret", "mindroom-worker-auth-demo")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-
-    assert env_values["MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME"] == "mindroom-worker-auth-demo"  # noqa: S105
-    assert worker_auth_secret["metadata"]["namespace"] == "mindroom-instances"
-    assert "stringData" not in worker_auth_secret
-    assert "data" not in worker_auth_secret
-
-
 def test_instance_chart_exposes_public_matrix_url_to_desktop_pairing() -> None:
     """Hosted pairing commands should use the tenant's reachable Matrix ingress."""
     docs = _render_chart(
@@ -781,7 +817,7 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
     ]
     assert volumes["storage"] == {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"}}
     assert volumes["config"] == {"name": "config", "configMap": {"name": "mindroom-config-demo"}}
-    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {}}
+    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {"sizeLimit": "1Gi"}}
     assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/mindroom_data"
     assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
         "mkdir",
@@ -807,19 +843,6 @@ def test_instance_chart_static_runner_generates_primary_api_key_without_other_au
     assert "MINDROOM_API_KEY" not in _env_by_name(_container(deployment, "sandbox-runner"))
 
 
-def test_instance_chart_dedicated_workers_generate_primary_api_key_without_other_auth() -> None:
-    """Without Supabase auth, dedicated worker pods can reach the primary Service, so its API gets a key too."""
-    docs = _render_instance_chart()
-    api_key_secret = _resource(docs, "Secret", "mindroom-primary-api-key-demo")
-
-    assert len(base64.b64decode(api_key_secret["data"]["MINDROOM_API_KEY"])) == 48
-    assert _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))["MINDROOM_API_KEY"] == {
-        "name": "MINDROOM_API_KEY",
-        "valueFrom": {"secretKeyRef": {"name": "mindroom-primary-api-key-demo", "key": "MINDROOM_API_KEY"}},
-    }
-
-
-@pytest.mark.parametrize("worker_backend", ["static_runner", "kubernetes"])
 @pytest.mark.parametrize(
     "settings",
     [
@@ -827,29 +850,15 @@ def test_instance_chart_dedicated_workers_generate_primary_api_key_without_other
         ("allowUnauthenticatedPrimary=true",),
     ],
 )
-def test_instance_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...], worker_backend: str) -> None:
-    """Provisioned Supabase auth and the opt-out render no generated key for either worker backend."""
-    docs = _render_chart(
-        Path("cluster/k8s/instance"),
-        f"workerBackend={worker_backend}",
-        "storageAccessMode=ReadWriteMany",
-        *settings,
-    )
+def test_instance_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...]) -> None:
+    """Provisioned Supabase auth and the opt-out render no generated key."""
+    docs = _render_chart(Path("cluster/k8s/instance"), *settings)
     mindroom_container = _container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom")
 
     assert not any(
         doc["kind"] == "Secret" and doc["metadata"]["name"] == "mindroom-primary-api-key-demo" for doc in docs
     )
     assert "MINDROOM_API_KEY" not in _env_by_name(mindroom_container)
-
-
-def test_instance_chart_dedicated_workers_skip_static_runner_storage() -> None:
-    """Dedicated workers need neither the sidecar nor its storage preparation."""
-    deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
-    pod_spec = deployment["spec"]["template"]["spec"]
-
-    assert [container["name"] for container in pod_spec["containers"]] == ["mindroom"]
-    assert [container["name"] for container in pod_spec["initContainers"]] == ["wait-for-synapse"]
 
 
 @pytest.mark.parametrize("secret_value", ["credentials_encryption_key", "platformSsoSecret"])
@@ -1128,6 +1137,39 @@ def test_platform_chart_exposes_instance_image_pull_secret_names() -> None:
     assert config["data"]["INSTANCE_IMAGE_PULL_SECRET_NAMES"] == "ghcr-pull,backup-pull"  # noqa: S105
 
 
+def test_platform_backend_cannot_create_service_accounts_in_the_tenant_namespace() -> None:
+    """The instance chart renders no ServiceAccount, so the provisioner needs no way to mint tenant identities."""
+    role = _resource(
+        _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform"),
+        "Role",
+        "platform-backend",
+    )
+
+    assert role["metadata"]["namespace"] == "mindroom-instances"
+    assert all("serviceaccounts" not in rule["resources"] for rule in role["rules"])
+
+
+def test_platform_chart_exposes_the_instance_ingress_controller_namespace() -> None:
+    """Fresh clusters may run the controller outside the instance chart's default namespace."""
+    default_config = _resource(
+        _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform"),
+        "ConfigMap",
+        "platform-config",
+    )
+    config = _resource(
+        _render_chart(
+            Path("cluster/k8s/platform"),
+            "provisioner.instanceIngressControllerNamespace=nginx",
+            release_name="mindroom-platform",
+        ),
+        "ConfigMap",
+        "platform-config",
+    )
+
+    assert default_config["data"]["INSTANCE_INGRESS_CONTROLLER_NAMESPACE"] == ""
+    assert config["data"]["INSTANCE_INGRESS_CONTROLLER_NAMESPACE"] == "nginx"
+
+
 def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:
     """Platform services should be deployable without forcing identical image tags."""
     docs = _render_chart(
@@ -1160,12 +1202,38 @@ def test_instance_chart_renders_configurable_control_plane_resources() -> None:
     synapse = _resource(docs, "Deployment", "synapse-demo")
 
     assert _container(mindroom, "mindroom")["resources"] == {
-        "requests": {"cpu": "300m", "memory": "768Mi"},
-        "limits": {"cpu": "1500m", "memory": "3Gi"},
+        "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "64Mi"},
+        "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "16Gi"},
     }
     assert _container(synapse, "synapse")["resources"] == {
-        "requests": {"cpu": "350m", "memory": "1Gi"},
-        "limits": {"cpu": "2", "memory": "4Gi"},
+        "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "64Mi"},
+        "limits": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "2Gi"},
+    }
+
+
+@pytest.mark.parametrize("workspace_size_limit", [None, "2Gi"])
+def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(workspace_size_limit: str | None) -> None:
+    """Tenant tool code shares a node with other tenants, so no instance container may fill its disk.
+
+    Requests stay small because every tenant's requests count against the node's allocatable ephemeral storage,
+    and large ones would leave new tenant pods unschedulable; the limits provide the protection.
+    """
+    set_args = () if workspace_size_limit is None else (f"sandboxRunnerWorkspaceSizeLimit={workspace_size_limit}",)
+    docs = _render_chart(Path("cluster/k8s/instance"), *set_args)
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+    containers = [
+        _container(mindroom, "mindroom"),
+        _container(mindroom, "sandbox-runner"),
+        _container(synapse, "synapse"),
+    ]
+
+    for container in containers:
+        assert container["resources"]["requests"]["ephemeral-storage"] == "64Mi", container["name"]
+        assert "ephemeral-storage" in container["resources"]["limits"], container["name"]
+    assert _volumes_by_name(mindroom)["sandbox-workspace"] == {
+        "name": "sandbox-workspace",
+        "emptyDir": {"sizeLimit": workspace_size_limit or "1Gi"},
     }
 
 
@@ -3469,12 +3537,9 @@ def test_runtime_chart_does_not_copy_shared_proxy_token_to_worker_namespace() ->
     assert worker_namespace_secrets == []
 
 
-@pytest.mark.parametrize("chart", ["runtime", "instance"])
-def test_worker_manager_can_verify_absence_without_controller_write_access(chart: str) -> None:
+def test_worker_manager_can_verify_absence_without_controller_write_access() -> None:
     """Migration can list lingering Pods and ReplicaSets without granting ReplicaSet mutation."""
-    docs = _render_runtime_chart() if chart == "runtime" else _render_instance_chart()
-    name = "mindroom-runtime-worker-manager" if chart == "runtime" else "mindroom-worker-manager-demo"
-    role = _resource(docs, "Role", name)
+    role = _resource(_render_runtime_chart(), "Role", "mindroom-runtime-worker-manager")
     for group, resource in (("", "pods"), ("apps", "deployments"), ("apps", "replicasets")):
         rules = [rule for rule in role["rules"] if group in rule["apiGroups"] and resource in rule["resources"]]
         verbs = {verb for rule in rules for verb in rule["verbs"]}

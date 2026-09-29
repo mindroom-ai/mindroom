@@ -203,10 +203,11 @@ class TestProvisionerExtended:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
 
-        # Make namespace creation fail (non-FileNotFoundError)
+        # Make namespace creation fail (non-FileNotFoundError), then label it for Pod Security.
         # Then the Secret is applied before and after Helm, each followed by a key listing with nothing stale.
         mock_kubectl.side_effect = [
             Exception("Namespace already exists"),
+            (0, "labeled", ""),
             (0, "OK", ""),
             (0, "", ""),
             (0, "OK", ""),
@@ -224,6 +225,51 @@ class TestProvisionerExtended:
 
         # Should continue despite namespace error
         assert response.status_code == 200
+
+    def test_provision_labels_tenant_namespace_for_pod_security_baseline(
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
+    ):
+        """Tenant pods run tenant code, so their namespace must enforce the Pod Security baseline profile."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
+
+        response = client.post(
+            "/system/provision",
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
+            headers=valid_auth,
+        )
+
+        assert response.status_code == 200
+        calls = [call.args[0] for call in mock_kubectl.call_args_list]
+        label_call = [
+            "label",
+            "namespace",
+            "mindroom-instances",
+            "pod-security.kubernetes.io/enforce=baseline",
+            "--overwrite",
+        ]
+        assert calls.index(["create", "namespace", "mindroom-instances"]) < calls.index(label_call)
+        mock_helm.assert_called()
+
+    def test_provision_stops_when_the_tenant_namespace_cannot_be_labeled(
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
+    ):
+        """Without enforced Pod Security, no tenant workload is deployed and the instance can be retried."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
+        mock_kubectl.side_effect = lambda args, **_kwargs: (1, "", "forbidden") if args[0] == "label" else (0, "", "")
+
+        response = client.post(
+            "/system/provision",
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
+            headers=valid_auth,
+        )
+
+        assert response.status_code == 500
+        assert "Pod Security" in response.json()["detail"]
+        mock_helm.assert_not_called()
+        updates = [call.args[0] for call in mock_supabase.table().update.call_args_list]
+        assert updates[-1]["status"] == "error"
 
     def test_provision_url_update_failure(
         self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict

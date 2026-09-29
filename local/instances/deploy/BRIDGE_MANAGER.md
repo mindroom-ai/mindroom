@@ -19,6 +19,7 @@ The `bridge.py` script provides a unified interface for managing Matrix bridges 
 ```bash
 # Add and configure Telegram bridge
 ./bridge.py add telegram --instance my-instance \
+  --admin @you:m-my-instance.example.com \
   --api-id YOUR_API_ID \
   --api-hash YOUR_API_HASH \
   --bot-token YOUR_BOT_TOKEN
@@ -45,6 +46,7 @@ The `bridge.py` script provides a unified interface for managing Matrix bridges 
 - **BRIDGE_TYPE**: `telegram`, `slack`, or `email`
 - **Options**:
   - `--instance`: Target Mindroom instance (default: "default")
+  - `--admin`: Matrix user ID granted bridge `admin` for Telegram and Slack (prompted when omitted); every other account gets the lowest level (`relaybot` for Telegram, `relay` for Slack)
   - Bridge-specific credentials (e.g., `--api-id`, `--bot-token`)
 
 ### `register` - Register with Matrix Server
@@ -61,6 +63,9 @@ Generates registration file and provides instructions for Matrix server registra
 # Start all bridges for instance
 ./bridge.py start --all --instance my-instance
 ```
+
+Bridges created by older versions keep the permissions those versions generated, `user` for the whole homeserver domain and `admin` for `@admin:<domain>`, and anyone can register those accounts.
+Fix such a bridge by hand: set `bridge.permissions` in its `data/config.yaml` to the lowest level for `*` (`relaybot` for Telegram, `relay` for Slack) plus `admin` for your own Matrix user ID, then restart it, or recreate it with `remove` and `add --admin`, which deletes its data.
 
 ### `stop` - Stop Bridge(s)
 ```bash
@@ -130,6 +135,7 @@ Shows all configured bridges across all instances.
 7. Add bridge with credentials:
    ```bash
    ./bridge.py add slack --instance my-instance \
+     --admin @you:m-my-instance.example.com \
      --app-token xapp-... \
      --bot-token xoxb-... \
      --team-id T...
@@ -222,7 +228,7 @@ The bridge manager integrates seamlessly with Mindroom instances:
 # Complete workflow
 ./deploy.py create demo --matrix tuwunel    # Create instance with Matrix
 ./deploy.py start demo                       # Start instance
-./bridge.py add telegram --instance demo     # Add Telegram bridge
+./bridge.py add telegram --instance demo --admin @you:m-demo.example.com  # Add Telegram bridge
 ./bridge.py register telegram --instance demo # Register with Matrix
 ./bridge.py start telegram --instance demo   # Start bridge
 ```

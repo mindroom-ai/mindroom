@@ -27,6 +27,7 @@ from backend.config import (
     INSTANCE_BASE_DOMAIN,
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_IMAGE_PULL_SECRET_NAMES,
+    INSTANCE_INGRESS_CONTROLLER_NAMESPACE,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MATRIX_OIDC_CLIENT_ID,
     INSTANCE_MATRIX_OIDC_CLIENT_SECRET,
@@ -99,20 +100,28 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "storage": "25Gi",
         "mindroomResources.requests.memory": "1Gi",
         "mindroomResources.requests.cpu": "500m",
+        "mindroomResources.requests.ephemeral-storage": "64Mi",
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
+        "mindroomResources.limits.ephemeral-storage": "32Gi",
         "synapseResources.requests.memory": "1Gi",
         "synapseResources.requests.cpu": "500m",
+        "synapseResources.requests.ephemeral-storage": "64Mi",
         "synapseResources.limits.memory": "4Gi",
         "synapseResources.limits.cpu": "2000m",
+        "synapseResources.limits.ephemeral-storage": "4Gi",
         "sandboxRunnerResources.requests.memory": "512Mi",
         "sandboxRunnerResources.requests.cpu": "250m",
+        "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
         "sandboxRunnerResources.limits.memory": "2Gi",
         "sandboxRunnerResources.limits.cpu": "1000m",
+        "sandboxRunnerResources.limits.ephemeral-storage": "8Gi",
     }
 }
 
 _INSTANCES_NAMESPACE = "mindroom-instances"
+# Tenant pods run tenant code, so admission must reject privileged and host-reaching pods in their namespace.
+_POD_SECURITY_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce=baseline"
 # PostgreSQL unique_violation of the constraint that allows one instance per subscription (migration 007).
 _UNIQUE_VIOLATION = "23505"
 _ONE_INSTANCE_PER_SUBSCRIPTION = "instances_subscription_id_key"
@@ -290,8 +299,15 @@ def _instance_secret_names(instance_id: str | int) -> list[str]:
     return [
         _instance_secret_name(str(instance_id)),
         f"mindroom-primary-api-key-{instance_id}",
-        f"mindroom-worker-auth-{instance_id}",
     ]
+
+
+async def _enforce_pod_security_baseline(namespace: str) -> None:
+    """Label the tenant namespace for the Pod Security baseline profile before deploying into it."""
+    code, _out, err = await run_kubectl(["label", "namespace", namespace, _POD_SECURITY_ENFORCE_LABEL, "--overwrite"])
+    if code != 0:
+        logger.error("Failed to enforce Pod Security on namespace %s: %s", namespace, err)
+        raise HTTPException(status_code=500, detail="Failed to enforce Pod Security on the instance namespace")
 
 
 def _instance_secret_hash(secret_data: dict[str, str]) -> str:
@@ -754,6 +770,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     # Always per instance: a shared token would let one tenant authenticate to every tenant's runner.
     sandbox_proxy_token = secrets.token_hex(32)
     try:
+        await _enforce_pod_security_baseline(namespace)
         # Existing instances may have plaintext credential files; preserve their current encryption state.
         credentials_encryption_key = await _provision_credentials_encryption_key(
             customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
@@ -817,6 +834,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         ]
         if storage_class_name:
             helm_args += ["--set", f"storageClassName={storage_class_name}"]
+        if INSTANCE_INGRESS_CONTROLLER_NAMESPACE:
+            helm_args += ["--set", f"ingressControllerNamespace={INSTANCE_INGRESS_CONTROLLER_NAMESPACE}"]
         plan = get_plan_details(tier)
         resource_profile = plan.resource_profile if plan else ""
         _append_resource_profile_helm_args(helm_args, resource_profile)

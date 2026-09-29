@@ -3,33 +3,54 @@ baseDomain: mindroom.chat  # Base domain for all services
 platformDomain: ""  # Platform app/API domain when it differs from baseDomain
 storage: 10Gi  # More storage for Matrix data
 storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
-storageAccessMode: ReadWriteOnce  # MindRoom storage access mode. Set ReadWriteMany for multi-node shared-worker storage.
+storageAccessMode: ReadWriteOnce  # MindRoom storage access mode.
 synapseStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
+# Namespace of the ingress-nginx controller pods, the only pods outside the instance that may reach its service ports.
+# kube-hetzner's nginx addon installs into `nginx` unless its ingress_target_namespace is set, so confirm the live
+# namespace with `kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx`; provisioned instances take it from
+# the platform chart's provisioner.instanceIngressControllerNamespace.
+ingressControllerNamespace: ingress-nginx
 
+# Tenants share nodes, so every container bounds its ephemeral storage (writable layer, logs, and emptyDirs).
+# Kubelet evicts only the pod that exceeds its limit.
+# The primary's limit leaves room for tool extras it installs into the image's virtualenv at runtime;
+# sentence_transformers with its torch and CUDA wheels alone unpacks to about 7 GiB on x86_64.
+# Ephemeral-storage requests stay small: every tenant's requests count against the node's allocatable ephemeral
+# storage, so large ones would leave new tenant pods Pending. They are explicit because a limit without a request
+# makes Kubernetes request the full limit.
 mindroomResources:
   requests:
     memory: "512Mi"
     cpu: "250m"
+    ephemeral-storage: "64Mi"
   limits:
     memory: "2Gi"
     cpu: "1000m"
+    ephemeral-storage: "16Gi"
 
 synapseResources:
   requests:
     memory: "512Mi"
     cpu: "250m"
+    ephemeral-storage: "64Mi"
   limits:
     memory: "2Gi"
     cpu: "1000m"
+    ephemeral-storage: "2Gi"
 
+# The sandbox runner runs tenant shell and python code on a writable root filesystem.
 sandboxRunnerResources:
   requests:
     memory: "256Mi"
     cpu: "100m"
+    ephemeral-storage: "64Mi"
   limits:
     memory: "1Gi"
     cpu: "500m"
+    ephemeral-storage: "4Gi"
+# Size limit of the sandbox runner's /app/workspace emptyDir; kubelet evicts the pod once usage exceeds it.
+sandboxRunnerWorkspaceSizeLimit: 1Gi
 
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
@@ -52,24 +73,10 @@ roomDefaults:
   admins: []
 matrixAutoJoinRoomKeys: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
-workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
-# Dedicated browser/display only: requires kubernetes, user_agent scope and browser worker_tools.
-# Configure MINDROOM_COMPUTER_ALLOWED_ORIGINS on the primary runtime; see docs/tools/worker-computer.md.
-workerComputerEnabled: false
+# Tool code runs in the per-tenant sandbox-runner sidecar.
+# Tenants share the mindroom-instances namespace, so the chart refuses dedicated Kubernetes workers; use the runtime chart for those.
+workerBackend: static_runner
 workerCleanupIntervalSeconds: 30
-controlPlaneNodeName: ""  # Optional explicit node pin for the control plane and dedicated workers when using shared ReadWriteOnce storage.
-kubernetesWorkerImage: ""  # Defaults to mindroom_image when empty
-kubernetesWorkerImagePullPolicy: ""  # Defaults to mindroom_image_pull_policy when empty
-kubernetesWorkerServiceAccountName: ""  # ServiceAccount used by dedicated worker pods. Defaults to the namespace `default`.
-kubernetesWorkerNamePrefix: "mindroom-worker"
-kubernetesWorkerStorageSubpathPrefix: "workers"
-kubernetesWorkerPort: 8766
-kubernetesWorkerReadyTimeoutSeconds: 60
-kubernetesWorkerIdleTimeoutSeconds: 1800
-kubernetesWorkerEnableServiceLinks: false
-kubernetesWorkerRuntimeClassName: ""  # Optional RuntimeClass applied to every dedicated worker pod.
-# Optional node-installed profile applied only to the main worker container.
-kubernetesWorkerSeccompProfile: {}
 
 # API keys and secrets (referenced via Secret in deployment)
 # Production provisioner deploys create this Secret outside Helm so secret values
@@ -95,7 +102,7 @@ platformSsoSecret: ""
 # Supabase (shared auth). Tenant workloads get only the public anon key, never the service-role key.
 supabaseUrl: ""
 supabaseAnonKey: ""
-# Without Supabase, the primary gets a generated MINDROOM_API_KEY because worker tool code can reach its API, on localhost from the static_runner sidecar or over the pod network from dedicated workers.
+# Without Supabase, the primary gets a generated MINDROOM_API_KEY because sidecar tool code can reach its API on localhost.
 # Set true only when other API auth is configured.
 allowUnauthenticatedPrimary: false
 
