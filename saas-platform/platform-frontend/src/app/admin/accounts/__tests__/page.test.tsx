@@ -346,8 +346,8 @@ describe('Admin Accounts Page', () => {
 
       await waitFor(() => {
         expect(mockApiCall).toHaveBeenCalledWith(
-          '/admin/accounts/account_1/status?status=suspended',
-          { method: 'PUT' }
+          '/admin/accounts/account_1/status',
+          { method: 'PUT', body: JSON.stringify({ status: 'suspended' }) }
         )
       })
     })

@@ -23,8 +23,15 @@ def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
     return f"Path '{path}' resolves to '{resolved}', which is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
+def _moved_base_dir_message(base_dir: Path) -> str:
+    """Explain that a toolkit's pinned base dir was moved or replaced, without suggesting weaker access."""
+    return f"base_dir '{base_dir}' no longer resolves to itself; it was moved or replaced by a link."
+
+
 def blocked_file_action_message(action: str, requested_path: str, base_dir: Path) -> str:
     """Explain why a file-tool action was blocked."""
+    if not _base_dir_is_current(base_dir):
+        return f"Error {action}: {_moved_base_dir_message(base_dir)}"
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
@@ -41,8 +48,38 @@ def format_path_for_output(path: str | Path, base_dir: Path) -> str:
         return str(path)
 
 
+def resolve_tool_base_dir(base_dir: str | Path | None) -> Path:
+    """Return a toolkit's canonical base dir, refusing a link or a directory swapped while it was resolved.
+
+    Runtime resolution refused links in the workspace path; pinning the same directory here keeps
+    a later swap from becoming the toolkit's root, and every later check refuses a root that moved.
+    """
+    spelled = Path(base_dir) if base_dir else Path.cwd()
+    resolved = spelled.resolve()
+    try:
+        with open_directory_within_root(spelled) as directory_fd:
+            pinned = os.path.samestat(os.fstat(directory_fd), resolved.stat())
+    except FileNotFoundError:
+        # A base dir that does not exist yet has nothing to pin; later checks still refuse one that moved.
+        return resolved
+    except OSError as exc:
+        msg = f"base_dir '{spelled}' must be a directory reached without a link: {exc.strerror}"
+        raise ValueError(msg) from exc
+    if not pinned:
+        msg = f"base_dir '{spelled}' changed while it was being resolved."
+        raise ValueError(msg)
+    return resolved
+
+
+def _base_dir_is_current(base_dir: Path) -> bool:
+    """Return whether a toolkit's canonical base dir still resolves to itself, so no link has replaced it."""
+    return base_dir.resolve() == base_dir
+
+
 def is_within_base_dir(path: Path, base_dir: Path) -> bool:
-    """Check whether a resolved path stays within base_dir."""
+    """Check whether a resolved path stays within base_dir, which must still resolve to itself."""
+    if not _base_dir_is_current(base_dir):
+        return False
     try:
         resolve_path_within_root(base_dir, path.resolve(), symlinks="internal")
     except (OSError, ValueError):
@@ -58,9 +95,15 @@ def resolve_base_dir_path(base_dir: Path, path: str, restrict_to_base_dir: bool 
         return candidate.resolve()
 
     try:
-        return resolve_path_within_root(base_dir, requested, symlinks="internal")
+        resolved = resolve_path_within_root(base_dir, requested, symlinks="internal")
     except ValueError:
+        if not _base_dir_is_current(base_dir):
+            raise ValueError(_moved_base_dir_message(base_dir)) from None
         raise ValueError(_blocked_base_dir_message(path, candidate.resolve(), base_dir.resolve())) from None
+    # The resolver re-resolves its root, so check against the pinned base dir to refuse a root swapped meanwhile.
+    if not resolved.is_relative_to(base_dir):
+        raise ValueError(_moved_base_dir_message(base_dir))
+    return resolved
 
 
 def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
@@ -85,9 +128,12 @@ def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
 
 
 def _relative_below(base_dir: Path, resolved: Path) -> Path | None:
-    """Return ``resolved`` below the canonical base dir, or ``None`` for an unrestricted outside path."""
-    canonical_base = base_dir.resolve()
-    return resolved.relative_to(canonical_base) if resolved.is_relative_to(canonical_base) else None
+    """Return ``resolved`` below the pinned base dir, or ``None`` for an unrestricted outside path.
+
+    Workspace-mode paths always lie below the pinned base dir, so they never take the by-path branch;
+    callers open them from ``base_dir`` without following a link, so a replaced base dir is refused.
+    """
+    return resolved.relative_to(base_dir) if resolved.is_relative_to(base_dir) else None
 
 
 def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
@@ -95,7 +141,7 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         return resolved.read_bytes()
-    return read_regular_file_within_root(base_dir.resolve(), relative)
+    return read_regular_file_within_root(base_dir, relative)
 
 
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
@@ -108,7 +154,7 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(payload)
         return
-    with open_directory_within_root(base_dir.resolve(), relative.parent, create=True) as directory_fd:
+    with open_directory_within_root(base_dir, relative.parent, create=True) as directory_fd:
         try:
             existing = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -135,7 +181,7 @@ def remove_resolved_path(base_dir: Path, resolved: Path) -> None:
         else:
             resolved.unlink()
         return
-    with open_directory_within_root(base_dir.resolve(), relative.parent) as directory_fd:
+    with open_directory_within_root(base_dir, relative.parent) as directory_fd:
         if stat.S_ISDIR(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
             os.rmdir(relative.name, dir_fd=directory_fd)
         else:

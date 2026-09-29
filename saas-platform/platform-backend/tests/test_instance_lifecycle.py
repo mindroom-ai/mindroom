@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 import stripe
-from backend.deps import verify_admin, verify_user
+from backend.deps import verify_admin, verify_user, verify_user_allow_deleted
 from backend.openrouter import CreatedOpenRouterKey, OpenRouterKeyNotFoundError
 from backend.pricing import get_plan_details
 from backend.services.instance_lifecycle import (
@@ -1293,7 +1293,10 @@ def _cancel_deletion(platform: Platform) -> Any:  # noqa: ANN401
         platform.db.row("accounts", id=ACCOUNT_ID)["deleted_at"] = None
         return record_rpc(name, params)
 
-    app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
+    app.dependency_overrides[verify_user_allow_deleted] = lambda: {
+        "account_id": ACCOUNT_ID,
+        "email": "customer@example.com",
+    }
     try:
         with (
             patch("backend.routes.gdpr.ensure_supabase", return_value=platform.db),

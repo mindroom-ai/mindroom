@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from backend.deps import ensure_supabase, limiter, verify_user
+from backend.deps import ensure_supabase, limiter, verify_user, verify_user_allow_deleted
 from backend.entitlements import decorate_subscription_for_response
 from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
 from backend.pricing import get_plan_limits_from_metadata
@@ -14,7 +14,9 @@ router = APIRouter()
 
 @router.get("/my/account", response_model=AccountWithRelationsOut)
 @limiter.limit("30/minute")  # Reading account info
-async def get_current_account(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def get_current_account(
+    request: Request, user: Annotated[dict, Depends(verify_user_allow_deleted)]
+) -> dict[str, Any]:
     """Get current user's account with subscription and instances."""
     sb = ensure_supabase()
 

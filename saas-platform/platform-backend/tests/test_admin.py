@@ -1,7 +1,7 @@
 """Comprehensive HTTP API tests for admin endpoints."""
 
-from datetime import UTC, datetime
-from unittest.mock import MagicMock, Mock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -334,6 +334,87 @@ class TestAdminEndpoints:
         assert data["status"] == "success"
         assert data["account_id"] == "acc_123"
         assert data["new_status"] == "suspended"
+
+    def test_admin_refuses_to_activate_an_account_awaiting_deletion(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """Setting active would leave deleted_at set, so the admin is pointed at the routes that restore access."""
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": "2026-09-01T00:00:00Z"}])
+
+        response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "Set its status to deleted" in detail
+        assert "PUT /admin/accounts/{account_id}" in detail
+        mock_supabase.table().update.assert_not_called()
+
+    def test_admin_activates_an_account_not_awaiting_deletion(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """Reactivating a suspended account still works."""
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": None}])
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "acc_123", "status": "active"}])
+
+        response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
+
+        assert response.status_code == 200
+        assert response.json()["new_status"] == "active"
+
+    def test_admin_status_change_for_an_unknown_account_is_not_found(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """A missing account answers 404 instead of being reported as a server error."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[])
+
+        response = client.put("/admin/accounts/acc_missing/status", json={"status": "suspended"})
+
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("PUT", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F/status", {"status": "suspended"}),
+            ("PUT", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F", {"status": "suspended"}),
+            ("DELETE", "/admin/accounts/5F0B2C1E-8C3D-4F7A-9B21-6E4D3A2C1B0F/complete", None),
+        ],
+    )
+    def test_admin_account_changes_drop_cached_auth(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_verify_admin: Mock,
+        method: str,
+        path: str,
+        body: dict | None,
+    ):
+        """Admin account changes take effect on the account's next request, whatever spelling the path id uses."""
+        from backend.deps import AuthCacheEntry, _auth_cache  # noqa: PLC0415
+
+        account_id = "5f0b2c1e-8c3d-4f7a-9b21-6e4d3a2c1b0f"
+        mock_supabase.table().update().eq().execute.return_value = Mock(
+            data=[{"id": account_id, "status": "suspended"}]
+        )
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": account_id, "email": "u@x.test"}])
+        _auth_cache.clear()
+        expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        for cached_id in (account_id, "acc_other"):
+            _auth_cache[cached_id] = AuthCacheEntry(
+                expires_at=expires_at,
+                account_id=cached_id,
+                user_data={"user_id": cached_id, "account_id": cached_id, "account": {"status": "active"}},
+            )
+
+        with (
+            patch("backend.routes.admin.instances_data.get_instances_for_account", return_value=[]),
+            patch("backend.routes.admin.instance_lifecycle.tear_down_account", new=AsyncMock()),
+            patch("backend.routes.admin.instance_lifecycle.delete_auth_user", new=AsyncMock()),
+        ):
+            response = client.request(method, path, json=body)
+
+        assert response.status_code == 200
+        assert set(_auth_cache) == {"acc_other"}
+        _auth_cache.clear()
 
     def test_admin_logout(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin logout."""

@@ -596,6 +596,34 @@ def test_output_temp_name_does_not_limit_destination_basename(tmp_path: Path, na
     assert list(tmp_path.iterdir()) == [tmp_path / filename]
 
 
+@pytest.mark.parametrize("workspace_state", ["real", "home-relative", "replaced-by-link"])
+def test_output_write_opens_the_workspace_as_spelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_state: str,
+) -> None:
+    """Output lands in the workspace as spelled; a workspace replaced by a link is refused, not followed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    workspace = tmp_path / "agents" / "code" / "workspace"
+    workspace.mkdir(parents=True)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    spelled = Path("~/agents/code/workspace") if workspace_state == "home-relative" else workspace
+    policy = _policy(spelled)
+    if workspace_state == "replaced-by-link":
+        workspace.rename(tmp_path / "moved-workspace")
+        workspace.symlink_to(credentials, target_is_directory=True)
+
+    result = write_bytes_to_output_path(policy, "reports/nested/out.bin", b"payload")
+
+    if workspace_state == "replaced-by-link":
+        assert result == "Failed to write redirected tool output."
+        assert list(credentials.iterdir()) == []
+    else:
+        assert not isinstance(result, str)
+        assert (workspace / "reports" / "nested" / "out.bin").read_bytes() == b"payload"
+
+
 @pytest.mark.parametrize(
     "bad_path",
     [

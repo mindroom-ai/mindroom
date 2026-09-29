@@ -19,7 +19,6 @@ from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_cli_state,
     app_runner_token,
-    app_runtime_config,
     app_runtime_paths,
     validate_runner_token,
 )
@@ -27,14 +26,10 @@ from mindroom.background_tasks import run_blocking_until_complete, wait_for_futu
 from mindroom.shell_supervisor import ensure_shell_supervisor
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
-from mindroom.tool_system.worker_routing import visible_workspace_roots
 from mindroom.tools.shell import ShellWorkerBinding, shell_tools
 from mindroom.workers.models import is_cli_worker_key
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
 
 _CLI_PRIVATE_ROOT = Path(CLI_PRIVATE_ROOT_PATH)
@@ -59,20 +54,14 @@ def _require_worker(request: Request, worker_key: str) -> RuntimePaths:
     return runtime
 
 
-def _workspace(
-    launch: CliWorkerLaunch,
-    runtime: RuntimePaths,
-    agent_policies: Mapping[str, ResolvedAgentPolicy],
-) -> Path:
-    roots = visible_workspace_roots(
-        runtime.storage_root,
-        launch.state_scope_worker_key,
-        agent_policies,
-        private_agent_names=frozenset(launch.private_agent_names),
-    )
+def _workspace(launch: CliWorkerLaunch, runtime: RuntimePaths) -> Path:
+    # CLI workers start without agent config, so they cannot resolve worker scopes or private
+    # roots. The primary resolves the canonical workspace from its live policies, refuses any
+    # other path, and maps it onto the mounts it planned for this worker (CliWorkerLease).
     workspace = Path(launch.shell.workspace).resolve()
-    if not any(workspace.is_relative_to(root.resolve()) for root in roots):
-        raise HTTPException(400, "CLI workspace is outside its canonical workspace mount")
+    storage_root = sandbox_exec.runner_storage_root(runtime)
+    if not workspace.is_relative_to(storage_root):
+        raise HTTPException(400, "CLI workspace is outside the worker's storage mount")
     if _CLI_PRIVATE_ROOT.resolve().is_relative_to(runtime.storage_root.resolve()):
         raise HTTPException(503, "CLI capability storage overlaps worker state")
     return workspace
@@ -85,8 +74,7 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
     cli_state = app_cli_state(request.app)
     if cli_state.install_started:
         raise HTTPException(409, "CLI worker was already assigned a turn")
-    agent_policies = app_runtime_config(request.app).get_agent_policies()
-    workspace = _workspace(payload, runtime, agent_policies)
+    workspace = _workspace(payload, runtime)
     # Fence concurrent installs before any await. A failed worker must be retired,
     # never revived with another generation's grant or surviving shell process.
     cli_state.install_started = True
@@ -101,7 +89,8 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
                 worker_key=payload.worker_key,
                 tool_init_overrides={"base_dir": str(workspace)},
                 runtime_paths=runtime,
-                agent_policies=agent_policies,
+                # No agent config here; this dedicated worker's root bounds base_dir.
+                agent_policies={},
                 private_agent_names=frozenset(payload.private_agent_names),
                 runner_token=token,
             ),

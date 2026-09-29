@@ -3,6 +3,7 @@ Shared audit logging utilities.
 KISS principle - simple function for consistent audit logging.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
 import re
@@ -10,9 +11,15 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from backend.config import supabase
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
+TRUNCATED = "... [truncated]"
+# Only this many characters of each audit string are redacted, which bounds the cost of the recursive assignment
+# regex below. Its worst case, nested assignments followed by a long whitespace run, grows with about the cube of the
+# length: measured at about 30 ms at this length, 60 ms at 320, and 250 ms at 512.
+MAX_AUDIT_TEXT_LENGTH = 256
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
@@ -74,6 +81,7 @@ _URL_QUERY_SECRET_KEYS = frozenset(
     }
 )
 _QUERY_CONTAINER_KEYS = frozenset({"query", "query_params", "query_string", "callback_query"})
+_ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _SECRET_KEY_VARIANTS = tuple(
     (key, key.replace("_", ""), tuple(key.split("_"))) for key in sorted(_SECRET_KEYS, key=len, reverse=True)
 )
@@ -81,7 +89,9 @@ _SECRET_KEY_VARIANTS = tuple(
 
 def _normalize_key(value: object) -> str:
     key = str(value).strip()
-    key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    # Zero-width lookarounds split an acronym from the next word without the backtracking of `([A-Z]+)([A-Z][a-z])`,
+    # which was quadratic in the length of an uppercase run.
+    key = _ACRONYM_BOUNDARY_PATTERN.sub("_", key)
     key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
     return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
@@ -127,11 +137,11 @@ def _redact_nested_assignment_value(match: re.Match[str]) -> str:
         quoted_value = match.group("quoted_value")
         if quoted_value is None:
             return match.group(0)
-        return f"{match.group('prefix')}{quote}{redact_audit_text(quoted_value)}{quote}"
+        return f"{match.group('prefix')}{quote}{_redact_audit_text(quoted_value)}{quote}"
     value = match.group("value")
     if value is None:
         return match.group(0)
-    return match.group("prefix") + redact_audit_text(value)
+    return match.group("prefix") + _redact_audit_text(value)
 
 
 def _redact_secret_assignment(match: re.Match[str]) -> str:
@@ -153,7 +163,11 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
 
 
 def _redact_url(value: str) -> str:
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        # An unparseable URL would otherwise make redaction raise and drop the whole audit row.
+        return REDACTED
     if parsed.scheme not in {"http", "https"}:
         return value
 
@@ -195,7 +209,18 @@ def _redact_query_fragment(value: str) -> str:
 
 
 def redact_audit_text(value: str) -> str:
-    """Redact credential-bearing values from free-form audit text."""
+    """Redact credential-bearing values from the first `MAX_AUDIT_TEXT_LENGTH` characters of free-form audit text.
+
+    Longer text is cut before redaction and marked as truncated.
+    Redaction markers can make the output several times longer than the redacted text.
+    A credential that straddles the cut can keep its beginning; only platform admins supply audit text that long.
+    """
+    if len(value) > MAX_AUDIT_TEXT_LENGTH:
+        return _redact_audit_text(value[:MAX_AUDIT_TEXT_LENGTH]) + TRUNCATED
+    return _redact_audit_text(value)
+
+
+def _redact_audit_text(value: str) -> str:
     redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
@@ -223,6 +248,19 @@ def _redact_audit_details(value: Any, parent_key: str | None) -> Any:  # noqa: A
 def redact_audit_details(value: Any) -> Any:  # noqa: ANN401
     """Recursively redact credential-bearing fields from audit details."""
     return _redact_audit_details(value, parent_key=None)
+
+
+@dataclass(frozen=True)
+class AuditActor:
+    """Authenticated account an audited request is attributed to."""
+
+    account_id: str
+    email: str | None
+
+
+def record_audit_actor(request: Request, actor: AuditActor) -> None:
+    """Attribute the audit row of the current request to an authenticated account."""
+    request.state.audit_actor = actor
 
 
 def create_audit_log(

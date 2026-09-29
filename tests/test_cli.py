@@ -739,6 +739,30 @@ def test_run_stops_waiting_when_another_process_pairs(tmp_path: Path) -> None:
     mock_run.assert_called_once()
 
 
+@pytest.mark.parametrize("command", ["run", "connect"])
+def test_pairing_errors_print_service_text_literally(tmp_path: Path, command: str) -> None:
+    """Rich markup in an approver or error detail from the provisioning service is shown as text, not rendered."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    message = "The connection approved by '@x:y[/bold]' is unusable; [link=https://attacker.example]revoke[/link] it."
+    args = (
+        ["run", "--no-api", "--config", str(config_path)]
+        if command == "run"
+        else ["connect", "--path", str(config_path)]
+    )
+
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=ValueError(message)),
+        patch("mindroom.cli.main._run", new_callable=AsyncMock) as mock_run,
+    ):
+        result = runner.invoke(app, args)
+
+    assert result.exit_code == 1, result.output
+    assert message in " ".join(result.output.split())
+    mock_run.assert_not_called()
+
+
 def test_run_exits_with_printed_credentials_when_env_is_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

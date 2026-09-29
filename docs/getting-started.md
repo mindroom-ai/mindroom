@@ -114,7 +114,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI ChatGPT authentication: run `codex login`.
 - For Kimi Code CLI authentication: run `kimi` and `/login`.
-- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
+- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5.5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 Then run `uvx mindroom run`.
@@ -124,7 +124,7 @@ Then run `uvx mindroom run`.
 **In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
-Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+Setup writes a generated `MINDROOM_API_KEY` to your `.env`, and the dashboard asks for it before loading, because `mindroom run` serves the dashboard on every network interface by default.
 
 **Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
 Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.

@@ -235,6 +235,34 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     assert captured["sandbox_labels"] is None
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [({}, True), ({"verify_ssl": None}, True), ({"verify_ssl": True}, True), ({"verify_ssl": False}, False)],
+)
+def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+    *,
+    expected: bool,
+) -> None:
+    """Only an explicit false may disable certificate checks for Daytona's API key traffic; unset and null verify."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(api_key="dt-test", **overrides)
+
+    assert captured["verify_ssl"] is expected
+    fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
+    assert fields["verify_ssl"].default is True
+
+
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)

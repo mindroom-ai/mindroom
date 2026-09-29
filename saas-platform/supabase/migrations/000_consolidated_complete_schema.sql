@@ -44,7 +44,7 @@ CREATE TABLE accounts (
     stripe_customer_id TEXT UNIQUE,
     tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
     is_admin BOOLEAN DEFAULT FALSE,
-    status TEXT DEFAULT 'active', -- active, suspended, deleted, pending_verification
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'deleted', 'pending_verification')),
 
     -- Soft delete support (GDPR compliance)
     deleted_at TIMESTAMPTZ NULL,

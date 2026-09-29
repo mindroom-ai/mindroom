@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.config import ACCOUNT_DELETION_GRACE_DAYS, logger, stripe
-from backend.deps import ensure_supabase, verify_user
+from backend.deps import ensure_supabase, invalidate_account_auth_cache, verify_user, verify_user_allow_deleted
 from backend.models import (
     GdprCancelDeletionResponse,
     GdprConsentResponse,
@@ -36,7 +36,7 @@ class DeletionRequest(BaseModel):
 
 
 @router.get("/my/gdpr/export-data", response_model=GdprExportResponse)
-async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def export_user_data(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Export all user data for GDPR compliance.
     Returns all personal data in machine-readable format.
@@ -184,6 +184,8 @@ async def request_account_deletion(
         # The soft delete may have committed before its response was lost; then the deletion stands.
         if not _deletion_recorded_after_all(sb, account_id, scheduled):
             raise HTTPException(status_code=500, detail=await _undo_scheduled_billing_end(scheduled)) from exc
+    # The account is pending deletion now, so its cached sign-in must not keep full access.
+    invalidate_account_auth_cache(account_id)
     # An account pending deletion never runs instances, so this holds them until cleanup.
     hold_errors = await instance_lifecycle.reconcile_account_instances(account_id)
     # Cancelling cannot be undone, so subscriptions without a paid period are cancelled only now the deletion is
@@ -305,7 +307,7 @@ async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: C
 
 
 @router.post("/my/gdpr/cancel-deletion", response_model=GdprCancelDeletionResponse)
-async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allow_deleted)]) -> dict[str, Any]:
     """
     Cancel a pending account deletion request.
     Only works if account is still in soft-delete state.
@@ -321,6 +323,8 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     restored = sb.rpc("restore_account", {"target_account_id": account_id}).execute().data
     if not restored:
         raise HTTPException(status_code=409, detail="This account deletion can no longer be cancelled")
+    # The account is active again, so a cached pending-deletion sign-in must not limit its next request.
+    invalidate_account_auth_cache(account_id)
     try:
         await instance_lifecycle.resume_account_billing(account_id)
     except stripe.StripeError:

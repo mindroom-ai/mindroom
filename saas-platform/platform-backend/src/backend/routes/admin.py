@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
-from backend.deps import ensure_supabase, limiter, verify_admin
+from backend.deps import ACTIVE_ACCOUNT_STATUS, ensure_supabase, invalidate_account_auth_cache, limiter, verify_admin
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -30,6 +30,8 @@ from pydantic import BaseModel
 
 router = APIRouter()
 ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
+# The accounts.status CHECK constraint allows exactly these values.
+ACCOUNT_STATUSES = ("active", "suspended", "deleted", "pending_verification")
 
 
 def audit_log_entry(
@@ -285,11 +287,21 @@ async def update_account_status(
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
 
-    valid_statuses = ["active", "suspended", "deleted", "pending_verification"]
-    if request.status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+    if request.status not in ACCOUNT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {list(ACCOUNT_STATUSES)}")
 
     try:
+        # Setting active would leave deleted_at set, which keeps the account refused everywhere.
+        if request.status == ACTIVE_ACCOUNT_STATUS:
+            account = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
+            if account.data and account.data[0].get("deleted_at") is not None:
+                raise HTTPException(  # noqa: TRY301
+                    status_code=409,
+                    detail=(
+                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the "
+                        "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
+                    ),
+                )
         result = (
             sb.table("accounts")
             .update({"status": request.status, "updated_at": datetime.now(UTC).isoformat()})
@@ -299,6 +311,8 @@ async def update_account_status(
 
         if not result.data:
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
+        # The database's id spelling is the one cached auth entries carry.
+        invalidate_account_auth_cache(result.data[0]["id"])
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -309,6 +323,8 @@ async def update_account_status(
         )
 
         return {"status": "success", "account_id": account_id, "new_status": request.status}  # noqa: TRY300
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
@@ -542,6 +558,8 @@ async def admin_update(
     try:
         data.pop("id", None)
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
+        if resource == "accounts" and result.data:
+            invalidate_account_auth_cache(result.data[0]["id"])
 
         # Log admin update
         audit_log_entry(
@@ -575,6 +593,8 @@ async def admin_delete_account_complete(
         raise HTTPException(status_code=404, detail="Account not found")
 
     account = account_result.data[0]
+    # The stored id is canonical, whatever spelling the path used, so cache and auth lookups match it.
+    account_id = account["id"]
     logger.info(
         f"Admin {admin['user_id']} initiating complete deletion of account {account_id} ({account.get('email')})"
     )
@@ -585,6 +605,7 @@ async def admin_delete_account_complete(
         "soft_delete_account",
         {"target_account_id": account_id, "reason": "admin_complete_deletion", "requested_by": admin["user_id"]},
     ).execute()
+    invalidate_account_auth_cache(account_id)
     claimed = (
         sb.table("accounts")
         .update({"hard_delete_started_at": datetime.now(UTC).isoformat()})
@@ -614,6 +635,7 @@ async def admin_delete_account_complete(
     try:
         sb.rpc("hard_delete_account", {"target_account_id": account_id}).execute()
         await instance_lifecycle.delete_auth_user(account_id)
+        invalidate_account_auth_cache(account_id)
     except Exception as e:
         logger.exception("Deleting the rows or auth user of account %s failed; its account row is kept", account_id)
         detail = (

@@ -447,8 +447,9 @@ def _write_atomic(
     file_mode: int | None = None,
 ) -> str | None:
     try:
+        # Open the workspace as spelled so a workspace replaced by a link is refused, not followed.
         with open_directory_within_root(
-            workspace_root.expanduser().resolve(),
+            workspace_root.expanduser(),
             relative_path.parent,
             create=True,
         ) as directory_fd:

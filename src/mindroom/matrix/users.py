@@ -1,5 +1,7 @@
 """Matrix user account management for agents."""
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -9,6 +11,7 @@ from uuid import UUID
 
 import httpx
 import nio
+from aiohttp import ClientError, ClientResponse
 from nio import crypto
 from nio.durable import DurableSyncConfig
 
@@ -40,6 +43,7 @@ from mindroom.matrix_identifiers import agent_username_localpart, extract_server
 
 logger = get_logger(__name__)
 
+_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS = 10
 _INVALID_REGISTRATION_TOKEN_MESSAGE = (
     "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "  # noqa: S105
     "Generate/issue a valid token for bot provisioning and try again."
@@ -890,7 +894,6 @@ async def _register_user_via_provisioning_if_configured(
         client_secret=client_secret,
         homeserver=homeserver,
         username=username,
-        password=password,
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
@@ -899,6 +902,14 @@ async def _register_user_via_provisioning_if_configured(
         source="Provisioning service",
     )
     if provisioning_result.status == "created":
+        assert provisioning_result.password is not None
+        await _replace_one_time_password(
+            homeserver=homeserver,
+            user_id=provisioning_user_id,
+            one_time_password=provisioning_result.password,
+            password=password,
+            runtime_paths=runtime_paths,
+        )
         logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_user_id)
         return provisioning_user_id
 
@@ -910,6 +921,51 @@ async def _register_user_via_provisioning_if_configured(
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
+
+
+def _one_time_password_error(user_id: str, detail: str) -> ValueError:
+    msg = (
+        f"Matrix account {user_id} was created, but replacing its one-time password failed{detail}. "
+        "Nobody knows this account's password now, so it cannot be used again. "
+        "Run `mindroom connect --force` to pair again, which gives new agent accounts a new namespace, then restart."
+    )
+    return matrix_startup_error(msg, permanent=True)
+
+
+async def _replace_one_time_password(
+    *,
+    homeserver: str,
+    user_id: str,
+    one_time_password: str,
+    password: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Change a provisioned account's one-time password to this install's own password."""
+    client = create_matrix_http_client(homeserver, runtime_paths, user_id)
+    try:
+        try:
+            response = await client.login(one_time_password)
+            if isinstance(response, nio.LoginResponse):
+                auth = {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": user_id},
+                    "password": one_time_password,
+                }
+                response = await client.change_password(auth, password)
+        except (ClientError, TimeoutError) as exc:
+            raise _one_time_password_error(user_id, f": {exc!r}") from exc
+        # nio parses a non-JSON error body as {}, which passes the empty ChangePasswordResponse schema.
+        transport = response.transport_response
+        status = transport.status if isinstance(transport, ClientResponse) else None
+        if not (isinstance(response, nio.ChangePasswordResponse) and status is not None and 200 <= status < 300):
+            detail = f": {response}" if isinstance(response, nio.ErrorResponse) else ""
+            raise _one_time_password_error(user_id, f" (HTTP {status}){detail}")
+        # Best effort: the password is already replaced, so a failed logout only leaves an unused session behind.
+        with contextlib.suppress(ClientError, TimeoutError):
+            async with asyncio.timeout(_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS):
+                await client.logout()
+    finally:
+        await client.close()
 
 
 async def _register_user_without_token(

@@ -27,6 +27,7 @@ from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthProviderError,
     OAuthRefreshRejectedError,
+    OAuthTokenEndpointChangedError,
     OAuthTokenResult,
     is_terminal_oauth_refresh_error_code,
 )
@@ -547,14 +548,16 @@ async def exchange_and_store_oauth_credentials(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     expected_connection_generation: str,
 ) -> dict[str, Any]:
-    """Exchange one code and publish its credential snapshot atomically."""
+    """Exchange one code at its authorization-bound token endpoint and publish the snapshot atomically."""
     return await _run_oauth_transaction(
         _exchange_and_store_oauth_credentials_transaction(
             context,
             code,
             code_verifier,
+            token_url=token_url,
             expected_connection_generation=expected_connection_generation,
         ),
     )
@@ -565,6 +568,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     expected_connection_generation: str,
 ) -> dict[str, Any]:
     async with oauth_credential_transaction(context) as transaction:
@@ -575,6 +579,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
             context,
             code,
             code_verifier,
+            token_url=token_url,
             transaction=transaction,
         )
 
@@ -584,6 +589,7 @@ async def _exchange_and_store_oauth_credentials_locked(
     code: str,
     code_verifier: str | None,
     *,
+    token_url: str,
     transaction: OAuthCredentialTransaction,
 ) -> dict[str, Any]:
     adapter_scope = _oauth_provider_adapter_active.set(True)
@@ -591,6 +597,7 @@ async def _exchange_and_store_oauth_credentials_locked(
         result = await context.provider.exchange_code(
             code,
             context.runtime_paths,
+            token_url=token_url,
             code_verifier=code_verifier,
         )
         await asyncio.to_thread(context.provider.validate_claims, result, context.runtime_paths)
@@ -686,12 +693,23 @@ async def _invalidate_rejected_credentials(
     credentials: dict[str, Any],
     exc: OAuthRefreshRejectedError,
     *,
+    provider_error: OAuthProviderError,
     transaction: OAuthCredentialTransaction,
 ) -> None:
     _attach_oauth_refresh_failure_context(exc, credentials)
     await transaction.reset(None)
     await transaction.commit()
-    _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
+    if isinstance(provider_error, OAuthTokenEndpointChangedError):
+        _log_oauth_refresh_failed(
+            context,
+            credentials,
+            exc,
+            reason="token_endpoint_changed",
+            stored_token_endpoint_origin=provider_error.stored_token_endpoint_origin,
+            current_token_endpoint_origin=provider_error.current_token_endpoint_origin,
+        )
+    else:
+        _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
 
 
 async def _raise_normalized_refresh_error(
@@ -708,6 +726,7 @@ async def _raise_normalized_refresh_error(
             context,
             credentials,
             normalized_error,
+            provider_error=exc,
             transaction=transaction,
         )
     else:
@@ -719,8 +738,8 @@ async def _raise_normalized_refresh_error(
 
 
 def _normalized_refresh_error(exc: OAuthProviderError) -> OAuthProviderError:
-    """Classify refresh failure only from its structured OAuth error code."""
-    if is_terminal_oauth_refresh_error_code(exc.oauth_error):
+    """Preserve explicit rejections or classify them from a structured OAuth error code."""
+    if isinstance(exc, OAuthRefreshRejectedError) or is_terminal_oauth_refresh_error_code(exc.oauth_error):
         return OAuthRefreshRejectedError(
             _OAUTH_REFRESH_FAILED_MESSAGE,
             oauth_error=exc.oauth_error,
@@ -750,6 +769,7 @@ def _log_oauth_refresh_failed(
     exc: OAuthProviderError,
     *,
     reason: str,
+    **fields: str | None,
 ) -> None:
     logger.warning(
         "oauth_credentials_refresh_failed",
@@ -758,6 +778,7 @@ def _log_oauth_refresh_failed(
         error_type=type(exc).__name__,
         oauth_error=_safe_oauth_error_code_for_logging(exc.oauth_error),
         **_oauth_refresh_failure_diagnostics(exc),
+        **fields,
     )
 
 
@@ -984,6 +1005,7 @@ def _token_data_preserving_refresh_token(
         and existing_refresh_token
         and _same_external_identity(existing_credentials, token_data)
         and _same_oauth_client(existing_credentials, token_data)
+        and (existing_credentials or {}).get("token_uri") == token_data.get("token_uri")
     ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data

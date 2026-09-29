@@ -12,7 +12,7 @@
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
-{{- $generatesApiKey := and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) -}}
+{{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
 {{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
 {{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
 {{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
@@ -433,7 +433,7 @@ spec:
           {{- if or $generatesApiKey .Values.env.envFrom }}
           envFrom:
             {{- if $generatesApiKey }}
-            # The sidecar shares this pod's network; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
+            # Worker tool code can reach this API; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
             - secretRef:
                 name: {{ $fullname }}-api-key
             {{- end }}

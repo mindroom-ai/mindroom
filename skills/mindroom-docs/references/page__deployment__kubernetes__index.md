@@ -205,6 +205,7 @@ The primary runtime creates worker Deployments and Services on demand and routes
 Each worker pod runs the sandbox-runner app and mounts the same agent workspace as every other runtime for that agent; the agent's sessions, memory, and learning data stay with the primary.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
+Worker pods can reach the primary API over the pod network, so the charts also give the primary a generated `MINDROOM_API_KEY` in this mode unless Supabase authentication or an explicit opt-out is configured; worker pods never receive that key.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
@@ -551,6 +552,7 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<project-ref> \
 The script prints the API response and exits non-zero when the query fails.
 The incremental migrations from `002` on are written to be re-runnable on a database that already has the baseline schema, while `000_consolidated_complete_schema.sql` is for fresh installs only.
 Apply them in numeric order.
+Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
 
 The first run of `005_account_deletion.sql` restarts the 7-day grace period of every account whose deletion was requested more than 7 days earlier, because older releases left those instances running and billed and their owners could still cancel.
 Without it, the first nightly cleanup after the upgrade would tear them down with no chance to cancel; reruns never restart a grace period again.
@@ -559,6 +561,9 @@ List those accounts before applying it, and consider telling their owners that t
 ```sql
 SELECT id, email, deleted_at FROM accounts WHERE deleted_at < NOW() - INTERVAL '7 days';
 ```
+
+Apply migration `006` before deploying a backend that enforces account status, because that backend refuses every account whose status is missing.
+Migration `006` sets missing account statuses to `active`, and it fails without changing anything while an account holds a status other than `active`, `suspended`, `deleted`, or `pending_verification`, so correct those rows first.
 
 Migration `007_one_instance_per_subscription.sql` fails without changing anything while a subscription still has more than one instance row, and its error lists them.
 Find them before applying it:
@@ -572,7 +577,6 @@ For each subscription, decide with the customer which instance to keep, usually 
 For every other row, check `helm status instance-<instance_id> -n mindroom-instances`, because a `deprovisioned` row from an older release's soft delete can still have a live release.
 If the release exists, uninstall it with `DELETE /admin/instances/<instance_id>/uninstall`, which also deletes its PVCs, Secrets, and platform OpenRouter key.
 Then delete the row with `DELETE FROM instances WHERE instance_id = <instance_id>;` and run the query again until it returns nothing.
-Snapshot the tables a migration touches before applying it, because the Management API cannot roll a committed query back.
 
 ## Multi-Tenant Architecture
 

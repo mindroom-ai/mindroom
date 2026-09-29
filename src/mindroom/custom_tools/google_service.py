@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
+from agno.tools import Toolkit
 from google_auth_httplib2 import AuthorizedHttp
+from googleapiclient.discovery import build
 from googleapiclient.http import build_http
 
+from mindroom.logging_config import get_logger
+from mindroom.oauth.client import ScopedOAuthClientMixin
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from googleapiclient.errors import HttpError
+
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+logger = get_logger(__name__)
 
 _SANITIZED_GOOGLE_AUTHORIZATION_REJECTION = b'{"error":{"code":401,"message":"Google authorization rejected"}}'
 
@@ -46,9 +61,20 @@ class _TrackedGoogleAuthorizedHttp(AuthorizedHttp):
         return response, content
 
 
-def google_service_account_configured(service_account_path: str | None, runtime_paths: RuntimePaths) -> bool:
-    """Return whether Google upstream service-account auth is configured."""
-    return bool(service_account_path or runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
+def google_http_error_result(service_name: str, operation: str, exc: HttpError) -> str:
+    """Return a tool error exposing only the HTTP status, never provider-controlled text."""
+    status = exc.resp.status
+    logger.warning(
+        "google_api_request_failed",
+        service=service_name,
+        operation=operation,
+        error_type=type(exc).__name__,
+        status=status,
+    )
+    message = f"{service_name} request failed"
+    if not isinstance(status, bool) and isinstance(status, int):
+        message = f"{message} (HTTP {status})"
+    return json.dumps({"error": message})
 
 
 class ThreadLocalGoogleServiceMixin:
@@ -137,3 +163,80 @@ class ThreadLocalGoogleServiceMixin:
     @_user_email.setter
     def _user_email(self, value: str | None) -> None:
         self._google_service_state().user_email = value
+
+
+class GoogleApiToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+    """Native Google API toolkit with scoped OAuth credentials and optional service-account fallback."""
+
+    _google_api_name: str
+    _google_api_version: str
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        tools: list[Callable[..., str]],
+        runtime_paths: RuntimePaths,
+        credentials_manager: CredentialsManager | None,
+        worker_target: ResolvedWorkerTarget | None,
+        runtime_config: Config | None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        provided_creds = kwargs.pop("creds", None)
+        if credentials_manager is None:
+            msg = f"{type(self).__name__} requires an explicit credentials_manager"
+            raise RuntimeError(msg)
+
+        self._runtime_paths = runtime_paths
+        self._creds_manager = credentials_manager
+        defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
+        self.service_account_path = cast("str | None", kwargs.pop("service_account_path", None))
+        self.delegated_user = cast("str | None", kwargs.pop("delegated_user", None))
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            msg = f"{self._oauth_provider.display_name} received unsupported constructor arguments: {unexpected}"
+            raise TypeError(msg)
+
+        self.creds = self._initialize_oauth_client(
+            worker_target=worker_target,
+            config=runtime_config,
+            provided_creds=provided_creds,
+            logger=logger,
+            defer_to_original_auth=defer_to_original_auth,
+        )
+        super().__init__(name=name, tools=tools)
+        self._set_original_auth(GoogleApiToolkit._service_account_auth)
+        self._wrap_oauth_function_entrypoints()
+
+    def _should_fallback_to_original_auth(self) -> bool:
+        return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
+
+    def _service_account_auth(self) -> Any:  # noqa: ANN401
+        """Return Google credentials built from the configured service-account file."""
+        from google.oauth2 import service_account  # noqa: PLC0415
+
+        if not self.service_account_path:
+            msg = (
+                f"{self._oauth_provider.display_name} service-account authentication "
+                "requires GOOGLE_SERVICE_ACCOUNT_FILE"
+            )
+            raise RuntimeError(msg)
+        creds = service_account.Credentials.from_service_account_file(
+            self.service_account_path,
+            scopes=self._oauth_provider.scopes,
+        )
+        if self.delegated_user:
+            creds = creds.with_subject(self.delegated_user)
+        return creds
+
+    def _google_api_service(self) -> Any:  # noqa: ANN401
+        """Return the per-thread authenticated Google API service."""
+        self._authenticate()
+        if self.service is None:
+            self.service = build(
+                self._google_api_name,
+                self._google_api_version,
+                http=self._google_authorized_http(self.creds),
+                cache_discovery=False,
+            )
+        return self.service

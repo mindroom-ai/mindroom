@@ -230,7 +230,7 @@ agents:
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-sonnet-5-5
 
 knowledge_bases:
   engineering_docs:
