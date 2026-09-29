@@ -10,6 +10,7 @@ from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 from agno.utils.tokens import count_schema_tokens
+from anthropic import BadRequestError
 
 from mindroom.agno_compat_vertex_claude_tools import (
     format_tools_for_vertex_claude,
@@ -27,7 +28,7 @@ from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
@@ -143,8 +144,23 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
     return count_messages, referenced_tool_names
 
 
+def _thinking_block_text(block: object) -> str:
+    """Return countable text for one thinking block.
+
+    The signature (or redacted data) carries the full reasoning even when the
+    visible text is a summary or empty. Its base64 text tokenizes larger than
+    that reasoning, which keeps the count conservative.
+    """
+    fields = ("thinking", "signature", "data")
+    values = [
+        cast("dict[str, Any]", block).get(field) if isinstance(block, dict) else getattr(block, field, None)
+        for field in fields
+    ]
+    return "\n".join(value for value in values if isinstance(value, str) and value.strip())
+
+
 def _messages_with_thinking_as_text(messages: list[Any]) -> list[Any]:
-    """Count each thinking block as its visible text, dropping empty or opaque ones."""
+    """Count each thinking block as text, dropping any message left empty."""
     text_messages: list[Any] = []
     for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
@@ -157,11 +173,10 @@ def _messages_with_thinking_as_text(messages: list[Any]) -> list[Any]:
             block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
             if block_type not in _THINKING_BLOCK_TYPES:
                 text_content.append(block)
-                continue
-            thinking = block.get("thinking") if isinstance(block, dict) else getattr(block, "thinking", None)
-            if isinstance(thinking, str) and thinking.strip():
-                text_content.append({"type": "text", "text": thinking})
-        text_messages.append({**message, "content": text_content})
+            elif text := _thinking_block_text(block):
+                text_content.append({"type": "text", "text": text})
+        if text_content:
+            text_messages.append({**message, "content": text_content})
     return text_messages
 
 
@@ -218,9 +233,9 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
         return request_kwargs, 0
     count_kwargs = dict(request_kwargs)
     if count_messages is not None:
-        # While thinking is on, the endpoint rejects any assistant turn whose
-        # blocks around its signed thinking were rewritten, as the text
-        # conversion above does. Count that thinking as text with thinking off.
+        # With thinking enabled, the endpoint rejects a request whose rewritten
+        # blocks sit among signed thinking blocks, as the text conversion above
+        # does. Count that thinking as text and send no thinking setting.
         count_kwargs["messages"] = _messages_with_thinking_as_text(count_messages)
         count_kwargs.pop("thinking", None)
     if count_tools:
@@ -353,6 +368,18 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         """Drop only replay messages older than one safe history boundary."""
         return [message for index, message in enumerate(messages) if not message.from_history or index >= cut]
 
+    @staticmethod
+    async def _advisory_count(count: Awaitable[int], *, input_budget: int) -> int | None:
+        """Return an exact count, or None when the endpoint rejects the count payload.
+
+        The count only advises; generation still enforces the real limit.
+        """
+        try:
+            return await count
+        except BadRequestError as exc:
+            logger.warning("vertex_claude_token_count_rejected", input_budget=input_budget, error=str(exc.message))
+            return None
+
     async def _fit_request_messages(
         self,
         messages: list[Message],
@@ -390,8 +417,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
                 compress_tool_results=compress_tool_results,
             )
 
-        original_tokens = await _count(messages)
-        if original_tokens <= input_budget:
+        original_tokens = await self._advisory_count(_count(messages), input_budget=input_budget)
+        if original_tokens is None or original_tokens <= input_budget:
             return messages
 
         if self.native_compaction is not None:

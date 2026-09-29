@@ -10,10 +10,12 @@ import httpx
 import pytest
 from agno.models.message import Message
 from anthropic import AsyncAnthropicVertex
+from anthropic.types import RedactedThinkingBlock, ThinkingBlock
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
+from structlog.testing import capture_logs
 
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _messages_with_thinking_as_text
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response
 
 
@@ -187,6 +189,73 @@ async def test_count_accepts_a_tool_loop_turn_with_thinking_around_tool_search()
     counted_blocks = [
         block for message in counted["messages"] if isinstance(message["content"], list) for block in message["content"]
     ]
-    assert {"type": "text", "text": "Find the tool first."} in counted_blocks
+    # Signatures carry the full reasoning, so they count too, even for empty visible thinking.
+    assert {"type": "text", "text": "Find the tool first.\nsig-1"} in counted_blocks
+    assert {"type": "text", "text": "sig-2"} in counted_blocks
     assert not any(block["type"] in {"thinking", "redacted_thinking"} for block in counted_blocks)
     assert [message.model_dump() for message in messages] == original
+
+
+def test_thinking_counts_as_text_for_sdk_blocks_and_drops_emptied_messages() -> None:
+    """Stored dict blocks and rebuilt SDK blocks count alike, and no empty message remains."""
+    messages = [
+        {"role": "user", "content": "Start."},
+        {
+            "role": "assistant",
+            "content": [
+                ThinkingBlock(type="thinking", thinking="Plan the lookup.", signature="sig-a"),
+                RedactedThinkingBlock(type="redacted_thinking", data="opaque-reasoning"),
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+            ],
+        },
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": ""}]},
+        {"role": "user", "content": "Continue."},
+    ]
+
+    assert _messages_with_thinking_as_text(messages) == [
+        {"role": "user", "content": "Start."},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Plan the lookup.\nsig-a"},
+                {"type": "text", "text": "opaque-reasoning"},
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+            ],
+        },
+        {"role": "user", "content": "Continue."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_count_sends_the_request_instead_of_failing_the_turn() -> None:
+    """The count only advises, so a count the endpoint rejects must not end the turn."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert "count-tokens" in request.url.path
+        return httpx.Response(
+            400,
+            json={"type": "error", "error": {"type": "invalid_request_error", "message": "Unsupported count schema"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AsyncAnthropicVertex(
+            project_id="test-project",
+            region="global",
+            credentials=Credentials(token="test-token"),
+            http_client=http,
+            max_retries=0,
+        )
+        model = MindroomVertexAIClaude(id="claude-opus-5-5", async_client=client, max_tokens=1000)
+        model.context_window = 4000
+        messages = [Message(role="user", content="Status report. " * 800)]
+
+        with capture_logs() as logs:
+            fitted = await model._fit_request_messages(
+                messages,
+                tools=None,
+                response_format=None,
+                compress_tool_results=False,
+            )
+
+    assert fitted == messages
+    assert any(log["event"] == "vertex_claude_token_count_rejected" for log in logs)
