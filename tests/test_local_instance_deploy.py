@@ -1649,6 +1649,30 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
     }
 
 
+def test_copied_config_stays_readable_when_ownership_transfer_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-root operator's config must remain readable by the container after denied chown."""
+    source_dir = tmp_path / "repo"
+    source_dir.mkdir()
+    (source_dir / "config.yaml").write_text("agents: {}\n")
+    monkeypatch.setattr(deploy, "REPO_ROOT", source_dir)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_config = Path(instance.data_dir) / "config" / "config.yaml"
+    target_config.parent.mkdir(parents=True)
+
+    def denied_chown(*_args: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(deploy.os, "fchown", denied_chown)
+    deploy._copy_config_to_instance(instance)
+
+    assert _mode(target_config) == 0o644
+    assert target_config.read_text() == "agents: {}\n"
+
+
 def test_matrix_template_copy_refuses_linked_destination(tmp_path: Path) -> None:
     """A planted log.config must not redirect a template copy or its mode change."""
     template_dir = tmp_path / "templates"

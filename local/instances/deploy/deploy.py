@@ -340,7 +340,11 @@ def _prepare_matrix_config(
             console.print("  [dim]Generated unique signing key for instance[/dim]")
 
         else:
-            fd = os.open(target_dir / file.name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+            fd = os.open(
+                target_dir / file.name,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                0o666,
+            )
             with os.fdopen(fd, "wb") as target, file.open("rb") as source:
                 shutil.copyfileobj(source, target)
                 os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
@@ -986,9 +990,10 @@ def _copy_config_to_instance(instance: Instance) -> None:
     if not os.path.lexists(target_config):
         _write_private_file(target_config, source_config.read_text())
         # Set proper permissions for Docker
+        with os.fdopen(os.open(target_config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
+            os.fchmod(f.fileno(), 0o644)
         with contextlib.suppress(OSError, PermissionError):
             _give_to_container_user(target_config)
-            target_config.chmod(0o644)
         console.print("[green]✓[/green] Copied config.yaml to instance")
 
 

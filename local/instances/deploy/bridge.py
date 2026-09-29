@@ -151,7 +151,7 @@ def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
     """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
     for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
         try:
-            info = os.stat(path, follow_symlinks=False)  # noqa: PTH116
+            info = path.lstat()
             if not stat.S_ISREG(info.st_mode):
                 msg = f"Refusing non-regular file: {path}"
                 raise ValueError(msg)
