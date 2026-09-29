@@ -162,11 +162,12 @@ class DelegateTools(Toolkit):
             if self._minimal_targets
             else ""
         )
+        background = self._background_jobs_available()
         background_guidance = (
             "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
             "and a positive number bounds the wait while work continues. "
             "A human follow-up releases the wait while the child keeps working. "
-            if self._background_jobs_available()
+            if background
             else ""
         )
         return (
@@ -180,7 +181,7 @@ class DelegateTools(Toolkit):
             "Set model to a configured model name to override the child's model for this session. "
             f"Available models: {', '.join(sorted(self._config.models))}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
-            "This does not create a Matrix thread. "
+            f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
             "follow-ups keep the child's model and mode.\n"
             f"{minimal_guidance}"

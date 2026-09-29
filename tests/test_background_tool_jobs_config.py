@@ -308,6 +308,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     assert "continue_subagent" in instructions + description
     # The default prompt keeps main's foreground wording; background semantics live only in the opt-in addendum.
     assert "The caller waits for the child to finish; this is not background work." in instructions
+    assert "The caller waits; this does not create a Matrix thread." in description
     assert "child tools that require approval pause both runs" in instructions
 
 
