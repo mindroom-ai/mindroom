@@ -858,6 +858,45 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
 
 
 @pytest.mark.asyncio
+async def test_one_agents_messages_for_different_requesters_dispatch_as_separate_turns() -> None:
+    """Replies one agent wrote for different humans, or for itself, never form one mixed-requester batch."""
+    batches: list[PreparedTurn] = []
+    failures: list[list[str]] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        is_shutting_down=lambda: False,
+        on_dispatch_failure=lambda failed: failures.append([pending.event.event_id for pending in failed]),
+    )
+    agent = "@mindroom_research:localhost"
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent))
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    for event_id, requester, timestamp in (
+        ("$e1:localhost", "@alice:localhost", 1_000_000),
+        ("$e2:localhost", "@bob:localhost", 1_000_200),
+        ("$e3:localhost", agent, 1_000_400),
+    ):
+        event = _text_event(event_id, event_id, timestamp)
+        event.sender = agent
+        pending = make_pending_event(event, room, source_kind="message", requester_user_id=requester)
+        pending = replace(pending, event=replace(pending.event, acts_for_requester=requester != agent))
+        await _admit_ready(gate, key, pending)
+
+    await gate.drain_all()
+
+    assert failures == []
+    assert [(batch.requester_user_id, list(batch.handled_turn.source_event_ids)) for batch in batches] == [
+        ("@alice:localhost", ["$e1:localhost"]),
+        ("@bob:localhost", ["$e2:localhost"]),
+        (agent, ["$e3:localhost"]),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_threaded_media_debounce_uses_trailing_quiet_time() -> None:
     """A later media upload inside the debounce window should extend the quiet deadline."""
     batches: list[PreparedTurn] = []

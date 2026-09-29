@@ -361,6 +361,16 @@ def pending_event_requester_user_id(key: CoalescingKey, pending_event: PendingEv
     return pending_event.event.sender
 
 
+def pending_event_run_identity(key: CoalescingKey, pending_event: PendingEvent) -> tuple[str, str | None]:
+    """Return who one queued event runs as, plus its author when an entity wrote it for that requester.
+
+    A batch runs as one requester and takes its origin from its latest event, so a
+    reply an entity wrote for a human never shares a batch with that human's messages.
+    """
+    event = pending_event.event
+    return pending_event_requester_user_id(key, pending_event), event.sender if event.acts_for_requester else None
+
+
 def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[PendingEvent]) -> str:
     """Resolve the one requester every event in the batch executes as.
 

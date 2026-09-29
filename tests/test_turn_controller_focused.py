@@ -1999,6 +1999,78 @@ async def test_agent_still_drops_its_own_reply_that_names_a_human_requester(tmp_
 
 
 @pytest.mark.asyncio
+async def test_agent_reply_for_a_human_does_not_share_that_humans_follow_up_batch(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A backlog splits a human's follow-up from an agent reply written for them, so only the reply is chatter."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    thread_root = "$thread-root:localhost"
+    human_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general please also check the logs",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root},
+            },
+            "event_id": "$human-follow-up:localhost",
+            "sender": _SENDER,
+            "origin_server_ts": 999,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+    agent_event = _entity_reply_event(
+        config,
+        sender=_entity_user_id(config, "research"),
+        acting_requester=_SENDER,
+        mention=None,
+        event_id="$agent-follow-up:localhost",
+    )
+    agent_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root}
+    agent_pending = make_pending_event(
+        agent_event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id=_SENDER,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        trust_internal_payload_metadata=True,
+    )
+    pending_events = (
+        make_pending_event(
+            human_event,
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=_SENDER,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+        replace(agent_pending, event=replace(agent_pending.event, acts_for_requester=True)),
+    )
+    gate = CoalescingGate(
+        dispatch_turn=harness.controller.handle_prepared_turn,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    for pending_event in pending_events:
+        await gate.admit(
+            active_follow_up_coalescing_key(room.room_id, thread_root),
+            ready_result=ReadyPendingEvent(pending_event=pending_event),
+            source_event_id=pending_event.event.event_id,
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+    await gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    assert harness.ignored_dispatch_sources == [(agent_event.event_id,)]
+    assert [request.sources.logical_source_event_ids for request in harness.runner.requests] == [
+        (human_event.event_id,),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     tmp_path: Path,

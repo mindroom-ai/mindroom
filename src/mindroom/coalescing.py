@@ -21,6 +21,7 @@ from .coalescing_batch import (
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
     pending_event_requester_user_id,
+    pending_event_run_identity,
 )
 from .coalescing_cleanup import (
     ClaimedSegmentOwner,
@@ -1155,6 +1156,7 @@ class CoalescingGate:
         )
         if candidate_count == 0:
             return
+        candidate_count = self._front_same_requester_run_length(key, gate, candidate_count)
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
         if parallel_root:
@@ -1166,10 +1168,10 @@ class CoalescingGate:
 
     @staticmethod
     def _front_same_requester_run_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
-        """Cap a front run at its first requester change so each turn runs as its own sender."""
-        front_requester_user_id = pending_event_requester_user_id(key, gate.queue[0].pending_event)
+        """Cap a front run at its first run-identity change so each turn runs as its own sender."""
+        front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
         for index, queued in enumerate(islice(gate.queue, count)):
-            if pending_event_requester_user_id(key, queued.pending_event) != front_requester_user_id:
+            if pending_event_run_identity(key, queued.pending_event) != front_identity:
                 return index
         return count
 
