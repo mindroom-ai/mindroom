@@ -559,6 +559,7 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
                 depth=0,
                 expected_generation=0,
                 operation=complete,
+                adapter=fixture.adapter,
             )
             waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
             await coordinator.runtime.release_wait(fixture.job_id, waited.claim)

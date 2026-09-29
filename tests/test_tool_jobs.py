@@ -119,7 +119,14 @@ async def test_quiescence_fences_control_but_retains_receipts_and_storage(tmp_pa
                 operation=operation,
             )
         with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
-            await runtime.continue_job("paused", owner=job_owner(), depth=0, expected_generation=0, operation=operation)
+            await runtime.continue_job(
+                "paused",
+                owner=job_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=operation,
+                adapter={},
+            )
         with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
             await runtime.cancel("paused", owner=job_owner(), depth=0)
         await runtime.acknowledge_wait(job.job_id, waited.claim)
@@ -247,7 +254,14 @@ async def test_waiter_that_missed_a_pause_claims_the_next_generation_once(
         continuation = asyncio.create_task(
             queued(
                 continuation_queued,
-                runtime.continue_job(job.job_id, owner=job_owner(), depth=0, expected_generation=0, operation=resumed),
+                runtime.continue_job(
+                    job.job_id,
+                    owner=job_owner(),
+                    depth=0,
+                    expected_generation=0,
+                    operation=resumed,
+                    adapter={},
+                ),
             ),
         )
         await continuation_queued.wait()
@@ -287,7 +301,14 @@ async def test_next_generation_deletes_the_payload_it_replaces(tmp_path: Path) -
         waited = await runtime.wait("next", owner=job_owner(), depth=0)
         await runtime.release_wait("next", waited.claim)
         assert payload_files() == {"next.g0.result.json"}
-        await runtime.continue_job("next", owner=job_owner(), depth=0, expected_generation=0, operation=resumed)
+        await runtime.continue_job(
+            "next",
+            owner=job_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=resumed,
+            adapter={},
+        )
         waited = await runtime.wait("next", owner=job_owner(), depth=0)
         assert await runtime.read_payload(waited.job) == {"generation": 1}
         assert payload_files() == {"next.g1.result.json"}
@@ -868,7 +889,14 @@ async def test_stale_wait_receipt_cannot_consume_replacement_generation(tmp_path
         if replacement == "cancelled":
             await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
         else:
-            await runtime.continue_job(job.job_id, owner=job_owner(), depth=0, expected_generation=0, operation=resumed)
+            await runtime.continue_job(
+                job.job_id,
+                owner=job_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=resumed,
+                adapter={},
+            )
             await wait_for_status(runtime, job.job_id, "completed")
         with pytest.raises(ValueError, match="no longer belongs"):
             await runtime.acknowledge_wait(job.job_id, waiting.claim)
@@ -1029,6 +1057,7 @@ async def test_failed_continuation_preserves_approval_for_safe_retry(
                 depth=0,
                 expected_generation=0,
                 operation=continuation,
+                adapter={},
             )
         assert (await runtime.lookup(job.job_id, owner=job_owner(), depth=0)).status == "awaiting_approval"
         monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
@@ -1038,6 +1067,7 @@ async def test_failed_continuation_preserves_approval_for_safe_retry(
             depth=0,
             expected_generation=0,
             operation=continuation,
+            adapter={},
         )
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "once"
         assert calls == 1
@@ -1280,6 +1310,7 @@ async def test_stale_approval_cannot_change_a_newer_job_generation(tmp_path: Pat
                 depth=0,
                 expected_generation=0,
                 operation=approval,
+                adapter={},
             )
             waited = await runtime.wait("generation", owner=job_owner(), depth=0)
             await runtime.acknowledge_wait("generation", waited.claim)
@@ -1293,6 +1324,7 @@ async def test_stale_approval_cannot_change_a_newer_job_generation(tmp_path: Pat
                 depth=0,
                 expected_generation=0,
                 operation=approval,
+                adapter={},
             )
         assert await runtime.lookup("generation", owner=job_owner(), depth=0) == before
         assert executions == (2 if next_state == "approval" else 1)
@@ -1730,7 +1762,14 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
     monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_writer)
     with human_message_signal_context(human):
         accepting = asyncio.create_task(
-            runtime.continue_job("failed", owner=job_owner(), depth=0, expected_generation=0, operation=operation)
+            runtime.continue_job(
+                "failed",
+                owner=job_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=operation,
+                adapter={},
+            )
             if continuation
             else runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation),
         )
@@ -1747,7 +1786,14 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
             # The failed continuation never became current, so the approval can still continue exactly once.
             assert [(job.status, job.generation) for job in jobs] == [("awaiting_approval", 0)]
             assert human.has_subscribers
-            await runtime.continue_job("failed", owner=job_owner(), depth=0, expected_generation=0, operation=operation)
+            await runtime.continue_job(
+                "failed",
+                owner=job_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=operation,
+                adapter={},
+            )
         else:
             assert jobs == []
             assert not human.has_subscribers

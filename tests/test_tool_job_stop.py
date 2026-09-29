@@ -532,7 +532,14 @@ async def test_stop_reaches_an_approval_continued_while_it_was_judged(tmp_path: 
         stop = asyncio.create_task(runtime.stop_jobs(receipt_order=100, matches=held_match))
         await judging.wait()
         await asyncio.wait_for(
-            runtime.continue_job("paused", owner=job_owner(), depth=0, expected_generation=0, operation=resumed),
+            runtime.continue_job(
+                "paused",
+                owner=job_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=resumed,
+                adapter={},
+            ),
             30,
         )
         await continued.wait()
