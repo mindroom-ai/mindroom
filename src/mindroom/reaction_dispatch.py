@@ -116,9 +116,13 @@ class ReactionDispatcher:
                 self.deps.runtime_paths,
             ).current_entity_name_for_user_id(event.sender)
             turn_record = self.deps.turn_store.turn_record_for_response_event_id(event.reacts_to)
-            has_incomplete_turn = turn_record is not None and not turn_record.completed
+            # A visible voice echo owns an event before any response exists, so
+            # only a turn with a conversation target has a response to stop.
+            has_stoppable_turn = (
+                turn_record is not None and not turn_record.completed and turn_record.conversation_target is not None
+            )
             if sender_agent_name or not (
-                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to) or has_incomplete_turn
+                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to) or has_stoppable_turn
             ):
                 return False
             await self.deps.journal_dispatcher.claim_semantic_consumer(
