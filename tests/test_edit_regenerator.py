@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from itertools import cycle
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -898,6 +899,29 @@ async def test_rebuild_that_never_changes_is_capped(tmp_path: Path) -> None:
 
     async def generate(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_cap_counts_attempts_when_the_check_runs_twice_per_attempt(tmp_path: Path) -> None:
+    """A snapshot check that passes before history refresh and rebuilds after it is still capped."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    verdicts = cycle([False, EditPreparation.REBUILD])
+    harness.turn_store.prepare_edit_snapshot.side_effect = lambda **_kwargs: next(verdicts)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        # The response runner checks once at admission and again after refreshing history.
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is False
         assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
         return None
 

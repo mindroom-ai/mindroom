@@ -44,6 +44,12 @@ logger = get_logger(__name__)
 _MAX_CONSECUTIVE_EDIT_REBUILDS = 8
 
 
+def _log_dropped_rebuilding_edit(room_id: str, rebuilds: int) -> None:
+    """Report a drain that stopped because every attempt asked to rebuild."""
+    if rebuilds > _MAX_CONSECUTIVE_EDIT_REBUILDS:
+        logger.error("Dropping an edit whose regeneration kept asking to rebuild", room_id=room_id, rebuilds=rebuilds)
+
+
 @dataclass(frozen=True)
 class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
@@ -95,7 +101,6 @@ class _Mailbox:
     handed_off_revisions: set[str] = field(default_factory=set)
     participants: int = 0
     rebuild_requested: bool = False
-    consecutive_rebuilds: int = 0
 
 
 @dataclass
@@ -397,14 +402,6 @@ class EditRegenerator:
                 thread_history=history,
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
-            mailbox.consecutive_rebuilds = mailbox.consecutive_rebuilds + 1 if mailbox.rebuild_requested else 0
-            if mailbox.consecutive_rebuilds > _MAX_CONSECUTIVE_EDIT_REBUILDS:
-                logger.error(
-                    "Dropping an edit whose regeneration kept asking to rebuild the same request",
-                    room_id=room.room_id,
-                    driving_revision_id=driving_edit.revision[1],
-                    rebuilds=mailbox.consecutive_rebuilds,
-                )
             if result is False and not stale_runs_removed:
                 self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
@@ -555,8 +552,10 @@ class EditRegenerator:
             self.deps.turn_store.release_pending_turn_claim(claimed_record)
 
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
-        mailbox.consecutive_rebuilds = 0
-        while mailbox.pending and mailbox.consecutive_rebuilds <= _MAX_CONSECUTIVE_EDIT_REBUILDS:
+        # Counted per attempt: the response runner may run the snapshot check
+        # more than once in one attempt, so only its final verdict counts.
+        rebuilds = 0
+        while mailbox.pending and rebuilds <= _MAX_CONSECUTIVE_EDIT_REBUILDS:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = await self._build_request(room, mailbox)
             if request is None or record is None:
@@ -569,7 +568,9 @@ class EditRegenerator:
                 mailbox.handed_off_revisions.update(request.sources.pending_event_ids)
             if mailbox.rebuild_requested:
                 mailbox.rebuild_requested = False
+                rebuilds += 1
                 continue
+            rebuilds = 0
             if regenerated_event_id is not None:
                 if not applied:
                     return
@@ -595,3 +596,4 @@ class EditRegenerator:
                 )
                 continue
             self._discard(mailbox, applied)
+        _log_dropped_rebuilding_edit(room.room_id, rebuilds)
