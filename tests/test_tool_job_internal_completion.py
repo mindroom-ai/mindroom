@@ -23,6 +23,7 @@ from mindroom.response_turn import (
 )
 from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
+    _ReadyJobContinuation,
     background_wait_edit,
     background_wait_notice,
     join_approval_jobs,
@@ -318,12 +319,13 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Path) -> None:
-    """A job whose access is revoked while the reply waits is gone for that reply, which still finishes."""
+@pytest.mark.parametrize("other_job", [False, True])
+async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Path, *, other_job: bool) -> None:
+    """A job whose access is revoked while the reply waits is gone for that reply; its other jobs still join."""
     paths = test_runtime_paths(tmp_path)
     owner = _job().owner
     allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = tool_job_runtime(tmp_path, authorize=lambda job: allowed or job.job_id == "kept")
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -336,14 +338,41 @@ async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Pat
         await asyncio.Event().wait()
         raise AssertionError
 
+    finish = asyncio.Event()
+
+    async def kept() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "Kept result")
+
     try:
         await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        if other_job:
+            await start_job(runtime, "kept", tool_name="tool", depth=0, adapter={}, owner=owner, operation=kept)
         with tool_runtime_context(context):
             stream = join_conversation_jobs(set())
             assert "Waiting" in (await anext(stream)).content
+
+            async def rest() -> list[object]:
+                return [item async for item in stream]
+
+            joining = asyncio.create_task(rest())
             allowed = False
-            await runtime.cancel_revoked(denied=lambda _job: True)
-            assert [item.content async for item in stream] == [None]
+            await runtime.cancel_revoked(denied=lambda job: job.job_id == "revoked")
+            if other_job:
+                # This is a bounded assertion of non-completion while the kept job's gate is closed.
+                with pytest.raises(TimeoutError):
+                    async with asyncio.timeout(0.1):
+                        await asyncio.shield(joining)
+            finish.set()
+            joined = await joining
+        assert [item.content for item in joined[:1]] == [None]
+        if other_job:
+            assert len(joined) == 2
+            assert isinstance(joined[1], _ReadyJobContinuation)
+            assert "kept" in joined[1].prompt
+            assert "revoked" not in joined[1].prompt
+        else:
+            assert len(joined) == 1
     finally:
         await runtime.shutdown()
 

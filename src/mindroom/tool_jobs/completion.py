@@ -219,11 +219,10 @@ async def join_conversation_jobs(
         ready = [job for job in jobs if job.status in READY_STATUSES]
         if not ready:
             yield BackgroundWaitChunk("⏳ Waiting for background work…")
-            await _wait_for_ready_jobs(runtime, jobs, human)
+            ready = await _wait_until_ready(runtime, jobs, human, pending)
             yield BackgroundWaitChunk(None)
             if human.is_set():
                 return
-            ready = [job for job in await pending() if job.status in READY_STATUSES]
         if ready and not human.is_set():
             attempted.update((job.job_id, job.generation) for job in ready)
             yield _ReadyJobContinuation(completion_prompt(ready))
@@ -232,27 +231,48 @@ async def join_conversation_jobs(
             signal.unsubscribe(human.set)
 
 
-async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
+async def _wait_until_ready(
+    runtime: ToolJobRuntime,
+    jobs: list[BackgroundJob],
+    human: asyncio.Event,
+    pending: Callable[[], Awaitable[list[BackgroundJob]]],
+) -> list[BackgroundJob]:
+    """Wait for a ready job, a human message, or no remaining jobs this reply can still access."""
+    # Jobs this reply lost access to are gone for it; the others keep the reply waiting.
+    unavailable: set[str] = set()
+    ready: list[BackgroundJob] = []
+    while jobs and not ready and not human.is_set():
+        unavailable |= await _wait_for_ready_jobs(runtime, jobs, human)
+        jobs = [job for job in await pending() if job.job_id not in unavailable]
+        ready = [job for job in jobs if job.status in READY_STATUSES]
+    return ready
+
+
+async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> str | None:
+    """Wait until one job is ready, returning its ID when this reply lost access to it."""
     waited: JobWait | None = None
     try:
         waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth)
     except JobAccessError:
-        # Access revoked while this reply waited: the job is gone for this reply, which still finishes.
-        return
+        return job.job_id
     finally:
         if waited is not None:
             await runtime.release_wait(job.job_id, waited.claim)
+    return None
 
 
-async def _wait_for_ready_jobs(runtime: ToolJobRuntime, jobs: Sequence[BackgroundJob], human: asyncio.Event) -> None:
-    """Release all transient wait claims before handing outcomes back to the runner."""
+async def _wait_for_ready_jobs(
+    runtime: ToolJobRuntime,
+    jobs: Sequence[BackgroundJob],
+    human: asyncio.Event,
+) -> set[str]:
+    """Wait for the first ready job or human message, returning the jobs this reply lost access to."""
     waiters = [asyncio.create_task(_wait_for_job(runtime, job)) for job in jobs]
     human_wait = asyncio.create_task(human.wait())
     tasks = [*waiters, human_wait]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
+        return {lost for task in waiters if task in done and (lost := task.result()) is not None}
     finally:
         for task in tasks:
             task.cancel()
