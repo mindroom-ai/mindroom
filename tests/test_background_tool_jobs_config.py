@@ -55,8 +55,7 @@ from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,7 +101,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
     config.background_tool_jobs.enabled = not enabled
     model = DelegationModel(id="test", responses=[ModelResponse(content="done")])
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     storage = create_session_storage("lead", config, paths, owner)
     try:
         agent = create_agent(
@@ -442,7 +441,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     """Saved ownership parks before approval handoff; new human ingress still dispatches."""
     bot = _bot(tmp_path)
     paths = bot.runtime_paths
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
     runtime = tool_job_runtime(paths.storage_root)
 
     executions = 0
@@ -459,7 +458,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         depth=0,
         kind=kind,
         source_event_id="$saved",
-        adapter=_job().adapter if kind == "delegation" else {},
+        adapter=completed_delegation_job().adapter if kind == "delegation" else {},
         owner=owner,
         operation=operation,
     )
@@ -537,7 +536,11 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         '{"schema_version": 7, "job_id": "another"}',
         pytest.param(
             json.dumps(
-                {"schema_version": 7, **asdict(replace(_job(), job_id="retired")), "source_event_id": ["$saved"]},
+                {
+                    "schema_version": 7,
+                    **asdict(replace(completed_delegation_job(), job_id="retired")),
+                    "source_event_id": ["$saved"],
+                },
             ),
             id="non-string-source",
         ),
@@ -549,7 +552,7 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
     directory = paths.storage_root / "tool_jobs"
     directory.mkdir(parents=True)
     (directory / "retired.json").write_text(unreadable)
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
     saved = BackgroundJob(
         job_id="saved",
         owner=owner,

@@ -25,9 +25,8 @@ from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconc
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 from tests.test_event_journal_store import ROOM, admit
-from tests.test_tool_jobs import _age, _owner
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import backdate_job, job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,7 +77,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
     await _bind_reply(store, "$newer", "$newer-reply")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="agent",
         room_id=ROOM,
         thread_id="$thread",
@@ -110,7 +109,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
         return BackgroundOutcome("completed", "unreachable")
 
     try:
-        for job_id, (job_owner, source) in jobs.items():
+        for job_id, (source_owner, source) in jobs.items():
             await start_job(
                 runtime,
                 job_id,
@@ -118,18 +117,18 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
                 depth=0,
                 source_event_id=source,
                 adapter={},
-                owner=job_owner,
+                owner=source_owner,
                 operation=operation,
             )
         # Merely sending a follow-up has not cancelled any accepted work.
-        for job_id, (job_owner, _) in jobs.items():
-            assert (await runtime.lookup(job_id, owner=job_owner, depth=0)).status == "running"
+        for job_id, (source_owner, _) in jobs.items():
+            assert (await runtime.lookup(job_id, owner=source_owner, depth=0)).status == "running"
         await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=100)
-        for job_id, (job_owner, _) in jobs.items():
-            job = await runtime.lookup(job_id, owner=job_owner, depth=0)
+        for job_id, (source_owner, _) in jobs.items():
+            job = await runtime.lookup(job_id, owner=source_owner, depth=0)
             if job_id in {"earlier", "current", "member"}:
                 assert job.user_stop_receipt_order == 100
-                await runtime.cancel(job_id, owner=job_owner, depth=0)
+                await runtime.cancel(job_id, owner=source_owner, depth=0)
             else:
                 assert job.user_stop_receipt_order is None
                 assert job.status == "running"
@@ -155,7 +154,7 @@ async def test_stop_follows_ancestry_through_an_answered_completion(
     await _bind_reply(store, "$follow-up", "$reply")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="agent",
         room_id=ROOM,
         thread_id="$thread",
@@ -207,7 +206,7 @@ async def test_stop_follows_ancestry_through_an_answered_completion(
         await store.settle(completion.event_id)
         if retention_pass:
             await runtime.acknowledge_wait("prior", ready.claim)
-            _age(runtime, "prior", datetime.now(UTC) - timedelta(days=31))
+            backdate_job(runtime, "prior", datetime.now(UTC) - timedelta(days=31))
 
             async def source_finished(_job: BackgroundJob) -> bool:
                 return True
@@ -248,20 +247,20 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
             tool_name="slow",
             depth=0,
             adapter={},
-            owner=_owner(),
+            owner=job_owner(),
             operation=operation,
         )
         await started.wait()
         await asyncio.wait_for(runtime.stop_jobs(receipt_order=7, matches=selected), 2)
         await asyncio.wait_for(cleaning.wait(), 2)
-        saved = await runtime.lookup("active", owner=_owner(), depth=0)
+        saved = await runtime.lookup("active", owner=job_owner(), depth=0)
         assert saved.status == "cancel_requested"
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
         assert await runtime.pending_outcomes() == []
         release.set()
         await runtime.release_wait("active", claim)
-        waited = await runtime.wait("active", owner=_owner(), depth=0)
+        waited = await runtime.wait("active", owner=job_owner(), depth=0)
         assert waited.job.status == "cancelled"
         await runtime.release_wait("active", waited.claim)
         assert await runtime.pending_outcomes() == []
@@ -272,7 +271,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
     restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        saved = await restored.lookup("active", owner=_owner(), depth=0)
+        saved = await restored.lookup("active", owner=job_owner(), depth=0)
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
         assert await restored.pending_outcomes() == []
@@ -297,7 +296,7 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
     await _bind_reply(store, "$new-edit", "$reply", edit_order=new.receipt_order)
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="agent",
         room_id=ROOM,
         thread_id="$thread",
@@ -360,7 +359,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
     await _bind_reply(store, "$source", "$reply", entity_name="general")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="general",
         room_id=ROOM,
         thread_id="$thread",
@@ -448,12 +447,20 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
 
     runtime = tool_job_runtime(tmp_path)
     try:
-        await start_job(runtime, "ready", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=_completed)
-        waited = await runtime.wait("ready", owner=_owner(), depth=0)
+        await start_job(
+            runtime,
+            "ready",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=_completed,
+        )
+        waited = await runtime.wait("ready", owner=job_owner(), depth=0)
         await runtime.release_wait("ready", waited.claim)
         monkeypatch.setattr(runtime_module, "write_json_file_durable", counting_writer)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-        stopped = await runtime.lookup("ready", owner=_owner(), depth=0)
+        stopped = await runtime.lookup("ready", owner=job_owner(), depth=0)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
         await runtime.stop_jobs(receipt_order=50, matches=_every_job)
     finally:
@@ -462,7 +469,7 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
     try:
         await restored.recover()
         await restored.stop_jobs(receipt_order=100, matches=_every_job)
-        replayed = await restored.lookup("ready", owner=_owner(), depth=0)
+        replayed = await restored.lookup("ready", owner=job_owner(), depth=0)
     finally:
         await restored.shutdown()
     assert writes == ["ready.json"]
@@ -483,14 +490,14 @@ async def test_slow_stop_matching_leaves_jobs_accessible(tmp_path: Path) -> None
 
     stop = None
     try:
-        await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=_completed)
+        await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=_completed)
         stop = asyncio.create_task(runtime.stop_jobs(receipt_order=100, matches=slow_match))
         await judging.wait()
-        seen = await asyncio.wait_for(runtime.lookup("held", owner=_owner(), depth=0), 30)
+        seen = await asyncio.wait_for(runtime.lookup("held", owner=job_owner(), depth=0), 30)
         assert seen.user_stop_receipt_order is None
         release.set()
         await stop
-        assert (await runtime.lookup("held", owner=_owner(), depth=0)).user_stop_receipt_order == 100
+        assert (await runtime.lookup("held", owner=job_owner(), depth=0)).user_stop_receipt_order == 100
     finally:
         release.set()
         if stop is not None:
@@ -519,19 +526,19 @@ async def test_stop_reaches_an_approval_continued_while_it_was_judged(tmp_path: 
 
     stop = None
     try:
-        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=awaiting)
-        waited = await runtime.wait("paused", owner=_owner(), depth=0)
+        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=awaiting)
+        waited = await runtime.wait("paused", owner=job_owner(), depth=0)
         await runtime.release_wait("paused", waited.claim)
         stop = asyncio.create_task(runtime.stop_jobs(receipt_order=100, matches=held_match))
         await judging.wait()
         await asyncio.wait_for(
-            runtime.continue_job("paused", owner=_owner(), depth=0, expected_generation=0, operation=resumed),
+            runtime.continue_job("paused", owner=job_owner(), depth=0, expected_generation=0, operation=resumed),
             30,
         )
         await continued.wait()
         release.set()
         await stop
-        settled = await runtime.wait("paused", owner=_owner(), depth=0)
+        settled = await runtime.wait("paused", owner=job_owner(), depth=0)
         await runtime.release_wait("paused", settled.claim)
         assert settled.job.user_stop_receipt_order == 100
         assert settled.job.status == "cancelled"
@@ -558,18 +565,18 @@ async def test_approval_stopped_during_shutdown_is_cancelled_on_restart(tmp_path
 
     runtime = tool_job_runtime(tmp_path)
     try:
-        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=awaiting)
-        waited = await runtime.wait("paused", owner=_owner(), depth=0)
+        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=awaiting)
+        waited = await runtime.wait("paused", owner=job_owner(), depth=0)
         await runtime.release_wait("paused", waited.claim)
         await runtime.quiesce()
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-        assert (await runtime.lookup("paused", owner=_owner(), depth=0)).status == "awaiting_approval"
+        assert (await runtime.lookup("paused", owner=job_owner(), depth=0)).status == "awaiting_approval"
     finally:
         await runtime.shutdown()
     restored = tool_job_runtime(tmp_path, cancel=cleanup)
     try:
         await restored.recover()
-        job = await restored.lookup("paused", owner=_owner(), depth=0)
+        job = await restored.lookup("paused", owner=job_owner(), depth=0)
         assert await restored.stoppable_jobs() == []
     finally:
         await restored.shutdown()
@@ -581,7 +588,7 @@ async def test_stop_on_a_closed_runtime_raises_without_saving_a_mark(tmp_path: P
     """A closed runtime refuses a Stop, so its unsettled reaction replays after restart instead of being lost."""
     runtime = tool_job_runtime(tmp_path)
     try:
-        await start_job(runtime, "done", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=_completed)
+        await start_job(runtime, "done", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=_completed)
     finally:
         await runtime.shutdown()
     with pytest.raises(runtime_module.JobAccessError, match="closed"):
@@ -591,7 +598,7 @@ async def test_stop_on_a_closed_runtime_raises_without_saving_a_mark(tmp_path: P
 
 def _conversation_owner(target: MessageTarget) -> ToolExecutionIdentity:
     return replace(
-        _owner(),
+        job_owner(),
         agent_name="general",
         room_id=ROOM,
         thread_id="$thread",
@@ -610,7 +617,7 @@ async def _stoppable_reply(bot: AgentBot, store: PrincipalStore, target: Message
             ("$source",),
             response_event_id="$reply",
             conversation_target=target,
-            requester_id=_owner().requester_id,
+            requester_id=job_owner().requester_id,
             response_owner="general",
             completed=False,
         ),
@@ -731,8 +738,16 @@ async def test_stopped_job_fences_its_settled_completion(tmp_path: Path, journal
     pin_background_tool_jobs(Config(), paths)
     register_background_runtime(paths, runtime)
     try:
-        await start_job(runtime, "ready", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=_completed)
-        waited = await runtime.wait("ready", owner=_owner(), depth=0)
+        await start_job(
+            runtime,
+            "ready",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=_completed,
+        )
+        waited = await runtime.wait("ready", owner=job_owner(), depth=0)
         await runtime.release_wait("ready", waited.claim)
         completion = completion_event(waited.job, sender_id="@mindroom_parent:test")
         await store.admit(completion)

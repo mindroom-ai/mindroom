@@ -33,8 +33,7 @@ from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,7 +95,7 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
         existing_event_is_placeholder=True,
     )
     owner = replace(
-        _job().owner,
+        completed_delegation_job().owner,
         agent_name="general",
         transport_agent_name=None,
         requester_id=request.response_envelope.requester_id,

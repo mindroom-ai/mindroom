@@ -12,14 +12,13 @@ from mindroom.tool_jobs.runtime import JobAccessError, register_background_runti
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
-from tests.test_subagent_runtime import _config, _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, managed_team_config, tool_job_runtime
 
 
 def test_unbound_tool_authority_does_not_access_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An ordinary call needs no managed runtime lookup or storage filesystem access."""
     paths = test_runtime_paths(tmp_path)
-    context = _delegate_runtime_context(_config(tmp_path), paths)
+    context = _delegate_runtime_context(managed_team_config(tmp_path), paths)
 
     def unavailable(_path: Path, *_args: object, **_kwargs: object) -> Path:
         msg = "Unbound calls must not resolve job storage"
@@ -35,8 +34,8 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
     """Publishing or releasing a second runtime cannot bypass the first runtime's policy."""
     first = test_runtime_paths(tmp_path / "first")
     second = test_runtime_paths(tmp_path / "second")
-    owner = _job().owner
-    config = _config(tmp_path)
+    owner = completed_delegation_job().owner
+    config = managed_team_config(tmp_path)
     context = _delegate_runtime_context(config, first, execution_identity=owner)
     function = Function(name="denied", entrypoint=lambda: None)
 

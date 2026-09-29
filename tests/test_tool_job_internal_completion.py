@@ -38,7 +38,6 @@ from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.response_runner_helpers import _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx, _streaming_adapter
-from tests.test_subagent_runtime import _config, _delivery_coordinator, _finish_job
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -51,8 +50,14 @@ import pytest
 from mindroom.event_journal import EventKind
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    delivery_coordinator,
+    finish_delegation_job,
+    managed_team_config,
+    start_job,
+    tool_job_runtime,
+)
 
 
 @pytest.mark.asyncio
@@ -74,10 +79,10 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
     streaming: bool,
 ) -> None:
     """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
-    paths, owner = test_runtime_paths(tmp_path), _job().owner
+    paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
         source_kind=SILENT_SCHEDULE_SOURCE_KIND,
@@ -137,7 +142,10 @@ async def test_completion_source_is_internal_and_has_no_conversation_projection(
     """An outcome gains durable response ownership without adding a Matrix message."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
-    job = replace(_job(), owner=replace(_job().owner, agent_name="general", transport_agent_name=None))
+    job = replace(
+        completed_delegation_job(),
+        owner=replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None),
+    )
     event = completion_event(job, sender_id=bot.matrix_id.full_id)
     envelope = completion_envelope(job, sender_id=bot.matrix_id.full_id)
     store = bot._journal_store.principal(bot._journal_principal_id)
@@ -160,7 +168,10 @@ async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
-    job = replace(_job(), owner=replace(_job().owner, agent_name="general", transport_agent_name=None))
+    job = replace(
+        completed_delegation_job(),
+        owner=replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None),
+    )
     event = completion_event(job, sender_id=bot.matrix_id.full_id)
     store = bot._journal_store.principal(bot._journal_principal_id)
     await store.admit(event)
@@ -178,7 +189,7 @@ async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path
 async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> None:
     """Transient ready-result claims cannot hide an unsaved outcome after release."""
     runtime = tool_job_runtime(tmp_path)
-    owner = _job().owner
+    owner = completed_delegation_job().owner
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("failed", "tool failed")
@@ -208,7 +219,7 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
     target = _target(thread_id="$thread")
     request = _plain_request(target)
     owner = replace(
-        _job().owner,
+        completed_delegation_job().owner,
         agent_name="general",
         transport_agent_name=None,
         requester_id=request.user_id or "@user:localhost",
@@ -280,10 +291,10 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
 async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path: Path) -> None:
     """Turn-end waiting is visible, interruptible, and does not cancel the operation."""
     paths = test_runtime_paths(tmp_path)
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
@@ -323,11 +334,11 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
 async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Path, *, other_job: bool) -> None:
     """A job whose access is revoked while the reply waits is gone for that reply; its other jobs still join."""
     paths = test_runtime_paths(tmp_path)
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     allowed = True
     runtime = tool_job_runtime(tmp_path, authorize=lambda job: allowed or job.job_id == "kept")
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
@@ -384,10 +395,10 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
     streaming: bool,
 ) -> None:
     """Both shared drivers continue once at the safe boundary even if the model ignores retrieval."""
-    paths, owner = test_runtime_paths(tmp_path), _job().owner
+    paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
@@ -437,10 +448,10 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
 @pytest.mark.asyncio
 async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Path) -> None:
     """Ready work is published only to the internal response source owner."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     try:
-        job = await _finish_job(coordinator)
+        job = await finish_delegation_job(coordinator)
         bot = coordinator.bot_provider("team")
         assert bot is not None
         await coordinator.deliver_pending()
@@ -453,14 +464,14 @@ async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_successful_completion_admission_is_not_repeated_after_bot_replacement(tmp_path: Path) -> None:
     """The durable journal owns an admitted generation, including after a bot is replaced."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     bot = _bot(tmp_path)
     bot.running = True
     coordinator.bot_provider = lambda _name: bot
     store = bot.journal_principal()
     try:
-        job = await _finish_job(coordinator)
+        job = await finish_delegation_job(coordinator)
         event = completion_event(job, sender_id=bot.matrix_id.full_id)
         with patch.object(type(store), "admit", autospec=True, side_effect=type(store).admit) as admit:
             await coordinator.deliver_pending()
@@ -487,12 +498,12 @@ async def test_successful_completion_admission_is_not_repeated_after_bot_replace
 @pytest.mark.asyncio
 async def test_failed_completion_admission_retries_and_new_generation_is_admitted(tmp_path: Path) -> None:
     """Only successful durable admission suppresses retries; approval outcomes keep distinct generations."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     bot = _bot(tmp_path)
     bot.running = True
     coordinator.bot_provider = lambda _name: bot
-    fixture = _job()
+    fixture = completed_delegation_job()
 
     async def approval() -> BackgroundOutcome:
         return BackgroundOutcome("awaiting_approval")
@@ -547,7 +558,7 @@ async def test_internal_source_envelope_is_stable_after_runtime_recovery(tmp_pat
     """Recovery cannot conflict with an outcome source admitted before the crash."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
     runtime = tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
@@ -587,7 +598,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
     owner = replace(
-        _job().owner,
+        completed_delegation_job().owner,
         agent_name="general",
         transport_agent_name=None,
         requester_id=request.response_envelope.requester_id,
@@ -693,7 +704,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$event" if thread_root else "$thread"))
     owner = replace(
-        _job().owner,
+        completed_delegation_job().owner,
         agent_name="general",
         transport_agent_name=None,
         requester_id=request.response_envelope.requester_id,
@@ -752,10 +763,10 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
 @pytest.mark.asyncio
 async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(tmp_path: Path) -> None:
     """A pending approval reaches the existing native wait path without a join deadlock."""
-    paths, owner = test_runtime_paths(tmp_path), _job().owner
+    paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
@@ -800,10 +811,10 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
 @pytest.mark.parametrize("failure_boundary", ["join_cancel", "continuation_cancel", "continuation_error"])
 async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failure_boundary: str) -> None:  # noqa: PLR0915
     """Joining or retrieving retained work cannot publish top-level completion early."""
-    paths, owner = test_runtime_paths(tmp_path), _job().owner
+    paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
@@ -883,10 +894,10 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_path: Path, used: int) -> None:
     """A resumed approval that already used its turn's continuations joins no further ready results."""
     paths = test_runtime_paths(tmp_path)
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
-        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )

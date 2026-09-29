@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from dataclasses import asdict, fields, replace
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,16 +19,11 @@ import mindroom.orchestration.tool_job_runtime as runtime_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
-from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ToolConfigEntry
+from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
-from mindroom.delegation.state import DelegationChild
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import MatrixID
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.message_target import MessageTarget
@@ -55,70 +50,30 @@ from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_con
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origin
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
-from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    delivery_coordinator,
+    finish_delegation_job,
+    managed_team_config,
+    start_delegation_job,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import DelegationChild
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
-
-
-def _job() -> BackgroundJob:
-    owner = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="lead",
-        requester_id="@human:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="!room:localhost_$thread",
-        transport_agent_name="team",
-    )
-    child = DelegationChild(
-        delegation_id="job_123",
-        parent_tool_call_id="call_123",
-        caller_agent_name="lead",
-        child_agent_name="worker",
-        task="Inspect files",
-        session_id="child_session",
-        run_id="child_run",
-        model_name="default",
-        depth=1,
-        execution_identity={},
-    )
-    return BackgroundJob(
-        job_id="job_123",
-        tool_name="delegate",
-        depth=0,
-        kind="delegation",
-        adapter={"child": asdict(child)},
-        owner=owner,
-        status="completed",
-        result="Finished @worker",
-    )
-
-
-def _config(tmp_path: Path) -> Config:
-    access = ResponderAccessConfig(users=["@human:localhost"], current_room_members=False)
-    return bind_runtime_paths(
-        Config(
-            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-            agents={
-                "lead": AgentConfig(display_name="Lead", delegate_to=["worker"], access=access),
-                "worker": AgentConfig(display_name="Worker", access=access),
-            },
-            teams={"team": TeamConfig(display_name="Team", role="Work", agents=["lead"], access=access)},
-        ),
-        runtime_paths=test_runtime_paths(tmp_path),
-    )
 
 
 @pytest.mark.asyncio
@@ -129,7 +84,7 @@ async def test_runtime_startup_io_keeps_loop_live_and_retains_cancelled_lease(
     cancel_startup: bool,
 ) -> None:
     """Storage setup runs off-loop, and cancellation cannot orphan its newly acquired lease."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.background_tool_jobs.enabled = True
     paths = test_runtime_paths(tmp_path)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
@@ -174,14 +129,14 @@ async def test_runtime_startup_io_keeps_loop_live_and_retains_cancelled_lease(
 
 def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: Path) -> None:
     """A config reload cannot leave completion delivery holding old authority."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
-    job = _job()
+    job = completed_delegation_job()
     assert coordinator._authorized(job)
     config.agents["lead"].delegate_to = []
     assert not coordinator._authorized(job)
@@ -192,14 +147,14 @@ def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: P
 
 def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path: Path) -> None:
     """Current target or recipient access revocation blocks delivery."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
-    job = _job()
+    job = completed_delegation_job()
     assert not coordinator._authorized(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost")))
     config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
     assert not coordinator._authorized(job)
@@ -236,7 +191,7 @@ class _ResolvingMembership(AgentReplyMembershipIndex):
 @pytest.mark.asyncio
 async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) -> None:
     """Unresolved membership hides a job from access but cancels it only after a proven denial."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
         entity.access = ResponderAccessConfig(current_room_members=True)
     membership = _ResolvingMembership()
@@ -247,7 +202,7 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
         agent_reply_memberships=membership,
     )
     runtime = tool_job_runtime(tmp_path, authorize=coordinator._authorized)
-    fixture = _job()
+    fixture = completed_delegation_job()
     release = asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -268,45 +223,14 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
         await runtime.shutdown()
 
 
-def _delivery_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
-    bot = MagicMock(spec=AgentBot)
-    bot.running = True
-    bot.client = MagicMock(spec=nio.AsyncClient)
-    bot.client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_team:localhost")}
-    bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
-    return ToolJobRuntimeCoordinator(
-        runtime_paths=test_runtime_paths(tmp_path),
-        config_provider=lambda: config,
-        bot_provider=lambda name: bot if name == "team" else None,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-    )
-
-
-async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
-    fixture = _job()
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "Saved answer")
-
-    job = await start_delegation_job(
-        coordinator.runtime,
-        delegation_child(fixture),
-        owner=fixture.owner,
-        operation=operation,
-    )
-    result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
-    await coordinator.runtime.release_wait(job.job_id, result.claim)
-    return result.job
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [False, True])
 async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_path: Path, approval: bool) -> None:
     """Current permission loss also stops accepted work through its internal owner."""
-    config = _config(tmp_path)
-    coordinator = _delivery_coordinator(tmp_path, config)
+    config = managed_team_config(tmp_path)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    fixture = _job()
+    fixture = completed_delegation_job()
     child = delegation_child(fixture)
     started, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -344,9 +268,9 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
 @pytest.mark.asyncio
 async def test_retry_passes_for_unjoined_recipient_do_not_query_the_homeserver(tmp_path: Path) -> None:
     """Retry passes check a burst of jobs for a bot outside their room against synced room state, not Matrix."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
-    fixture = _job()
+    fixture = completed_delegation_job()
     bot = coordinator.bot_provider("team")
     assert bot is not None
     client = bot.client
@@ -389,8 +313,8 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An in-process restart must choose fresh settings and a fresh runtime after a shutdown save error."""
-    config = _config(tmp_path)
-    coordinator = _delivery_coordinator(tmp_path, config)
+    config = managed_team_config(tmp_path)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
     started = asyncio.Event()
 
@@ -399,7 +323,7 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
         await asyncio.Event().wait()
         raise AssertionError
 
-    fixture = _job()
+    fixture = completed_delegation_job()
     await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await asyncio.wait_for(started.wait(), 10)
 
@@ -426,9 +350,9 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
 @pytest.mark.asyncio
 async def test_live_wait_claim_suppresses_completion_delivery(tmp_path: Path) -> None:
     """The delivery loop cannot race a result awaiting parent persistence."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
-    job = await _finish_job(coordinator)
+    job = await finish_delegation_job(coordinator)
     waiting = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     bot = coordinator.bot_provider("team")
     assert bot is not None
@@ -447,7 +371,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
 ) -> None:
     """Shutdown owns detached tasks and removes the managed runtime lookup."""
     monkeypatch.setattr(runtime_module, "interrupt_child", AsyncMock())
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.sync()
     started, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -459,7 +383,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
             cancelled.set()
         raise AssertionError
 
-    fixture = _job()
+    fixture = completed_delegation_job()
     await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await started.wait()
     assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
@@ -469,7 +393,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     await coordinator.stop()
     assert cancelled.is_set()
     assert get_background_runtime(coordinator.runtime_paths) is None
-    restored = _delivery_coordinator(tmp_path, _config(tmp_path))
+    restored = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await restored.initialize()
     await restored.runtime.recover()
     job = await restored.runtime.lookup(fixture.job_id, owner=fixture.owner, depth=0)
@@ -479,9 +403,9 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
 
 def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_path: Path) -> None:
     """Only a started service may own the exclusive job-store lease."""
-    config = _config(tmp_path)
-    first = _delivery_coordinator(tmp_path, config)
-    second = _delivery_coordinator(tmp_path, config)
+    config = managed_team_config(tmp_path)
+    first = delivery_coordinator(tmp_path, config)
+    second = delivery_coordinator(tmp_path, config)
     assert first is not second
     assert not (first.runtime_paths.storage_root / "tool_jobs").exists()
 
@@ -493,7 +417,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
 ) -> None:
     """A replacement transport must signal jobs launched by its retired runner."""
     monkeypatch.setattr(runtime_module, "interrupt_child", AsyncMock())
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     runtime = coordinator.runtime
     register_background_runtime(coordinator.runtime_paths, runtime)
@@ -512,7 +436,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
         tool_executed.set()
         return BackgroundOutcome("completed", "Executed")
 
-    fixture = _job()
+    fixture = completed_delegation_job()
     with human_message_signal_context(signal):
         job = await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     waiting = asyncio.create_task(runtime.wait(job.job_id, owner=fixture.owner, depth=0))
@@ -553,7 +477,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
 
 def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) -> None:
     """Ordinary job authority tracks tool grant and filters."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["lead"].tools = ["calculator"]
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
@@ -562,7 +486,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
     job = replace(
-        _job(),
+        completed_delegation_job(),
         kind="tool",
         tool_name="add",
         toolkit_name="calculator",
@@ -586,9 +510,9 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> None:
     """Native admission reserves foreground delivery."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
-    fixture = _job()
+    fixture = completed_delegation_job()
     done = asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -620,10 +544,10 @@ async def test_completion_worker_retries_transient_authorization_scan(
     wake: str,
 ) -> None:
     """A failed Matrix-state read cannot strand accepted outcomes or require config reload."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     runtime = coordinator.runtime
-    job = await _finish_job(coordinator)
+    job = await finish_delegation_job(coordinator)
     failed, delivered = asyncio.Event(), asyncio.Event()
     read_state = matrix_state._load_matrix_state_file
     matrix_state._load_matrix_state_file_cached.cache_clear()
@@ -664,19 +588,19 @@ async def test_completion_worker_retries_transient_authorization_scan(
 @pytest.mark.asyncio
 async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_path: Path) -> None:
     """A retained child keeps exact transport ancestry but loses execution after a grant is revoked."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    owner = replace(_job().owner, agent_name="worker", session_id="child_session")
-    child = delegation_child(_job())
+    owner = replace(completed_delegation_job().owner, agent_name="worker", session_id="child_session")
+    child = delegation_child(completed_delegation_job())
     child.execution_identity = serialize_tool_execution_identity(owner)
     await start_child_turn(
         child,
         parent_run_id="parent",
         config=config,
         runtime_paths=coordinator.runtime_paths,
-        caller_execution_identity=_job().owner,
+        caller_execution_identity=completed_delegation_job().owner,
     )
     function = Function(name="add", entrypoint=lambda: None)
     toolkit = Toolkit(name="calculator", auto_register=False)
@@ -707,23 +631,23 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
 @pytest.mark.asyncio
 async def test_accepted_execution_continues_while_room_membership_resolves(tmp_path: Path) -> None:
     """A running job's leaf call is stopped by a proven denial, never by membership that is still resolving."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
     for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
         entity.access = ResponderAccessConfig(current_room_members=True)
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     membership = _ResolvingMembership()
     coordinator.agent_reply_memberships = membership
     await coordinator.initialize()
-    owner = replace(_job().owner, agent_name="worker", session_id="child_session")
-    child = delegation_child(_job())
+    owner = replace(completed_delegation_job().owner, agent_name="worker", session_id="child_session")
+    child = delegation_child(completed_delegation_job())
     child.execution_identity = serialize_tool_execution_identity(owner)
     await start_child_turn(
         child,
         parent_run_id="parent",
         config=config,
         runtime_paths=coordinator.runtime_paths,
-        caller_execution_identity=_job().owner,
+        caller_execution_identity=completed_delegation_job().owner,
     )
     function = Function(name="add", entrypoint=lambda: None)
     toolkit = Toolkit(name="calculator", auto_register=False)
@@ -750,13 +674,13 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
 @pytest.mark.asyncio
 async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: Path) -> None:
     """The final leaf arguments cannot bypass current MCP filters through a catalog-free OAuth bridge."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.mcp_servers = {"demo": _oauth_server_config()}
     config.agents["lead"].tools = ["mcp_demo"]
     sync_mcp_tool_registry(config)
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     toolkit = MindRoomMCPToolkit(
         server_id="demo",
         manager=None,
@@ -805,7 +729,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
     function_name: str,
 ) -> None:
     """Implied filters and preset child factory identity survive Function copying and saved-result projection."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["lead"].tools = [
         ToolConfigEntry(
             name=authored,
@@ -814,9 +738,9 @@ async def test_expanded_tool_authority_retains_exact_construction(
     ]
     config.memory.backend = "none"
     config.models["default"] = ModelConfig(provider="openai", id="gpt-6-astra")
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    owner = _job().owner
+    owner = completed_delegation_job().owner
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with tool_runtime_context(
@@ -838,7 +762,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
             function._agent = agent
             assert function.owning_toolkit == authored
             stored = replace(
-                _job(),
+                completed_delegation_job(),
                 kind="tool",
                 tool_name=function_name,
                 toolkit_name=authored,
@@ -869,11 +793,11 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     wrapped: bool,
 ) -> None:
     """Registry mutation inside construction cannot authorize the old implementation as its replacement."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["lead"].tools = ["calculator"]
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    owner = _job().owner
+    owner = completed_delegation_job().owner
 
     def replacement_factory() -> type[Toolkit]:
         pytest.fail("Authority must not instantiate the replacement")
@@ -905,7 +829,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     function = toolkit.get_async_functions()["add"].model_copy(deep=True)
     function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     stored = replace(
-        _job(),
+        completed_delegation_job(),
         kind="tool",
         tool_name="add",
         toolkit_name="calculator",

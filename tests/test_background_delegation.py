@@ -66,8 +66,7 @@ from tests.delegation_helpers import (
 from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_delegation_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import completed_delegation_job, start_delegation_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -134,7 +133,11 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         async def saved_outcome() -> BackgroundOutcome:
             return BackgroundOutcome("completed", "retained")
 
-        child = replace(delegation_child(_job()), caller_agent_name="leader", child_agent_name="code")
+        child = replace(
+            delegation_child(completed_delegation_job()),
+            caller_agent_name="leader",
+            child_agent_name="code",
+        )
         retained = await start_delegation_job(runtime, child, owner=owner, operation=saved_outcome)
         waited = await runtime.wait(retained.job_id, owner=owner, depth=0)
         await runtime.release_wait(retained.job_id, waited.claim)

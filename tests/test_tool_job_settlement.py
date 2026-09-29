@@ -17,8 +17,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
-from tests.test_background_subagents import _owner
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -50,7 +49,15 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
         raise OSError(msg)
 
     try:
-        await start_job(runtime, "shutdown", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(
+            runtime,
+            "shutdown",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
         await asyncio.wait_for(started.wait(), 10)
         with monkeypatch.context() as patch, capture_logs() as logs:
             patch.setattr(runtime_module, "write_json_file_durable", fail_save)
@@ -92,13 +99,13 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             tool_name="tool",
             depth=0,
             adapter={},
-            owner=_owner(),
+            owner=job_owner(),
             operation=operation,
         )
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module, "write_json_file_durable", fail_outcome)
             release.set()
-            waited = await asyncio.wait_for(runtime.wait("write-failure", owner=_owner(), depth=0), 2)
+            waited = await asyncio.wait_for(runtime.wait("write-failure", owner=job_owner(), depth=0), 2)
             assert waited.job.status == "completed"
             assert waited.job.result == "retained output"
             assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
@@ -109,7 +116,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
-            saved = await restored.lookup("write-failure", owner=_owner(), depth=0)
+            saved = await restored.lookup("write-failure", owner=job_owner(), depth=0)
             assert saved.status == "completed"
             assert saved.result == "retained output"
             assert await restored.read_payload(saved) == {"artifact": [1, 2]}
@@ -145,10 +152,18 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
 
     stopping = None
     try:
-        await start_job(runtime, "returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(
+            runtime,
+            "returned",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
         await asyncio.wait_for(cleaning.wait(), 2)
         stopping = asyncio.create_task(
-            runtime.shutdown() if shutdown else runtime.cancel("returned", owner=_owner(), depth=0),
+            runtime.shutdown() if shutdown else runtime.cancel("returned", owner=job_owner(), depth=0),
         )
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(stopping), 0.02)
@@ -196,9 +211,17 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
 
     stopping = None
     try:
-        await start_job(runtime, "returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(
+            runtime,
+            "returned",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
         monkeypatch.setattr(runtime, "_publish", delayed_publish)
-        stopping = asyncio.create_task(runtime.cancel("returned", owner=_owner(), depth=0))
+        stopping = asyncio.create_task(runtime.cancel("returned", owner=job_owner(), depth=0))
         await asyncio.wait_for(saving.wait(), 2)
         finish.set()
         await asyncio.wait_for(returned.wait(), 2)
@@ -250,12 +273,12 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         tool_name="tool",
         depth=0,
         adapter={},
-        owner=_owner(),
+        owner=job_owner(),
         operation=completed if first_completed else running,
         cancel=cleanup,
     )
     if first_completed:
-        waited = await runtime.wait("first", owner=_owner(), depth=0)
+        waited = await runtime.wait("first", owner=job_owner(), depth=0)
         await runtime.release_wait("first", waited.claim)
     await start_job(
         runtime,
@@ -263,7 +286,7 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         tool_name="tool",
         depth=0,
         adapter={},
-        owner=_owner(),
+        owner=job_owner(),
         operation=running,
         cancel=cleanup,
     )
@@ -289,7 +312,7 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
-            assert (await restored.lookup("second", owner=_owner(), depth=0)).status == "interrupted"
+            assert (await restored.lookup("second", owner=job_owner(), depth=0)).status == "interrupted"
         finally:
             await restored.shutdown()
         if failure is not None:
@@ -323,7 +346,15 @@ async def test_blocked_shutdown_cleanup_still_settles_other_jobs(tmp_path: Path)
         return operation
 
     for name in ("blocked", "later"):
-        await start_job(runtime, name, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=running(name))
+        await start_job(
+            runtime,
+            name,
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=running(name),
+        )
     await both_started.wait()
     with pytest.raises(ExceptionGroup, match="shutdown") as failure:
         await runtime.shutdown()

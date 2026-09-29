@@ -24,8 +24,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,7 +48,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     bot.config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
     runtime = tool_job_runtime(paths.storage_root)
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: bot, AgentReplyMembershipIndex())
     # An authorize-all runtime stands in for the one initialize would create for this bot's stricter grants.
     coordinator._runtime, coordinator._journal = runtime, bot._journal_store

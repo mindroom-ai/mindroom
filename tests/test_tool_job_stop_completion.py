@@ -23,9 +23,8 @@ from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_event_journal_store import ROOM, admit
 from tests.test_tool_job_completion import _persist_waiting_continuation
 from tests.test_tool_job_stop import _bind_reply
-from tests.test_tool_jobs import _owner
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -49,7 +48,7 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
     await _bind_reply(store, "$follow-up", "$reply", entity_name="general")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="general",
         room_id=ROOM,
         thread_id="$thread",
@@ -164,7 +163,7 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
     await _bind_reply(store, "$source", "$reply", entity_name="general")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="general",
         room_id=ROOM,
         thread_id="$thread",
@@ -237,7 +236,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
     await _bind_reply(store, "$follow-up", "$reply", entity_name="general")
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = replace(
-        _owner(),
+        job_owner(),
         agent_name="general",
         requester_id="@user:localhost",
         room_id=ROOM,

@@ -27,7 +27,7 @@ from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
-from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
+from tests.tool_job_helpers import completed_delegation_job, delivery_coordinator, managed_team_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,13 +60,13 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
     revoked: bool,
 ) -> None:
     """An accepted outer job cannot enter a now-disabled real file or shell function."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.defaults.tools = []
     entry = ToolConfigEntry(name=toolkit_name, defer=deferred, overrides={flag: True})
     config.agents["lead"].tools = [entry]
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     paths = coordinator.runtime_paths
-    owner = replace(_job().owner, transport_agent_name="lead")
+    owner = replace(completed_delegation_job().owner, transport_agent_name="lead")
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         agent_name="lead",

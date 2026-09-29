@@ -40,8 +40,13 @@ from mindroom.turn_origin import TurnIntent
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import assembled_function, start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    assembled_function,
+    completed_delegation_job,
+    start_delegation_job,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -514,7 +519,7 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
         async with execution_resources():
             with tool_runtime_context(context):
                 if native:
-                    child = replace(delegation_child(_job()), caller_agent_name="general")
+                    child = replace(delegation_child(completed_delegation_job()), caller_agent_name="general")
                     accepted = await start_delegation_job(runtime, child, owner=owner, operation=native_operation)
                     job_id = accepted.job_id
                 else:

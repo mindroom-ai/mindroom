@@ -19,8 +19,7 @@ from mindroom.tool_jobs.results import (
     encode_result_payload,
     read_result_payload,
 )
-from tests.test_background_subagents import _owner
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundOutcome
@@ -142,8 +141,16 @@ async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) ->
         raise RuntimeError(message)
 
     try:
-        await start_job(runtime, "failed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
-        waited = await runtime.wait("failed", owner=_owner(), depth=0)
+        await start_job(
+            runtime,
+            "failed",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("failed", owner=job_owner(), depth=0)
         await runtime.release_wait("failed", waited.claim)
         assert (waited.job.status, waited.job.has_result_payload) == ("failed", False)
         payload = await read_result_payload(runtime, waited.job)

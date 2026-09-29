@@ -38,8 +38,14 @@ from tests.conftest import unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
-from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
-from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    delivery_coordinator,
+    managed_team_config,
+    start_delegation_job,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,12 +84,12 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     configured: bool,
 ) -> None:
     """A member's tool becomes a job, while the leader's SDK delegation runs inline, until the grant is withdrawn."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
     config.teams["team"].agents = ["lead", "worker"]
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     paths = coordinator.runtime_paths
-    owner = replace(_job().owner, transport_agent_name="team" if configured else "lead")
+    owner = replace(completed_delegation_job().owner, transport_agent_name="team" if configured else "lead")
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -134,7 +140,7 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     config.agents["worker"] = config.agents["general"].model_copy(deep=True)
     persist_entity_accounts(config, paths)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    owner = replace(_job().owner, agent_name="worker", transport_agent_name="general")
+    owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="general")
     runtime = tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
@@ -232,9 +238,9 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
 @pytest.mark.asyncio
 async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_owner(tmp_path: Path) -> None:
     """An ordinary later turn must not receive an unusable other-member retrieval directive."""
-    config = _config(tmp_path)
-    paths = _delivery_coordinator(tmp_path, config).runtime_paths
-    owner = replace(_job().owner, agent_name="worker", transport_agent_name="lead")
+    config = managed_team_config(tmp_path)
+    paths = delivery_coordinator(tmp_path, config).runtime_paths
+    owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="lead")
     runtime = tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
@@ -266,10 +272,10 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
 @pytest.mark.parametrize("changed_agent", ["lead", "worker"])
 async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path: Path, changed_agent: str) -> None:
     """Native retrieval and generic discovery enforce the same frozen caller/child storage scope."""
-    config = _config(tmp_path)
-    coordinator = _delivery_coordinator(tmp_path, config)
+    config = managed_team_config(tmp_path)
+    coordinator = delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    paths, owner = coordinator.runtime_paths, _job().owner
+    paths, owner = coordinator.runtime_paths, completed_delegation_job().owner
     child = prepare_child_turn("lead", "worker", "Work", owner=owner, config=config, runtime_paths=paths, depth=0)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
@@ -306,13 +312,13 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
 @pytest.mark.asyncio
 async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tmp_path: Path) -> None:
     """Native child tools and durable results keep an ordinary agent's ad hoc team transport."""
-    config = _config(tmp_path)
+    config = managed_team_config(tmp_path)
     config.agents["carrier"] = config.agents["lead"].model_copy(deep=True)
     config.agents["worker"].tools = ["calculator"]
-    coordinator = _delivery_coordinator(tmp_path, config)
+    coordinator = delivery_coordinator(tmp_path, config)
     paths = coordinator.runtime_paths
-    owner = replace(_job().owner, transport_agent_name="carrier")
-    child = delegation_child(_job())
+    owner = replace(completed_delegation_job().owner, transport_agent_name="carrier")
+    child = delegation_child(completed_delegation_job())
     child_owner = replace(owner, agent_name="worker", session_id=child.session_id)
     child.execution_identity = serialize_tool_execution_identity(child_owner)
     await start_child_turn(
