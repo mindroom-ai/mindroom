@@ -278,6 +278,12 @@ class UpdateAccountStatusRequest(BaseModel):
     reason: str | None = None
 
 
+def _update_account_auth_ban(sb: Any, account_id: str, status: str | None) -> None:
+    """Apply suspension to Auth before either admin route changes the account row."""
+    if status in {"suspended", ACTIVE_ACCOUNT_STATUS}:
+        sb.auth.admin.update_user_by_id(account_id, {"ban_duration": "876000h" if status == "suspended" else "none"})
+
+
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
 async def update_account_status(
     account_id: str,
@@ -302,6 +308,7 @@ async def update_account_status(
                         "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
                     ),
                 )
+        _update_account_auth_ban(sb, account_id, request.status)
         result = (
             sb.table("accounts")
             .update({"status": request.status, "updated_at": datetime.now(UTC).isoformat()})
@@ -313,12 +320,6 @@ async def update_account_status(
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
         # The database's id spelling is the one cached auth entries carry.
         invalidate_account_auth_cache(result.data[0]["id"])
-
-        if request.status in {"suspended", ACTIVE_ACCOUNT_STATUS}:
-            sb.auth.admin.update_user_by_id(
-                result.data[0]["id"],
-                {"ban_duration": "876000h" if request.status == "suspended" else "none"},
-            )
 
         audit_log_entry(
             account_id=admin["user_id"],
@@ -563,6 +564,8 @@ async def admin_update(
 
     try:
         data.pop("id", None)
+        if resource == "accounts":
+            _update_account_auth_ban(sb, resource_id, data.get("status"))
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
         if resource == "accounts" and result.data:
             invalidate_account_auth_cache(result.data[0]["id"])

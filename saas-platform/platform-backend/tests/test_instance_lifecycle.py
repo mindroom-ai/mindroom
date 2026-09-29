@@ -2045,3 +2045,24 @@ async def test_nightly_cleanup_pages_through_every_pending_account(platform: Pla
         await run_cleanup_job()
 
     assert sorted(seen) == sorted([ACCOUNT_ID, second_account])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,stored_status", [("canceled", "cancelled"), ("unpaid", "unpaid")])
+async def test_unknown_price_still_holds_inactive_subscription(
+    platform: Platform, status: str, stored_status: str
+) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("running"))
+    remote = _stripe_subscription(status)
+    remote["items"]["data"][0]["price"] = {"id": "price_retired_unknown"}
+    platform.stripe.api_key = "test"
+    platform.stripe.Subscription.retrieve.return_value = remote
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, refresh_from_stripe=True)
+
+    assert summary.errors == []
+    assert platform.subscription()["status"] == stored_status
+    assert platform.subscription()["tier"] == "hobby"
+    assert platform.scaled_down()
+    assert platform.instance()["lifecycle_stopped_at"] is not None

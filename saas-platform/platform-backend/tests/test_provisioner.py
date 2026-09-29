@@ -2,6 +2,7 @@
 
 import base64
 import inspect
+import json
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
@@ -1468,3 +1469,50 @@ class TestProvisionerEndpoints:
         data = response.json()
         assert data["success"] is True
         assert data["customer_id"] == "123"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["remote_key", "secret_value"])
+async def test_provisioning_recovers_an_unusable_stored_key(missing: str) -> None:
+    from backend.services.provisioner_service import _provision_openrouter_key
+
+    db = _stored_key_db(150 if missing == "remote_key" else 15)
+    operations = []
+
+    def request(method, url, headers, body):
+        operations.append(method)
+        if method == "PATCH":
+            assert missing == "remote_key"
+            return 404, b"{}"
+        if method == "DELETE":
+            return (404, b"{}") if missing == "remote_key" else (200, b'{"deleted": true}')
+        assert method == "POST"
+        assert db.row("instances", instance_id="123")["openrouter_key_hash"] is None
+        return 201, json.dumps(
+            {
+                "key": "replacement",
+                "data": {
+                    "hash": "new_hash",
+                    "label": "replacement",
+                    "limit": 15,
+                    "limit_reset": "monthly",
+                },
+            }
+        ).encode()
+
+    with (
+        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "test-management"),
+        patch("backend.services.provisioner_service._existing_instance_secret_value", AsyncMock(return_value="")),
+        patch("backend.openrouter._send_http_request", side_effect=request),
+    ):
+        key, created = await _provision_openrouter_key(
+            sb=db,
+            account_id="acc_123",
+            instance_id="123",
+            tier="hobby",
+            existing_instance_row=db.row("instances", instance_id="123"),
+            namespace="test",
+        )
+    assert key == "replacement"
+    assert created.hash == "new_hash"
+    assert operations == (["PATCH", "DELETE", "POST"] if missing == "remote_key" else ["DELETE", "POST"])

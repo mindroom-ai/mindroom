@@ -618,12 +618,16 @@ async def _provision_openrouter_key(
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
-        if not _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
-            await set_instance_openrouter_key_limit(sb, existing_instance_row, tier)
-        existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
-        if not existing_key:
-            raise HTTPException(status_code=500, detail="Stored OpenRouter key is missing from the instance Secret")
-        return existing_key, None
+        try:
+            if not _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
+                await set_instance_openrouter_key_limit(sb, existing_instance_row, tier)
+            existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
+        except OpenRouterKeyNotFoundError:
+            pass
+        else:
+            if existing_key:
+                return existing_key, None
+        await revoke_instance_openrouter_key(sb, instance_id)
     if monthly_limit_usd <= 0:
         return "", None
 

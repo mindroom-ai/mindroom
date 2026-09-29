@@ -57,7 +57,12 @@ from backend.services.provisioner_service import (
     start_instance,
     uninstall_instance,
 )
-from backend.services.subscription_projection import subscription_fields
+from backend.services.subscription_projection import (
+    PermanentEventError,
+    maybe_timestamp_to_iso,
+    subscription_fields,
+    subscription_status,
+)
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -382,8 +387,15 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
         if not stripe_subscription_id or not stripe.api_key:
             return subscription
         remote = await anyio.to_thread.run_sync(stripe.Subscription.retrieve, stripe_subscription_id)
-        fields = subscription_fields(sb, remote)
-        fields.pop("updated_at")
+        try:
+            fields = subscription_fields(sb, remote)
+            fields.pop("updated_at")
+        except PermanentEventError:
+            logger.warning("Unknown price for subscription %s; refreshing status and trial end only", subscription_id)
+            fields = {
+                "status": subscription_status(sb, remote["status"], stripe_subscription_id),
+                "trial_ends_at": maybe_timestamp_to_iso(remote.get("trial_end")),
+            }
         unchanged = all(
             parse_timestamp(subscription.get(key)) == parse_timestamp(value)
             if key in {"trial_ends_at", "current_period_start", "current_period_end"}
