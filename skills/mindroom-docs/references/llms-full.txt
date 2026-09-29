@@ -9752,6 +9752,7 @@ The agent can list and read inside those folders, and there is no write, create,
 - `list_folders` returns an ID, name, and absolute path for each selected folder, plus a `truncated` flag if too many folders or paths are too long to fit one reply.
 - `list_directory` takes a `root_id` and an optional relative `path` and returns at most 200 entries, each with its name and type (`directory`, `file`, `symlink`, or `other`), plus a `truncated` flag if there are more entries than fit the folder limit or one reply.
 - `read_file` takes a `root_id`, a relative `path`, and an optional byte `offset` and returns at most 16 KiB of UTF-8 text with `next_offset`, `eof`, and `truncated`; the agent continues a longer file from `next_offset`.
+  Text that escapes heavily in JSON, such as accented or emoji characters, returns fewer bytes so the reply still fits one encrypted message, never splitting a character.
 
 Paths are relative to the selected folder, and absolute paths or `..` components are rejected.
 The bridge opens every path component relative to a folder descriptor pinned at startup and never follows symbolic links, so a link inside a selected folder cannot reach a file outside it.
@@ -9773,7 +9774,10 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 - `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the local home directory.
   Its `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
 - `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it has finished.
+  With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
+  An offset past the captured output, a negative offset, or one inside a UTF-8 character is rejected, and a finished handle stays available for a corrected check.
 - `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
+  A later `check_shell` then reports `state: "killed"` with whatever exit code the process returned, which is the negative signal number only when the signal ended it, while `completed` means the command exited on its own.
 
 ### Local Approval
 
@@ -9798,15 +9802,22 @@ Revoking clears auto-approval, rejects a waiting request, and stops every runnin
 
 A command still running after its inline wait keeps running as a handle instead of being killed.
 The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops the command with `kill_shell`.
+Every shell result reports `output_start` and `next_offset`, the byte range the returned output covers, while `output_bytes` stays the total captured size.
+An `output_start` above the requested offset, 0 without one, means earlier output was skipped, as in a running command's newest-output reply, and a `check_shell` from that earlier offset reads it.
+Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and more output is available while `next_offset` is below `output_bytes`.
 Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
 Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
-The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each one.
-A finished `check_shell` hands its output over once and then forgets the handle.
+The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each running one.
+A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with the exit code the process returned, instead of an unknown handle.
+A `check_shell` that returns a finished handle's remaining output in full, inline or as an attachment, hands it over and forgets the handle.
+If the attachment cannot be uploaded, the reply shows the part that fits from the requested offset with a `warning`, and the handle stays for a `check_shell` from `next_offset`.
+A `run_shell` that finished within its inline wait but whose output cannot be attached returns such a handle too, and a `request_status` for that `run_shell` returns the same reply with the handle.
 If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
 The bridge retains at most 16 handles.
-When all 16 are retained, a new command drops the oldest finished handle that nobody has checked, together with its output, and is refused before approval if all 16 are still running.
+When all 16 are retained, a new command drops the handle that finished longest ago, together with its output, even if the agent is still paging through it, and is refused before approval if all 16 are still running.
+A retained handle keeps its output, up to 10 MiB, in the bridge's private temporary files, so 16 retained handles can hold up to 160 MiB on local disk until each is checked in full, dropped for a new command, dropped when a command starts more than 10 minutes after it finished, or forgotten by revoke, stop, or shutdown.
 
-Revoking shell access, stopping the bridge, and helper shutdown kill every handle.
+Revoking shell access, stopping the bridge, and helper shutdown kill and forget every handle, so a later `check_shell` reports an unknown handle.
 Handles never survive a helper restart.
 If the helper is force-killed, for example with `SIGKILL`, running handle processes are not cleaned up.
 After a command finishes, the remaining processes in its process group, such as children started with `&`, are terminated, so long-running work should stay in the foreground and continue as a handle.
@@ -9824,14 +9835,17 @@ Only `TMPDIR` and `LANG` come from the helper's own environment, so helper crede
 
 If capture fails or takes longer than 5 seconds, commands use that minimal environment instead.
 Profile changes apply the next time the bridge starts.
-Commands read standard input from `/dev/null` and have no terminal, so they cannot answer password prompts, but they keep any authority the account already has without one.
-Standard error is merged into standard output in the order it is written.
+Each call runs in a fresh non-interactive `/bin/sh`, so a directory change, variable, or other shell state never carries over to the next call.
+`$SHELL` is still your login shell, not the shell running the command.
+Commands read standard input from `/dev/null`, so it is at end of file, and have no terminal, so they cannot answer password prompts, but they keep any authority the account already has without one.
+Standard error is merged into standard output in the order it is written; redirect it with `2>file` to keep it separate.
 
 The bridge captures up to 10 MiB of combined output per command in private temporary files, which it removes after transfer and when it stops.
 Output beyond that limit is dropped, and the result reports `output_truncated: true`.
 Output that fits in one encrypted reply returns inline.
 Larger output travels as an encrypted Matrix media attachment whose key is only inside the encrypted reply, and the cloud tool downloads and verifies it within the tool's configured `timeout_seconds` before returning the full text.
-If the upload fails or takes longer than 30 seconds, the reply keeps the exit code, shows the newest output that fits, sets `output_truncated`, and adds a `warning`.
+If the upload fails or takes longer than 30 seconds, the reply keeps the exit code, shows the output that fits from the requested offset, sets `output_truncated` and `next_offset`, and adds a `warning`.
+The reply then carries a handle, also for a command that finished within its inline wait, and `check_shell` continues from `next_offset` until a reply delivers the rest.
 For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#common-setup-notes) apply.
 A result larger than the automatic-save threshold, 50 KiB by default, is saved as a plaintext file under `mindroom_tool_outputs/` in the agent workspace and returned as a preview, and the agent can pass `mindroom_output_path` to choose the file.
 
@@ -9843,6 +9857,7 @@ The tool tells the agent to query `request_status` with the original `request_id
 The local journal keeps each reply as a durable receipt, and a command interrupted by a helper crash is reported with an unknown outcome and never run again.
 
 `status` reports which of applications, folders, and shell commands are enabled, whether a shell command is waiting for approval, the remaining auto-approval time, and only the caller's own handles.
+Its `bridge.gui_mode`, `observe_only` or `control`, describes only application control, so an observe-only bridge can still read selected folders and run approved shell commands.
 Remote status never includes a waiting command's text; only the person at the computer sees it.
 A remote status reply also fits one encrypted message, so with many selected folders it can trim the folder list and set `file_roots_truncated: true`; the local status a person at the computer sees always lists every folder.
 File contents and command output become model input after MindRoom decrypts them in the cloud process, so your model provider receives them.
@@ -10215,7 +10230,7 @@ Some applications change their UI successfully and then return an accessibility 
 If the user asks to receive the screenshot, the agent calls `desktop(action="screenshot", app="...", return_attachment=true)` and then sends the returned `attachment_id` in the same turn with `matrix_message`.
 
 For folders, the agent calls `list_folders`, then `list_directory` and `read_file` with a returned `root_id` and relative paths, continuing a long file from `next_offset`.
-For shell work, the agent sends one exact command with `run_shell`, waits for the local decision and the inline result, and polls a returned handle with `check_shell`.
+For shell work, the agent sends one exact command with `run_shell`, waits for the local decision and the inline result, and polls a returned handle with `check_shell` from the last `next_offset`.
 The tool instructs it never to resubmit or rephrase a rejected or expired command, and to query `request_status` after a timeout or unknown outcome instead of running the command again.
 
 For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.

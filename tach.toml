@@ -1404,18 +1404,20 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
+    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.custom_tools.toolkit_functions",
     "mindroom.desktop.client",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
+    "mindroom.desktop.input",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
- "mindroom.desktop.input"]
+]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
 # enforce both dependency edges and module visibility for each importer.

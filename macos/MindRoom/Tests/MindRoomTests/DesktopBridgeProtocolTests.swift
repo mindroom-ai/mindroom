@@ -55,7 +55,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
                 "request_id": "shell-7", "requester_id": "@me:example.org", "agent_name": "assistant",
                 "command": "ls -la", "cwd": "/Users/test", "expires_at_ms": 1_900_000_000_000,
             ],
-            "auto_approve_remaining_seconds": 0.0,
+            "auto_approve_remaining_seconds": 251,
             "auto_approve_until_revoked": false,
             "active_request_id": NSNull(),
             "handles": [[
@@ -77,6 +77,8 @@ final class DesktopBridgeProtocolTests: XCTestCase {
             commandPreview: "sleep 100", elapsedSeconds: 12.5, state: "running"
         )])
         XCTAssertNil(status.shell.activeRequestID)
+        let remaining: Int = status.shell.autoApproveRemainingSeconds
+        XCTAssertEqual(remaining, 251, "The bridge already rounds the lease up to whole seconds")
         let reencoded = try JSONDecoder().decode(DesktopStatus.self, from: JSONEncoder().encode(status))
         XCTAssertEqual(reencoded, status)
     }
