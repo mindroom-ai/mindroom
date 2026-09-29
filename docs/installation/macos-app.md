@@ -58,7 +58,6 @@ The app detects the command-line runtime separately from the background service:
    If needed, sign in there or use the secondary **Open in Browser** option.
    **Cancel** stops the waiting connection without saving new credentials and returns to **Connect Account**.
    If approval is already being collected or saved, the app finishes connecting and shows the result.
-   If the installed runtime is too old for safe cancellation, the connection attempt fails with a hint to use **Update Local Runtime** in **Settings**, then try again.
    On success, the app shows the connection result and refreshes service status.
    An unapproved code expires after 10 minutes.
    If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.
