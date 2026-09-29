@@ -1,4 +1,4 @@
-"""Reject Claude attribution in commit messages and commit identities.
+"""Reject AI coding agent attribution (Claude, Codex, Gemini) in commit messages and commit identities.
 
 Runs as a pre-commit ``commit-msg`` hook on the message being written, and in CI with ``--range`` on every commit a pull request adds.
 """
@@ -14,15 +14,15 @@ from pathlib import Path
 # Git appends the staged diff below this line for ``git commit --verbose`` and strips it from the final message.
 SCISSORS_LINE = "# ------------------------ >8 ------------------------"
 MESSAGE_PATTERNS = (
-    re.compile(r"^\s*co-authored-by:.*(claude|anthropic)", re.IGNORECASE),
-    re.compile(r"^\W*generated with \[?claude code", re.IGNORECASE),
-    re.compile(r"claude\.ai/code/session_", re.IGNORECASE),
+    re.compile(r"^\s*co-authored-by:.*\b(claude|anthropic|codex|openai|gemini)\b", re.IGNORECASE),
+    re.compile(r"^\W*generated with \[?(claude code|codex)\b", re.IGNORECASE),
+    re.compile(r"claude\.ai/code/session_|chatgpt\.com/codex/tasks/", re.IGNORECASE),
 )
-IDENTITY_PATTERN = re.compile(r"@anthropic\.com>$", re.IGNORECASE)
+IDENTITY_PATTERN = re.compile(r"@(anthropic|openai)\.com>$", re.IGNORECASE)
 
 
 def message_violations(message: str) -> list[str]:
-    """Return the commit message lines that attribute the work to Claude."""
+    """Return the commit message lines that attribute the work to an AI coding agent."""
     message = message.split(SCISSORS_LINE, 1)[0]
     return [
         line
@@ -65,7 +65,7 @@ def main() -> int:
         violations = message_violations(args.message_file.read_text(encoding="utf-8"))
     if not violations:
         return 0
-    print("Claude attribution is not allowed in commits:", file=sys.stderr)
+    print("AI agent attribution is not allowed in commits:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     print("Remove the attribution lines and commit identities before committing or merging.", file=sys.stderr)

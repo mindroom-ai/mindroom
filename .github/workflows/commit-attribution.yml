@@ -24,7 +24,7 @@ jobs:
           filter: blob:none
           persist-credentials: false
 
-      - name: Reject Claude attribution in pull request commits
+      - name: Reject AI agent attribution in pull request commits
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

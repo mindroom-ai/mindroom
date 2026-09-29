@@ -88,7 +88,7 @@ repos:
         pass_filenames: false
 
       - id: check-commit-attribution
-        name: Reject Claude attribution in commit messages
+        name: Reject AI agent attribution in commit messages
         entry: .venv/bin/python .github/scripts/check_commit_attribution.py
         language: system
         stages: [commit-msg]

@@ -744,7 +744,7 @@ SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_PROJECT_REF=<ref> \
 - **Atomic Commits**: Ensure each commit corresponds to a tested, working state.
 - **Preserve Review History**: Do not amend commits or force-push PR branches unless the user explicitly asks for it. Prefer follow-up commits so PR history stays inspectable.
 - **Targeted Adds**: **NEVER** use `git add .`. Always add files individually (`git add <filename>`) to prevent committing unrelated changes.
-- **No AI Attribution**: **NEVER** add Claude co-author trailers, "Generated with Claude Code" footers, Claude Code session links, or `@anthropic.com` commit identities.
+- **No AI Attribution**: **NEVER** add Claude, Codex, or Gemini co-author trailers, "Generated with Claude Code" or "Generated with Codex" footers, Claude Code session or Codex task links, or `@anthropic.com` or `@openai.com` commit identities.
   The `check-commit-attribution` commit-msg hook (installed by `uv run pre-commit install`) and the `commit-attribution` pull request check reject them.
 
 ### Step 4: Testing & Quality

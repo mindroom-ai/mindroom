@@ -1,4 +1,4 @@
-"""Tests for the hook that rejects Claude attribution in commits."""
+"""Tests for the hook that rejects AI coding agent attribution in commits."""
 
 from __future__ import annotations
 
@@ -36,10 +36,15 @@ def _check_message(tmp_path: Path, message: str) -> subprocess.CompletedProcess[
         "Fix the bug\n\nco-authored-by: Reviewer <reviewer@anthropic.com>\n",
         "Fix the bug\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
         "Fix the bug\n\nhttps://claude.ai/code/session_0123456789\n",
+        "Fix the bug\n\nCo-authored-by: Codex <noreply@openai.com>\n",
+        "Fix the bug\n\nCo-Authored-By: GPT Codex (gpt-6-sol) <codex@openai.com>\n",
+        "Fix the bug\n\nGenerated with [Codex](https://openai.com/codex/).\n",
+        "Fix the bug\n\nRun: https://chatgpt.com/codex/tasks/0123456789\n",
+        "Fix the bug\n\nCo-authored-by: gemini-cli <218195315+gemini-cli@users.noreply.github.com>\n",
     ],
 )
 def test_commit_message_with_attribution_is_rejected(tmp_path: Path, message: str) -> None:
-    """Claude trailers, footers, and session links fail the commit-msg hook."""
+    """Claude, Codex, and Gemini trailers, footers, and session links fail the commit-msg hook."""
     result = _check_message(tmp_path, message)
 
     assert result.returncode == 1
@@ -91,10 +96,12 @@ def test_revision_range_reports_attributed_messages_and_identities(tmp_path: Pat
 
     _commit(tmp_path, f"Attributed commit\n\n{CLAUDE_TRAILER}")
     _commit(tmp_path, "Commit by Claude", email="noreply@anthropic.com")
+    _commit(tmp_path, "Commit by Codex", email="codex@openai.com")
     result = _run_hook("--range", "main..feature", cwd=tmp_path)
 
     assert result.returncode == 1
     assert CLAUDE_TRAILER in result.stderr
     assert "author Dev <noreply@anthropic.com>" in result.stderr
     assert "committer Dev <noreply@anthropic.com>" in result.stderr
+    assert "author Dev <codex@openai.com>" in result.stderr
     assert result.stderr.count(CLAUDE_TRAILER) == 1
