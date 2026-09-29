@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
@@ -15,7 +15,12 @@ from mindroom.desktop.media import (
     download_encrypted_screenshot,
     upload_encrypted_media,
 )
-from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, SHELL_OUTPUT_MIME_TYPE, EncryptedDesktopMedia
+from mindroom.desktop.protocol import (
+    MAX_SCREENSHOT_BYTES,
+    MAX_SHELL_OUTPUT_BYTES,
+    SHELL_OUTPUT_MIME_TYPE,
+    EncryptedDesktopMedia,
+)
 
 JPEG = b"\xff\xd8\xffdesktop-image"
 OUTPUT = "shell output é \x01 😀\n".encode()
@@ -208,3 +213,190 @@ async def test_upload_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> Non
             filename="shell.txt",
             timeout_seconds=0.01,
         )
+
+
+@pytest.mark.asyncio
+async def test_upload_sends_only_ciphertext_and_returns_the_pinned_encrypted_file_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The homeserver sees an opaque `.enc` upload, and the returned reference keeps the Matrix encrypted-file wire shape."""
+    calls: list[tuple[bytes, str, str]] = []
+
+    async def upload(
+        _client: nio.AsyncClient,
+        content: bytes,
+        *,
+        content_type: str,
+        filename: str,
+    ) -> tuple[nio.UploadResponse, None]:
+        calls.append((content, content_type, filename))
+        return nio.UploadResponse("mxc://example.org/screenshot"), None
+
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
+
+    media = await upload_encrypted_media(
+        AsyncMock(spec=nio.AsyncClient),
+        JPEG,
+        mime_type="image/jpeg",
+        filename="desktop.jpg",
+        timeout_seconds=1,
+    )
+
+    [(ciphertext, content_type, filename)] = calls
+    assert (content_type, filename) == ("application/octet-stream", "desktop.jpg.enc")
+    assert len(ciphertext) == len(JPEG)
+    assert ciphertext != JPEG
+    content = media.to_content()
+    assert content == {
+        "url": "mxc://example.org/screenshot",
+        "key": {
+            "alg": "A256CTR",
+            "ext": True,
+            "k": media.key,
+            "key_ops": ["encrypt", "decrypt"],
+            "kty": "oct",
+        },
+        "iv": media.iv,
+        "hashes": {"sha256": media.sha256},
+        "v": "v2",
+        "mimetype": "image/jpeg",
+        "size": len(JPEG),
+    }
+    assert all((media.key, media.iv, media.sha256))
+    assert EncryptedDesktopMedia.from_content(content) == media
+
+
+@pytest.mark.asyncio
+async def test_png_upload_encrypts_without_decoding_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Desktop never sends Matrix image info, so a screenshot upload must not pay to decode its pixels."""
+    uploaded = _capture_uploads(monkeypatch)
+
+    def no_decode(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("desktop media upload decoded the image")
+
+    monkeypatch.setattr("PIL.Image.open", no_decode)
+    png = b"\x89PNG\r\n\x1a\ndesktop-image"
+
+    media = await upload_encrypted_media(
+        AsyncMock(spec=nio.AsyncClient),
+        png,
+        mime_type="image/png",
+        filename="browser.png",
+        timeout_seconds=1,
+    )
+
+    assert (media.mime_type, media.size) == ("image/png", len(png))
+    assert png not in uploaded[0]
+
+
+@pytest.mark.asyncio
+async def test_upload_error_response_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A homeserver upload error surfaces as a desktop media failure naming the response."""
+
+    async def upload(*_args: object, **_kwargs: object) -> tuple[nio.UploadError, None]:
+        return nio.UploadError("quota exceeded"), None
+
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
+
+    with pytest.raises(DesktopMediaError, match=r"^Matrix media upload failed: .*quota exceeded"):
+        await upload_encrypted_media(
+            AsyncMock(spec=nio.AsyncClient),
+            OUTPUT,
+            mime_type=SHELL_OUTPUT_MIME_TYPE,
+            filename="shell.txt",
+            timeout_seconds=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_error_response_is_reported() -> None:
+    """A homeserver download error surfaces as a desktop media failure naming the response."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.download.return_value = nio.DownloadError("not found")
+    media = EncryptedDesktopMedia(
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/jpeg",
+        size=len(JPEG),
+    )
+
+    with pytest.raises(DesktopMediaError, match=r"^Matrix media download failed: .*not found"):
+        await download_encrypted_media(client, media, timeout_seconds=1)
+
+
+@pytest.mark.parametrize(
+    ("mime_type", "limit"),
+    [("image/jpeg", MAX_SCREENSHOT_BYTES), (SHELL_OUTPUT_MIME_TYPE, MAX_SHELL_OUTPUT_BYTES)],
+)
+@pytest.mark.asyncio
+async def test_download_rejects_oversized_ciphertext_before_decrypting(
+    monkeypatch: pytest.MonkeyPatch,
+    mime_type: str,
+    limit: int,
+) -> None:
+    """Ciphertext larger than the desktop media limit is refused without spending work on decryption."""
+    decrypt = Mock()
+    monkeypatch.setattr("nio.crypto.attachments.decrypt_attachment", decrypt)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.download.return_value = nio.DownloadResponse(b"x" * (limit + 1), "application/octet-stream", None)
+    media = EncryptedDesktopMedia(
+        url="mxc://example.org/media",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type=mime_type,
+        size=limit,
+    )
+
+    with pytest.raises(DesktopMediaError, match=r"^Encrypted Matrix media exceeds the desktop media limit"):
+        await download_encrypted_media(client, media, timeout_seconds=1)
+    decrypt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_metadata_whose_sha256_does_not_match_the_ciphertext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untampered ciphertext still fails closed when the authenticated SHA-256 names different bytes."""
+    uploaded = _capture_uploads(monkeypatch)
+    client = AsyncMock(spec=nio.AsyncClient)
+    media = await upload_encrypted_media(
+        client,
+        JPEG,
+        mime_type="image/jpeg",
+        filename="desktop.jpg",
+        timeout_seconds=1,
+    )
+    other = await upload_encrypted_media(
+        client,
+        JPEG,
+        mime_type="image/jpeg",
+        filename="desktop.jpg",
+        timeout_seconds=1,
+    )
+    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+
+    with pytest.raises(DesktopMediaError, match=r"^Matrix media authentication or decryption failed"):
+        await download_encrypted_screenshot(client, replace(media, sha256=other.sha256), timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_plaintext_that_does_not_match_its_declared_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authenticated bytes still have to match the declared image type before reaching a model."""
+    uploaded = _capture_uploads(monkeypatch)
+    client = AsyncMock(spec=nio.AsyncClient)
+    media = await upload_encrypted_media(
+        client,
+        JPEG,
+        mime_type="image/jpeg",
+        filename="desktop.jpg",
+        timeout_seconds=1,
+    )
+    client.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
+
+    with pytest.raises(DesktopMediaError, match="do not match their declared PNG, JPEG, or text MIME type"):
+        await download_encrypted_screenshot(client, replace(media, mime_type="image/png"), timeout_seconds=1)
