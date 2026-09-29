@@ -237,7 +237,7 @@ async def _count(
     identity: ToolExecutionIdentity | None = None,
     run_id: str = "r1",
     captured: CapturedRequest | None = None,
-    correlation_id: str | None = None,
+    correlation_id: str = "$event",
 ) -> asyncio.Task[None] | None:
     """Count one seeded run as a completed response to a person, returning the review it started, if any."""
     await runner.count(

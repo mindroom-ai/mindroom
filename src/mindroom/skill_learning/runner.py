@@ -85,7 +85,7 @@ def _response_replies(
     return count_model_replies(run if isinstance(run, RunOutput) else None)
 
 
-def _review_log_context(scope: _ReviewScope, correlation_id: str | None) -> dict[str, str]:
+def _review_log_context(scope: _ReviewScope, correlation_id: str) -> dict[str, str]:
     """Return the log fields of the reviewed conversation and the response that made it due."""
     identity = scope.identity
     fields = {
@@ -139,7 +139,7 @@ class SkillReviewRunner:
         identity: ToolExecutionIdentity | None,
         run_id: str,
         captured: CapturedRequest | None,
-        correlation_id: str | None,
+        correlation_id: str,
     ) -> None:
         """Add a person's completed response to its conversation's count, and start a review once the count is due.
 
@@ -188,7 +188,7 @@ class SkillReviewRunner:
         config: Config,
         scope: _ReviewScope,
         captured: CapturedRequest | None,
-        correlation_id: str | None,
+        correlation_id: str,
     ) -> None:
         # The review runs in a fresh context, so it binds its conversation's fields, as the response's turn did, for
         # its LLM usage, request, and notice logs.
@@ -212,7 +212,7 @@ class SkillReviewRunner:
                     ),
                 )
             if archived:
-                logger.info("Archived unused learned skills", agent=scope.agent, archived=archived)
+                logger.info("Archived unused learned skills", archived=archived)
             await asyncio.wait_for(
                 review_conversation(
                     config=config,
@@ -227,20 +227,15 @@ class SkillReviewRunner:
                 timeout=settings.timeout_seconds,
             )
         except TimeoutError:
-            logger.info("Skill review reached its timeout", agent=scope.agent, session_id=scope.session)
+            logger.info("Skill review reached its timeout")
         except Exception:
-            logger.exception("Skill review failed", agent=scope.agent, session_id=scope.session)
+            logger.exception("Skill review failed")
         finally:
             # The notice runs on its own, so a new response that stops the review after its writes landed cannot stop
             # the notice too; shutdown sends none.
             if settings.notify and progress.changes and not self._stopped:
                 create_background_task(self._notify(scope, progress.changes), name=f"skill_notice:{scope.agent}")
-        logger.info(
-            "Skill review finished",
-            agent=scope.agent,
-            session_id=scope.session,
-            changed=sorted(progress.changes),
-        )
+        logger.info("Skill review finished", changed=sorted(progress.changes))
 
     async def _notify(self, scope: _ReviewScope, changes: dict[str, str]) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
@@ -265,4 +260,4 @@ class SkillReviewRunner:
             },
         )
         if await send_message_result(client, identity.room_id, content) is None:
-            logger.warning("Could not post skill review notice", agent=scope.agent, room_id=identity.room_id)
+            logger.warning("Could not post skill review notice")

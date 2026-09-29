@@ -9793,12 +9793,17 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
     streaming: bool,
 ) -> None:
     """Both response drivers stop the conversation's review, then count the completed run with its final request."""
-    reviews, model, _send = await _respond_with_skill_learning(tmp_path, streaming=streaming)
+    reviews, model, _send = await _respond_with_skill_learning(
+        tmp_path,
+        lambda request: replace(request, correlation_id="$correlation"),
+        streaming=streaming,
+    )
     (counted,) = reviews.counted
     scope = {key: counted[key] for key in ("agent_name", "session_id", "identity")}
     assert reviews.cancelled == [scope]
     assert counted["agent_name"] == "general"
     assert counted["identity"].requester_id == "@user:localhost"
+    assert counted["correlation_id"] == "$correlation"
     captured = counted["captured"]
     assert captured is not None
     assert captured.model is model

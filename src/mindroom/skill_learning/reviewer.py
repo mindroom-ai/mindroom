@@ -368,7 +368,6 @@ async def review_conversation(
             await _record_usage(run, invocation_id, config, runtime_paths, agent_name, session_id, identity)
     logger.info(
         "Skill review model run finished",
-        agent=agent_name,
         forked=review.forked,
         model_requests=sum(1 for message in run.messages if message.role == "assistant"),
         input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
