@@ -11,6 +11,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TextIO, cast
 
+from mindroom.desktop.shell import INVISIBLE_CHARACTER
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
@@ -75,15 +77,17 @@ def _parse_shell_approval(answer: str) -> _ShellApprovalChoice | None:
 
 
 def _escape_terminal_text(value: str) -> str:
-    """Show controls, format characters, separators, and backslashes as escapes the terminal cannot interpret."""
+    """Show controls, format and invisible characters, spaces other than the ASCII space, and backslashes as escapes."""
     return "".join(_escaped_character(character) for character in value)
 
 
 def _escaped_character(character: str) -> str:
     if character in _ESCAPES:
         return _ESCAPES[character]
-    category = unicodedata.category(character)
-    if not category.startswith("C") and category not in {"Zl", "Zp"}:
+    # Look-alike, wide, and invisible characters could disguise a command or pad it past the visible rows.
+    if character == " " or (
+        not INVISIBLE_CHARACTER.fullmatch(character) and not unicodedata.category(character).startswith(("C", "Z"))
+    ):
         return character
     code = ord(character)
     if code <= 0xFF:
@@ -104,12 +108,17 @@ def auto_approval_notice(minutes: int | None) -> str:
     )
 
 
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}{'s' if count != 1 else ''}"
+
+
 def _describe_pending_request(pending: Mapping[str, object], *, now: float) -> str:
+    command = str(pending["command"])
     fields = {
         "Requester": str(pending["requester_id"]),
         "Agent": str(pending["agent_name"]),
         "Working directory": str(pending["cwd"]),
-        "Command": str(pending["command"]),
+        "Command": command,
     }
     shown = {label: _escape_terminal_text(value) for label, value in fields.items()}
     expires_in = max(0, round(cast("int", pending["expires_at_ms"]) / 1000 - now))
@@ -120,8 +129,14 @@ def _describe_pending_request(pending: Mapping[str, object], *, now: float) -> s
         "It runs as your user account with its full access, including files outside selected folders and the network.",
     ]
     if shown != fields:
-        lines.append("Control, formatting, and backslash characters are shown escaped.")
+        lines.append("Control, formatting, invisible, non-ASCII space, and backslash characters are shown escaped.")
     lines.append("Timed and until-stopped choices also approve later commands from every allowed requester and agent.")
+    # Next to the choices, so a command too long for the screen cannot hide its start above the visible rows.
+    command_lines = command.count("\n") + 1
+    lines.append(
+        f"The command is {_counted(len(command), 'character')} on {_counted(command_lines, 'line')}; "
+        "read all of it before answering.",
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -259,7 +274,7 @@ async def serve_terminal_shell_approvals(
     interactive terminal every request is rejected.
     """
     interactive = input_fd is not None and os.isatty(input_fd)
-    # A decided request can still look pending until the bridge's waiting task runs; never ask twice.
+    # A request whose decision failed, for example on expiry, can still look pending; never ask twice.
     decided: str | None = None
     while True:
         pending = _pending_request(control)

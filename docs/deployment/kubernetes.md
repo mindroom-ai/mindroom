@@ -202,7 +202,7 @@ This keeps the deployment simple, but all proxied tool calls share the same runn
 The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
 It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
 The primary leases each proxied tool's saved settings to the runner per call.
-The runner's own config file is only the seed the pod started with, so each call also carries the primary's [live config snapshot](sandbox-proxy.md#live-config-snapshots) with sensitive keys removed, and the runner resolves the requesting agent and its settings from it.
+The runner mounts no config, so each call carries the primary's [live config snapshot](sandbox-proxy.md#live-config-snapshots), limited to the fields runners resolve, and the runner resolves the requesting agent and its settings from it.
 Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
 When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
 See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.

@@ -74,7 +74,6 @@ def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, 
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=Config(agents={"writer": _writer()}, models={}),
-        tool_metadata={},
         runner_token=TOKEN,
     )
     app.include_router(sandbox_runner.router)

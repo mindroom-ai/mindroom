@@ -48,9 +48,6 @@ _FULL_KUBERNETES_ENV = {
     "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "worker-pvc",
     "MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH": "/srv/worker",
     "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "tenants",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME": "worker-config",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY": "worker.yaml",
-    "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH": "/srv/config/worker.yaml",
     "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS": "900",
     "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS": "120",
     "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX": "tenant-worker",
@@ -125,9 +122,6 @@ def _legacy_kubernetes_backend_config_signature(
         config.storage_pvc_name,
         config.storage_mount_path,
         config.storage_subpath_prefix,
-        config.config_map_name or "",
-        config.config_key,
-        config.config_path,
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
@@ -183,9 +177,9 @@ def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
     assert signature[0] == legacy_signature[0]
     assert signature[1] == ""
     assert signature[2] == "null"
-    assert signature[3:17] == legacy_signature[1:15]
-    assert signature[18:] == legacy_signature[15:]
-    assert signature[17].startswith(("in-cluster:", "kubeconfig:"))
+    assert signature[3:14] == legacy_signature[1:12]
+    assert signature[15:] == legacy_signature[12:]
+    assert signature[14].startswith(("in-cluster:", "kubeconfig:"))
 
 
 def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
@@ -385,7 +379,6 @@ def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tm
         ("MINDROOM_KUBERNETES_WORKER_PORT", "9100"),
         ("MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME", "other-sa"),
         ("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "other-pvc"),
-        ("MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME", "other-config"),
         ("MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS", "60"),
         ("MINDROOM_KUBERNETES_WORKER_NODE_NAME", "node-b"),
         ("MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE", "false"),

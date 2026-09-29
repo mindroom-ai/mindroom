@@ -1317,7 +1317,16 @@ def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_pa
         asyncio.run(host.handle(_request("start")))
 
 
-@pytest.mark.parametrize("app_ids", ["com.example.Editor", [""], [123]])
+@pytest.mark.parametrize(
+    "app_ids",
+    [
+        "com.example.Editor",
+        [""],
+        [123],
+        ["com.example.Editor", "chat.mindroom.menubar"],
+        ["chat.mindroom.desktophelper"],
+    ],
+)
 def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> None:
     host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))

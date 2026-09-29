@@ -398,7 +398,7 @@ final class DesktopControlStore: ObservableObject {
 
     func addApplication(at url: URL) -> String? {
         guard let application = InstalledApplicationCatalog.application(at: url) else {
-            errorMessage = "Choose a macOS application with a bundle identifier."
+            errorMessage = "Choose a macOS application with a bundle identifier other than MindRoom itself."
             recovery = nil
             return nil
         }

@@ -4427,7 +4427,6 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         room_id=room.room_id,
         thread_id=None,
         config_path="agents.assistant.role",
-        old_value="old",
         new_value="new",
     )
 
@@ -4496,7 +4495,6 @@ async def test_committed_config_confirmation_resumes_before_changed_responder_ac
         room_id=room.room_id,
         thread_id=None,
         config_path="router.access.users",
-        old_value=["@bob:example.com"],
         new_value=["@alice:example.com"],
         decision_event_id=reaction_event_id,
         decision_key="✅",

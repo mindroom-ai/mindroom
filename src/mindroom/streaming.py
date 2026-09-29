@@ -100,6 +100,7 @@ __all__ = [
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+_IN_PROGRESS_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,6 +441,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
 
     response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
     display_text = response.formatted_text
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+        # An interactive block still arriving is raw JSON; its question renders once the block closes.
+        display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
@@ -472,7 +476,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         extra_content=extra_content,
         markdown_renderer=snapshot.markdown_renderer,
     )
-    if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
         # updates may already contain mentions, so using m.text here would make
         # every progressive edit eligible for a push notification.

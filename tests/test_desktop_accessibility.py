@@ -876,3 +876,35 @@ def test_fallback_rejects_hidden_actionable_identity_changes(change: str, during
         change_identity()
     with pytest.raises(AccessibilityError, match="state changed"):
         backend.prepare_fallback(state.app_id, state.state_id)
+
+
+def test_untargeted_keyboard_guard_requires_the_validated_app_to_stay_frontmost() -> None:
+    """Keys without an exact element still go only to the allowlisted app that was focused and checked."""
+    backend, _, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    guard = backend.prepare_keyboard(state.app_id, state.state_id)
+    assert workspace.applications[0].activation_options == [0]
+    guard()
+    workspace.applications[0].active = False
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
+        guard()
+
+
+def test_untargeted_keyboard_guard_reports_nothing_typed_when_focus_is_lost_before_any_input() -> None:
+    """The first check runs before any key is posted, so its failure is a definite refusal, not an unknown outcome."""
+    backend, _, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    guard = backend.prepare_keyboard(state.app_id, state.state_id)
+    workspace.applications[0].active = False
+    with pytest.raises(AccessibilityError, match="nothing was typed") as refused:
+        guard()
+    assert type(refused.value) is AccessibilityError
+
+
+def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:
+    """The primary-screen target already covers whichever app has keyboard focus."""
+    backend = ScreenshotOnlyAccessibilityBackend(frozenset({PRIMARY_SCREEN_APP_ID}), lambda: (1920, 1080))
+    state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
+    with pytest.raises(AccessibilityError, match="stale"):
+        backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, "old-state")
