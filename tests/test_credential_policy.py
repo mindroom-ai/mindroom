@@ -17,6 +17,7 @@ from mindroom.credential_policy import (
     is_oauth_token_service,
     looks_like_oauth_credentials,
 )
+from mindroom.tool_system.metadata import _tool_config_fields
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 
 
@@ -26,7 +27,7 @@ def test_primary_owned_tool_config_services_match_builtin_registry() -> None:
         service
         for service, metadata in BUILTIN_TOOL_METADATA.items()
         if metadata.requires_primary_runtime
-        and metadata.config_fields
+        and _tool_config_fields(metadata)
         and service not in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
         and not is_oauth_token_service(service)
         and not is_oauth_client_config_service(service)

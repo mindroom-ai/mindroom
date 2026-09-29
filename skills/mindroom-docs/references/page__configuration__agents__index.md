@@ -499,8 +499,8 @@ They do not own them.
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
 The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
-Primary-built tools keep their settings in primary stores, with existing OAuth and local-only placement unchanged.
-Other primary-built tool settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
+Built-in tools that run in the primary runtime keep their settings in primary stores, with existing OAuth and local-only placement unchanged.
+Settings for other built-in tools that run in the primary runtime use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
 Worker-executed tools without a scoped OAuth provider manage `user` and `user_agent` credentials through their worker runtime.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).

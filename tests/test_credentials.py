@@ -1964,23 +1964,40 @@ def test_primary_tool_config_stays_isolated_per_shared_agent(
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
 @pytest.mark.parametrize(
-    ("service", "url_field"),
-    [("browserbase", "base_url"), ("daytona", "api_url"), ("composio", "base_url")],
+    ("service", "primary_config", "worker_config"),
+    [
+        (
+            "browserbase",
+            {"api_key": "primary-key", "base_url": "https://primary.example.test"},
+            {"base_url": "https://worker.example.test"},
+        ),
+        (
+            "daytona",
+            {"api_key": "primary-key", "api_url": "https://primary.example.test"},
+            {"api_url": "https://worker.example.test"},
+        ),
+        (
+            "composio",
+            {"api_key": "primary-key", "base_url": "https://primary.example.test"},
+            {"base_url": "https://worker.example.test"},
+        ),
+        ("todo", {"exclude_tools": []}, {"exclude_tools": ["add_todo"]}),
+    ],
 )
 def test_primary_tool_config_ignores_requester_worker_document(
     credentials_manager: CredentialsManager,
     worker_scope: str,
     service: str,
-    url_field: str,
+    primary_config: dict[str, Any],
+    worker_config: dict[str, Any],
 ) -> None:
     """Requester settings come from the primary store even when a worker file exists."""
     manager = credentials_manager
     identity = ToolExecutionIdentity("matrix", "general", "@alice:example.test", None, None, None, None)
     target = _worker_target(worker_scope, "general", identity)
-    primary_config = {"api_key": "primary-key", url_field: "https://primary.example.test"}
     save_scoped_credentials(service, primary_config, credentials_manager=manager, worker_target=target)
     assert target.worker_key is not None
-    manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
+    manager.for_worker(target.worker_key).save_credentials(service, worker_config)
 
     assert load_scoped_credentials(service, credentials_manager=manager, worker_target=target) == primary_config
 
