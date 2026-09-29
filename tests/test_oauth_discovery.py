@@ -13,6 +13,7 @@ import pytest
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
 from mindroom.credentials import get_runtime_credentials_manager
@@ -26,6 +27,7 @@ from mindroom.oauth.discovery import (
 )
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.server_fetch_url import ServerFetchUrlError
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -317,7 +319,7 @@ async def test_resource_origin_metadata_registers_public_client(
         else:
             storage_patch.setattr(manager, "save_credentials", observed_save)
         authorization = asyncio.create_task(
-            provider.authorization_uri_async(runtime_paths, state="state-token", code_verifier=verifier),
+            oauth_authorization_url(provider, runtime_paths, state="state-token", code_verifier=verifier),
         )
         if cancel_publication:
             await _cancel_registration_publication(
@@ -326,7 +328,8 @@ async def test_resource_origin_metadata_registers_public_client(
                 release_publication,
                 provider.id,
             )
-            authorization_url = await provider.authorization_uri_async(
+            authorization_url = await oauth_authorization_url(
+                provider,
                 runtime_paths,
                 state="state-token",
                 code_verifier=verifier,
@@ -360,6 +363,7 @@ async def test_resource_origin_metadata_registers_public_client(
         "client_id": "registered-public-client",
         "redirect_uri": "https://mindroom.example.test/api/oauth/example/callback",
         OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "https://mindroom.example.test/api/oauth/example/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "example",
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
@@ -396,7 +400,7 @@ def test_dynamic_registration_rejects_unconfirmed_redirect_uri(
         registration["redirect_uris"] = registered_redirect_uris
 
     with pytest.raises(OAuthProviderError, match="did not confirm redirect_uri"):
-        _stored_registration(provider, runtime_paths, registration)
+        _stored_registration(provider, runtime_paths, registration, "https://auth.example.test/token")
 
 
 @pytest.mark.asyncio
@@ -439,7 +443,8 @@ async def test_dynamic_client_registration_singleflights_across_fresh_event_loop
         verifier = provider.issue_pkce_code_verifier()
         assert verifier is not None
         return asyncio.run(
-            provider.authorization_uri_async(
+            oauth_authorization_url(
+                provider,
                 runtime_paths,
                 state=state,
                 code_verifier=verifier,

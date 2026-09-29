@@ -41,6 +41,7 @@ _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
         "google_drive",
         "google_gmail",
         "google_sheets",
+        "google_tasks",
     },
 )
 __all__ = [

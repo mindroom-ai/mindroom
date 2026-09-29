@@ -56,17 +56,17 @@ class MindRoomE2BTools(E2BTools):
         super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
-        """Return the canonical workspace root and the canonical relative path below it."""
+        """Return the workspace root as spelled, so a replaced workspace is refused, and the canonical path below it."""
         if self._workspace_root is None:
             msg = "E2B local file transfers require an agent workspace"
             raise ValueError(msg)
         requested = Path(path)
-        root = self._workspace_root.resolve()
+        canonical_root = self._workspace_root.resolve()
         if not requested.is_absolute() and ".." not in requested.parts:
             with suppress(ValueError):
-                resolved = resolve_path_within_root(root, requested, symlinks="internal")
-                if resolved != root:
-                    return root, resolved.relative_to(root)
+                resolved = resolve_path_within_root(canonical_root, requested, symlinks="internal")
+                if resolved != canonical_root:
+                    return self._workspace_root, resolved.relative_to(canonical_root)
         msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
         raise ValueError(msg)
 

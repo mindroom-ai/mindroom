@@ -153,7 +153,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
             label="Verify SSL",
             type="boolean",
             required=False,
-            default=False,
+            default=True,
             description="Whether to verify SSL certificates",
         ),
         ConfigField(
@@ -225,7 +225,7 @@ def daytona_tools() -> type[DaytonaTools]:
             organization_id: str | None = None,
             timeout: int = 300,
             auto_create_sandbox: bool = True,
-            verify_ssl: bool | None = False,
+            verify_ssl: bool | None = True,
             persistent: bool = True,
             instructions: str | None = None,
             add_instructions: bool = False,
@@ -251,7 +251,15 @@ def daytona_tools() -> type[DaytonaTools]:
                 organization_id=organization_id,
                 timeout=timeout,
                 auto_create_sandbox=auto_create_sandbox,
-                verify_ssl=verify_ssl,
+                # AGNO_COMPAT: Daytona disables TLS verification process-wide for any falsy verify_ssl.
+                # Reason: Agno 3.0.9 treats None like False and then patches daytona_api_client.Configuration.__init__
+                # for the whole process until it restarts, so one such toolkit disables checks for every Daytona client.
+                # Upstream issue: Tracking gap; no matching issue has been verified for either behavior.
+                # Upstream PR: No matching fix identified.
+                # Remove when: Agno disables verification only for an explicit False and scopes it to its own client
+                # configuration; keep MindRoom's true default for unset and null values.
+                # Coverage: tests/test_tool_config_sync.py::test_daytona_verifies_tls_certificates_unless_explicitly_disabled.
+                verify_ssl=verify_ssl is not False,
                 persistent=persistent,
                 instructions=instructions,
                 add_instructions=add_instructions,

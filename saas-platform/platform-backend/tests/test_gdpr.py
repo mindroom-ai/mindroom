@@ -1,12 +1,17 @@
 """Test GDPR endpoints functionality."""
 
+import time
+from collections import defaultdict
 from unittest.mock import MagicMock, patch
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
 from main import app
-from backend.deps import verify_user
+from backend import auth_monitor, deps
+from backend.deps import verify_user, verify_user_allow_deleted
+from backend.routes import gdpr
 
 
 @pytest.fixture
@@ -33,6 +38,7 @@ def mock_verify_user(mock_user):
         return mock_user
 
     app.dependency_overrides[verify_user] = override_verify_user
+    app.dependency_overrides[verify_user_allow_deleted] = override_verify_user
     yield
     app.dependency_overrides.clear()
 
@@ -259,3 +265,38 @@ class TestGDPREndpoints:
             )
             assert response.status_code == 200
             assert response.json()["status"] == "deletion_scheduled"
+
+
+def test_cached_token_cannot_provision_after_requesting_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Requesting deletion drops the account's cached auth, so the same token is refused on its next request."""
+    monkeypatch.setattr(app, "dependency_overrides", {})
+    monkeypatch.setattr(auth_monitor, "failed_attempts", defaultdict(list))
+    monkeypatch.setattr(auth_monitor, "blocked_ips", {})
+    deps._auth_cache.clear()
+    account = {"id": "user_123", "email": "user@example.test", "status": "active", "deleted_at": None}
+    auth_user = MagicMock()
+    auth_user.user.id = "user_123"
+    auth_user.user.email = "user@example.test"
+    auth_client = MagicMock()
+    auth_client.auth.get_user.return_value = auth_user
+    sb = MagicMock()
+    sb.table().select().eq().single().execute.side_effect = lambda: MagicMock(data=dict(account))
+
+    def soft_delete(_name: str, _params: dict) -> MagicMock:
+        account.update(status="deleted", deleted_at="2026-09-28T00:00:00Z")
+        return MagicMock()
+
+    sb.rpc.side_effect = soft_delete
+    monkeypatch.setattr(deps, "_ensure_auth_client", lambda: auth_client)
+    monkeypatch.setattr(deps, "ensure_supabase", lambda: sb)
+    monkeypatch.setattr(gdpr, "ensure_supabase", lambda: sb)
+    token = jwt.encode({"sub": "user_123", "exp": int(time.time()) + 300}, "secret", algorithm="HS256")
+    headers = {"Authorization": f"Bearer {token}"}
+    client = TestClient(app)
+
+    deletion = client.post("/my/gdpr/request-deletion", headers=headers, json={"confirmation": True})
+    provision = client.post("/my/instances/provision", headers=headers)
+
+    assert deletion.status_code == 200
+    assert provision.status_code == 403
+    deps._auth_cache.clear()

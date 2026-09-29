@@ -1074,6 +1074,8 @@ depends_on = [
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
     "mindroom.api.provider_setup",
+    "mindroom.cli.config",
+    "mindroom.cli.doctor",
     "mindroom.agents",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -1402,18 +1404,20 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
+    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.custom_tools.toolkit_functions",
     "mindroom.desktop.client",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
+    "mindroom.desktop.input",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
- "mindroom.desktop.input"]
+]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
 # enforce both dependency edges and module visibility for each importer.
@@ -1645,6 +1649,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.api.computers",
     "mindroom.worker_computer.auth",
@@ -2594,6 +2599,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.orchestration.computer_runtime",
     "mindroom.agent_reply_membership_sync",
@@ -2813,6 +2819,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
+    "mindroom.matrix.message_builder",
     "mindroom.matrix.state",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
@@ -4080,6 +4087,8 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.credentials_sync",
+    # Deferred import in the missing-env check.
+    "mindroom.model_loading",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -4106,7 +4115,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.cli.owner"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.matrix.identity"]
 visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
@@ -4127,6 +4136,8 @@ depends_on = [
     "mindroom.matrix.health",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
+    # Deferred import in the provider key checks.
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -4205,6 +4216,8 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.api.auth",
+    "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
     "mindroom.cli.response_activity",
@@ -5444,7 +5457,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["get_model_instance", "missing_model_api_key_provider"]
+expose = ["get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.model_loading"]
 
 [[interfaces]]
@@ -6468,6 +6481,17 @@ depends_on = [
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 
 [[modules]]
+path = "mindroom.legacy_tool_credentials"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.credentials",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+
+[[modules]]
 path = "mindroom.workers.backends.legacy_state_root_mounts"
 depends_on = [
     "mindroom.logging_config",
@@ -6812,6 +6836,7 @@ path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.error_handling",
     "mindroom.delegation.audit",
+    "mindroom.delegation.records",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",

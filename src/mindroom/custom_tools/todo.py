@@ -152,7 +152,9 @@ class _TemplateRoot:
         """Return one template's text from this root."""
         if self.workspace_root is None:
             return path.read_text(encoding="utf-8")
-        return read_regular_file_within_root(self.workspace_root, path.relative_to(self.workspace_root)).decode("utf-8")
+        # Template paths are canonical; open them below the workspace as spelled so a replaced workspace is refused.
+        relative = path.relative_to(self.workspace_root.resolve())
+        return read_regular_file_within_root(self.workspace_root, relative).decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +289,7 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
             msg = "Workspace todo template directory escapes workspace"
             raise ValueError(msg) from None
         roots.append(
-            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root.resolve()),
+            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root),
         )
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)

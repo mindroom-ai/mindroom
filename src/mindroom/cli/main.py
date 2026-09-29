@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import socket
 import sys
 from contextlib import nullcontext
@@ -14,6 +15,7 @@ from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
 
+from .api import is_loopback_host
 from .banner import make_banner
 from .config import (
     activate_cli_runtime,
@@ -37,6 +39,7 @@ from .trigger import trigger_app
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from types import FrameType
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -55,6 +58,8 @@ _CONFIG_INIT_PROVIDER_CHOICES = (
 # Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
 # The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
 _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
+# Matches `MindRoomCommand.pairingCancelledExitCode` in the macOS app.
+_CONNECT_CANCELLED_EXIT_CODE = 130
 
 app = typer.Typer(
     help=_HELP,
@@ -186,7 +191,8 @@ def run(
                     confirm_approver=_approver_confirmation(),
                 )
     except (OSError, TypeError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        # Pairing errors can carry text the provisioning service chose, such as an approver or error detail.
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from None
 
     asyncio.run(
@@ -254,6 +260,7 @@ async def _run(
         else:
             console.print(f"Dashboard: http://{display_host}:{api_port}")
         console.print(f"API: http://{display_host}:{api_port}/api")
+        _warn_if_dashboard_is_open_beyond_loopback(runtime_paths, api_host, api_port)
     console.print("Press Ctrl+C to stop\n")
 
     try:
@@ -279,6 +286,20 @@ async def _run(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_host: str, api_port: int) -> None:
+    """Warn when anyone who can reach a non-loopback bind address would administer MindRoom."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
+        return
+    address_host = f"[{api_host}]" if ":" in api_host else api_host
+    console.print(
+        f"[yellow]Warning:[/yellow] The dashboard API listens on {address_host}:{api_port} without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom.",
+    )
+    console.print(f"  Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.")
 
 
 @app.command()
@@ -620,11 +641,17 @@ def connect(
         "--force",
         help="Pair again even when this machine is already connected.",
     ),
+    graceful_cancel: bool = typer.Option(
+        False,
+        "--graceful-cancel",
+        help="Cancel on SIGTERM while waiting; finish an in-flight approval or save (used by the macOS app).",
+    ),
 ) -> None:
     """Connect this local MindRoom to your MindRoom Chat account by approving a link.
 
     When this machine is already connected, a terminal asks before pairing again.
     Without a terminal it exits with code 3 unless --force is given.
+    With --graceful-cancel, SIGTERM while waiting exits with code 130 without saving.
     """
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
 
@@ -642,24 +669,49 @@ def connect(
                 "existing agents keep working, and new agents get the new namespace.",
             )
             if not force:
-                if not _stdin_is_interactive():
-                    console.print("Run `mindroom connect --force` to pair again.")
-                    raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
-                typer.confirm("Pair again?", abort=True)
-        cli_connect.pair_local_install(
-            runtime_paths,
-            console=console,
-            provisioning_url=provisioning_url,
-            client_name=client_name,
-            persist_env=persist_env,
-            open_browser=open_browser,
-            renew_expired=False,
-            confirm_approver=_approver_confirmation(),
-        )
+                _confirm_reconnect()
+        cancelled = False
+
+        def request_cancel(_signum: int, _frame: FrameType | None) -> None:
+            nonlocal cancelled
+            cancelled = True
+
+        def stop_waiting() -> bool:
+            if cancelled:
+                console.print("Connection cancelled. Nothing was saved.")
+                raise typer.Exit(_CONNECT_CANCELLED_EXIT_CODE)
+            return False
+
+        if graceful_cancel:
+            signal.signal(signal.SIGTERM, request_cancel)
+        try:
+            cli_connect.pair_local_install(
+                runtime_paths,
+                console=console,
+                provisioning_url=provisioning_url,
+                client_name=client_name,
+                persist_env=persist_env,
+                open_browser=open_browser,
+                renew_expired=False,
+                stop_waiting=stop_waiting if graceful_cancel else None,
+                confirm_approver=_approver_confirmation(),
+            )
+            console.print("\nNext step:\n  mindroom run")
+        finally:
+            if graceful_cancel:
+                # Preserve the result through shutdown; Python resets callable handlers during finalization.
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except (TypeError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from None
-    console.print("\nNext step:\n  mindroom run")
+
+
+def _confirm_reconnect() -> None:
+    """Confirm re-pairing in a terminal, or let the macOS app ask via exit code 3."""
+    if not _stdin_is_interactive():
+        console.print("Run `mindroom connect --force` to pair again.")
+        raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
+    typer.confirm("Pair again?", abort=True)
 
 
 def _stdin_is_interactive() -> bool:

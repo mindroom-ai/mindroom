@@ -513,8 +513,9 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, "
-            "Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries."
+            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, "
+            "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
+            "Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -626,6 +627,20 @@ class EmbedderConfig(BaseModel):
         return value.strip() or None
 
 
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings with a trimmed string ``api_key``, dropped when null or blank; reject non-strings."""
+    if "api_key" not in settings:
+        return settings
+    normalized = dict(settings)
+    api_key = normalized.pop("api_key")
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    if api_key and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -642,7 +657,7 @@ class ModelConfig(BaseModel):
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(
         default=None,
-        description="Optional API key (usually from env vars)",
+        description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
@@ -670,6 +685,20 @@ class ModelConfig(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset so the provider's shared key applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
 
     @field_validator("icon")
     @classmethod
@@ -721,6 +750,17 @@ class ModelConfig(BaseModel):
             msg = "Model api is only supported for provider: openai"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key is not None and "api_key" in (self.extra_kwargs or {}):
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
+            raise ValueError(msg)
+        return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
 
 class RouterConfig(BaseModel):

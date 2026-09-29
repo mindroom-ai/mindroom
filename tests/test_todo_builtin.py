@@ -937,3 +937,50 @@ def test_workspace_template_swapped_after_resolution_is_not_read(
         tool.apply_template(agent=_agent(), name="swapped", params={})
 
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_is_read_through_an_operator_linked_agents_directory(tmp_path: Path) -> None:
+    """An operator symlink for the agents directory still serves workspace templates."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    agents = runtime_paths_for(config).storage_root / "agents"
+    real_agents = tmp_path / "agents-volume"
+    real_agents.mkdir()
+    agents.symlink_to(real_agents, target_is_directory=True)
+    _write_workspace_template(
+        config,
+        "linked",
+        'name: linked\nversion: "1"\ndescription: Linked template.\ntodos:\n  - title: Linked task\n',
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+        result = tool.apply_template(agent=_agent(), name="linked", params={})
+
+    assert "`linked`" in listing
+    assert "Linked task" in result
+
+
+def test_workspace_template_is_not_read_through_a_replaced_workspace(tmp_path: Path) -> None:
+    """A workspace replaced by a link never supplies templates from the link's target."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "swapped",
+        'name: swapped\nversion: "1"\ndescription: Own template.\ntodos:\n  - title: Own task\n',
+    )
+    workspace = _workspace_template_dir(config).parent.parent
+    victim = tmp_path / "victim-workspace"
+    (victim / "todo" / "templates").mkdir(parents=True)
+    (victim / "todo" / "templates" / "swapped.yaml.j2").write_text(
+        'name: swapped\nversion: "1"\ndescription: Victim.\ntodos:\n  - title: victim-only note\n',
+        encoding="utf-8",
+    )
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(victim, target_is_directory=True)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises((OSError, ValueError)):
+        tool.apply_template(agent=_agent(), name="swapped", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()

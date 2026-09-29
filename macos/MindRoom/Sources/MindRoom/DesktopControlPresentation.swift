@@ -106,6 +106,17 @@ extension DesktopShellStatus {
     }
 }
 
+extension DesktopShellHandle {
+    /// A handle stopped by `kill_shell` or the local Kill button reports `killed`; any other finish is `completed`.
+    var stateLabel: String {
+        switch state {
+        case "running": "Running"
+        case "killed": "Killed"
+        default: "Finished"
+        }
+    }
+}
+
 extension DesktopShellRequest {
     var displayCommand: String { desktopSafePreview(command) }
     var displayCwd: String { desktopSafePreview(cwd) }
@@ -204,7 +215,7 @@ extension DesktopStatus {
         guard isBridgeOnline, shell.enabled else { return .off }
         if let pending = shell.pending { return .pending(pending) }
         if shell.autoApproveUntilRevoked { return .untilRevoked }
-        let remaining = Int(shell.autoApproveRemainingSeconds.rounded(.up))
+        let remaining = shell.autoApproveRemainingSeconds
         return remaining > 0 ? .autoApprove(seconds: remaining) : .askEachTime
     }
 

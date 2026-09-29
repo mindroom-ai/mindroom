@@ -75,6 +75,11 @@ _MAX_CONSOLE_ENTRIES = 200
 _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
 _PLAYWRIGHT_INSTALL_COMMAND = "uv run playwright install chromium"
+# Chromium binds its SingletonSocket in a new directory under TMPDIR, and a Unix
+# socket path holds at most 107 bytes. Dedicated workers point TMPDIR into their
+# long state path, where Chromium aborts at startup with "Socket path too long".
+_CHROMIUM_SINGLETON_SOCKET_SUFFIX = "/org.chromium.Chromium.XXXXXX/SingletonSocket"
+_UNIX_SOCKET_PATH_MAX_BYTES = 107
 
 logger = get_logger(__name__)
 
@@ -339,6 +344,14 @@ def _persistent_launch_kwargs(
     if executable:
         launch_kwargs["executable_path"] = executable
     return launch_kwargs
+
+
+def _give_chromium_a_short_tmpdir(launch_kwargs: dict[str, Any]) -> None:
+    """Point Chromium at ``/tmp`` when its singleton socket would not fit under the inherited TMPDIR."""
+    env: Mapping[str, str] = launch_kwargs.get("env", os.environ)
+    tmpdir = env.get("TMPDIR")
+    if tmpdir and len(os.fsencode(tmpdir + _CHROMIUM_SINGLETON_SOCKET_SUFFIX)) > _UNIX_SOCKET_PATH_MAX_BYTES:
+        launch_kwargs["env"] = {**env, "TMPDIR": "/tmp"}  # noqa: S108
 
 
 def _browser_help_payload(action: str) -> dict[str, Any]:
@@ -1766,6 +1779,7 @@ class BrowserTools(Toolkit):
                 )
                 await destination_proxy.start()
                 launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS}
+                _give_chromium_a_short_tmpdir(launch_kwargs)
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(

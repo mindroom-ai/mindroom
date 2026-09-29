@@ -54,6 +54,18 @@ def publish_oauth_credentials(
         executor.submit(asyncio.run, publish()).result()
 
 
+async def oauth_authorization_url(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    state: str,
+    code_verifier: str | None = None,
+) -> str:
+    """Resolve endpoints once and build the authorization URL, as the connect endpoint does."""
+    endpoints = await provider.runtime_endpoints(runtime_paths)
+    return await provider.authorization_uri_async(runtime_paths, endpoints, state=state, code_verifier=code_verifier)
+
+
 def corrupt_oauth_credential_payload(database_path: Path, payload: bytes) -> None:
     """Replace a current credential payload with unreadable bytes for recovery tests."""
     with closing(sqlite3.connect(database_path)) as connection:

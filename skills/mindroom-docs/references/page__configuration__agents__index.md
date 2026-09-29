@@ -496,7 +496,7 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 

@@ -49,6 +49,16 @@ Automatic discovery first checks protected-resource metadata at the resource ori
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
+Starting a connection resolves the provider's endpoints once, builds the authorization URL from them, and records the resolved token endpoint in the pending OAuth state.
+The callback fails without contacting any token endpoint when the provider now resolves a different one; otherwise the built-in exchange sends the authorization code, PKCE verifier, and client secret to that recorded endpoint.
+Stored credentials record the same endpoint as `token_uri`, including credentials produced by custom token exchangers and parsers.
+Refreshes through the provider contract, used by the dashboard, MCP servers, GitHub, and Atlassian, send the refresh token only when the stored `token_uri` matches the token endpoint the provider currently resolves.
+When it differs, or an older credential has no recorded endpoint, MindRoom deletes the credential without contacting the token endpoint and requires reconnection.
+That rejection is logged as `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and the stored and current endpoint origins, so an authorization-server change is distinguishable from a revoked grant.
+Google tool wrappers instead refresh through google-auth against the stored `token_uri` without re-resolving endpoints, and Google providers always store Google's fixed token endpoint there.
+A reconnect keeps an earlier refresh token that the provider did not replace only when the verified identity, OAuth client, and `token_uri` all match.
+Dynamic client registrations record the token endpoint they were issued for, and discovery registers a new client when the resolved token endpoint changes.
+A code exchange or refresh also refuses a dynamically registered client whose recorded token endpoint differs from the endpoint it is about to use.
 The SQLite store is authoritative on every OAuth credential read.
 Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
@@ -93,7 +103,7 @@ If a configured restriction cannot be checked from verified provider claims, the
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](tools/atlassian.md#scopes) call.
 The built-in provider reads its app client from `atlassian_oauth_client`, and each additional site configured through `AtlassianConnectionConfig` gets a separate provider that defaults to its own `<name>_atlassian_oauth_client` service.
-Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
+Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, Tasks, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.

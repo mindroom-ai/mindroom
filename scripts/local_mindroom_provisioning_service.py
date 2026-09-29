@@ -60,6 +60,13 @@ which the chat client shows for each install. Running installs send a heartbeat
 at startup and every few hours; the service records heartbeats at most once per
 connection every ten minutes so it does not rewrite the state file on every call.
 
+Agent passwords: register-agent creates each agent account with a random
+one-time password and returns it once, only when the account was created. The
+client logs in with it and immediately changes it to a password of its own, so
+the service never learns the password the client keeps. Older clients that
+still send their own password get it registered unchanged and receive no
+password back.
+
 Namespace exemption: pairing always assigns each new connection a random
 namespace, and register-agent only accepts usernames shaped like
 ``mindroom_<entity>_<namespace>``. The operator's own installs are the
@@ -277,7 +284,12 @@ class RegisterAgentRequest(BaseModel):
 
     homeserver: str = Field(min_length=1, max_length=512)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=1024)
+    # LEGACY_COMPAT: register-agent requests carrying the agent's own password
+    # Legacy format: released MindRoom clients send the agent's chosen `password`, which the service registers unchanged.
+    # Last legacy release: the release before the first one containing #2428 (at least v2026.9.364); replacement: the first release containing #2428, which omits password and replaces the returned one-time password.
+    # Handling: a supplied password is registered as before and never returned; remove this field once no paired installs run a release older than the first release containing #2428.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_register_agent_with_client_password_registers_it_unchanged.
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
     display_name: str = Field(min_length=1, max_length=255)
 
 
@@ -286,6 +298,8 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+    # One-time password generated for a created account; the client replaces it immediately.
+    password: str | None = None
 
 
 class HeartbeatResponse(BaseModel):
@@ -838,9 +852,10 @@ async def _matrix_whoami(config: ServiceConfig, access_token: str) -> str:
 
 async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
     register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
+    generated_password = None if payload.password else secrets.token_urlsafe(32)
     request_payload = {
         "username": payload.username,
-        "password": payload.password,
+        "password": payload.password or generated_password,
         "device_name": "mindroom_agent",
         "auth": {
             "type": "m.login.registration_token",
@@ -875,7 +890,7 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
             except httpx.HTTPError:
                 pass
 
-        return RegisterAgentResponse(status="created", user_id=user_id)
+        return RegisterAgentResponse(status="created", user_id=user_id, password=generated_password)
 
     detail = response.text.strip() or "unknown error"
     errcode = None
@@ -1305,7 +1320,11 @@ async def revoke_connection(
     return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
 
 
-@router.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
+@router.post(
+    "/v1/local-mindroom/register-agent",
+    response_model=RegisterAgentResponse,
+    response_model_exclude_none=True,
+)
 async def register_agent(
     payload: RegisterAgentRequest,
     config: Annotated[ServiceConfig, Depends(_service_config_from_request)],

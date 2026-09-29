@@ -222,6 +222,57 @@ def test_validate_server_fetch_url_keeps_ipv4_mapped_metadata_blocked_when_priva
     assert exc_info.value.reason == "metadata_address"
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "168.63.129.16",
+        "[::ffff:168.63.129.16]",
+        "[2002:a83f:8110::]",
+        "[2001:0:4136:e378::57c0:7eef]",
+        "[fd00:ec2::23]",
+        "[fd20:ce::254]",
+        "[fd00:c1::a9fe:a9fe]",
+    ],
+)
+@pytest.mark.parametrize("allow_private_networks", [False, True])
+def test_platform_agent_endpoints_are_metadata_addresses(host: str, *, allow_private_networks: bool) -> None:
+    """Host agent and credential endpoints are blocked on every port, in every embedded IPv4 form, under both policies."""
+    for url in (f"http://{host}/machine?comp=goalstate", f"http://{host}:32526/vmSettings"):
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            validate_server_fetch_url(url, allow_private_networks=allow_private_networks)
+        assert exc_info.value.reason == "metadata_address"
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_redirect_url(
+            "https://example.com/start",
+            f"http://{host}/",
+            allow_private_networks=allow_private_networks,
+        )
+    assert exc_info.value.reason == "metadata_address"
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validated_connect_addresses(host.strip("[]"), port=80, allow_private_networks=allow_private_networks)
+    assert exc_info.value.reason == "metadata_address"
+
+
+@pytest.mark.parametrize("allow_private_networks", [False, True])
+def test_dns_names_resolving_to_a_host_agent_endpoint_are_blocked_at_dial_time(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allow_private_networks: bool,
+) -> None:
+    """A public hostname that resolves to the Azure host agent must not be dialed."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("168.63.129.16"),
+    )
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validated_connect_addresses("wireserver.example", port=80, allow_private_networks=allow_private_networks)
+
+    assert exc_info.value.reason == "metadata_address"
+
+
 @pytest.mark.parametrize("url", ["http://169.254.1.1/", "http://[fe80::1]/"])
 def test_validate_server_fetch_url_keeps_link_local_blocked_when_private_is_enabled(url: str) -> None:
     """The local-network opt-in should not open link-local addresses."""

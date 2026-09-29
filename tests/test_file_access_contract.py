@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import ModuleType
 
+    from agno.tools.file import FileTools
+
     from mindroom.config.models import FileAccess
 
 _PNG = base64.b64decode(
@@ -326,6 +328,7 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["file", "workspace"])
 @pytest.mark.parametrize(
     ("probe", "resolver_module"),
     [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
@@ -338,20 +341,139 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
     outside: Path,
     probe: _ToolProbe,
     resolver_module: ModuleType,
+    swap: str,
 ) -> None:
-    """A file `file` or `coding` checked by resolution and then swapped for a link is never followed."""
+    """A file or workspace that `file` or `coding` checked and then swapped for a link is never followed."""
     resolve = resolver_module.resolve_base_dir_path
 
     def resolve_then_swap(*args: object, **kwargs: object) -> Path:
         resolved = resolve(*args, **kwargs)
-        checked = workspace / probe.filename
-        checked.unlink()
-        checked.symlink_to(outside / probe.filename)
+        if swap == "workspace":
+            workspace.rename(tmp_path / "moved-workspace")
+            workspace.symlink_to(outside, target_is_directory=True)
+        else:
+            checked = workspace / probe.filename
+            checked.unlink()
+            checked.symlink_to(outside / probe.filename)
         return resolved
 
     monkeypatch.setattr(resolver_module, "resolve_base_dir_path", resolve_then_swap)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda file_tool, _coding: file_tool.save_file("new notes", "notes/new.txt"),
+        lambda file_tool, _coding: file_tool.read_file("doc.txt"),
+        lambda file_tool, _coding: file_tool.delete_file("doc.txt"),
+        lambda _file, coding_tool: coding_tool.write_file("notes/new.txt", "new notes"),
+        lambda _file, coding_tool: coding_tool.edit_file("doc.txt", "contract", "changed"),
+    ],
+    ids=["file:save_file", "file:read_file", "file:delete_file", "coding:write_file", "coding:edit_file"],
+)
+def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_construction(
+    tmp_path: Path,
+    workspace: Path,
+    outside: Path,
+    operation: Callable[[FileTools, CodingTools], str],
+) -> None:
+    """Once built, `file` and `coding` never follow a workspace that worker code replaced with a link."""
+    file_tool = file_tools()(base_dir=workspace, enable_delete_file=True)
+    coding_tool = CodingTools(base_dir=str(workspace))
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    result = operation(file_tool, coding_tool)
+
+    assert result.startswith("Error")
+    assert "unrestricted" not in result
+    assert sorted(entry.name for entry in outside.iterdir()) == ["doc.png", "doc.txt"]
+    assert (outside / "doc.txt").read_text() == _TEXT
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda file_tool, _coding: file_tool.list_files(),
+        lambda file_tool, _coding: file_tool.search_files("*.json"),
+        lambda file_tool, _coding: file_tool.search_content("sk-"),
+        lambda file_tool, _coding: file_tool.search_content("sk-", directory="."),
+        lambda _file, coding_tool: coding_tool.ls(),
+        lambda _file, coding_tool: coding_tool.ls("."),
+        lambda _file, coding_tool: coding_tool.grep("sk-"),
+        lambda _file, coding_tool: coding_tool.grep("sk-", path="."),
+        lambda _file, coding_tool: coding_tool.find_files("*.json"),
+        lambda _file, coding_tool: coding_tool.find_files("*.json", path="."),
+    ],
+    ids=[
+        "file:list_files",
+        "file:search_files",
+        "file:search_content",
+        "file:search_content-directory",
+        "coding:ls",
+        "coding:ls-path",
+        "coding:grep",
+        "coding:grep-path",
+        "coding:find_files",
+        "coding:find_files-path",
+    ],
+)
+def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
+    tmp_path: Path,
+    workspace: Path,
+    outside: Path,
+    operation: Callable[[FileTools, CodingTools], str],
+) -> None:
+    """Listing and searching never reveal the target of a workspace that worker code replaced with a link."""
+    (outside / "openai.json").write_text('{"api_key": "sk-SECRET-VALUE"}\n')
+    file_tool = file_tools()(base_dir=workspace)
+    coding_tool = CodingTools(base_dir=str(workspace))
+    workspace.rename(tmp_path / "moved-workspace")
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    result = operation(file_tool, coding_tool)
+
+    assert "openai.json" not in result
+    assert "SECRET" not in result
+    assert "unrestricted" not in result
+
+
+@pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])
+@pytest.mark.parametrize(
+    "build",
+    [lambda base_dir: file_tools()(base_dir=base_dir), lambda base_dir: CodingTools(base_dir=str(base_dir))],
+    ids=["file", "coding"],
+)
+def test_worker_path_tool_refuses_a_base_dir_swapped_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+    build: Callable[[Path], object],
+    swap: str,
+) -> None:
+    """A workspace swapped after runtime resolution but before the toolkit pins it is refused, never adopted."""
+    if swap == "workspace-link":
+        workspace.rename(tmp_path / "moved-workspace")
+        workspace.symlink_to(outside, target_is_directory=True)
+        base_dir = workspace
+    else:
+        (tmp_path / "current").symlink_to(tmp_path, target_is_directory=True)
+        (outside / "workspace").mkdir()
+        base_dir = tmp_path / "current" / "workspace"
+        open_directory = path_safety_module.open_directory_within_root
+
+        def swap_then_open(root: Path, *args: object, **kwargs: object) -> object:
+            (tmp_path / "current").unlink()
+            (tmp_path / "current").symlink_to(outside, target_is_directory=True)
+            return open_directory(root, *args, **kwargs)
+
+        monkeypatch.setattr(path_safety_module, "open_directory_within_root", swap_then_open)
+
+    with pytest.raises(ValueError, match="base_dir"):
+        build(base_dir)
 
 
 @pytest.mark.asyncio
