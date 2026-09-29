@@ -34,9 +34,15 @@ jobs:
         run: uv build --wheel
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A retried release must reach the macOS job, which waits for this one.
+          skip-existing: true
 
   build_macos_app:
     name: Build and publish macOS app
+    # The app installs the runtime release matching its own version, so publish
+    # it only after that version is on PyPI.
+    needs: deploy
     runs-on: macos-latest
     timeout-minutes: 45
     permissions:

@@ -44,7 +44,9 @@ Each step shows its own status, and only the selected panel is displayed.
 The app detects the command-line runtime separately from the background service: **Runtime installed · Background service not installed** means step 1 is already done.
 
 1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location.
-   If it is missing, **Install MindRoom** installs it using bundled `uv`.
+   If it is missing, **Install MindRoom** uses bundled `uv` to install the runtime release that matches the app version.
+   If the installed runtime is a different release, for example after an app update, **Install** shows **Update needed** and **Update MindRoom** installs the matching release.
+   Configuring, pairing, checking, and starting wait until the runtime matches, because the app uses command options from its own release.
    Installing the runtime does not install the background service.
 2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
    The configuration path is shown in the panel.
@@ -70,7 +72,8 @@ The app detects the command-line runtime separately from the background service:
    Already installed services use their saved configuration path, including a custom path chosen in the terminal.
    If the service starts before your account is connected, Local agents shows **Waiting for your chat account** until you choose **Connect Account** and approve.
 
-An existing running or stopped service opens directly at **Start**.
+A runtime that needs an update opens at **Install**.
+Otherwise, an existing running or stopped service opens directly at **Start**.
 Existing configuration without a service opens at **Check**.
 Commands show progress and results directly above the selected panel.
 **Refresh Status** rereads the runtime, configuration, and service state, including changes made in a terminal.
@@ -206,7 +209,8 @@ If a runtime action is still in progress, let it finish before quitting.
 
 **Settings** separates app updates from runtime updates.
 **Check App Updates…** uses Sparkle for signed releases configured with an update feed.
-**Update Local Runtime** updates the installed CLI.
+**Update Local Runtime** installs the CLI release that matches the app version, and Settings notes when the installed runtime differs.
+Because `uv` records that exact version, `uv tool upgrade mindroom` in a terminal keeps it; after the next app update, the app asks for the new matching runtime.
 Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
 

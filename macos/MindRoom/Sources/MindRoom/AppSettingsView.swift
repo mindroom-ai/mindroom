@@ -47,7 +47,10 @@ struct AppSettingsView: View {
             }
             AppSectionCard {
                 Text("Updates").font(.headline)
-                Text("App updates include the computer-access helper. The local-agent runtime updates separately.").foregroundStyle(.secondary)
+                Text("App updates include the computer-access helper. The local-agent runtime updates separately to the version that matches this app.").foregroundStyle(.secondary)
+                if let reason = runner.localSetup.runtimeUpdateReason {
+                    Text("\(reason) Update Local Runtime, then apply it to the service.").foregroundStyle(.orange)
+                }
                 HStack {
                     Button("Check App Updates…") {
                         do { try AppUpdater.shared.checkForUpdates() }

@@ -43,6 +43,15 @@ def test_release_builds_universal_macos_app(release_workflow: str, macos_build_s
     assert 'require_architectures "$binary" arm64 x86_64' in macos_build_script
 
 
+def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) -> None:
+    """The app installs `mindroom==<app version>`, so it must not ship before that release is on PyPI."""
+    macos_job = release_workflow.split("  build_macos_app:\n", 1)[1].split("\n  update_homebrew_tap:", 1)[0]
+    assert "\n    needs: deploy\n" in macos_job
+    # Retrying a release whose wheel is already on PyPI must still publish the app.
+    assert "skip-existing: true" in release_workflow
+    assert "APP_VERSION: ${{ inputs.release_ref }}" in macos_job
+
+
 def test_release_metadata_pr_reuses_open_metadata_pr(release_workflow: str) -> None:
     """Repeated release metadata updates should update an open metadata PR in place."""
     assert "gh pr list" in release_workflow

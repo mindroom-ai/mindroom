@@ -49,8 +49,8 @@ struct LocalAgentsView: View {
             showChatSetup = true
             runner.pairingCancelled = false
         }
-        .onChange(of: setup.runtimeInstalled) { wasInstalled, installed in
-            if choseInitialStep, !wasInstalled, installed, step == .install { show(.configure) }
+        .onChange(of: setup.runtimeReady) { wasReady, ready in
+            if choseInitialStep, !wasReady, ready, step == .install { show(.configure) }
         }
         .onChange(of: runner.setupCheck) { _, result in
             if result?.setupCheckPassed == true { show(.start) }
@@ -108,10 +108,15 @@ struct LocalAgentsView: View {
 
     private var install: some View {
         AppSectionCard {
-            Label(setup.runtimeInstalled ? "MindRoom runtime installed" : "Install MindRoom runtime",
-                  systemImage: setup.runtimeInstalled ? "checkmark.circle.fill" : "arrow.down.circle")
+            Label(setup.runtimeReady ? "MindRoom runtime installed" : setup.runtimeInstalled ? "Update MindRoom runtime" : "Install MindRoom runtime",
+                  systemImage: setup.runtimeReady ? "checkmark.circle.fill" : "arrow.down.circle")
                 .font(.headline)
-            if let path = setup.runtimePath {
+            if let path = setup.runtimePath, let reason = setup.runtimeUpdateReason {
+                Text("\(reason) Update it before configuring, checking, or starting agents.")
+                Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                Button("Update MindRoom") { runner.run(.updateRuntime) }
+                    .buttonStyle(.borderedProminent).disabled(busy)
+            } else if let path = setup.runtimePath {
                 Text("Already installed on this Mac. Continue with your existing configuration or set up a new one.")
                 Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                 Button("Continue to Configure") { show(.configure) }.buttonStyle(.borderedProminent)
@@ -137,7 +142,7 @@ struct LocalAgentsView: View {
                 configurationLocation
                 if !setup.configurationExists {
                     Button("Prepare Configuration") { runner.run(.initializeHostedConfig) }
-                        .buttonStyle(.borderedProminent).disabled(busy || !setup.runtimeInstalled)
+                        .buttonStyle(.borderedProminent).disabled(busy || !setup.runtimeReady)
                 }
                 if setup.configurationExists {
                     DisclosureGroup("Connect or reconnect your chat account", isExpanded: $showChatSetup) {
@@ -145,7 +150,7 @@ struct LocalAgentsView: View {
                             Text("Approve this Mac in the app’s Chat tab. Check the code and signed-in account before approving. You can cancel while waiting. Skip this if this configuration is already connected.")
                             Button("Connect Account") { runner.run(.pairHosted) }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(busy || !setup.runtimeInstalled || !setup.configurationExists)
+                                .disabled(busy || !setup.runtimeReady || !setup.configurationExists)
                         }.padding(.top, 8)
                     }
                     Divider()
@@ -157,13 +162,13 @@ struct LocalAgentsView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Manage your Matrix server separately. Prepare configuration, then edit config.yaml and .env to connect it.")
                         Button("Prepare Self-Hosted Configuration") { runner.run(.initializeSelfHostedConfig) }
-                            .disabled(busy || !setup.runtimeInstalled)
+                            .disabled(busy || !setup.runtimeReady)
                     }.padding(.top, 8)
                 }
             }
-            if !setup.runtimeInstalled { Text("Install the runtime in step 1 to prepare or pair configuration.").foregroundStyle(.secondary) }
+            if !setup.runtimeReady { Text("Install or update the runtime in step 1 to prepare or pair configuration.").foregroundStyle(.secondary) }
             Button("Continue to Check") { show(.check) }
-                .buttonStyle(.borderedProminent).disabled(!setup.runtimeInstalled || !setup.configurationExists)
+                .buttonStyle(.borderedProminent).disabled(!setup.runtimeReady || !setup.configurationExists)
         }
     }
 
@@ -184,12 +189,12 @@ struct LocalAgentsView: View {
             }
             HStack {
                 Button("Check Setup") { runner.run(.checkSetup) }.buttonStyle(.borderedProminent)
-                    .disabled(busy || !setup.runtimeInstalled || !setup.configurationExists)
+                    .disabled(busy || !setup.runtimeReady || !setup.configurationExists)
                 Button("Open Config Folder") { runner.run(.openConfigFolder) }
                 Spacer()
                 Button("Continue to Start") { show(.start) }
             }
-            if !setup.runtimeInstalled || !setup.configurationExists {
+            if !setup.runtimeReady || !setup.configurationExists {
                 Text("Complete Install and Configure before running checks.").foregroundStyle(.secondary)
             }
         }
@@ -202,7 +207,8 @@ struct LocalAgentsView: View {
             if state == .pairing {
                 Text(MindRoomServiceState.dashboardAfterPairingHint).font(.callout).foregroundStyle(.secondary)
                 HStack {
-                    Button("Connect Account") { runner.run(.pairHosted) }.buttonStyle(.borderedProminent).disabled(busy)
+                    Button("Connect Account") { runner.run(.pairHosted) }.buttonStyle(.borderedProminent)
+                        .disabled(busy || !setup.runtimeReady)
                     Spacer()
                     Button("Stop Agents") { runner.run(.stopService) }.disabled(busy)
                 }
@@ -225,7 +231,7 @@ struct LocalAgentsView: View {
                     }.buttonStyle(.borderedProminent).disabled(busy || !setup.canStart(service: state))
                     Button("Check Setup First") { show(.check) }
                 }
-                if !setup.runtimeInstalled { Text("Install the runtime in step 1 before starting.").foregroundStyle(.secondary) }
+                if !setup.runtimeReady { Text("Install or update the runtime in step 1 before starting.").foregroundStyle(.secondary) }
                 else if !setup.configurationExists && state == .notInstalled { Text("Prepare configuration in step 2 before starting.").foregroundStyle(.secondary) }
                 else if state == .unknown { Text("Refresh Status to determine whether the service can be started.").foregroundStyle(.secondary) }
                 if state == .stopped {

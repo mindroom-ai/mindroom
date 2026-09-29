@@ -23,6 +23,11 @@ Closing only the main window keeps the helper and menu bar available.
 Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.
 Executable detection is separate from launchd status, so an installed CLI is not presented as missing when only the service has not been installed.
 Existing configuration is reused.
+Release builds install and update the runtime as `mindroom==<CFBundleShortVersionString>`, because the release workflow stamps the app with the same CalVer version it publishes to PyPI and publishes the app only after PyPI.
+The installed version is read from the package metadata in the executable's Python environment, without starting the runtime.
+A different installed version sends Local agents to **Install** with **Update needed** and blocks setup actions until the matching runtime is installed.
+Builds whose version is not CalVer, including the build script's `0.1.0` fallback and SwiftPM launches without a bundle version, install the latest runtime and accept any installed version.
+Set `APP_VERSION` to a published release when testing the pinned flow in a local build.
 **Check Setup** runs `mindroom doctor`; its result is kept for the current session and invalidated when a refresh observes changes to the root config or adjacent `.env`.
 Doctor's zero exit code can include warnings.
 Only a recognized summary with no failures or warnings completes the Check step; other results keep attention visible.
