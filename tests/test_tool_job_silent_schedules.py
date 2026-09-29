@@ -63,7 +63,7 @@ if TYPE_CHECKING:
         ("The report mentions NO_REPLY", "More findings", "The report mentions NO_REPLY\n\nMore findings"),
     ],
 )
-async def test_silent_join_preserves_the_deliverable_report(
+async def test_silent_join_preserves_the_deliverable_report(  # noqa: PLR0915
     tmp_path: Path,
     *,
     enabled: bool,
