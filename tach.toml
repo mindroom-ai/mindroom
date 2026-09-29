@@ -4666,7 +4666,6 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
-    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
@@ -7443,7 +7442,6 @@ depends_on = [
     "mindroom.approval_tools",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_access",
 ]
 
@@ -7595,7 +7593,6 @@ path = "mindroom.skill_learning.library"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.path_confinement",
-    "mindroom.redaction",
     "mindroom.tool_system.skill_usage",
     "mindroom.tool_system.skills",
 ]
@@ -7603,7 +7600,7 @@ visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.history_run_visibility", "mindroom.redaction"]
+depends_on = ["mindroom.history_run_visibility"]
 visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.runner"]
 
 [[modules]]
@@ -7628,10 +7625,7 @@ path = "mindroom.skill_learning.reviewer"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.agno_compat_model_hooks",
-    "mindroom.claude_prompt_cache",
-    "mindroom.custom_tools.skill_manage",
     "mindroom.helper_usage",
-    "mindroom.logging_config",
     "mindroom.model_loading",
     "mindroom.model_usage",
     "mindroom.skill_learning.tools",
@@ -7644,11 +7638,8 @@ visibility = ["mindroom.skill_learning.runner"]
 path = "mindroom.skill_learning.runner"
 depends_on = [
     "mindroom.agent_storage",
-    "mindroom.background_tasks",
     "mindroom.constants",
-    "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.message_builder",
     "mindroom.runtime_resolution",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.reviewer",

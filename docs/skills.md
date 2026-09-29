@@ -89,8 +89,6 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
-Workspace skills are read through no-follow descriptors because worker code can share the workspace.
-A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; files over 1 MiB are not read, a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
 Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 ## Authoring skills as an agent
@@ -232,7 +230,7 @@ Approval rules for `skill_manage` apply to chat calls like to any tool; the revi
 The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
 Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
 A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters, and one the review creates also needs the `learned` marker shown below.
-`skill_manage` refuses a new skill past the 256-skill count and a support file past the 256-file listing; loading skips skills past the prompt budget with a warning, as it does for hand-written skills.
+Skills past the workspace loading limits are skipped with a warning, as hand-written skills are.
 Files that contain a likely literal credential are refused with the offending line named, using Hermes Agent's skill guard patterns: a quoted api-key, token, secret, or password value of at least 20 characters that does not name an environment variable, a private key header, and GitHub, OpenAI, Anthropic, AWS, and GitLab token formats.
 This is a heuristic for common formats, not a guarantee.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
@@ -267,7 +265,7 @@ A telemetry write that fails, for example on a full disk, is logged and never fa
 A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.
 `skill_manage` rewrites of skill files keep their existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
-With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response or a config change stopped it after its writes landed; a review stopped by shutdown posts none.
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response stopped it after its writes landed; a review stopped by shutdown posts none.
 The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
 Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md), also for a review that times out or is interrupted.
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
