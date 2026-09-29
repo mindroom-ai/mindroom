@@ -56,7 +56,7 @@ from mindroom.tool_system.runtime_context import (
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -424,7 +424,7 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
             patch("mindroom.ai._prepare_agent_run_context", new=prepare),
         ):
             pending = asyncio.create_task(run())
-            await asyncio.wait_for(waiting.wait(), 2)
+            await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
             assert "Independent answer already shown." in notices[-1].response_text
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
@@ -439,7 +439,7 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
             )
             release.set()
             with pytest.raises(ResponsePausedForApproval) as raised:
-                await asyncio.wait_for(pending, 2)
+                await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             paused = raised.value.paused
             assert paused.response_text.count("Independent answer already shown.") == 1
             assert "Need approval to continue." in paused.response_text
@@ -627,7 +627,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             waiting.clear()
             releases[0].set()
             if repeat_join:
-                await asyncio.wait_for(waiting.wait(), 2)
+                await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
                 second = next(job for job in jobs if job.status == "running")
                 model.responses.extend(
@@ -639,7 +639,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                     ],
                 )
                 releases[1].set()
-            answer = await asyncio.wait_for(pending, 2)
+            answer = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             assert "Final result received." in answer
             assert answer.count("**Team Response**") == 1
             assert answer.count("Independent work done.") == 1

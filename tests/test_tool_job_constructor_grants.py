@@ -27,7 +27,7 @@ from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
-from tests.tool_job_helpers import completed_delegation_job, delivery_coordinator, managed_team_config
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, completed_delegation_job, delivery_coordinator, managed_team_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,7 +127,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                     owner=owner,
                     operation=operation,
                 )
-                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
                 if revoked:
                     entry.overrides[flag] = False
@@ -140,7 +140,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                     )
                     assert function_name not in current.get_async_functions()
                 release.set()
-                await asyncio.wait_for(finished.wait(), 5)
+                await asyncio.wait_for(finished.wait(), JOB_TEST_TIMEOUT)
                 if revoked:
                     assert not (tmp_path / "nested.txt").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []

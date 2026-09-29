@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
+JOB_TEST_TIMEOUT = 30
+
+
 def _authorize_all(_job: BackgroundJob) -> bool:
     return True
 

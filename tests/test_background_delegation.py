@@ -66,7 +66,13 @@ from tests.delegation_helpers import (
 from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
-from tests.tool_job_helpers import completed_delegation_job, start_delegation_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    completed_delegation_job,
+    start_delegation_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -586,7 +592,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     listed = json.loads(await JobTools(paths, identity).job("list"))
                     assert [item["status"] for item in listed if item["job_id"] == child.delegation_id] == ["running"]
                 release.set()
-                await asyncio.wait_for(completed.wait(), 5)
+                await asyncio.wait_for(completed.wait(), JOB_TEST_TIMEOUT)
                 signal.clear()
                 if duplicate_approval == "denied_retrieval":
                     # A denied approval for merely retrieving a job must leave its child untouched.
@@ -695,14 +701,14 @@ async def test_human_followup_does_not_stop_next_provider_invocation(
         await entered.wait()
         signal.notify()
         release.set()
-        assert await asyncio.wait_for(first, 1) == "Provider finished"
+        assert await asyncio.wait_for(first, JOB_TEST_TIMEOUT) == "Provider finished"
         assert not stream or closed.is_set()
         entered.clear()
         called.clear()
         second = asyncio.create_task(invoke())
         await called.wait()
         assert entered.is_set()
-        assert await asyncio.wait_for(second, 1) == "Provider finished"
+        assert await asyncio.wait_for(second, JOB_TEST_TIMEOUT) == "Provider finished"
 
 
 @pytest.mark.asyncio
@@ -858,7 +864,7 @@ async def test_early_child_failure_retains_liveness_through_settlement(
             ),
         )
         try:
-            await asyncio.wait_for(settling.wait(), 10)
+            await asyncio.wait_for(settling.wait(), JOB_TEST_TIMEOUT)
             with subagent_recovery_lock(child.subagent_id, paths) as acquired:
                 assert not acquired, "Failure settlement released its exact live child too early"
         finally:
@@ -942,7 +948,7 @@ async def test_inline_child_failure_retains_liveness_through_settlement(
                 ),
             )
             try:
-                await asyncio.wait_for(settling.wait(), 10)
+                await asyncio.wait_for(settling.wait(), JOB_TEST_TIMEOUT)
                 with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
                     assert not acquired, "Failure settlement released its exact live child too early"
             finally:
@@ -1010,7 +1016,7 @@ async def _drive_background_child(
             )
             if while_waiting is not None:
                 await while_waiting()
-            return await asyncio.wait_for(pending, 5)
+            return await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
     finally:
         await runtime.shutdown()
         storage.close()
@@ -1041,7 +1047,7 @@ class _BlockingChild:
         raise AssertionError
 
     async def running(self) -> DelegationChild:
-        await asyncio.wait_for(self.started.wait(), 5)
+        await asyncio.wait_for(self.started.wait(), JOB_TEST_TIMEOUT)
         assert self.child is not None
         return self.child
 

@@ -58,7 +58,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import assembled_function, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -181,7 +181,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                     FunctionCall(function=function, call_id="call", arguments={"wait_timeout": 0}),
                 )
                 job_id = json.loads(result[3].result)["job_id"]
-                assert await asyncio.to_thread(started.wait, 5)
+                assert await asyncio.to_thread(started.wait, JOB_TEST_TIMEOUT)
                 if shutdown:
                     stopping = asyncio.create_task(runtime.shutdown())
                     await asyncio.sleep(0)
@@ -483,10 +483,10 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             parent = asyncio.create_task(parent_run())
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
             release.set()
-            response = await asyncio.wait_for(parent, 2)
+            response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
         assert response.tools is not None
         assert response.tools[0].result == "connected result"
         assert toolkit.closes == 1
@@ -535,9 +535,9 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             parent = asyncio.create_task(parent_run())
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
-            response = await asyncio.wait_for(parent, 2)
+            response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
             assert not closed.is_set()
             job_id = json.loads(response.tools[0].result)["job_id"]
             release.set()
@@ -733,9 +733,9 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             parent = asyncio.create_task(parent_run())
-            assert await asyncio.to_thread(started.wait, 2)
+            assert await asyncio.to_thread(started.wait, JOB_TEST_TIMEOUT)
             signal.notify()
-            response = await asyncio.wait_for(parent, 2)
+            response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
             job_id = json.loads(response.tools[0].result)["job_id"]
             cancelling = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
             await wait_for_status(runtime, job_id, "cancel_requested")
@@ -984,7 +984,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
         async with execution_resources():
             with tool_runtime_context(context), human_message_signal_context(signal):
                 parent = asyncio.create_task(model.arun_function_call(call))
-                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 signal.notify()
                 returned = await parent
                 job_id = json.loads(returned[3].result)["job_id"]
@@ -1039,7 +1039,7 @@ async def test_streamed_state_conflict_notice_reaches_sdk_tool_message(tmp_path:
 
     pending = asyncio.create_task(dispatch())
     try:
-        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         state["conflict"] = "newer"
         release.set()
         events = await pending

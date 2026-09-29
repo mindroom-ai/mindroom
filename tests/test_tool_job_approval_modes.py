@@ -26,7 +26,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,13 +157,13 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
         async with execution_resources():
             with tool_runtime_context(context), human_message_signal_context(signal):
                 task = asyncio.create_task(actor.arun("Work", session_id=context.session_id, metadata={}))
-                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 signal.notify()
                 done, _ = await asyncio.wait({task}, timeout=0.05)
                 assert not done, "Child returned before its tool finished"
                 assert await runtime.list_jobs(owner=owner, depth=1) == []
                 release.set()
-                result = await asyncio.wait_for(task, 2)
+                result = await asyncio.wait_for(task, JOB_TEST_TIMEOUT)
                 assert result.tools is not None
                 assert result.tools[0].result == "finished once"
                 assert effects == ["finished once"]

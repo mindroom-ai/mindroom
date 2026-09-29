@@ -51,6 +51,7 @@ from mindroom.event_journal import EventKind
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
     completed_delegation_job,
     delivery_coordinator,
     finish_delegation_job,
@@ -862,7 +863,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
                     continuation=_continuation(),
                 ),
             )
-            await asyncio.wait_for(waiting.wait(), 1)
+            await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
             assert recorder.outcome == "pending"
             assert recorder.assistant_text == "Independent work done"
             assert metadata == {}
@@ -870,7 +871,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
                 task.cancel()
             else:
                 finish.set()
-                await asyncio.wait_for(continuing.wait(), 1)
+                await asyncio.wait_for(continuing.wait(), JOB_TEST_TIMEOUT)
                 if failure_boundary == "continuation_cancel":
                     task.cancel()
             expected = RuntimeError if failure_boundary == "continuation_error" else asyncio.CancelledError

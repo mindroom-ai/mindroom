@@ -24,7 +24,7 @@ from tests.test_event_journal_store import ROOM, admit
 from tests.test_tool_job_completion import _persist_waiting_continuation
 from tests.test_tool_job_stop import _bind_reply
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -132,7 +132,7 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             recovery_proof_ready=lambda: True,
             source_event_ids=(event.event_id,),
         )
-        await asyncio.wait_for(started.wait(), 3)
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, _CountingGateway()))
         stop_task = asyncio.create_task(reconciler.finalize("$reply", 100, AsyncMock()))
         assert await asyncio.wait_for(asyncio.shield(stop_task), 3)

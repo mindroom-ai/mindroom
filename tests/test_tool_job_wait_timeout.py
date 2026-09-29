@@ -33,7 +33,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -158,10 +158,10 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
                     await asyncio.wait_for(entered.wait(), 30)
                     assert not waiting.done()
                     gate.set()
-                    result = await asyncio.wait_for(waiting, 1)
+                    result = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
                     assert result[3].result == "finished"
                 else:
-                    result = await asyncio.wait_for(waiting, 1)
+                    result = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
                     handle = json.loads(result[3].result)
                     assert handle["status"] == "running"
                     gate.set()
@@ -277,7 +277,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                response = await asyncio.wait_for(agent.arun("start", session_id=context.session_id), 1)
+                response = await asyncio.wait_for(agent.arun("start", session_id=context.session_id), JOB_TEST_TIMEOUT)
                 results = {tool.tool_name: tool for tool in response.tools}
                 handle = json.loads(results["slow"].result)
                 assert handle["status"] == "running"

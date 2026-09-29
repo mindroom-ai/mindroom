@@ -17,7 +17,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
-from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -58,7 +58,7 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
             owner=job_owner(),
             operation=operation,
         )
-        await asyncio.wait_for(started.wait(), 10)
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         with monkeypatch.context() as patch, capture_logs() as logs:
             patch.setattr(runtime_module, "write_json_file_durable", fail_save)
             await orchestrator.stop()
@@ -105,7 +105,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module, "write_json_file_durable", fail_outcome)
             release.set()
-            waited = await asyncio.wait_for(runtime.wait("write-failure", owner=job_owner(), depth=0), 2)
+            waited = await asyncio.wait_for(runtime.wait("write-failure", owner=job_owner(), depth=0), JOB_TEST_TIMEOUT)
             assert waited.job.status == "completed"
             assert waited.job.result == "retained output"
             assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
@@ -161,7 +161,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
             owner=job_owner(),
             operation=operation,
         )
-        await asyncio.wait_for(cleaning.wait(), 2)
+        await asyncio.wait_for(cleaning.wait(), JOB_TEST_TIMEOUT)
         stopping = asyncio.create_task(
             runtime.shutdown() if shutdown else runtime.cancel("returned", owner=job_owner(), depth=0),
         )
@@ -171,7 +171,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())
         assert snapshot["status"] in {"running", "cancel_requested"}
         release.set()
-        await asyncio.wait_for(stopping, 2)
+        await asyncio.wait_for(stopping, JOB_TEST_TIMEOUT)
         assert cleaned.is_set()
         assert (tmp_path / "effect.txt").read_text() == "completed once"
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())
@@ -222,11 +222,11 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
         )
         monkeypatch.setattr(runtime, "_publish", delayed_publish)
         stopping = asyncio.create_task(runtime.cancel("returned", owner=job_owner(), depth=0))
-        await asyncio.wait_for(saving.wait(), 2)
+        await asyncio.wait_for(saving.wait(), JOB_TEST_TIMEOUT)
         finish.set()
-        await asyncio.wait_for(returned.wait(), 2)
+        await asyncio.wait_for(returned.wait(), JOB_TEST_TIMEOUT)
         release.set()
-        settled = await asyncio.wait_for(stopping, 2)
+        settled = await asyncio.wait_for(stopping, JOB_TEST_TIMEOUT)
         assert settled.status == "completed"
         assert settled.result == "exact result"
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())

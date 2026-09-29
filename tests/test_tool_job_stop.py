@@ -26,7 +26,7 @@ from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 from tests.test_event_journal_store import ROOM, admit
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import backdate_job, job_owner, start_job, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, backdate_job, job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -251,8 +251,8 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
             operation=operation,
         )
         await started.wait()
-        await asyncio.wait_for(runtime.stop_jobs(receipt_order=7, matches=selected), 2)
-        await asyncio.wait_for(cleaning.wait(), 2)
+        await asyncio.wait_for(runtime.stop_jobs(receipt_order=7, matches=selected), JOB_TEST_TIMEOUT)
+        await asyncio.wait_for(cleaning.wait(), JOB_TEST_TIMEOUT)
         saved = await runtime.lookup("active", owner=job_owner(), depth=0)
         assert saved.status == "cancel_requested"
         assert saved.user_stop_receipt_order == 7

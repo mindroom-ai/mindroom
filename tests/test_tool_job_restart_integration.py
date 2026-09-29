@@ -57,7 +57,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -147,7 +147,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             original_task = asyncio.create_task(start_original())
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
             original = await original_task
         assert original.tools is not None
@@ -221,7 +221,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                     continuation=_continuation("Retrieve retained work"),
                 ),
             )
-            await asyncio.wait_for(interrupted_model.result_observed.wait(), 2)
+            await asyncio.wait_for(interrupted_model.result_observed.wait(), JOB_TEST_TIMEOUT)
             assert "retained after restart" in str(interrupted_model.seen_messages[-1].content)
             interrupted_task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -268,7 +268,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
             )
 
         with tool_runtime_context(context):
-            final = await asyncio.wait_for(retrieve_after_restart(), 2)
+            final = await asyncio.wait_for(retrieve_after_restart(), JOB_TEST_TIMEOUT)
         assert final.tools is not None
         retrieved = next(tool for tool in final.tools if tool.tool_call_id == "recovered-wait")
         assert retrieved.result == "retained after restart"

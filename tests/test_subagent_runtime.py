@@ -56,6 +56,7 @@ from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
 from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
     completed_delegation_job,
     delivery_coordinator,
     finish_delegation_job,
@@ -255,7 +256,7 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
         config.agents["lead"].delegate_to.clear()
         await coordinator.deliver_pending()
         assert await coordinator.runtime.list_jobs(owner=fixture.owner, depth=0) == []
-        await asyncio.wait_for(cancelled.wait(), 10)
+        await asyncio.wait_for(cancelled.wait(), JOB_TEST_TIMEOUT)
         config.agents["lead"].delegate_to.append("worker")
         waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
         assert waited.job.status == "cancelled"
@@ -325,7 +326,7 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
 
     fixture = completed_delegation_job()
     await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
-    await asyncio.wait_for(started.wait(), 10)
+    await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
 
     async def failed_save(*_args: object, **_kwargs: object) -> None:
         msg = "snapshot unavailable"
@@ -461,7 +462,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
         target=target,
         response_envelope=_envelope(target=target),
     )
-    released = await asyncio.wait_for(waiting, 1)
+    released = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
     assert released.job.status == "running"
     advance.set()
     await checkpoint_reached.wait()
@@ -572,17 +573,17 @@ async def test_completion_worker_retries_transient_authorization_scan(
         await coordinator.sync()
         worker = coordinator._task
         assert worker is not None
-        await asyncio.wait_for(failed.wait(), 1)
+        await asyncio.wait_for(failed.wait(), JOB_TEST_TIMEOUT)
         if wake == "signal":
             runtime.changed.set()
-        await asyncio.wait_for(delivered.wait(), 1)
+        await asyncio.wait_for(delivered.wait(), JOB_TEST_TIMEOUT)
         assert coordinator._task is worker
         assert not worker.done()
         assert coordinator.runtime is runtime
         assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
         assert await runtime.pending_outcomes() == [job]
     finally:
-        await asyncio.wait_for(coordinator.stop(), 1)
+        await asyncio.wait_for(coordinator.stop(), JOB_TEST_TIMEOUT)
 
 
 @pytest.mark.asyncio

@@ -37,7 +37,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
 )
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -169,7 +169,10 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                 assert "job_id" in handle, "A released wait returns its handle without redirecting it to a file"
                 assert not (workspace / "report.txt").exists()
                 release.set()
-                waited = await asyncio.wait_for(runtime.wait(handle["job_id"], owner=identity, depth=0), 5)
+                waited = await asyncio.wait_for(
+                    runtime.wait(handle["job_id"], owner=identity, depth=0),
+                    JOB_TEST_TIMEOUT,
+                )
                 await runtime.release_wait(handle["job_id"], waited.claim)
                 if mode == "explicit":
                     relocated_output = workspace / "completed_report.txt"

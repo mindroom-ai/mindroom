@@ -27,7 +27,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,12 +92,12 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
             with tool_runtime_context(context), human_message_signal_context(signal):
                 pending = asyncio.create_task(actor.arun("Switch the model", session_id=context.session_id))
                 if wait_timeout is None:
-                    await asyncio.wait_for(started.wait(), 2)
+                    await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                     signal.notify()
                     done, _ = await asyncio.wait({pending}, timeout=0.05)
                     assert not done, "A control result cannot become a background handle on human follow-up"
                     release.set()
-                response = await asyncio.wait_for(pending, 2)
+                response = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
                 assert response.tools is not None
                 tool = response.tools[0]
                 if wait_timeout is None:

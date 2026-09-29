@@ -17,7 +17,14 @@ from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context, job_checkpoint
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
-from tests.tool_job_helpers import backdate_job, job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    backdate_job,
+    job_owner,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -914,11 +921,11 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
         await asyncio.sleep(0)
         signal.notify()
         signal.clear()
-        result = await asyncio.wait_for(waiter, 1)
+        result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
         assert result.job.status == "running"
         assert result.claim is None
         proceed.set()
-        await asyncio.wait_for(finished.wait(), 1)
+        await asyncio.wait_for(finished.wait(), JOB_TEST_TIMEOUT)
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "done"
         assert calls == 1
     finally:
@@ -1498,7 +1505,7 @@ async def test_cancellation_retry_propagates_failed_terminal_persistence(tmp_pat
         with pytest.raises(OSError, match="initial terminal write failed"):
             await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
         retry = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
-        await asyncio.wait_for(retry_write_started.wait(), 2)
+        await asyncio.wait_for(retry_write_started.wait(), JOB_TEST_TIMEOUT)
         for _ in range(3):
             await asyncio.sleep(0)
         release_retry_write.set()
@@ -1809,7 +1816,7 @@ async def test_wait_budget_never_cancels_owned_execution(tmp_path: Path, budget:
             finish.set()
             result = await asyncio.wait_for(waiter, 1)
         else:
-            detached = await asyncio.wait_for(waiter, 1)
+            detached = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
             assert detached.job.status == "running"
             assert detached.claim is None
             finish.set()

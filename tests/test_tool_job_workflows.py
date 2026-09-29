@@ -32,7 +32,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
-from tests.tool_job_helpers import assembled_function, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -235,9 +235,9 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     try:
         with tool_runtime_context(context):
             job_id = await run()
-            await asyncio.wait_for(started[0].wait(), 2)
+            await asyncio.wait_for(started[0].wait(), JOB_TEST_TIMEOUT)
             if parallel:
-                await asyncio.wait_for(started[1].wait(), 2)
+                await asyncio.wait_for(started[1].wait(), JOB_TEST_TIMEOUT)
             waiter = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
             await wait_for_status(runtime, job_id, "cancel_requested")
             assert not cleaned.is_set()
@@ -245,7 +245,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
             assert not done
             assert completed == [0]
             release.set()
-            await asyncio.wait_for(waiter, 2)
+            await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
             assert cleaned.is_set()
             assert sorted(completed) == ([0, 1, 2] if parallel else [0, 1])
     finally:

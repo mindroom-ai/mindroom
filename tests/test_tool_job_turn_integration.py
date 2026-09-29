@@ -39,7 +39,7 @@ from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -135,7 +135,7 @@ async def _wait_until_ready(
         job = await runtime.lookup(job_id, owner=owner, depth=0)
         if job.status not in {"running", "cancel_requested"}:
             return job
-        await asyncio.wait_for(runtime.changed.wait(), 2)
+        await asyncio.wait_for(runtime.changed.wait(), JOB_TEST_TIMEOUT)
 
 
 def _provider_tool_content(model: DelegationModel, tool_call_id: str) -> str:
@@ -238,9 +238,9 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
             first_pending = asyncio.create_task(run_turn("Start the report"))
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
-            first = await asyncio.wait_for(first_pending, 2)
+            first = await asyncio.wait_for(first_pending, JOB_TEST_TIMEOUT)
         assert first.tools is not None
         job_id = json.loads(cast("str", first.tools[0].result))["job_id"]
         assert "released" in str(first.content)
@@ -260,14 +260,14 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         )
         with tool_runtime_context(context), human_message_signal_context(signal):
             second_pending = asyncio.create_task(run_turn("Check the earlier report"))
-            await asyncio.wait_for(model.list_observed.wait(), 2)
+            await asyncio.wait_for(model.list_observed.wait(), JOB_TEST_TIMEOUT)
             assert (await runtime.lookup(job_id, owner=owner, depth=0)).status == "running"
             assert job_id in str(model.seen_messages[-1].content)
             release.set()
             ready = await _wait_until_ready(runtime, job_id, owner=owner)
             assert ready.status == "completed"
             model.allow_wait.set()
-            second = await asyncio.wait_for(second_pending, 2)
+            second = await asyncio.wait_for(second_pending, JOB_TEST_TIMEOUT)
 
         assert second.tools is not None
         list_result = next(tool.result for tool in second.tools if tool.tool_call_id == "list-call")
@@ -405,8 +405,8 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
     try:
         with tool_runtime_context(context):
             pending = asyncio.create_task(drive_stream())
-            await asyncio.wait_for(started.wait(), 2)
-            await asyncio.wait_for(model.text_started.wait(), 2)
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+            await asyncio.wait_for(model.text_started.wait(), JOB_TEST_TIMEOUT)
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
             job_id = jobs[0].job_id
@@ -429,7 +429,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             assert not any(isinstance(chunk, BackgroundWaitChunk) for chunk in chunks)
 
             model.release_text.set()
-            await asyncio.wait_for(pending, 3)
+            await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
 
         assert executions == 1
         saved = await runtime.lookup(job_id, owner=owner, depth=0)

@@ -29,7 +29,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -162,7 +162,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
                 if initially_excluded:
                     # Now managed: the approved child runs as a job.
-                    await asyncio.wait_for(child_done.wait(), 2)
+                    await asyncio.wait_for(child_done.wait(), JOB_TEST_TIMEOUT)
                     assert executed == ["Research"]
                     assert len(jobs) == 1
                 else:

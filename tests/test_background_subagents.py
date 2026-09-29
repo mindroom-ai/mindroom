@@ -42,7 +42,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
 from tests.conftest import test_runtime_paths
 from tests.test_queued_message_notify import _envelope
-from tests.tool_job_helpers import job_child, job_owner, start_delegation_job, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_child, job_owner, start_delegation_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -261,7 +261,7 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
         human.notify()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         proceed.set()
-        await asyncio.wait_for(next_tool.wait(), 1)
+        await asyncio.wait_for(next_tool.wait(), JOB_TEST_TIMEOUT)
         human.clear()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "finished"
     finally:
@@ -360,7 +360,7 @@ async def test_approval_continuation_runs_after_human_followup(tmp_path: Path) -
             expected_generation=0,
             operation=continuation,
         )
-        await asyncio.wait_for(executed.wait(), 1)
+        await asyncio.wait_for(executed.wait(), JOB_TEST_TIMEOUT)
         human.clear()
         result = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         assert result.job.result == "approved"
@@ -386,7 +386,7 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
         with human_message_signal_context(human):
             job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
     finally:
         finish.set()
         await runtime.shutdown()
@@ -411,7 +411,7 @@ async def test_idle_parent_human_ingress_releases_active_job_wait(tmp_path: Path
         waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
         await asyncio.sleep(0)
         coordinator.reserve_waiting_human_message(target=target, response_envelope=_envelope(target=target))
-        result = await asyncio.wait_for(waiter, 1)
+        result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
         assert result.job.status == "running"
     finally:
         await runtime.shutdown()
@@ -762,7 +762,7 @@ async def test_recovered_approval_continues_after_human_followup(tmp_path: Path,
             expected_generation=0,
             operation=continuation,
         )
-        await asyncio.wait_for(executed.wait(), 1)
+        await asyncio.wait_for(executed.wait(), JOB_TEST_TIMEOUT)
         result = await restored.wait(job.job_id, owner=owner, depth=0)
         assert result.job.result == "approved"
     finally:

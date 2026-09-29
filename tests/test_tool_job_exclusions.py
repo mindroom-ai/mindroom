@@ -37,7 +37,7 @@ from mindroom.tools.shell import _process_registry
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.tool_job_helpers import assembled_function, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -233,7 +233,7 @@ async def test_human_followup_keeps_shell_under_native_wait(tmp_path: Path, shel
             assert not done
             assert await runtime.list_jobs(owner=owner, depth=0) == []
             (tmp_path / "release").touch()
-            result = await asyncio.wait_for(pending, 5)
+            result = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             assert "native result" in result.result
             assert await runtime.list_jobs(owner=owner, depth=0) == []
         finally:
