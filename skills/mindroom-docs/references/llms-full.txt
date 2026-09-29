@@ -2943,7 +2943,9 @@ They do not own them.
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
 The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
-Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
+Primary-built tools keep their settings in primary stores, with existing OAuth and local-only placement unchanged.
+Other primary-built tool settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
+Worker-executed tools without a scoped OAuth provider manage `user` and `user_agent` credentials through their worker runtime.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
@@ -16772,6 +16774,8 @@ Only agents with no private, per-agent, or inherited scope use the global creden
 Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
+Primary-built tools read their settings from primary stores, never worker credential stores, with OAuth token and existing local-only service rules unchanged.
+Other primary-built tool settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, while explicit shared grants and shared mirrors still apply.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
