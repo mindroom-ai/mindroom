@@ -11,12 +11,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
-from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 from tests.conftest import test_runtime_paths
@@ -832,6 +833,33 @@ def test_local_folder_and_shell_actions_are_discoverable_with_their_own_paramete
     assert "check_shell" in description
     assert "kill_shell" in description
     assert "untrusted" in description
+    assert "gui_mode (observe_only or control) covers only app control" in description
+    assert "kill_shell finishes with state killed" in description
+
+
+def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
+    """The agent learns the real size limits and that each command runs alone in a non-interactive /bin/sh."""
+    function = DesktopTools().async_functions["desktop"]
+    description = function.description or ""
+    assert f"{DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB" in description
+    assert f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB" in description
+    for phrase in (
+        "stderr is merged into output in order",
+        "2>file",
+        "$SHELL is the user's login shell",
+        "fresh non-interactive /bin/sh",
+        "stdin at EOF",
+        "no TTY",
+    ):
+        assert phrase in description
+    command = function.parameters["properties"]["command"]["description"]
+    assert "/bin/sh" in command
+    assert "2>file" in command
+    handle = function.parameters["properties"]["handle"]["description"]
+    assert handle == (
+        "Shell handle from a run_shell or check_shell reply; a finished command keeps one only while output is "
+        "still undelivered."
+    )
 
 
 @pytest.mark.asyncio
@@ -880,6 +908,32 @@ async def test_folder_listing_omits_unspecified_optional_arguments(monkeypatch: 
         {"handle": "shell:1"},
         {"handle": "shell:1", "force": True},
     ]
+
+
+@pytest.mark.asyncio
+async def test_check_shell_polls_from_an_offset_and_returns_where_to_continue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent passes the last next_offset to check_shell; other shell actions refuse an offset."""
+    polled = _shell_result(state="running", handle="shell:1", exit_code=None, output="new", next_offset=9)
+    request = _route_desktop_requests(monkeypatch, DesktopResponse("r1", "s", True, result=polled))
+    tool = _configured_tool(monkeypatch)
+
+    result = await tool.desktop("check_shell", handle="shell:1", offset=6)
+
+    assert request.await_args.args[1].parameters == {"handle": "shell:1", "offset": 6}
+    assert json.loads(result.content)["result"]["next_offset"] == 9
+    for action, arguments, message in (
+        ("check_shell", {"handle": "shell:1", "offset": -1}, "offset must be an integer of at least 0"),
+        ("kill_shell", {"handle": "shell:1", "offset": 6}, "does not accept offset"),
+        ("run_shell", {"command": "ls", "offset": 6}, "does not accept offset"),
+    ):
+        payload = json.loads((await tool.desktop(action, **arguments)).content)
+        assert (payload["status"], message in payload["message"]) == ("error", True)
+    assert request.await_count == 1
+    properties = tool.async_functions["desktop"].parameters["properties"]
+    assert "check_shell" in properties["offset"]["description"]
+    description = tool.async_functions["desktop"].description or ""
+    assert "next_offset" in description
+    assert "an output_start above the offset you asked for" in description
 
 
 @pytest.mark.asyncio

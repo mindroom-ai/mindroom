@@ -2,6 +2,8 @@
 
 Rows are plain dicts per table. Filters compare values as strings, like PostgREST query parameters.
 Embedded many-to-one selects such as ``subscription:subscriptions(*)`` resolve through ``<table>_id`` columns.
+RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
+Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ class FakeQuery:
     row_limit: int | None = None
     single_row: bool = False
     conflict_column: str | None = None
+    negate_next: bool = False
 
     def select(self, columns: str = "*", **_kwargs: Any) -> FakeQuery:  # noqa: ANN401
         self.columns = columns
@@ -55,13 +58,25 @@ class FakeQuery:
         self.action, self.payload, self.conflict_column = "upsert", payload, on_conflict
         return self
 
-    def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
-        self.filters.append(("eq", column, value))
+    @property
+    def not_(self) -> FakeQuery:
+        self.negate_next = True
         return self
 
-    def in_(self, column: str, values: list[Any]) -> FakeQuery:
-        self.filters.append(("in", column, values))
+    def _filter(self, op: str, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
+        self.filters.append((f"not.{op}" if self.negate_next else op, column, value))
+        self.negate_next = False
         return self
+
+    def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
+        return self._filter("eq", column, value)
+
+    def in_(self, column: str, values: list[Any]) -> FakeQuery:
+        return self._filter("in", column, values)
+
+    def is_(self, column: str, value: str) -> FakeQuery:
+        assert value == "null"
+        return self._filter("is", column, None)
 
     def order(self, column: str, *, desc: bool = False) -> FakeQuery:
         self.order_by = (column, desc)
@@ -81,9 +96,8 @@ class FakeQuery:
 
     def _matches(self, row: dict[str, Any]) -> bool:
         for op, column, value in self.filters:
-            if op == "eq" and str(row.get(column)) != str(value):
-                return False
-            if op == "in" and str(row.get(column)) not in {str(v) for v in value}:
+            negated = op.startswith("not.")
+            if _matches_filter(op.removeprefix("not."), row.get(column), value) == negated:
                 return False
         return True
 
@@ -132,14 +146,65 @@ class FakeQuery:
         return FakeResult(projected)
 
 
+def _matches_filter(op: str, current: Any, value: Any) -> bool:  # noqa: ANN401
+    if op == "eq":
+        return str(current) == str(value)
+    if op == "in":
+        return str(current) in {str(v) for v in value}
+    assert op == "is"
+    return current is None
+
+
+@dataclass
+class FakeRpc:
+    """One pending RPC call, recorded when executed."""
+
+    db: FakeSupabase
+    name: str
+    params: dict[str, Any]
+
+    def execute(self) -> FakeResult:
+        self.db.rpc_calls.append((self.name, self.params))
+        return FakeResult(self.db.rpc_results.get(self.name))
+
+
+@dataclass
+class FakeAuthAdmin:
+    """The ``auth.admin`` user API; set ``error`` to make deletions fail."""
+
+    db: FakeSupabase
+    deleted_users: list[str] = field(default_factory=list)
+    error: Exception | None = None
+
+    def delete_user(self, user_id: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.deleted_users.append(user_id)
+        self.db.tables["accounts"] = [row for row in self.db.tables.get("accounts", []) if row["id"] != user_id]
+
+
+@dataclass
+class FakeAuth:
+    admin: FakeAuthAdmin
+
+
 @dataclass
 class FakeSupabase:
     """Minimal Supabase client backed by per-table row lists."""
 
     tables: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    rpc_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    rpc_results: dict[str, Any] = field(default_factory=dict)
+    auth: FakeAuth = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.auth = FakeAuth(FakeAuthAdmin(self))
 
     def table(self, name: str) -> FakeQuery:
         return FakeQuery(self, name)
+
+    def rpc(self, name: str, params: dict[str, Any]) -> FakeRpc:
+        return FakeRpc(self, name, params)
 
     def row(self, table: str, **match: Any) -> dict[str, Any]:  # noqa: ANN401
         """Return the single row matching every given column."""

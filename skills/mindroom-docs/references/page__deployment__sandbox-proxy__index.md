@@ -182,9 +182,9 @@ Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker v
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
 > Header-only trusted-upstream authentication is still forgeable from the sidecar.
-> Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
+> Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
 
-### Kubernetes dedicated workers (`workerBackend: kubernetes`)
+### Kubernetes dedicated workers (`workers.backend: kubernetes`)
 
 In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand.
 Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service.
@@ -193,32 +193,39 @@ Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
-The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
-The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
+The hosted instance chart refuses this mode, because its tenants share the `mindroom-instances` namespace and a worker manager's Role there would reach every tenant's Deployments and Services.
 
-Use the instance Helm chart with values like:
+Use the runtime Helm chart, in a namespace of its own, with values like:
 
 ```yaml
-workerBackend: kubernetes
-workerCleanupIntervalSeconds: 30
-storageAccessMode: ReadWriteMany
-kubernetesWorkerPort: 8766
-kubernetesWorkerReadyTimeoutSeconds: 60
-kubernetesWorkerIdleTimeoutSeconds: 1800
-sandbox_proxy_token: "replace-me"
+storage:
+  accessModes:
+    - ReadWriteMany
+workers:
+  backend: kubernetes
+  cleanupIntervalSeconds: 30
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+  kubernetes:
+    port: 8766
+    readyTimeoutSeconds: 60
+    idleTimeoutSeconds: 1800
 ```
 
 Important notes for this mode:
 
-- `storageAccessMode` should be `ReadWriteMany` because multiple dedicated workers may need concurrent access to the same agent storage.
-- If you must keep `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
-- `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
+- `storage.accessModes` should be `ReadWriteMany` because multiple dedicated workers may need concurrent access to the same agent storage.
+- If you must keep `ReadWriteOnce`, set `workers.kubernetes.colocateWithControlPlaneNode: true` or `workers.kubernetes.nodeName` so the control plane and dedicated workers stay on the same node.
+- `workers.kubernetes.image` defaults to the main MindRoom image settings when its repository is left empty.
 - The chart creates the worker-manager ServiceAccount, Role, RoleBinding, and worker-specific NetworkPolicy rules automatically when this backend is enabled.
 
-  The runtime and hosted instance charts grant narrow access to one worker-auth Secret in shared runtime namespaces, while explicitly separate runtime worker namespaces may use per-worker auth Secret CRUD.
+  The runtime chart grants narrow access to one worker-auth Secret in its own namespace, while an explicitly separate worker namespace may use per-worker auth Secret CRUD.
 - The primary runtime does not need `MINDROOM_SANDBOX_PROXY_URL` in this mode because worker endpoints come from the Kubernetes worker handles.
 - Dynamic worker pods default to `enableServiceLinks: false` so Kubernetes does not inject sibling Service names into the runner environment.
 - Runner ingress defaults to allowing the MindRoom control-plane pod to reach worker runner ports, while worker-to-worker ingress is denied by NetworkPolicy.
+- Worker pods can reach the primary API over the pod network, so unless the explicit opt-out is configured the runtime chart gives the primary a generated `MINDROOM_API_KEY` that worker pods never receive.
 - The authenticated `/api/workers` and `/api/workers/cleanup` endpoints on the primary runtime expose backend-neutral worker lifecycle information.
 
 Untrusted code-execution tools may still share the runner container's process namespace and may be able to inspect the runner process environment through `/proc` on some container runtimes.
@@ -631,7 +638,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` (a 1 GiB tmpfs on Docker, an `emptyDir` on Kubernetes).
+- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` bounded at 1 GiB: a tmpfs that refuses writes past the limit on Docker, and a disk-backed `emptyDir` whose size limit kubelet enforces by evicting only that worker pod on Kubernetes.
   The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
   Worker tools install their extras into the worker's own virtualenv on the state mount instead.
   Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.
@@ -644,7 +651,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - [Live config snapshots](#live-config-snapshots) and Docker worker config projections carry only the allowlisted fields runners resolve, and runners accept snapshots only on requests authenticated with the sandbox token.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories, never the primary's config, and it does not receive the credentials-encryption key.
-- With `workerBackend: kubernetes` or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
+- With `workers.backend: kubernetes` in the runtime chart or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
   `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
   `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces of `private.per: user` agents, since it shares one runtime across those agents, and never mounts agents on other scopes.
   Sessions, memory, learning, Mem0 data, and private-instance identity records stay with the primary.
@@ -790,7 +797,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-  The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+  The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
   GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
   Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.

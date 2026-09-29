@@ -11,7 +11,7 @@
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
-{{- $generatesApiKey := and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) -}}
+{{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -419,7 +419,7 @@ spec:
           {{- if or $generatesApiKey .Values.env.envFrom }}
           envFrom:
             {{- if $generatesApiKey }}
-            # The sidecar shares this pod's network; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
+            # Worker tool code can reach this API; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
             - secretRef:
                 name: {{ $fullname }}-api-key
             {{- end }}

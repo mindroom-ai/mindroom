@@ -16,6 +16,7 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
 
 The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
+The dashboard and API are fully privileged, so the chart gives the primary a generated `MINDROOM_API_KEY`, and the install notes show how to read it.
 
 ## Rollout Progress Deadline
 
@@ -347,7 +348,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   allowlist:
     domains:
       - example.com
@@ -383,7 +384,7 @@ workers:
 approvedEgress:
   enabled: true
   image:
-    tag: v0.1.0
+    tag: v0.1.10
   parentProxy:
     enabled: true
     host: agent-vault
@@ -625,15 +626,15 @@ workers:
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
+- Worker tool code can reach the primary API, on `localhost` from the `static_runner` sidecar or over the pod network from dedicated Kubernetes workers, so the chart gives the primary a generated `MINDROOM_API_KEY` from the `<fullname>-api-key` Secret for either backend, and the dashboard and API then require it.
+  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` takes precedence, which GitOps and `helm template` workflows should use because the generated key changes on every offline render.
+  `apiAuth.allowUnauthenticatedPrimary: true` removes the key and is unsafe unless other primary API authentication is configured.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
   The sidecar never receives the credentials encryption key, and saved settings for each proxied tool reach it as per-call leases from the primary.
   From the storage PVC it mounts only the `agents` and `private_instances` directories read-write over its own `sandbox-runner` directory, so agent workspaces persist while the credential store, Matrix state, and the primary's config stay out of reach.
   It mounts neither the config ConfigMap nor a file-sourced config; each request carries the allowlisted config fields the runner resolves.
   An init container creates those directories as the runtime user.
-  The sidecar shares the pod network namespace, so the chart gives the primary a generated `MINDROOM_API_KEY` from the `<fullname>-api-key` Secret, and the dashboard and API then require it; the install notes show how to read it.
-  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` takes precedence, which GitOps and `helm template` workflows should use because the generated key changes on every offline render.
-  `apiAuth.allowUnauthenticatedPrimary: true` removes the key and is unsafe unless other primary API authentication is configured.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.

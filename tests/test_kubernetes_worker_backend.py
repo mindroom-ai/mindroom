@@ -1014,6 +1014,24 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
 
 
+def test_kubernetes_worker_tmp_has_an_eviction_size_limit(tmp_path: Path) -> None:
+    """Tool code writing past 1 GiB to /tmp gets its own pod evicted instead of filling the node's ephemeral storage."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["worker-tmp"] == {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}}
+    assert {"name": "worker-tmp", "mountPath": "/tmp"} in pod_spec["containers"][0]["volumeMounts"]  # noqa: S108
+    assert pod_spec["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+
+
 def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
     """A browser-compatible Localhost profile must not broaden pod-level or helper-container policy."""
     profile: _WorkerSeccompProfile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
@@ -1762,7 +1780,7 @@ def test_kubernetes_worker_never_receives_the_primary_config(tmp_path: Path, con
     )
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
-        {"name": "worker-tmp", "emptyDir": {}},
+        {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}},
     ]
     committed_runtime = deserialize_runtime_paths(
         _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],

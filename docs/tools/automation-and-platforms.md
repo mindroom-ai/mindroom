@@ -244,7 +244,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
-| `verify_ssl` | `boolean` | `no` | `false` | Verify Daytona SSL certificates. The default `false` path monkey-patches the Daytona client to disable SSL verification warnings and checks. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify Daytona TLS certificates. Setting `false` monkey-patches the Daytona client for the whole process, until it restarts, to disable certificate checks and their warnings. |
 | `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across calls in the current agent session; use `sandbox_id` for cross-session reuse. |
 | `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
 | `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
@@ -274,7 +274,8 @@ create_file("main.py", "print('ok')")
 ### Notes
 
 - `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
-- `verify_ssl: false` is not a cosmetic flag here, because the current implementation actively patches the Daytona client to skip certificate verification.
+- `verify_ssl: false` is not a cosmetic flag here, because the upstream toolkit patches the Daytona client to skip certificate verification for every Daytona tool in the process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection; set it only for a self-hosted Daytona API with a certificate you cannot otherwise trust.
+- The dashboard used to save `verify_ssl: false` with every Daytona setup because that was the default, so the first start after upgrading drops a saved `false` once and logs a warning; save it again only if you need it.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 
 ## [`composio`]
@@ -344,6 +345,12 @@ Localhost, loopback, private-network, metadata-service, and non-HTTP(S) destinat
 If both `username` and `password` are nonempty, the request uses HTTP Basic Auth.
 If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
 Per-call headers are merged on top of configured default headers.
+Configured credentials, meaning `api_key`, a `username` / `password` pair, or `headers`, are only sent to the `base_url` origin.
+Without `base_url`, a call on a tool with configured credentials returns an error and sends nothing, so the model cannot choose where they go.
+Redirects are followed, but a hop to another scheme, host, or port drops the configured headers and `Authorization`, except a direct upgrade from `http` to `https` on the same host, matching how HTTPX already treats `Authorization`.
+With configured credentials, a per-call `Host` header is dropped, so only `base_url` chooses the virtual host that receives them.
+Up to 10 redirects are followed, and their bodies are never read.
+The tool asks for an uncompressed body (`Accept-Encoding: identity`, replacing any per-call value) and reads at most 8 MiB of it; a larger body, or one a server compressed with `gzip`, `x-gzip`, `deflate`, `br`, or `zstd` anyway, returns `status_code`, `headers`, and an `error` instead of `data`.
 The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
 Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
 
@@ -351,7 +358,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. |
+| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. Required for `api_key`, `username` / `password`, and `headers`. |
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
@@ -381,7 +388,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 ### Notes
 
-- If `base_url` is omitted, `endpoint` must be a full URL.
+- If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
 - `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 

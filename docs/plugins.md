@@ -329,7 +329,7 @@ Function names are prefixed, such as `secondary_get_latest_emails` and `secondar
 Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
 
 Add more workspace definitions with distinct names and client services as needed.
-Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
 Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
 Keep workspace names stable because they identify stored connections.
 
@@ -525,6 +525,7 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
 | `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
+| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's resolved state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 Example:
 

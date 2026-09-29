@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 
 from mindroom import constants
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 console = Console()
+# Warnings go to stderr so `config init --print` output stays valid YAML.
+_err_console = Console(stderr=True)
 
 config_app = typer.Typer(
     name="config",
@@ -141,11 +144,24 @@ _FIRST_RUN_PROVIDER_STEPS: dict[_ProviderPreset, str] = {
 
 
 def _config_init_owner_user_id(config_path: Path) -> str | None:
-    """Return the paired owner MXID available to config init, if one was persisted."""
+    """Return the paired owner MXID available to config init, warning when a persisted one cannot be used."""
     from mindroom.cli.owner import parse_owner_matrix_user_id  # noqa: PLC0415
 
     runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-    return parse_owner_matrix_user_id(runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV))
+    raw_owner_user_id = (runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV) or "").strip()
+    owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
+    if raw_owner_user_id and owner_user_id is None:
+        source = (
+            "the environment"
+            if constants.OWNER_MATRIX_USER_ID_ENV in runtime_paths.process_env
+            else str(runtime_paths.env_path)
+        )
+        _err_console.print(
+            f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(source)} "
+            f"is not a valid Matrix user ID ({escape(repr(raw_owner_user_id))}), "
+            "so the owner placeholders in config.yaml were left for you to replace.",
+        )
+    return owner_user_id
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
@@ -207,6 +223,21 @@ def _write_env_file(
             _PUBLIC_HOSTED_ENV_DEFAULTS,
             title="Hosted Matrix defaults for mindroom.chat",
         )
+        if changed:
+            console.print(f"[green]Env file updated:[/green] {env_path}")
+        # `mindroom run` serves the dashboard on every interface by default, so a kept
+        # .env without a dashboard key gets one; an explicitly empty key stays empty.
+        if _append_missing_env_defaults(
+            env_path,
+            (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
+            title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
+        ):
+            # A service already running without a key reads .env only at startup.
+            console.print(
+                f"[green]Generated MINDROOM_API_KEY in {env_path}[/green]; "
+                "restart MindRoom if it is already running to apply it.",
+            )
+            changed = True
         if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
             upsert_env_values(env_path, {env_key: provider_api_key})
             console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
@@ -242,7 +273,6 @@ def _append_missing_env_defaults(
     appended_lines = [f"# {title}", *(f"{key}={value}" for key, value in missing_defaults)]
     appended_content = "\n".join(appended_lines)
     write_private_env_text(env_path, f"{current_content}{separator}{appended_content}\n")
-    console.print(f"[green]Env file updated:[/green] {env_path}")
     return True
 
 
@@ -1217,7 +1247,7 @@ def _env_template(
 
     Generates a random dashboard API key.
     """
-    api_key = secrets.token_urlsafe(32)
+    api_key = _new_dashboard_api_key()
     if matrix_server == "mindroom.chat":
         matrix_homeserver = "https://mindroom.chat"
         extra_matrix = (
@@ -1252,10 +1282,9 @@ MATRIX_HOMESERVER={matrix_homeserver}
 {storage_root_block}{provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
-# When set, all dashboard requests require: Authorization: Bearer <key>
-# The auth header is injected at the proxy layer (nginx / Vite dev server),
-# so the key never appears in the browser JS bundle.
-# Remove or comment out to allow open access (fine for localhost).
+# The bundled dashboard's login page asks for it; API clients send `Authorization: Bearer <key>`.
+# Set it empty (MINDROOM_API_KEY=) to allow open access; `mindroom run` listens on
+# every interface by default, so do that only with `--api-host 127.0.0.1`.
 MINDROOM_API_KEY={api_key}
 
 # OpenAI-compatible API authentication (separate from dashboard auth)
@@ -1265,6 +1294,11 @@ MINDROOM_API_KEY={api_key}
 # MindRoom port (default 8765)
 # MINDROOM_PORT=8765
 """
+
+
+def _new_dashboard_api_key() -> str:
+    """Return a random MINDROOM_API_KEY for a new or kept `.env`."""
+    return secrets.token_urlsafe(32)
 
 
 def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:

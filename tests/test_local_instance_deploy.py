@@ -5,17 +5,22 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _REAL_SUBPROCESS_RUN = subprocess.run
 _SANDBOX_SERVICES = {"sandbox-runner", "sandbox-relay"}
@@ -527,13 +532,14 @@ def test_telegram_bridge_compose_renders_configured_image(
 
     assert telegram_template["image"] == expected_image
 
-    compose_path = bridge_manager._create_bridge_docker_compose(bridge, telegram_template)
+    compose_path = bridge_manager._create_bridge_docker_compose(bridge, telegram_template, {})
     compose = yaml.safe_load(compose_path.read_text())
     assert compose["services"]["telegram"]["image"] == expected_image
 
     compose_path = bridge_manager._create_bridge_docker_compose(
         bridge,
         {"image": "registry.example/telegram:compatible"},
+        {},
     )
 
     overridden_compose = yaml.safe_load(compose_path.read_text())
@@ -1503,13 +1509,15 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
-    """Older instances gain runtime secrets before Compose runs, while their datastores keep their credentials."""
+    """Older instances gain runtime secrets and an owner-only homeserver.yaml, keeping their datastore credentials."""
     instance, _users_file, commands, console = authelia_launch
     instance.auth_type = None
     instance.matrix_type = deploy.MatrixType.SYNAPSE
     homeserver = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
     homeserver.parent.mkdir(parents=True)
     homeserver.write_text("database:\n  args:\n    password: synapse_password\n")
+    homeserver.chmod(0o644)
+    monkeypatch.setattr(deploy.os, "chown", lambda *_args: None)
     env_file = _write_older_env_file(instance)
     older_env = env_file.read_text()
     env_at_launch: dict[str, str] = {}
@@ -1529,7 +1537,155 @@ def test_launch_upgrades_older_synapse_env_without_changing_datastore_passwords(
     assert env_at_launch["POSTGRES_PASSWORD"] == "synapse_password"  # noqa: S105
     assert "REDIS_PASSWORD" not in env_at_launch
     assert homeserver.read_text() == "database:\n  args:\n    password: synapse_password\n"
+    assert _mode(homeserver) == 0o600
     assert set(_launched_services(commands)) >= _SANDBOX_SERVICES
     text = normalize_console_output(console.export_text())
     assert "Added MINDROOM_API_KEY, MINDROOM_SANDBOX_PROXY_TOKEN to" in text
     assert "Dashboard API key: MINDROOM_API_KEY in envs/alpha.env" in text
+
+
+@pytest.fixture
+def world_readable_umask() -> Iterator[None]:
+    """Create files the way a default shell does, so only explicit modes keep secrets private."""
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_instance_env_file_and_synapse_config_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider keys, datastore passwords, and the macaroon key must not be readable by other local accounts."""
+    template = tmp_path / ".env.template"
+    template.write_text("OPENAI_API_KEY=\n")
+    template.chmod(0o644)
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", template)
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+
+    deploy._create_environment_file(instance, "alpha", deploy.MatrixType.SYNAPSE)
+    deploy._setup_synapse_config(instance)
+
+    homeserver = Path(instance.data_dir) / "synapse" / "homeserver.yaml"
+    assert _mode(tmp_path / "envs") == 0o700
+    assert _mode(tmp_path / "envs" / "alpha.env") == 0o600
+    assert (tmp_path / "envs" / "alpha.env").read_text().startswith("OPENAI_API_KEY=\n")
+    assert _mode(homeserver) == 0o600
+    assert "macaroon_secret_key" in homeserver.read_text()
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_launch_tightens_an_existing_world_readable_env_file(tmp_path: Path) -> None:
+    """Env files written by older versions become owner-only the next time secrets are checked."""
+    env_file = tmp_path / "alpha.env"
+    env_file.write_text("MINDROOM_API_KEY=existing\n")
+    env_file.chmod(0o644)
+
+    assert deploy._ensure_env_secrets(env_file, ("MINDROOM_API_KEY",)) == []
+    assert _mode(env_file) == 0o600
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credential copies and their directory stay private, including copies left world-readable by older versions."""
+    source_dir = tmp_path / "home" / ".mindroom" / "credentials"
+    source_dir.mkdir(parents=True)
+    for name in ("openai.json", "google_oauth.json"):
+        (source_dir / name).write_text('{"api_key": "secret"}')
+        (source_dir / name).chmod(0o600)
+    monkeypatch.setattr(deploy.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(deploy, "REPO_ROOT", tmp_path / "repo-root")
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+    target_dir.mkdir(parents=True)
+    target_dir.chmod(0o755)
+    (target_dir / "openai.json").write_text('{"api_key": "secret"}')
+    (target_dir / "openai.json").chmod(0o644)
+    monkeypatch.setattr(deploy.os, "chown", lambda *_args: None)
+
+    deploy._create_instance_directories(instance)
+
+    assert _mode(target_dir) == 0o700
+    assert {path.name: _mode(path) for path in target_dir.iterdir()} == {
+        "openai.json": 0o600,
+        "google_oauth.json": 0o600,
+    }
+
+
+def _operator_in_group_100(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+    """Fake chown for an operator whose primary group is 100, like NixOS users, so any group change fails."""
+    calls: list[tuple[object, ...]] = []
+
+    def _chown(path: object, uid: int, gid: int) -> None:
+        calls.append((path, uid, gid))
+        if gid not in (-1, 100):
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(deploy.os, "chown", _chown)
+    return calls
+
+
+def test_secret_file_goes_to_the_container_uid_without_changing_its_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator outside group 1000 can still hand a file to the container user and make it owner-only."""
+    homeserver = tmp_path / "homeserver.yaml"
+    homeserver.write_text("macaroon_secret_key: secret\n")
+    homeserver.chmod(0o644)
+    console = Console(record=True, width=400)
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._protect_synapse_config(homeserver)
+
+    assert calls == [(homeserver, os.getuid() + 1, -1)]
+    assert _mode(homeserver) == 0o600
+    assert console.export_text() == ""
+
+
+def test_secret_file_already_owned_by_the_container_uid_is_not_chowned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator running as the container user needs no ownership change and gets no warning."""
+    homeserver = tmp_path / "homeserver.yaml"
+    homeserver.write_text("macaroon_secret_key: secret\n")
+    homeserver.chmod(0o644)
+    console = Console(record=True, width=400)
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid())
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._protect_synapse_config(homeserver)
+
+    assert calls == []
+    assert _mode(homeserver) == 0o600
+    assert console.export_text() == ""
+
+
+def test_unrestrictable_secret_file_prints_the_exact_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how."""
+    homeserver = tmp_path / "synapse dir" / "homeserver.yaml"
+    homeserver.parent.mkdir()
+    homeserver.write_text("macaroon_secret_key: secret\n")
+    homeserver.chmod(0o644)
+    console = Console(record=True, width=400)
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+
+    def _refuse_chown(*_args: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(deploy.os, "chown", _refuse_chown)
+
+    deploy._protect_synapse_config(homeserver)
+
+    assert f"sudo chown {os.getuid() + 1} {shlex.quote(str(homeserver))}" in console.export_text()
+    assert _mode(homeserver) == 0o600

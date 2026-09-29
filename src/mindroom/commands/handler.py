@@ -477,8 +477,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     room_id=room.room_id,
                     thread_id=effective_thread_id,
                     config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
                     new_value=change_info["new_value"],
+                    new_value_withheld=change_info["new_value_withheld"],
                     requester=resolved_requester_user_id,
                 )
 

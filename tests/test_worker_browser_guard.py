@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import shutil
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -32,50 +31,46 @@ def _verification_reader(verifier: BrowserURLVerifier) -> asyncio.StreamReader:
     return reader
 
 
+def _verification_reader_for(verifier: BrowserURLVerifier, url: str) -> asyncio.StreamReader:
+    body = json.dumps({"url": url}).encode()
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        (
+            "POST /verify HTTP/1.1\r\n"
+            f"Authorization: Bearer {verifier.token}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n"
+        ).encode()
+        + body,
+    )
+    return reader
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("late_error", [False, True])
-async def test_cancelled_request_retains_validation_capacity(
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("https://unresolvable.example/", True),
+        ("http://127.0.0.1/admin", False),
+        ("http://metadata.google.internal/", False),
+        ("file:///etc/passwd", False),
+    ],
+)
+async def test_verifier_checks_urls_without_dns_lookups(
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    late_error: bool,
+    url: str,
+    allowed: bool,
 ) -> None:
-    """A timed-out waiter cannot free capacity while its validation still runs."""
-    entered = asyncio.Event()
-    release = threading.Event()
-    loop = asyncio.get_running_loop()
-    calls = 0
+    """The relay validates every dialed address, so the page-request callback never waits on a resolver."""
 
-    def validate(url: str, *, allow_private_networks: bool, allow_loopback: bool) -> str:
-        nonlocal calls
-        assert not allow_private_networks
-        assert not allow_loopback
-        calls += 1
-        if calls == 1:
-            loop.call_soon_threadsafe(entered.set)
-            assert release.wait(5)
-            if late_error:
-                msg = "fixture validation failed after waiter cancellation"
-                raise RuntimeError(msg)
-        return url
+    def no_dns(*_args: object, **_kwargs: object) -> None:
+        msg = "the URL verifier must not resolve hostnames"
+        raise AssertionError(msg)
 
-    monkeypatch.setattr(browser_guard, "validate_browser_fetch_url", validate)
-    monkeypatch.setattr(browser_guard, "_MAX_CONNECTIONS", 1)
+    monkeypatch.setattr("socket.getaddrinfo", no_dns)
     verifier = BrowserURLVerifier()
-    request = asyncio.create_task(verifier._verify_request(_verification_reader(verifier)))
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        request.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request
-        await verifier.close()
-        assert await verifier._verify_request(_verification_reader(verifier)) == (503, False)
-        assert calls == 1
-    finally:
-        release.set()
-        request.cancel()
-        await asyncio.gather(request, *getattr(verifier, "_validations", ()), return_exceptions=True)
-        await verifier.close()
-    assert await verifier._verify_request(_verification_reader(verifier)) == (200, True)
+
+    assert await verifier._verify_request(_verification_reader_for(verifier, url)) == (200, allowed)
 
 
 @pytest.mark.asyncio

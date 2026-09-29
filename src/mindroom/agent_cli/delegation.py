@@ -83,6 +83,10 @@ async def advance_cli_delegation(
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
+    if decisions is None:
+        # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
+        # chooses; a fresh call therefore never inherits an approval saved under the same ID.
+        state.gates.pop(str(tool.tool_call_id), None)
     persist = partial(persist_delegation_state, catalog.agent, response)
 
     # Same mutation/authorization owner as ordinary prepared dispatch. No parent

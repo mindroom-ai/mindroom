@@ -269,7 +269,7 @@ async def _append_response_events(
                 data={"content": response.content},
             ),
         )
-    usage = response.metrics.to_dict() if response.metrics is not None else None
+    usage = child_response_usage(response)
     if usage:
         await owner.append_event(
             handle,
@@ -280,6 +280,11 @@ async def _append_response_events(
             ),
         )
     return usage, pending_approval
+
+
+def child_response_usage(response: RunOutput) -> dict[str, object] | None:
+    """Return the usage one child attempt reports."""
+    return response.metrics.to_dict() if response.metrics is not None else None
 
 
 async def finish_child_record(

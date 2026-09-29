@@ -6,9 +6,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
@@ -36,7 +34,11 @@ if TYPE_CHECKING:
 
 
 def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
-    """Return a dispatchable fallback when voice normalization itself fails."""
+    """Return a dispatchable fallback when voice normalization itself fails.
+
+    It registers no audio attachment, and the voice lane trusts its metadata, so it
+    carries no attachment IDs: those in the sender's own event are not MindRoom's.
+    """
     body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     source = dict(event.source) if isinstance(event.source, dict) else {}
     source_content = source.get("content")
@@ -51,9 +53,6 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
     inherited_mentions = original_content.get("m.mentions")
     if isinstance(inherited_mentions, dict):
         content["m.mentions"] = inherited_mentions
-    attachment_ids = parse_attachment_ids_from_event_source(source)
-    if attachment_ids:
-        content[ATTACHMENT_IDS_KEY] = attachment_ids
     inherited_relation = original_content.get("m.relates_to")
     if isinstance(inherited_relation, dict):
         content["m.relates_to"] = inherited_relation

@@ -32,12 +32,25 @@ _METADATA_HOSTNAME_SUFFIXES = (
     ".metadata.google.internal",
     ".metadata.goog",
 )
+# Cloud metadata, host agent, and workload credential endpoints stay blocked even when private networks are allowed.
 _METADATA_IP_ADDRESSES = frozenset(
     {
+        # AWS, Azure, GCP, and most other clouds: instance metadata.
         ipaddress.ip_address("169.254.169.254"),
+        # AWS ECS task metadata and credentials.
         ipaddress.ip_address("169.254.170.2"),
+        # Alibaba Cloud instance metadata.
         ipaddress.ip_address("100.100.100.200"),
+        # Azure WireServer host agent, which is on public address space.
+        ipaddress.ip_address("168.63.129.16"),
+        # AWS instance metadata over IPv6.
         ipaddress.ip_address("fd00:ec2::254"),
+        # AWS EKS Pod Identity Agent credentials over IPv6.
+        ipaddress.ip_address("fd00:ec2::23"),
+        # GCP instance metadata over IPv6.
+        ipaddress.ip_address("fd20:ce::254"),
+        # Oracle Cloud Infrastructure instance metadata over IPv6.
+        ipaddress.ip_address("fd00:c1::a9fe:a9fe"),
     },
 )
 _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -266,12 +279,16 @@ def validate_server_fetch_url(
     *,
     allow_private_networks: bool = False,
     allow_loopback: bool = False,
+    resolve_hostnames: bool = True,
 ) -> str:
-    """Validate that a URL is safe for a server-side HTTP(S) request."""
+    """Validate that a URL is safe for a server-side HTTP(S) request.
+
+    Callers that validate the dialed address at connect time may skip hostname resolution here.
+    """
     return _validate_server_fetch_url(
         url,
         allow_private_networks=allow_private_networks,
-        resolve_hostnames=True,
+        resolve_hostnames=resolve_hostnames,
         allow_loopback=allow_loopback,
     )
 

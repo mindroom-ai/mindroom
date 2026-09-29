@@ -76,6 +76,16 @@ _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 _MAX_PARAMETER_LENGTHS = {"text": 2_000, "value": 2_000, "path": 4_096, "cwd": 4_096, "command": 8_192}
 
 
+def _response_metrics(*, elapsed_ms: int, structured_bytes: int, screenshot_bytes: int) -> dict[str, int]:
+    """Build the metrics every executed reply carries."""
+    return {"elapsed_ms": elapsed_ms, "structured_bytes": structured_bytes, "screenshot_bytes": screenshot_bytes}
+
+
+# Replies are fitted before their metrics are known, so fitting reserves the widest value of each metric;
+# JSON consumers hold integers exactly only up to 2**53 - 1.
+_WIDEST_METRICS = _response_metrics(elapsed_ms=2**53 - 1, structured_bytes=2**53 - 1, screenshot_bytes=2**53 - 1)
+
+
 async def _run_macos_application_events() -> None:
     """Refresh AppKit's application cache while asyncio owns the main thread."""
     if sys.platform != "darwin":
@@ -334,11 +344,11 @@ class DesktopBridge:
                         response,
                         result={
                             **response.result,
-                            "metrics": {
-                                "elapsed_ms": max(0, round((self.monotonic_clock() - started_at) * 1000)),
-                                "structured_bytes": len(json.dumps(response.result, ensure_ascii=False).encode()),
-                                "screenshot_bytes": response.screenshot.size if response.screenshot is not None else 0,
-                            },
+                            "metrics": _response_metrics(
+                                elapsed_ms=max(0, round((self.monotonic_clock() - started_at) * 1000)),
+                                structured_bytes=len(json.dumps(response.result, ensure_ascii=False).encode()),
+                                screenshot_bytes=response.screenshot.size if response.screenshot is not None else 0,
+                            ),
                         },
                     )
                     self._journal.remember_response(command, entry.command_fingerprint, response)
@@ -421,7 +431,7 @@ class DesktopBridge:
         return {
             **self._bridge_status(),
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
+            "gui_mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
@@ -433,7 +443,7 @@ class DesktopBridge:
             return {
                 "enabled": False,
                 "pending": None,
-                "auto_approve_remaining_seconds": 0.0,
+                "auto_approve_remaining_seconds": 0,
                 "auto_approve_until_revoked": False,
                 "active_request_id": None,
                 "handles": [],
@@ -482,7 +492,7 @@ class DesktopBridge:
         return self.local_status()
 
     def kill_local_shell_handle(self, handle: str) -> dict[str, object]:
-        """Kill any caller's handle from the local management channel."""
+        """Kill any caller's handle from the local management channel; its owner's check reports it killed."""
         self._enabled_shell().kill_handle(handle)
         return self.local_status()
 
@@ -916,14 +926,13 @@ class DesktopBridge:
                 ),
             )
         _reject_unexpected_parameters(parameters, allowed=frozenset({"root_id", "path", "offset"}))
-        return _Execution(
-            await asyncio.to_thread(
-                files.read_file,
-                _required_str_parameter(parameters, "root_id"),
-                _required_str_parameter(parameters, "path"),
-                _optional_int_parameter(parameters, "offset") or 0,
-            ),
+        read = await asyncio.to_thread(
+            files.read_file,
+            _required_str_parameter(parameters, "root_id"),
+            _required_str_parameter(parameters, "path"),
+            _optional_int_parameter(parameters, "offset") or 0,
         )
+        return _Execution(self._fit_file_read(command, read))
 
     async def _execute_shell(self, command: DesktopCommand) -> _Execution:
         """Start a command only after local approval, or read or stop one of the caller's own handles."""
@@ -933,11 +942,11 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
         parameters = command.parameters
         if command.action == "check_shell":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle"}))
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
             handle = _required_str_parameter(parameters, "handle")
-            return _Execution(
-                await self._shell_result(command, shell.check(command.requester_id, command.agent_name, handle)),
-            )
+            offset = _optional_int_parameter(parameters, "offset")
+            result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
+            return _Execution(await self._shell_result(command, shell, result, offset=offset))
         if command.action == "kill_shell":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
             handle = _required_str_parameter(parameters, "handle")
@@ -956,10 +965,21 @@ class DesktopBridge:
             expires_at_ms=command.expires_at_ms,
             timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         )
-        return _Execution(await self._shell_result(command, await shell.execute(request)))
+        return _Execution(await self._shell_result(command, shell, await shell.execute(request)))
 
-    async def _shell_result(self, command: DesktopCommand, result: DesktopShellResult) -> dict[str, object]:
-        """Reply inline when the encrypted response fits one to-device message, otherwise attach the full output."""
+    async def _shell_result(
+        self,
+        command: DesktopCommand,
+        shell: DesktopShell,
+        result: DesktopShellResult,
+        *,
+        offset: int | None = None,
+    ) -> dict[str, object]:
+        """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
+
+        Output starts at byte ``offset``; without one, a running command shows its newest output. The returned
+        output covers ``[output_start, next_offset)``, and the next check continues from ``next_offset``.
+        """
         output = result.output
         size = output.size
         payload: dict[str, object] = {
@@ -970,40 +990,77 @@ class DesktopBridge:
             "output_bytes": size,
             "output_truncated": output.truncated,
             "output_attachment": None,
+            "output_start": offset or 0,
+            "next_offset": size,
         }
         if result.state == "running":
-            return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), size=size)
+            if offset is None:
+                return self._fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
+            head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
+            return self._fit_output_head(command, payload, head, offset=offset, requested=size - offset)
         try:
-            content = output.read()
-            # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
-            if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-                inline = {**payload, "output": content.decode()}
-                if self._success_response(command, result=inline).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
-                    return inline
-            try:
-                media = await upload_encrypted_media(
-                    self.client,
-                    content,
-                    mime_type=SHELL_OUTPUT_MIME_TYPE,
-                    filename=f"shell-{command.request_id}.txt",
-                    timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
-                )
-            except DesktopMediaError as exc:
-                error = str(exc)
-            except Exception:
-                logger.exception("shell_output_upload_failed", request_id=command.request_id)
-                error = "Shell output upload failed."
-            else:
-                return {**payload, "output_attachment": media.to_content()}
-            warning = f"The full output could not be attached ({error[:_MAX_WARNING_DETAIL]}); only its end is shown."
-            return self._fit_output_tail(
-                command,
-                {**payload, "warning": warning},
-                content[-MAX_INLINE_RESPONSE_BYTES:],
-                size=size,
+            return await self._finished_shell_result(command, shell, result, payload, offset or 0)
+        except BaseException:
+            if command.action == "run_shell":
+                # The caller never learned this handle, so nothing could page from it.
+                shell.hand_over(result)
+            raise
+
+    async def _finished_shell_result(
+        self,
+        command: DesktopCommand,
+        shell: DesktopShell,
+        result: DesktopShellResult,
+        payload: dict[str, object],
+        start: int,
+    ) -> dict[str, object]:
+        """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
+        content = result.output.read(start)
+        # A run_shell reply names its handle only while that handle stays to page from.
+        delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
+        # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
+        if len(content) <= MAX_INLINE_RESPONSE_BYTES:
+            inline = {**delivered, "output": content.decode()}
+            if self._fits_inline(command, inline):
+                shell.hand_over(result)
+                return inline
+        try:
+            media = await upload_encrypted_media(
+                self.client,
+                content,
+                mime_type=SHELL_OUTPUT_MIME_TYPE,
+                filename=f"shell-{command.request_id}.txt",
+                timeout_seconds=_MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
-        finally:
-            output.release()
+        except DesktopMediaError as exc:
+            error = str(exc)
+        except Exception:
+            logger.exception("shell_output_upload_failed", request_id=command.request_id)
+            error = "Shell output upload failed."
+        else:
+            shell.hand_over(result)
+            return {**delivered, "output_attachment": media.to_content()}
+        detail = error[:_MAX_WARNING_DETAIL]
+        if result.handle is None:
+            # Revocation raced this command's registration, so there is no handle to page from.
+            shell.hand_over(result)
+            warning = (
+                f"The output could not be attached ({detail}); only its beginning is shown and the rest is not "
+                "kept. Do not run the command again automatically."
+            )
+        else:
+            warning = (
+                f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
+                "Continue with check_shell from next_offset."
+            )
+        head = content[:MAX_INLINE_RESPONSE_BYTES]
+        return self._fit_output_head(
+            command,
+            {**payload, "warning": warning},
+            head,
+            offset=start,
+            requested=len(content),
+        )
 
     def _leftmost_fitting(
         self,
@@ -1014,17 +1071,21 @@ class DesktopBridge:
     ) -> int:
         """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
 
-        Shared by every trimmed reply (shell output, listings, status), all measured the same way:
-        ``self._success_response(command, result=build(x)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES``.
+        Shared by every trimmed reply (shell output, listings, status), all measured by ``_fits_inline``.
         Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
         """
         while low < high:
             middle = (low + high) // 2
-            if self._success_response(command, result=build(middle)).content_bytes() <= MAX_INLINE_RESPONSE_BYTES:
+            if self._fits_inline(command, build(middle)):
                 high = middle
             else:
                 low = middle + 1
         return low
+
+    def _fits_inline(self, command: DesktopCommand, result: dict[str, object]) -> bool:
+        """Report whether ``result`` fits one to-device reply once execution adds its metrics."""
+        reply = self._success_response(command, result={**result, "metrics": _WIDEST_METRICS})
+        return reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
 
     def _fit_output_tail(
         self,
@@ -1032,19 +1093,44 @@ class DesktopBridge:
         payload: dict[str, object],
         tail: bytes,
         *,
-        size: int,
+        requested: int,
     ) -> dict[str, object]:
         """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
         text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
 
         def reply(start: int) -> dict[str, object]:
             shown = text[start:]
-            truncated = bool(payload["output_truncated"]) or len(shown.encode()) < size
-            return {**payload, "output": shown, "output_truncated": truncated}
+            shown_bytes = len(shown.encode())
+            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
+            output_start = cast("int", payload["next_offset"]) - shown_bytes
+            return {**payload, "output": shown, "output_truncated": truncated, "output_start": output_start}
 
         # Dropping older characters never grows the reply, so search for the fewest to drop.
         start = self._leftmost_fitting(command, 0, len(text), reply)
         return reply(start)
+
+    def _fit_output_head(
+        self,
+        command: DesktopCommand,
+        payload: dict[str, object],
+        head: bytes,
+        *,
+        offset: int,
+        requested: int,
+    ) -> dict[str, object]:
+        """Show the oldest output from ``offset`` whose escaped reply still fits inline, and where to continue."""
+        # The offset starts a character, so only the last one can be cut; ``next_offset`` then points at it.
+        text = head.decode(errors="ignore")
+
+        def reply(dropped: int) -> dict[str, object]:
+            shown = text[: len(text) - dropped]
+            shown_bytes = len(shown.encode())
+            truncated = bool(payload["output_truncated"]) or shown_bytes < requested
+            return {**payload, "output": shown, "output_truncated": truncated, "next_offset": offset + shown_bytes}
+
+        # Dropping newer characters never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, len(text), reply)
+        return reply(dropped)
 
     def _fit_listing(
         self,
@@ -1063,6 +1149,21 @@ class DesktopBridge:
 
         # Dropping later entries never grows the reply, so search for the fewest to drop.
         dropped = self._leftmost_fitting(command, 0, total, reply)
+        return reply(dropped)
+
+    def _fit_file_read(self, command: DesktopCommand, read: dict[str, object]) -> dict[str, object]:
+        """Keep the longest prefix of a file read whose escaped reply fits inline; the next read starts after it."""
+        text = cast("str", read["text"])
+        offset = cast("int", read["offset"])
+
+        def reply(dropped: int) -> dict[str, object]:
+            if not dropped:
+                return read
+            shown = text[: len(text) - dropped]
+            return {**read, "text": shown, "next_offset": offset + len(shown.encode()), "eof": False, "truncated": True}
+
+        # Dropping later characters never grows the reply, so search for the fewest to drop.
+        dropped = self._leftmost_fitting(command, 0, len(text), reply)
         return reply(dropped)
 
     def _fit_status(
@@ -1249,10 +1350,13 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
 
     def _bridge_status(self) -> dict[str, object]:
-        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not)."""
+        """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not).
+
+        ``gui_mode`` describes only application control; folders and shell access are reported separately.
+        """
         control_available = self._control_available()
         status: dict[str, object] = {
-            "mode": "control" if control_available else "observe_only",
+            "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
             "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),

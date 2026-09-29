@@ -48,6 +48,7 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
         "google_drive",
         "google_gmail",
         "google_sheets",
+        "google_tasks",
         "gmail",
         "homeassistant",
     },

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.worker_computer.browser_proxy import browser_upstream_proxy_url
+from mindroom.worker_computer.browser_proxy import browser_egress
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 
 if TYPE_CHECKING:
@@ -63,7 +63,8 @@ class BrowserMCPTools(Toolkit):
             storage_root=self._runtime_paths.storage_root,
             allow_private_networks=self._allow_private_networks,
             allow_loopback=True,
-            upstream_proxy_url=browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ),
+            # The Computer browser runs in a dedicated worker, where the egress proxy may enforce approved egress.
+            egress=browser_egress(self._runtime_paths.process_env, os.environ, egress_control=True),
         )
         return f"browser_mcp:{self._allow_private_networks}"
 

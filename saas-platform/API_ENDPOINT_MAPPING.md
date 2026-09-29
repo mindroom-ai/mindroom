@@ -78,7 +78,7 @@ These operations are for provisioner clients and have no direct platform fronten
 | DELETE | `/system/instances/{instance_id}/uninstall` | `provisioner.py` | Uninstall an instance |
 | POST | `/system/sync-instances` | `provisioner.py` | Synchronize Kubernetes and database state |
 
-Admin lifecycle routes verify the Supabase user and `accounts.is_admin` through `verify_admin`, call `backend/services/provisioner_service.py` directly, and record the action in the audit log.
+Admin lifecycle routes verify the Supabase user, `accounts.is_admin`, and an active account through `verify_admin`, call `backend/services/provisioner_service.py` directly, and record the action in the audit log.
 System routes separately validate the provisioner bearer key before calling that same service.
 There is no admin-to-system HTTP proxy hop.
 The shared service owns the Kubernetes and Helm lifecycle work.
@@ -96,6 +96,13 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 | POST | `/my/gdpr/request-deletion` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: request account deletion |
 | POST | `/my/gdpr/cancel-deletion` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: cancel deletion |
 | POST | `/my/gdpr/consent` | `gdpr.py` | `src/lib/api.ts` → `src/app/dashboard/settings/page.tsx`: consent preferences |
+
+User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
+`GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion (`status` `deleted` with `deleted_at` set) can still see, export, and cancel it; every other inactive account stays rejected there too.
+Suspending an account blocks its platform API calls and new instance and Matrix sign-ins, but its running instances and existing instance and Matrix sessions continue, so stop its instances separately.
+The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
+Rows hold the method, path, status, client IP, and the account and email that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified; the middleware never reads request bodies, and the admin routes record their request data in their own audit entries.
+Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account awaiting deletion answers 409, because `deleted_at` would stay set; set its status to `deleted` so the owner can cancel the deletion, or clear `deleted_at` and set the status through `PUT /admin/accounts/{account_id}`.
 
 ## SSO and Matrix OIDC
 

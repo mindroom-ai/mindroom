@@ -373,9 +373,20 @@ Expiry or revocation stops future automatic decisions without cancelling decisio
 Changes to configured bindings or room membership invalidate matching grants.
 Clients show approval or revocation as submitted until a backend card edit acknowledges the durable change.
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
-When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander and the call stays approvable.
+Approval cards hide a field entirely when its name marks it as secret, such as `password`, `credentials`, or an `Authorization` header, and the card still shows the field name.
+Inside text, approval cards hide only credentials in known token formats with realistic lengths, such as `sk-…`, `ghp_…`, `github_pat_…`, `xoxb-…`, `AIza…`, and JSON Web Tokens, and show the rest of the text exactly as written.
+An `sk-` or `pk-` match must also contain a long run mixing letters and digits or both letter cases, so kebab-case names such as pod, image, or branch names stay visible.
+Each distinct token becomes a numbered placeholder such as `⟦secret-1⟧`, numbered within one card, so equal tokens look equal and different tokens look different.
+A placeholder for a token that contains `--`, which starts a comment in SQL, reads `⟦secret-1 --⟧`, and a literal `⟦` in the arguments is shown as `⟦=` so it cannot pass for a placeholder.
+Floating-point numbers and integers outside ±(2^53 − 1) are shown as text and unpaired surrogates as `�`, because Matrix events cannot carry them.
+Mapping keys get the same treatment as text, and a changed key that would repeat another key's text gets `�` and its position appended so every key stays distinct.
+Other secrets written inline, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, are shown on the card, so keep secrets in credentials or secret-named fields.
+Deny the call when a hidden field, or a placeholder where a command, host, path, or delimiter belongs, could change what runs.
+A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.
+When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander.
 They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
-When the complete redacted arguments cannot be delivered — over the 2MB completeness cap or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
+When the complete redacted arguments cannot be delivered, the card sets `approvable: false` and any approve action is converted into a denial.
+This happens when the arguments exceed the 2MB completeness cap, when they nest deeper than the 32 levels redaction inspects, or when the sidecar upload fails.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
@@ -478,7 +489,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
-| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty = open access) | _(none)_ |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that requests without a credential may address and that their browser `Origin` may name, for an unauthenticated dashboard or `/v1` API; loopback names, IP addresses, and the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL` are always allowed | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
@@ -618,10 +629,10 @@ agents:
 models:
   default:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5          # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
-    id: claude-sonnet-5            # Required: Model ID for the provider
+    id: claude-sonnet-5-5          # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: Model-specific API key used instead of the provider's shared key
     extra_kwargs: null             # Optional: Provider-specific parameters
@@ -703,7 +714,7 @@ defaults:
 
 # defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
 # Set it to null to use provider defaults.
-# GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
 # room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
 #
 # A thread's first trusted automatic summary call is summary-only.
@@ -1000,6 +1011,7 @@ Credential fields can read from env vars, from files, or from literal values:
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other stored value makes that tool fail to load instead of silently choosing a truthiness.
 When a seeded service is first imported or changes, MindRoom logs a notice naming the declaration variable (`MINDROOM_CREDENTIAL_SEEDS_FILE` or `MINDROOM_CREDENTIAL_SEEDS_JSON`) that supplied it; the declaration variables themselves have no `_FILE` variant.
 To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
 
