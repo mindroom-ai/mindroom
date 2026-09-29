@@ -65,7 +65,13 @@ class TestWebhookEndpoints:
     @pytest.fixture
     def mock_stripe_signature(self):
         """Mock Stripe signature verification."""
-        with patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock:
+        with (
+            patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock,
+            patch(
+                "backend.routes.webhooks.stripe.Subscription.retrieve",
+                side_effect=lambda _id: mock.return_value.data.object,
+            ),
+        ):
             yield mock
 
     @pytest.fixture

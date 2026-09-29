@@ -71,6 +71,9 @@ class FakeQuery:
     def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
         return self._filter("eq", column, value)
 
+    def gt(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
+        return self._filter("gt", column, value)
+
     def in_(self, column: str, values: list[Any]) -> FakeQuery:
         return self._filter("in", column, values)
 
@@ -149,6 +152,8 @@ class FakeQuery:
 def _matches_filter(op: str, current: Any, value: Any) -> bool:  # noqa: ANN401
     if op == "eq":
         return str(current) == str(value)
+    if op == "gt":
+        return current is not None and current > value
     if op == "in":
         return str(current) in {str(v) for v in value}
     assert op == "is"

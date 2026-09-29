@@ -314,6 +314,12 @@ async def update_account_status(
         # The database's id spelling is the one cached auth entries carry.
         invalidate_account_auth_cache(result.data[0]["id"])
 
+        if request.status in {"suspended", ACTIVE_ACCOUNT_STATUS}:
+            sb.auth.admin.update_user_by_id(
+                result.data[0]["id"],
+                {"ban_duration": "876000h" if request.status == "suspended" else "none"},
+            )
+
         audit_log_entry(
             account_id=admin["user_id"],
             action="update",

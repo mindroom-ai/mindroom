@@ -78,6 +78,7 @@ from backend.openrouter import (
     create_openrouter_key,
     delete_openrouter_key,
     set_openrouter_key_disabled,
+    set_openrouter_key_limit,
 )
 from backend.pricing import get_plan_details
 from backend.process import run_helm
@@ -502,11 +503,11 @@ def _included_ai_budget_usd(tier: str) -> int:
 def openrouter_key_matches_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
     """Return whether an instance holds exactly the platform-paid OpenRouter key its tier includes.
 
-    A tier without an included AI budget matches only an instance that stores no key.
+    A tier without an included AI budget may retain a key with a zero limit.
     """
     budget = _included_ai_budget_usd(tier)
-    if budget <= 0:
-        return _stored_openrouter_key_hash(instance_row) is None
+    if budget <= 0 and _stored_openrouter_key_hash(instance_row) is None:
+        return True
     return _matching_openrouter_metadata(instance_row, budget)
 
 
@@ -538,6 +539,20 @@ async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], 
         if not disabled:
             raise
         logger.info("OpenRouter key %s for instance %s no longer exists", key_hash, instance_row.get("instance_id"))
+
+
+async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, Any], tier: str) -> None:
+    """Apply the plan budget to the stored key, preserving its usage and identity."""
+    limit = _included_ai_budget_usd(tier)
+    await anyio.to_thread.run_sync(
+        partial(
+            set_openrouter_key_limit,
+            management_api_key=OPENROUTER_PROVISIONING_API_KEY,
+            key_hash=instance_row["openrouter_key_hash"],
+            limit_usd=limit,
+        )
+    )
+    update_instance(sb, instance_row["instance_id"], {"openrouter_key_limit_usd": limit})
 
 
 async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
@@ -598,19 +613,17 @@ async def _provision_openrouter_key(
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
-    A stored key with a larger budget than the tier includes (for example after a downgrade) is deleted before any
-    replacement exists, so a failure can never leave it live once the row stops naming it; a smaller one keeps
-    serving until its replacement is published.
-    A created key is not recorded yet: call `_commit_openrouter_key` once the Secret holding it is published,
-    or `_discard_openrouter_key` if publication fails, so stored metadata always names the published key.
+    Stored keys keep their usage across plan changes; only their spending limit changes.
+    A created key is recorded after its Secret is published, or discarded if publication fails.
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
-    if monthly_limit_usd > 0 and _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
+    if _stored_openrouter_key_hash(existing_instance_row) is not None:
+        if not _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
+            await set_instance_openrouter_key_limit(sb, existing_instance_row, tier)
         existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
-        if existing_key:
-            return existing_key, None
-    if existing_instance_row is not None and openrouter_key_exceeds_plan(existing_instance_row, tier):
-        await revoke_instance_openrouter_key(sb, instance_id)
+        if not existing_key:
+            raise HTTPException(status_code=500, detail="Stored OpenRouter key is missing from the instance Secret")
+        return existing_key, None
     if monthly_limit_usd <= 0:
         return "", None
 
@@ -632,27 +645,11 @@ async def _provision_openrouter_key(
 
 
 async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Record a newly published key and revoke the smaller key the row still names, if any."""
-    superseded_key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
+    """Record a newly published key."""
     try:
         await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
     except Exception:
         logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
-        return
-    if superseded_key_hash is None or superseded_key_hash == created_key.hash:
-        return
-    delete_key = partial(
-        delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=superseded_key_hash
-    )
-    try:
-        await anyio.to_thread.run_sync(delete_key)
-    except OpenRouterError:
-        logger.warning(
-            "Failed to revoke superseded OpenRouter key %s for instance %s",
-            superseded_key_hash,
-            instance_id,
-            exc_info=True,
-        )
 
 
 async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:

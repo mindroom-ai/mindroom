@@ -2,7 +2,6 @@
 
 import base64
 import inspect
-import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
@@ -130,98 +129,44 @@ def _stored_key_db(limit_usd: int) -> FakeSupabase:
     )
 
 
-_NEW_HOBBY_KEY = CreatedOpenRouterKey(
-    key="sk-or-v1-new-customer",
-    hash="new_hash",
-    label="MindRoom hobby instance 123",
-    limit_usd=15,
-    limit_reset="monthly",
-)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_limit", [10, 150])
+async def test_a_stored_key_limit_changes_without_replacing_the_key(old_limit: int) -> None:
+    from backend.services.provisioner_service import _provision_openrouter_key
 
-
-async def _replace_key(db: FakeSupabase, order: list[str], *, delete_error: Exception | None = None) -> str:
-    from backend.services.provisioner_service import _commit_openrouter_key, _provision_openrouter_key
-
-    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
-        order.append(f"delete {key_hash}")
-        if delete_error is not None:
-            raise delete_error
-
-    def create_key(*, management_api_key: str, plan: object) -> CreatedOpenRouterKey:  # noqa: ARG001
-        order.append("create")
-        return _NEW_HOBBY_KEY
-
+    db = _stored_key_db(old_limit)
     with (
-        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch("backend.services.provisioner_service.create_openrouter_key", create_key),
-        patch("backend.services.provisioner_service.delete_openrouter_key", delete_key),
+        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "test-management"),
+        patch("backend.services.provisioner_service.set_openrouter_key_limit") as set_limit,
+        patch(
+            "backend.services.provisioner_service._existing_instance_secret_value", AsyncMock(return_value="same-key")
+        ),
     ):
-        result, pending_key = await _provision_openrouter_key(
+        key, created = await _provision_openrouter_key(
             sb=db,
             account_id="acc_123",
             instance_id="123",
             tier="hobby",
             existing_instance_row=db.row("instances", instance_id="123"),
-            namespace="mindroom-instances",
+            namespace="test",
         )
-        assert pending_key == _NEW_HOBBY_KEY
-        await _commit_openrouter_key(db, "123", pending_key)
-    return result
+    assert (key, created) == ("same-key", None)
+    set_limit.assert_called_once_with(management_api_key="test-management", key_hash="old_hash", limit_usd=15)
+    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "old_hash"
+    assert db.row("instances", instance_id="123")["openrouter_key_limit_usd"] == 15
 
 
 @pytest.mark.asyncio
-async def test_a_smaller_stored_key_keeps_serving_until_its_replacement_is_recorded() -> None:
-    """An upgrade mints the new key first and revokes the superseded one once the new key is recorded."""
-    db = _stored_key_db(10)
-    order: list[str] = []
-
-    result = await _replace_key(db, order)
-
-    assert result == "sk-or-v1-new-customer"
-    assert order == ["create", "delete old_hash"]
-    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "new_hash"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_revoke_of_a_smaller_superseded_key_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    """A superseded key that cannot be deleted is visible in the logs and does not lose the replacement."""
-    db = _stored_key_db(10)
-
-    with caplog.at_level(logging.WARNING):
-        result = await _replace_key(db, [], delete_error=OpenRouterError("OpenRouter key deletion failed"))
-
-    assert result == "sk-or-v1-new-customer"
-    assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_larger_stored_key_is_deleted_before_its_replacement_is_minted() -> None:
-    """A downgrade deletes the pricier key first, so a failure can never leave it live once the row forgets it."""
-    db = _stored_key_db(150)
-    order: list[str] = []
-
-    result = await _replace_key(db, order)
-
-    assert result == "sk-or-v1-new-customer"
-    assert order == ["delete old_hash", "create"]
-    assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "new_hash"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_delete_of_a_larger_stored_key_mints_no_replacement() -> None:
-    """While the pricier key cannot be deleted, the row keeps naming it and no second key is created."""
+async def test_a_failed_limit_update_preserves_stored_key_metadata() -> None:
     from backend.services.provisioner_service import _provision_openrouter_key
 
     db = _stored_key_db(150)
-    create_key = Mock()
     with (
-        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch("backend.services.provisioner_service.create_openrouter_key", create_key),
         patch(
-            "backend.services.provisioner_service.delete_openrouter_key",
-            side_effect=OpenRouterError("OpenRouter key deletion failed"),
+            "backend.services.provisioner_service.set_openrouter_key_limit",
+            side_effect=OpenRouterError("update failed"),
         ),
-        pytest.raises(OpenRouterError),
+        pytest.raises(OpenRouterError, match="update failed"),
     ):
         await _provision_openrouter_key(
             sb=db,
@@ -229,11 +174,10 @@ async def test_a_failed_delete_of_a_larger_stored_key_mints_no_replacement() -> 
             instance_id="123",
             tier="hobby",
             existing_instance_row=db.row("instances", instance_id="123"),
-            namespace="mindroom-instances",
+            namespace="test",
         )
-
-    create_key.assert_not_called()
     assert db.row("instances", instance_id="123")["openrouter_key_hash"] == "old_hash"
+    assert db.row("instances", instance_id="123")["openrouter_key_limit_usd"] == 150
 
 
 def _is_existing_secret_value_lookup(args: list[str]) -> bool:

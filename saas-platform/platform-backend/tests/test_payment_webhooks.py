@@ -232,9 +232,10 @@ def _deliver(event_type: str, stripe_object: dict[str, Any], event_id: str = "ev
     )
     timestamp = int(time.time())
     signature = hmac.new(WEBHOOK_SECRET.encode(), f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
-    response = TestClient(app).post(
-        "/webhooks/stripe", content=body, headers={"Stripe-Signature": f"t={timestamp},v1={signature}"}
-    )
+    with patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value=stripe_object):
+        response = TestClient(app).post(
+            "/webhooks/stripe", content=body, headers={"Stripe-Signature": f"t={timestamp},v1={signature}"}
+        )
     assert response.status_code == 200
     return response.json()
 
@@ -313,6 +314,7 @@ def test_redelivered_payment_succeeded_keeps_one_payment(db: _SchemaCheckedSupab
 
 
 def test_payment_failed_marks_active_subscription_past_due(db: _SchemaCheckedSupabase) -> None:
+    _deliver("invoice.payment_succeeded", _invoice(), event_id="evt_paid")
     invoice = _invoice(status="open", amount_paid=0)
 
     assert _deliver("invoice.payment_failed", invoice) == {"received": True, "error": None}

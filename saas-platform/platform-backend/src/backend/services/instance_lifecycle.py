@@ -7,8 +7,8 @@ Stripe webhooks and the nightly cleanup job both call it, so they behave identic
   disable its platform-paid OpenRouter key, and schedule teardown.
 - Entitled again: start the instance (or reprovision it when it was torn down or its key does not match
   the tier), re-enable the key, and clear the schedule.
-- Entitled on a different tier: redeploy a running instance with the tier's key and resources, and revoke
-  a larger key from an instance that is not running.
+- Entitled on a different tier: redeploy a running instance with the tier's key and resources, and lower
+  the key limit of an instance that is not running.
 - Teardown due and still not entitled: uninstall everything and mark the instance deprovisioned.
 
 Account deletion also runs through this module: a deletion request cancels Stripe billing and holds the
@@ -30,10 +30,10 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
+
 from backend.config import INSTANCE_TEARDOWN_GRACE_DAYS, logger, stripe
 from backend.deps import ensure_supabase
 from backend.entitlements import (
-    db_subscription_status,
     is_expired_trial,
     is_subscription_service_active,
     parse_timestamp,
@@ -52,11 +52,12 @@ from backend.services.provisioner_service import (
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
-    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
+    set_instance_openrouter_key_limit,
     start_instance,
     uninstall_instance,
 )
+from backend.services.subscription_projection import subscription_fields
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -381,14 +382,14 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
         if not stripe_subscription_id or not stripe.api_key:
             return subscription
         remote = await anyio.to_thread.run_sync(stripe.Subscription.retrieve, stripe_subscription_id)
-        trial_end = remote.get("trial_end")
-        fields = {
-            "status": db_subscription_status(str(remote["status"])),
-            "trial_ends_at": datetime.fromtimestamp(trial_end, tz=UTC).isoformat() if trial_end else None,
-        }
-        unchanged = subscription.get("status") == fields["status"] and parse_timestamp(
-            subscription.get("trial_ends_at")
-        ) == parse_timestamp(fields["trial_ends_at"])
+        fields = subscription_fields(sb, remote)
+        fields.pop("updated_at")
+        unchanged = all(
+            parse_timestamp(subscription.get(key)) == parse_timestamp(value)
+            if key in {"trial_ends_at", "current_period_start", "current_period_end"}
+            else subscription.get(key) == value
+            for key, value in fields.items()
+        )
         query = sb.table("subscriptions")
         query = (
             query.select("*") if unchanged else query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
@@ -496,9 +497,7 @@ async def _resume(
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
-    # Only provisioning applies another tier's resources and mints its key or drops one it does not include (for
-    # example after a downgrade), and a key lost in an earlier failed attempt is missing too; re-enabling the
-    # stored key would hand it back.
+    # Apply the tier's resources and key limit before re-enabling a held instance.
     plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
@@ -529,7 +528,7 @@ def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
     return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
 
 
-def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "revoke"] | None:
+def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "limit"] | None:
     """Return how an instance the lifecycle does not hold must change to run only what its tier pays for."""
     status = instance.get("status")
     if status == "error" and instance.get("lifecycle_error"):
@@ -538,11 +537,11 @@ def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", 
     if _deployed_plan_matches(instance, tier):
         return None
     if status == "running":
-        # Provisioning applies the tier's resources and replaces or deletes the key.
+        # Provisioning applies the tier's resources and updates the key limit.
         return "redeploy"
     # Any other instance is not redeployed, which would start a customer-stopped one or race a provision; it only
-    # loses a key its tier does not pay for, and the rest follows once it runs again.
-    return "revoke" if openrouter_key_exceeds_plan(instance, tier) else None
+    # gets a lower key limit when required, and the rest follows once it runs again.
+    return "limit" if openrouter_key_exceeds_plan(instance, tier) else None
 
 
 def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
@@ -560,9 +559,8 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=False)
-    elif alignment == "revoke":
-        logger.info("Revoking the OpenRouter key of instance %s, which its tier does not include", instance_id)
-        await revoke_instance_openrouter_key(sb, instance_id)
+    elif alignment == "limit":
+        await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)

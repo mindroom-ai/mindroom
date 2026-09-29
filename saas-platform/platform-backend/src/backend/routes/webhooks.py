@@ -1,15 +1,21 @@
 """Webhook handlers for external services."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any
+
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
-from backend.entitlements import db_subscription_status
 from backend.models import WebhookResponse
-from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
 from backend.services.instance_lifecycle import ENDED_STRIPE_STATUSES, reconcile_account_instances
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from backend.services.subscription_projection import (
+    PermanentEventError,
+    maybe_timestamp_to_iso,
+    subscription_fields,
+    subscription_status,
+    timestamp_to_iso,
+)
 
 router = APIRouter()
 
@@ -33,93 +39,6 @@ _REDELIVERED_EVENT_TYPES = frozenset(
         "invoice.payment_failed",
     }
 )
-
-
-class _PermanentEventError(ValueError):
-    """The event can never be applied (for example a price without tier metadata); record it instead of retrying."""
-
-
-def _timestamp_to_iso(timestamp: float) -> str:
-    """Convert Unix timestamp to ISO format string."""
-    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
-
-
-def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
-    """Convert Unix timestamp to ISO format string, or None if timestamp is None."""
-    return _timestamp_to_iso(timestamp) if timestamp is not None else None
-
-
-def _get_tier_from_price(price: dict) -> str:
-    """Extract the canonical tier for a Stripe price."""
-    if match := get_stripe_price_match(price.get("id")):
-        return match.tier
-
-    if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
-        return tier
-
-    msg = (
-        f"Unable to determine tier from price. "
-        f"Price metadata: {price.get('metadata')}, "
-        f"lookup_key: {price.get('lookup_key')}"
-    )
-    raise _PermanentEventError(msg)
-
-
-def _get_billing_cycle_from_price(price: dict) -> str:
-    """Extract the canonical billing cycle for a Stripe price."""
-    if match := get_stripe_price_match(price.get("id")):
-        return match.billing_cycle
-
-    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
-        return cycle
-
-    msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
-    raise _PermanentEventError(msg)
-
-
-class _SubscriptionFields(TypedDict):
-    """Shared subscription persistence fields and event-specific additions."""
-
-    stripe_subscription_id: str
-    stripe_price_id: str | None
-    tier: str
-    status: str
-    max_agents: int
-    max_messages_per_day: int
-    trial_ends_at: str | None
-    updated_at: str
-    current_period_start: NotRequired[str]
-    current_period_end: NotRequired[str]
-    account_id: NotRequired[str]
-    cancelled_at: NotRequired[str | None]
-
-
-def _subscription_fields(subscription: dict) -> _SubscriptionFields:
-    """Project the fields shared by subscription creation and update events."""
-    item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
-    price_data = item["price"] if item else {}
-    tier = _get_tier_from_price(price_data)
-    _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
-
-    subscription_data: _SubscriptionFields = {
-        "stripe_subscription_id": subscription["id"],
-        "stripe_price_id": price_data.get("id"),
-        "tier": tier,
-        "status": db_subscription_status(subscription["status"]),
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
-
-    # Since Stripe API version 2025-03-31.basil the billing period lives on each subscription item, not on the
-    # subscription; our subscriptions have a single item.
-    if start := item.get("current_period_start"):
-        subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := item.get("current_period_end"):
-        subscription_data["current_period_end"] = _timestamp_to_iso(end)
-    return subscription_data
 
 
 def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) -> str | None:
@@ -202,7 +121,7 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     stored = _without_repeated_trial(subscription)
     if stored is None:
         return True, account_id
-    subscription_data = _subscription_fields(stored)
+    subscription_data = subscription_fields(sb, stored)
     subscription_data["account_id"] = account_id
     if existing.data:
         # Update existing subscription
@@ -246,8 +165,9 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
         logger.info("Ignoring update for superseded Stripe subscription %s", subscription["id"])
         return True, account_id
 
-    subscription_data = _subscription_fields(subscription)
-    subscription_data["cancelled_at"] = _maybe_timestamp_to_iso(subscription.get("canceled_at"))
+    subscription = stripe.Subscription.retrieve(subscription["id"])
+    subscription_data = subscription_fields(sb, subscription)
+    subscription_data["cancelled_at"] = maybe_timestamp_to_iso(subscription.get("canceled_at"))
 
     # Update subscription with tenant validation
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
@@ -328,7 +248,7 @@ def payment_row(sb: Any, invoice: dict) -> dict[str, Any] | None:
         "amount": invoice["amount_paid"] / 100,
         "currency": invoice["currency"],
         "status": "succeeded",
-        "created_at": _timestamp_to_iso(paid_at),
+        "created_at": timestamp_to_iso(paid_at),
     }
 
 
@@ -376,9 +296,9 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 
     # Only an active subscription becomes past_due; past_due keeps the instance running, so a failed
     # first payment (incomplete) or a late event for a cancelled subscription must not reach it.
-    sb.table("subscriptions").update({"status": "past_due", "updated_at": datetime.now(UTC).isoformat()}).eq(
-        "stripe_subscription_id", subscription_id
-    ).eq(
+    sb.table("subscriptions").update(
+        {"status": subscription_status(sb, "past_due", subscription_id), "updated_at": datetime.now(UTC).isoformat()}
+    ).eq("stripe_subscription_id", subscription_id).eq(
         "account_id",
         account_id,  # Tenant validation
     ).eq("status", "active").execute()
@@ -459,7 +379,7 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
                 acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
                 if acc_result.data:
                     account_id = acc_result.data["id"]
-    except _PermanentEventError as e:
+    except PermanentEventError as e:
         logger.exception("Webhook %s can never be applied; recording it", event.id)
         error_msg = str(e)
     except Exception as e:
