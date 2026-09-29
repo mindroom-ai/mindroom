@@ -46,7 +46,8 @@ The app detects the command-line runtime separately from the background service:
 1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location.
    If it is missing, **Install MindRoom** uses bundled `uv` to install the runtime release that matches the app version.
    If the installed runtime is a different release, for example after an app update, **Install** shows **Update needed** and **Update MindRoom** installs the matching release.
-   Configuring, pairing, checking, and starting wait until the runtime matches, because the app uses command options from its own release.
+   Configuring, pairing, checking, and starting, including **Apply Runtime to Service…** and the menu bar's start action, wait until the runtime matches, because the app uses command options from its own release.
+   Stop and restart stay available.
    Installing the runtime does not install the background service.
 2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
    The configuration path is shown in the panel.

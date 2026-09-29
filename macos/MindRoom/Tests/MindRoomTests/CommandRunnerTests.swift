@@ -166,6 +166,41 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeFromAnotherReleaseBlocksSetupAndStartButNotUpdateOrStop() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
+        let recorder = InvocationRecorder()
+        let runner = MindRoomCommandRunner(
+            runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379"),
+            processRunner: { invocation, _ in
+                recorder.record(invocation.arguments)
+                return CommandResult(exitCode: 0, output: "MindRoom service: installed but not running")
+            }, showSection: { _ in }
+        )
+        let refreshed = expectation(description: "Status refreshed")
+        let observation = runner.$hasRefreshedStatus.filter { $0 }.sink { _ in refreshed.fulfill() }
+        runner.refreshStatus()
+        await fulfillment(of: [refreshed], timeout: 2)
+
+        for command in [MindRoomCommand.installService, .startService, .checkSetup, .initializeHostedConfig, .pairHosted, .reconnectHosted] {
+            XCTAssertTrue(runner.isBlockedByRuntimeUpdate(command), command.title)
+            runner.run(command)
+            XCTAssertFalse(runner.isRunningCommand, command.title)
+        }
+        for command in [MindRoomCommand.updateRuntime, .stopService, .restartService] {
+            XCTAssertFalse(runner.isBlockedByRuntimeUpdate(command), command.title)
+        }
+        let updated = expectation(description: "Runtime updated")
+        runner.onCommandFinished = { _, _ in updated.fulfill() }
+        runner.run(.updateRuntime)
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertTrue(recorder.arguments.contains(["tool", "install", "--managed-python", "--python", "3.13", "--force", "mindroom==2026.9.379"]))
+        XCTAssertFalse(recorder.arguments.contains { $0.contains("start") || $0.contains("connect") })
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
     func testWebActionsNavigateInsideApp() {
         var sections: [AppSection] = []
         let runner = MindRoomCommandRunner(processRunner: { _, _ in

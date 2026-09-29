@@ -170,18 +170,18 @@ struct MindRoomRuntime {
 
     /// Reads the installed version from the package metadata in the executable's
     /// Python environment, so status refreshes do not have to start the runtime.
-    static func installedRuntimeVersion(executablePath: String) -> String? {
+    private static func installedRuntimeVersion(executablePath: String) -> String? {
         let fileManager = FileManager.default
         let lib = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("lib")
-        for python in (try? fileManager.contentsOfDirectory(atPath: lib.path)) ?? [] where python.hasPrefix("python") {
+        let metadata = ((try? fileManager.contentsOfDirectory(atPath: lib.path)) ?? []).filter { $0.hasPrefix("python") }.flatMap { python -> [String] in
             let sitePackages = lib.appendingPathComponent(python).appendingPathComponent("site-packages")
-            let metadata = (try? fileManager.contentsOfDirectory(atPath: sitePackages.path)) ?? []
-            if let entry = metadata.first(where: { $0.hasPrefix("mindroom-") && $0.hasSuffix(".dist-info") }) {
-                return String(entry.dropFirst("mindroom-".count).dropLast(".dist-info".count))
-            }
+            return ((try? fileManager.contentsOfDirectory(atPath: sitePackages.path)) ?? [])
+                .filter { $0.hasPrefix("mindroom-") && $0.hasSuffix(".dist-info") }
         }
-        return nil
+        // A prefix shared by several Python versions does not say which one the executable runs.
+        guard metadata.count == 1, let entry = metadata.first else { return nil }
+        return String(entry.dropFirst("mindroom-".count).dropLast(".dist-info".count))
     }
 
     private func uvCommand(arguments: [String]) -> MindRoomCommandInvocation {

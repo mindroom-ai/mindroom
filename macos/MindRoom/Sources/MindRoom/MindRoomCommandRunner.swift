@@ -57,6 +57,11 @@ final class MindRoomCommandRunner: ObservableObject {
         runningCommandTitle != nil
     }
 
+    /// The one gate every entry point uses for commands that need the runtime matching this app.
+    func isBlockedByRuntimeUpdate(_ command: MindRoomCommand) -> Bool {
+        command.requiresMatchingRuntime && localSetup.runtimeUpdateReason != nil
+    }
+
     // Status refreshes run independently of user commands so a background
     // refresh never swallows a menu click.
     func refreshStatus(queueIfBusy: Bool = true) {
@@ -107,7 +112,7 @@ final class MindRoomCommandRunner: ObservableObject {
         case .serviceStatus:
             refreshStatus()
         default:
-            guard let action = command.runtimeAction else { return }
+            guard let action = command.runtimeAction, !isBlockedByRuntimeUpdate(command) else { return }
             runUserCommand(command, action: action)
         }
     }

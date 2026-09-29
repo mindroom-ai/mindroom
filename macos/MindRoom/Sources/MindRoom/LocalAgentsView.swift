@@ -50,7 +50,9 @@ struct LocalAgentsView: View {
             runner.pairingCancelled = false
         }
         .onChange(of: setup.runtimeReady) { wasReady, ready in
-            if choseInitialStep, !wasReady, ready, step == .install { show(.configure) }
+            guard choseInitialStep, !wasReady, ready, step == .install else { return }
+            // A fresh install continues to Configure; an update resumes the existing service's step.
+            show(state.needsSetup ? .configure : setup.nextStep(service: state, check: runner.setupCheck))
         }
         .onChange(of: runner.setupCheck) { _, result in
             if result?.setupCheckPassed == true { show(.start) }
@@ -111,15 +113,16 @@ struct LocalAgentsView: View {
             Label(setup.runtimeReady ? "MindRoom runtime installed" : setup.runtimeInstalled ? "Update MindRoom runtime" : "Install MindRoom runtime",
                   systemImage: setup.runtimeReady ? "checkmark.circle.fill" : "arrow.down.circle")
                 .font(.headline)
-            if let path = setup.runtimePath, let reason = setup.runtimeUpdateReason {
-                Text("\(reason) Update it before configuring, checking, or starting agents.")
+            if let path = setup.runtimePath {
+                Text(setup.runtimeUpdateReason.map { "\($0) Update it before configuring, checking, or starting agents." }
+                     ?? "Already installed on this Mac. Continue with your existing configuration or set up a new one.")
                 Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-                Button("Update MindRoom") { runner.run(.updateRuntime) }
-                    .buttonStyle(.borderedProminent).disabled(busy)
-            } else if let path = setup.runtimePath {
-                Text("Already installed on this Mac. Continue with your existing configuration or set up a new one.")
-                Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-                Button("Continue to Configure") { show(.configure) }.buttonStyle(.borderedProminent)
+                if setup.runtimeUpdateReason != nil {
+                    Button("Update MindRoom") { runner.run(.updateRuntime) }
+                        .buttonStyle(.borderedProminent).disabled(busy)
+                } else {
+                    Button("Continue to Configure") { show(.configure) }.buttonStyle(.borderedProminent)
+                }
             } else {
                 Text("Install the command-line runtime that runs local agents. This does not install or start the background service.")
                 Button("Install MindRoom") { runner.run(.installRuntime) }

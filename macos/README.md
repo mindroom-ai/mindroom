@@ -25,7 +25,9 @@ Executable detection is separate from launchd status, so an installed CLI is not
 Existing configuration is reused.
 Release builds install and update the runtime as `mindroom==<CFBundleShortVersionString>`, because the release workflow stamps the app with the same CalVer version it publishes to PyPI and publishes the app only after PyPI.
 The installed version is read from the package metadata in the executable's Python environment, without starting the runtime.
-A different installed version sends Local agents to **Install** with **Update needed** and blocks setup actions until the matching runtime is installed.
+A different installed version sends Local agents to **Install** with **Update needed**.
+Until the matching runtime is installed, the command runner refuses setup, service install, and start commands from Local agents, Settings, and the menu bar; stop and restart stay available.
+If several Python directories in the executable's prefix contain MindRoom metadata, the version is reported as unknown and treated as a mismatch.
 Builds whose version is not CalVer, including the build script's `0.1.0` fallback and SwiftPM launches without a bundle version, install the latest runtime and accept any installed version.
 Set `APP_VERSION` to a published release when testing the pinned flow in a local build.
 **Check Setup** runs `mindroom doctor`; its result is kept for the current session and invalidated when a refresh observes changes to the root config or adjacent `.env`.

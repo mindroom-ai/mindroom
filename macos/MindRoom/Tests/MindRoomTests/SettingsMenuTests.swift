@@ -39,6 +39,28 @@ final class SettingsMenuTests: XCTestCase {
         }
     }
 
+    func testMenuStartWaitsForMatchingRuntimeButStopDoesNot() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try installFakeUVToolRuntime(home: home, versions: ["python3.13": "2026.9.378"])
+        let toggle = NSSelectorFromString("toggleLocalAgents")
+        for (output, enabled) in [("Service installed but not running", false), ("Service: running", true)] {
+            let runner = MindRoomCommandRunner(
+                runtime: MindRoomRuntime(homeURL: home, bundleURL: home, environment: ["PATH": ""], appVersion: "2026.9.379"),
+                processRunner: { _, _ in CommandResult(exitCode: 0, output: output) }
+            )
+            let refreshed = expectation(description: "Service status refreshed")
+            let subscription = runner.$serviceStatus.dropFirst().prefix(1).sink { _ in refreshed.fulfill() }
+            runner.refreshStatus()
+            await fulfillment(of: [refreshed], timeout: 3)
+            let menu = NSMenu()
+            StatusMenuController(runner: runner, desktop: DesktopControlStore()).menuNeedsUpdate(menu)
+
+            XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.action == toggle }).isEnabled, enabled, output)
+            withExtendedLifetime(subscription) {}
+        }
+    }
+
     func testStatusRowsOpenTheirOwnSections() throws {
         let controller = StatusMenuController.shared
         let originalShowWindow = controller.showWindow

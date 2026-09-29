@@ -84,7 +84,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         if !runner.serviceStatus.state.needsSetup, let action = runner.serviceStatus.state.primaryAction {
             let title = action == .stopService ? "Stop Local Agents" : "Start Local Agents"
             let item = actionItem(title, symbol: action == .stopService ? "stop.circle" : "play.circle", action: #selector(toggleLocalAgents))
-            item.isEnabled = !runner.isRunningCommand
+            item.isEnabled = !runner.isRunningCommand && !runner.isBlockedByRuntimeUpdate(action)
             menu.addItem(item)
         } else if !runner.serviceStatus.state.needsSetup {
             menu.addItem(actionItem("Refresh Local Agent Status", symbol: "arrow.clockwise", action: #selector(refreshStatus)))
