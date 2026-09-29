@@ -7,6 +7,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -35,6 +36,14 @@ from mindroom.desktop.shell import DesktopShellError
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 runner = CliRunner()
+
+
+@pytest.fixture
+def selected_root(tmp_path: Path) -> Path:
+    """Create one folder a run may expose read-only."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    return root
 
 
 def _run_config(
@@ -666,10 +675,13 @@ def test_run_command_preserves_unexpected_environment_errors(
 async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
     """CLI attaches durable admission before the transport runs and closes both owners."""
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    config = _run_config(apps=(), roots=(selected_root,))
     lifecycle = []
+    bridges: list[DesktopBridge] = []
     admitted = asyncio.Event()
     ready = asyncio.Event()
     ready.set()
@@ -706,8 +718,12 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
 
     owner = SimpleNamespace(client=client, source=Source(), close=close_owner)
 
-    class Bridge:
-        async def on_to_device_event(self, _event: object) -> None:
+    class Bridge(DesktopBridge):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            bridges.append(self)
+
+        async def on_to_device_event(self, event: object) -> None:  # noqa: ARG002
             lifecycle.append("admit")
             admitted.set()
 
@@ -723,49 +739,63 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
 
         def close(self) -> None:
             lifecycle.append("bridge_close")
+            super().close()
 
-    async def open_client(*_args: object, **_kwargs: object) -> object:
+    async def open_client(*_args: object) -> object:
         lifecycle.append("open")
         return owner
 
-    async def prepare_client(_client: object) -> None:
+    async def prepare_client(prepared_client: object, controller: PinnedMatrixDevice) -> None:
+        assert prepared_client is client
+        assert controller == config.controller
         assert client.to_device_callbacks
         lifecycle.append("prepare")
 
-    async def resolve_device(*_args: object, **_kwargs: object) -> None:
-        lifecycle.append("resolve")
-
-    bridge_options = {}
-
-    def make_bridge(**kwargs: object) -> Bridge:
-        bridge_options.update(kwargs)
-        return Bridge()
-
-    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
-    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
-    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
-    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
-    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", make_bridge)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", Bridge)
 
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
         session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-        config=_run_config(),
+        config=config,
         allow_control=True,
         lease_minutes=15,
+        deps=desktop_cli._BridgeRunDeps(open_client=open_client, prepare_client=prepare_client),
     )
 
-    assert lifecycle[:3] == ["open", "resolve", "prepare"]
+    assert lifecycle[:2] == ["open", "prepare"]
     assert lifecycle.index("admit") < lifecycle.index("ack")
     assert lifecycle[-2:] == ["bridge_close", "owner_close"]
     assert client.to_device_callbacks == []
-    assert bridge_options["journal_path"] == tmp_path / "desktop_bridge" / "commands.sqlite3"
-    assert bridge_options["legacy_journal_path"] == tmp_path / "desktop_bridge" / "command_journal.json"
-    policy = bridge_options["policy"]
+    [bridge] = bridges
+    assert bridge.journal_path == tmp_path / "desktop_bridge" / "commands.sqlite3"
+    assert bridge.legacy_journal_path == tmp_path / "desktop_bridge" / "command_journal.json"
+    policy = bridge.policy
     assert policy.allow_control is True
     assert policy.control_lease_expires_at_ms is not None
     assert 14 * 60 < policy.control_lease_expires_at_ms / 1000 - time.time() <= 15 * 60
+
+
+@pytest.mark.asyncio
+async def test_bridge_client_verifies_pinned_controller_before_publishing_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run publishes this device's encryption keys only after checking the pinned controller."""
+    client = object()
+    controller = PinnedMatrixDevice("@cloud:example.org", "CLOUD", "fingerprint")
+    calls: list[tuple[object, ...]] = []
+
+    async def resolve(*args: object) -> None:
+        calls.append(("resolve", *args))
+
+    async def prepare(*args: object) -> None:
+        calls.append(("prepare", *args))
+
+    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve)
+    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare)
+
+    await desktop_cli._prepare_bridge_client(client, controller)
+
+    assert calls == [("resolve", client, controller), ("prepare", client)]
 
 
 @pytest.mark.asyncio
@@ -773,11 +803,10 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
 async def test_cli_drains_native_work_before_releasing_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    selected_root: Path,
     shutdown: str,
 ) -> None:
     """Neither transport failure nor cancellation may release ownership over live input."""
-    from mindroom.desktop.bridge import DesktopBridge  # noqa: PLC0415
-
     started = asyncio.Event()
     shutdown_started = asyncio.Event()
     fail_transport = asyncio.Event()
@@ -818,19 +847,15 @@ async def test_cli_drains_native_work_before_releasing_owner(
         await client.close()
 
     owner = SimpleNamespace(client=client, source=Source(), close=close_owner)
-    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
-    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
-    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
-    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
     monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", ActiveBridge)
     task = asyncio.create_task(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            config=_run_config(),
+            config=_run_config(apps=(), roots=(selected_root,)),
             allow_control=False,
             lease_minutes=15,
+            deps=desktop_cli._BridgeRunDeps(open_client=AsyncMock(return_value=owner), prepare_client=AsyncMock()),
         ),
     )
     try:
@@ -855,21 +880,50 @@ async def test_cli_drains_native_work_before_releasing_owner(
 
 
 @pytest.mark.asyncio
-async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_stop(
+@pytest.mark.parametrize(
+    ("apps", "expected_calls"),
+    [((), ["open"]), (("com.example.Editor",), ["permissions", "open"])],
+)
+async def test_only_application_access_requests_gui_permissions_before_matrix_opens(
+    tmp_path: Path,
+    selected_root: Path,
+    apps: tuple[str, ...],
+    expected_calls: list[str],
+) -> None:
+    """Applications need macOS GUI permissions before Matrix opens; folder and shell access never ask for them."""
+    calls: list[str] = []
+
+    async def unavailable_matrix(*_args: object) -> NoReturn:
+        calls.append("open")
+        msg = "Matrix unavailable"
+        raise ConnectionError(msg)
+
+    with pytest.raises(ConnectionError, match="Matrix unavailable"):
+        await desktop_cli._run_bridge(
+            runtime_paths=SimpleNamespace(storage_root=tmp_path),
+            session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
+            config=_run_config(apps=apps, roots=(selected_root,), shell_enabled=True),
+            allow_control=False,
+            lease_minutes=15,
+            deps=desktop_cli._BridgeRunDeps(
+                request_permissions=lambda: calls.append("permissions"),
+                open_client=unavailable_matrix,
+            ),
+        )
+
+    assert calls == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    selected_root: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A terminal bridge serves folders and shell without GUI grants, and stopping it ends the local grant."""
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
+    """A terminal bridge serves folders and shell without a GUI provider, and stopping it ends the local grant."""
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
-    bridges: list[DesktopBridge] = []
-
-    class RecordingBridge(DesktopBridge):
-        def __post_init__(self) -> None:
-            super().__post_init__()
-            bridges.append(self)
+    prepared = asyncio.Event()
 
     class Source:
         async def run(self) -> None:
@@ -878,40 +932,34 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
         async def wait_for_work(self) -> None:
             await asyncio.Event().wait()
 
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("GUI setup ran for a bridge without applications")
+    async def prepare_client(*_args: object) -> None:
+        prepared.set()
 
     owner = SimpleNamespace(client=client, source=Source(), close=client.close)
-    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
-    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
-    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden)
-    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", forbidden)
     monkeypatch.setattr(
         "mindroom.desktop.bridge_components.capture_login_environment",
         AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
     )
-    monkeypatch.setattr(desktop_cli, "_terminal_input_fd", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", RecordingBridge)
     task = asyncio.create_task(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            config=_run_config(apps=(), roots=(root,), shell_enabled=True),
+            config=_run_config(apps=(), roots=(selected_root,), shell_enabled=True),
             allow_control=False,
             lease_minutes=15,
             shell_auto_approve_minutes=5,
+            deps=desktop_cli._BridgeRunDeps(open_client=AsyncMock(return_value=owner), prepare_client=prepare_client),
         ),
     )
     try:
-        for _ in range(500):
-            if client.to_device_callbacks and bridges:
-                break
-            await asyncio.sleep(0.01)
-        bridge = bridges[0]
+        await asyncio.wait_for(prepared.wait(), 5)
+        # The run registers exactly one admission callback: the built bridge's.
+        [registration] = client.to_device_callbacks
+        bridge = registration.func.__self__
+        assert isinstance(bridge, DesktopBridge)
         status = bridge.local_status()
         assert bridge.provider is None
-        assert [folder["path"] for folder in status["file_roots"]] == [str(root)]
+        assert [folder["path"] for folder in status["file_roots"]] == [str(selected_root)]
         assert 290 < status["shell"]["auto_approve_remaining_seconds"] <= 300
     finally:
         task.cancel()
@@ -924,7 +972,7 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
     assert client.to_device_callbacks == []
     output = " ".join(capsys.readouterr().out.split())
     assert "Applications: none" in output
-    assert f"Read-only folders: {root}" in output
+    assert f"Read-only folders: {selected_root}" in output
     assert "every locally allowed requester and agent" in output
     assert "for 5 minutes" in output
     assert "observe-only" not in output
