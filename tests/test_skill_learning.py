@@ -383,6 +383,16 @@ def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> 
     assert not (manual.parent / "references").exists()
 
 
+def test_a_new_skill_is_refused_while_the_skills_directory_is_itself_one_skill(tmp_path: Path) -> None:
+    """Skill loading then reads only skills/SKILL.md, so a new skill directory would never load."""
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "SKILL.md").write_text(LEARNED.replace("deploy-checks", "skills"), encoding="utf-8")
+    with pytest.raises(library.SkillEditError, match="makes skills/ one skill"):
+        library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    assert not (root / "deploy-checks").exists()
+
+
 def test_a_write_that_changes_nothing_is_refused(tmp_path: Path) -> None:
     """Like Hermes, an identical rewrite is no update: no notice, history snapshot, or reset of the skill's age."""
     root = tmp_path / "skills"
@@ -876,7 +886,7 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
-    assert "configured skill and read-only" in json.loads(model.requests[1][-1])["error"]
+    assert "not in its own workspace skill directory and is read-only" in json.loads(model.requests[1][-1])["error"]
     assert "user-owned and read-only" in json.loads(model.requests[3][-1])["error"]
     assert model.script, "the review should have stopped before its script ran out"
     assert sum(model.input_tokens[:-1]) < 9_000 <= sum(model.input_tokens)
@@ -1422,7 +1432,7 @@ async def test_chat_skill_manage_creates_user_owned_skills_and_edits_any_workspa
     assert learned.learned
     assert "1. Always run the smoke test." in learned.content
     refused = json.loads(await tools.skill_manage("patch", "mindroom-docs", old_string="a", new_string="b"))
-    assert "configured skill and read-only" in refused["error"]
+    assert "not in its own workspace skill directory and is read-only" in refused["error"]
 
 
 def test_learning_agents_offer_skill_manage(tmp_path: Path) -> None:
@@ -1564,12 +1574,6 @@ async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
         await _review_due(config, paths)
     assert len(model.requests) == 2
     assert all(notice not in content for request in model.requests for content in request)
-
-
-_UNMET = (
-    "---\nname: {name}\ndescription: Use when checking the setup\nmetadata:\n  openclaw:\n    requires:\n"
-    "      env: [SKILL_LEARNING_TEST_MISSING_ENV]\n---\nExport the variable first.\n"
-)
 
 
 def test_a_usage_write_that_fails_never_fails_the_skill_change(tmp_path: Path) -> None:

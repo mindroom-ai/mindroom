@@ -1010,6 +1010,19 @@ def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_pat
     assert not (tmp_path / "global" / ".usage.json").exists()
 
 
+def test_a_workspace_whose_skills_directory_is_one_skill_records_no_usage(tmp_path: Path) -> None:
+    """Usage records live beside skill directories, so loading a skills/ that is itself one skill writes none."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills.parent, "skills", "Whole-directory skill")
+    skills = _load_workspace_only(tmp_path, storage)
+    assert skills is not None
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    assert get_instructions is not None
+    assert "Body" in get_instructions(skill_name="skills")
+    assert not (workspace_skills / ".usage.json").exists()
+    assert not (workspace_skills.parent / ".usage.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
     """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""

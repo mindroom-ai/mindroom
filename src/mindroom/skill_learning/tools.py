@@ -284,7 +284,7 @@ class SkillTools:
         if entry is None:
             return _refusal(f"Unknown skill {name!r}; create it or check the skill name.")
         if entry.directory is None:
-            return _refusal(f"Skill {name!r} is a configured skill and read-only.")
+            return _refusal(f"Skill {name!r} is not in its own workspace skill directory and is read-only.")
         if self.learner and not entry.learned:
             return _refusal(f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change instead.")
         return None

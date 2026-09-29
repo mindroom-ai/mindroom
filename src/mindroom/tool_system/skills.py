@@ -176,12 +176,18 @@ class _MindroomSkills(Skills):
         return super()._get_skill_instructions(skill_name)
 
     def _record_use(self, skill_name: str) -> None:
-        """Count one agent load of a workspace skill; configured skills are not counted.
+        """Record one agent load of a workspace skill directory; configured skills are not recorded.
 
+        Usage records live beside skill directories, so a workspace whose ``skills/`` is itself one skill keeps none.
         Agno calls the skill tools on the event loop, so there the usage write runs in a thread.
         """
-        skill = self.get_skill(skill_name) if skill_name in self._workspace_roots_by_skill else None
-        if skill is None:
+        workspace_root = self._workspace_roots_by_skill.get(skill_name)
+        skill = self.get_skill(skill_name)
+        if (
+            workspace_root is None
+            or skill is None
+            or Path(skill.source_path).parent != workspace_root / _WORKSPACE_SKILLS_DIRNAME
+        ):
             return
         record = partial(record_skill_use, Path(skill.source_path))
         try:
