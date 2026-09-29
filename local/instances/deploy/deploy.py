@@ -17,6 +17,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -206,16 +207,42 @@ def _find_next_ports(registry: Registry) -> tuple[int, int]:
 
 def _write_private_file(path: Path, content: str) -> None:
     """Write a secret-bearing file that only its owner can read, whatever the umask or its previous mode."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        os.fchmod(f.fileno(), 0o600)
-        f.write(content)
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        previous = None
+        with contextlib.suppress(FileNotFoundError):
+            previous = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if previous is not None and not stat.S_ISREG(previous.st_mode):
+            msg = f"Refusing non-regular file: {path}"
+            raise ValueError(msg)
+        temporary = f".{path.name}.{secrets.token_hex(8)}"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                if previous is not None:
+                    os.fchown(f.fileno(), previous.st_uid, previous.st_gid)
+                os.fchmod(f.fileno(), 0o600)
+                f.write(content)
+            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 def _give_to_container_user(path: Path) -> None:
     """Make the container user own a path, changing only its owner so operators outside that user's group can too."""
-    if path.stat().st_uid != CONTAINER_UID:
-        os.chown(path, CONTAINER_UID, -1)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            msg = f"Refusing non-file/directory: {path}"
+            raise ValueError(msg)
+        if info.st_uid != CONTAINER_UID:
+            os.fchown(fd, CONTAINER_UID, -1)
+    finally:
+        os.close(fd)
 
 
 def _restrict_to_container_user(path: Path) -> None:
@@ -223,13 +250,22 @@ def _restrict_to_container_user(path: Path) -> None:
     quoted = shlex.quote(str(path))
     fixes: list[str] = []
     try:
-        _give_to_container_user(path)
-    except OSError:
-        fixes.append(f"sudo chown {CONTAINER_UID} {quoted}")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        fixes.append(f"sudo chmod 600 {quoted}")
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
+            info = os.fstat(f.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                msg = f"Refusing non-regular file: {path}"
+                raise ValueError(msg)
+            try:
+                if info.st_uid != CONTAINER_UID:
+                    os.fchown(f.fileno(), CONTAINER_UID, -1)
+            except OSError:
+                fixes.append(f"sudo chown {CONTAINER_UID} {quoted}")
+            try:
+                os.fchmod(f.fileno(), 0o600)
+            except OSError:
+                fixes.append(f"sudo chmod 600 {quoted}")
+    except PermissionError:
+        fixes.extend([f"sudo chown {CONTAINER_UID} {quoted}", f"sudo chmod 600 {quoted}"])
     if fixes:
         console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
         console.print(f"  Run: {' && '.join(fixes)}", markup=False, highlight=False, soft_wrap=True)
@@ -904,9 +940,14 @@ def _bring_up_instance(
 def _create_directory_with_permissions(path: Path, mode: int = 0o755) -> None:
     """Create a directory owned by the container user with the given mode."""
     path.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        path.chmod(mode)
-        _give_to_container_user(path)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, mode)
+            if os.fstat(fd).st_uid != CONTAINER_UID:
+                os.fchown(fd, CONTAINER_UID, -1)
+    finally:
+        os.close(fd)
 
 
 def _copy_credentials_to_instance(instance: Instance) -> None:

@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from typing import Any
 import matty
 import typer
 import yaml
+from deploy import _write_private_file
 from dotenv import load_dotenv
 from jinja2 import Template
 from pydantic import BaseModel, Field
@@ -126,14 +128,6 @@ BRIDGE_TEMPLATES = {
 }
 
 
-def _write_private_file(path: Path, content: str) -> None:
-    """Write a secret-bearing file that only its owner can read, whatever the umask or its previous mode."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        os.fchmod(f.fileno(), 0o600)
-        f.write(content)
-
-
 def load_registry() -> BridgeRegistry:
     """Load the bridge registry."""
     if not BRIDGE_REGISTRY_FILE.exists():
@@ -157,12 +151,16 @@ def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
     """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
     for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
         try:
-            if path.stat().st_mode & 0o077 == 0:
-                continue
-            path.chmod(0o600)
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
+                info = os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    msg = f"Refusing non-regular file: {path}"
+                    raise ValueError(msg)
+                if info.st_mode & 0o077:
+                    os.fchmod(f.fileno(), 0o600)
         except FileNotFoundError:
             continue
-        except OSError as e:
+        except PermissionError as e:
             # A non-root operator cannot chmod files the bridge container already owns.
             console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
             console.print(
@@ -419,7 +417,10 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
         return False
 
     # Add registration file to app_service_config_files
-    with synapse_config.open() as f:
+    with os.fdopen(os.open(synapse_config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)) as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            msg = f"Refusing non-regular file: {synapse_config}"
+            raise ValueError(msg)
         config = yaml.safe_load(f)
 
     if "app_service_config_files" not in config:

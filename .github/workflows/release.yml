@@ -169,24 +169,23 @@ jobs:
           - Sparkle appcast entry and signature
           EOF
 
+          RELEASE_METADATA_BRANCH="release-metadata/mindroom"
           EXISTING_RELEASE_METADATA_PR=$(
             gh pr list \
               --repo "$GITHUB_REPOSITORY" \
               --base main \
               --state open \
-              --search '"Update MindRoom release metadata" in:title' \
+              --head "$RELEASE_METADATA_BRANCH" \
               --limit 100 \
-              --json number,title,headRefName,updatedAt \
-              --jq 'map(select(.title | startswith("Update MindRoom release metadata"))) | sort_by(.updatedAt) | reverse | first | if . == null then "" else "\(.number) \(.headRefName)" end'
+              --json number,headRefName,isCrossRepository,updatedAt \
+              --jq 'map(select(.headRefName == "release-metadata/mindroom" and .isCrossRepository == false)) | sort_by(.updatedAt) | reverse | first | if . == null then "" else .number end'
           )
 
           if [[ -n "$EXISTING_RELEASE_METADATA_PR" ]]; then
-            EXISTING_RELEASE_METADATA_PR_NUMBER="${EXISTING_RELEASE_METADATA_PR%% *}"
-            RELEASE_METADATA_BRANCH="${EXISTING_RELEASE_METADATA_PR#* }"
+            EXISTING_RELEASE_METADATA_PR_NUMBER="$EXISTING_RELEASE_METADATA_PR"
             echo "Updating existing release metadata PR #${EXISTING_RELEASE_METADATA_PR_NUMBER} on ${RELEASE_METADATA_BRANCH}."
           else
             EXISTING_RELEASE_METADATA_PR_NUMBER=""
-            RELEASE_METADATA_BRANCH="release-metadata/mindroom"
             echo "Creating a new release metadata PR on ${RELEASE_METADATA_BRANCH}."
           fi
 
