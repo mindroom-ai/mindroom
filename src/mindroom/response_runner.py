@@ -143,9 +143,9 @@ from mindroom.tool_jobs.completion import (
     admit_job_completion,
     background_wait_edit,
     background_wait_notice,
-    background_wait_published,
     completion_envelope,
     completion_prompt,
+    published_wait_presentation,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime, parse_completion_event_id
@@ -2450,25 +2450,8 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            if initial_presentation is not None or background_wait_published():
-                try:
-                    initial_presentation = await self._read_response_presentation(
-                        room_id=delivery_target.room_id,
-                        event_id=message_id,
-                    )
-                except Exception:
-                    self.deps.logger.exception("Cannot read latest response for cancellation", event_id=message_id)
-                    initial_presentation = None
-                if initial_presentation is None:
-                    # A blocking wait may have published newer text. Never replace it
-                    # when Matrix cannot prove the current body.
-                    return FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=message_id,
-                        is_visible_response=True,
-                        cancel_source=cancel_source,
-                        failure_reason=cancel_failure_reason(cancel_source),
-                    )
+            # Text published beside wait progress is newer than the response's recovered body.
+            initial_presentation = published_wait_presentation() or initial_presentation
             return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                 CancelledVisibleNoteRequest(
                     target=delivery_target,

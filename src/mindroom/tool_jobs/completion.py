@@ -46,7 +46,7 @@ _UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
 @dataclass
 class _WaitNotice:
     callback: Callable[[StreamingPresentation, str | None], Awaitable[None]]
-    published: bool = False
+    presentation: StreamingPresentation | None = None
 
 
 _WAIT_NOTICE: ContextVar[_WaitNotice | None] = ContextVar("background_wait_notice", default=None)
@@ -66,14 +66,14 @@ async def report_background_wait(presentation: StreamingPresentation, notice: st
     """Report blocking wait progress through its response owner when present."""
     wait = _WAIT_NOTICE.get()
     if wait is not None:
-        wait.published = True
+        wait.presentation = presentation
         await wait.callback(presentation, notice)
 
 
-def background_wait_published() -> bool:
-    """Return whether wait progress may have replaced this blocking response's known body."""
+def published_wait_presentation() -> StreamingPresentation | None:
+    """Return the answer text and trace this blocking response last published beside wait progress."""
     wait = _WAIT_NOTICE.get()
-    return wait is not None and wait.published
+    return wait.presentation if wait is not None else None
 
 
 def background_wait_edit(

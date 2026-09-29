@@ -41,7 +41,7 @@ from mindroom.response_runner import (
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
 from mindroom.tool_jobs.completion import report_background_wait
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -65,7 +65,6 @@ from tests.bot_helpers import (
     _stream_outcome,
 )
 from tests.identity_helpers import fixture_entity_matrix_id
-from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -940,26 +939,6 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
     prior_text = "The team checked the workspace.\n\n🔧 `run_shell_command` [1]"
     latest_trace = [prior_trace, ToolTraceEntry(type="tool_call_started", tool_name="job")]
     latest_text = f"{prior_text}\n\nThe team is waiting for results.\n\n🔧 `job` [2]"
-    original = _make_message_event(
-        event_id="$existing",
-        body=prior_text,
-        timestamp_ms=10,
-        sender=bot.matrix_id.full_id,
-        room_id="!test:localhost",
-        extra_content=build_tool_trace_content([prior_trace]),
-    )
-    latest = _make_message_event(
-        event_id="$latest-edit",
-        body="* latest team progress",
-        timestamp_ms=20,
-        sender=bot.matrix_id.full_id,
-        room_id="!test:localhost",
-        relates_to={"rel_type": "m.replace", "event_id": "$existing"},
-        new_content={"msgtype": "m.text", "body": latest_text, **(build_tool_trace_content(latest_trace) or {})},
-    )
-    bot.client.room_get_event.side_effect = None
-    bot.client.room_get_event.return_value = _room_get_event_response(original)
-    bot.client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter(latest))
     request = replace(
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         existing_event_id="$existing",
@@ -969,7 +948,10 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
 
     async def wait_then_stop(*_args: object, **_kwargs: object) -> str:
         # The published wait is what makes Matrix newer than this response's known body.
-        await report_background_wait(StreamingPresentation(latest_text), "⏳ Waiting for background work…")
+        await report_background_wait(
+            StreamingPresentation(latest_text, tool_trace=tuple(latest_trace)),
+            "⏳ Waiting for background work…",
+        )
         stop = "user_stop"
         raise asyncio.CancelledError(stop)
 

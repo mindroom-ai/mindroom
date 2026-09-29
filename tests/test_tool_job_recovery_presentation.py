@@ -369,41 +369,11 @@ async def test_recovered_blocking_cancellation_keeps_visible_body_and_trace(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [False, True])
-async def test_blocking_cancellation_without_a_published_wait_keeps_the_ordinary_note(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    enabled: bool,
-) -> None:
-    """Only published wait progress makes a blocking cancellation reread its response."""
-    bot = _bot(tmp_path)
-    bot.config.memory.backend = "none"
-    bot.config.background_tool_jobs.enabled = enabled
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = replace(_plain_request(_target(thread_id="$thread")), existing_event_id="$response")
-    read = AsyncMock(return_value=None)
-    monkeypatch.setattr(runner, "_read_response_presentation", read)
-    monkeypatch.setattr(
-        "mindroom.response_runner.ai_response",
-        AsyncMock(side_effect=asyncio.CancelledError("user_stop")),
-    )
-    edit = AsyncMock(return_value=True)
-    monkeypatch.setattr(DeliveryGateway, "edit_text", edit)
-    outcome = await runner._process_and_respond(request)
-    read.assert_not_awaited()
-    assert outcome.delivery.terminal_status == "cancelled"
-    assert edit.await_args.args[0].new_text == outcome.delivery.final_visible_body
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("latest_state", ["readable", "unreadable", "error", "wrong_sender"])
 @pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
-async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa: PLR0915
+async def test_blocking_wait_cancellation_preserves_latest_presentation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    latest_state: str,
     recovered: bool,
     cancel_source: str,
 ) -> None:
@@ -420,22 +390,7 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa
         existing_event_id="$response",
         initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)) if recovered else None,
     )
-    sender = "@other:localhost" if latest_state == "wrong_sender" else bot.matrix_id.full_id
-    original = _make_message_event(
-        event_id="$response",
-        body=prefix,
-        timestamp_ms=10,
-        sender=sender,
-        extra_content=build_tool_trace_content([old_trace]),
-    )
     edits = []
-    bot.client.room_get_event.side_effect = None
-    bot.client.room_get_event.return_value = (
-        None if latest_state == "unreadable" else _room_get_event_response(original)
-    )
-    if latest_state == "error":
-        bot.client.room_get_event.side_effect = RuntimeError("latest response unavailable")
-    bot.client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter(*edits))
 
     async def edit(
         _client: object,
@@ -452,7 +407,7 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa
                 event_id=edit_id,
                 body="* " + text,
                 timestamp_ms=20 + len(edits),
-                sender=sender,
+                sender=bot.matrix_id.full_id,
                 relates_to={"rel_type": "m.replace", "event_id": event_id},
                 new_content=content,
             ),
@@ -488,17 +443,11 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa
     outcome = outcomes[0]
     assert outcome.terminal_status == "cancelled"
     assert outcome.cancel_source == cancel_source
-    if latest_state != "readable":
-        assert len(edits) == 1, "An unreadable latest response must stay intact"
-        assert outcome.final_visible_body is None
-    else:
-        assert len(edits) == 2
-        assert outcome.final_visible_body is not None
-        assert "New recovery analysis." in outcome.final_visible_body
-        note = (
-            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
-        )
-        assert outcome.final_visible_body.endswith(note)
+    assert len(edits) == 2
+    assert outcome.final_visible_body is not None
+    assert "New recovery analysis." in outcome.final_visible_body
+    note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
+    assert outcome.final_visible_body.endswith(note)
     wait_content = edits[0].source["content"]["m.new_content"]
     assert wait_content["body"].startswith(prefix if recovered else "New recovery analysis.")
     assert f"`retrieve` [{2 if recovered else 1}]" in wait_content["body"]
@@ -506,8 +455,7 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa
     assert trace == ([old_trace] if recovered else []) + [
         ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result"),
     ]
-    if latest_state == "readable":
-        assert outcome.tool_trace == tuple(trace)
-        final_content = edits[-1].source["content"]["m.new_content"]
-        assert final_content["io.mindroom.tool_trace"] == wait_content["io.mindroom.tool_trace"]
+    assert outcome.tool_trace == tuple(trace)
+    final_content = edits[-1].source["content"]["m.new_content"]
+    assert final_content["io.mindroom.tool_trace"] == wait_content["io.mindroom.tool_trace"]
     bot.client.room_redact.assert_not_called()
