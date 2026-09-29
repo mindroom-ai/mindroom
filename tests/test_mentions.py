@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from time import process_time
 from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     import pytest
 
 from mindroom import constants as constants_mod
@@ -24,66 +23,27 @@ from tests.identity_helpers import actual_entity_usernames, persist_entity_accou
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
 
-def test_bulk_mentions_bound_overlap_and_deduplication_work(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bulk mentions retain order without scanning every earlier range or user ID."""
-    operations = 0
+def test_bulk_mentions_bound_overlap_and_deduplication_work() -> None:
+    """Bulk mention scanning and ordered deduplication finish within a bounded CPU budget."""
+    distinct_user_ids = [f"@a{index}:b" for index in range(10_000)]
+    for user_ids, expected_user_ids in (
+        (["@a:b"] * 12_000, ["@a:b"]),
+        ([*distinct_user_ids, *distinct_user_ids[:2]], distinct_user_ids),
+    ):
+        text = " ".join(user_ids) + " "
+        started = process_time()
+        tokens = mentions_module._scan_mention_tokens(text)
+        assert process_time() - started < 0.5
+        assert [token.explicit_user_id for token in tokens] == user_ids
 
-    def count_operation() -> None:
-        nonlocal operations
-        operations += 1
-        assert operations < 500_000
-
-    class CountedRanges:
-        def __init__(self, ranges: list[tuple[int, int]]) -> None:
-            self.ranges = ranges
-
-        def __len__(self) -> int:
-            return len(self.ranges)
-
-        def __getitem__(self, index: int) -> tuple[int, int]:
-            count_operation()
-            return self.ranges[index]
-
-        def __iter__(self) -> Iterator[tuple[int, int]]:
-            for item in self.ranges:
-                count_operation()
-                yield item
-
-    original_overlap = mentions_module._range_overlaps_existing
-
-    def counted_overlap(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
-        return original_overlap(start, end, CountedRanges(ranges))  # type: ignore[arg-type]
-
-    monkeypatch.setattr(mentions_module, "_range_overlaps_existing", counted_overlap)
-    repeated = mentions_module._scan_mention_tokens("@a:b " * 12_000)
-    assert len(repeated) == 12_000
-    assert all(token.explicit_user_id == "@a:b" for token in repeated)
-    operations = 0
-    user_ids = [f"@a{index}:b" for index in range(10_000)]
-    distinct = mentions_module._scan_mention_tokens(" ".join(user_ids))
-    assert [token.explicit_user_id for token in distinct] == user_ids
-
-    class CountedUserID(str):
-        __slots__ = ()
-
-        __hash__ = str.__hash__
-
-        def __eq__(self, other: object) -> bool:
-            count_operation()
-            return super().__eq__(other)
-
-    operations = 0
-    replacements = [
-        mentions_module._MentionReplacement(
-            start=0,
-            end=0,
-            plain_text="",
-            markdown_text="",
-            user_id=CountedUserID(user_id),
-        )
-        for user_id in [*user_ids, *user_ids[:2]]
-    ]
-    assert mentions_module._mentioned_user_ids_from_replacements(replacements) == user_ids
+        replacements = [
+            mentions_module._MentionReplacement(start=0, end=0, plain_text="", markdown_text="", user_id=user_id)
+            for user_id in user_ids
+        ]
+        started = process_time()
+        mentioned_user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
+        assert process_time() - started < 0.5
+        assert mentioned_user_ids == expected_user_ids
 
 
 def _default_runtime_paths() -> constants_mod.RuntimePaths:
