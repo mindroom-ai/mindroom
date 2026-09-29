@@ -50,7 +50,7 @@ def _instance(
 
 
 @pytest.mark.parametrize("operation", ["write", "give", "restrict", "directory"])
-def test_deploy_refuses_linked_paths(tmp_path: Path, operation: str) -> None:
+def test_deploy_refuses_linked_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
     """Container-planted links must not redirect host writes or permission changes."""
     victim = tmp_path / "victim"
     if operation == "directory":
@@ -61,6 +61,8 @@ def test_deploy_refuses_linked_paths(tmp_path: Path, operation: str) -> None:
     before = victim.stat()
     link = tmp_path / "planted"
     link.symlink_to(victim)
+    if operation == "give":
+        monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid())
 
     actions = {
         "write": lambda: deploy._write_private_file(link, "replacement"),
@@ -1645,6 +1647,58 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
         "openai.json": 0o600,
         "google_oauth.json": 0o600,
     }
+
+
+def test_matrix_template_copy_refuses_linked_destination(tmp_path: Path) -> None:
+    """A planted log.config must not redirect a template copy or its mode change."""
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "log.config").write_text("template")
+    target_dir = tmp_path / "synapse"
+    target_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("unchanged")
+    victim.chmod(0o600)
+    (target_dir / "log.config").symlink_to(victim)
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+
+    with pytest.raises(OSError, match="symbolic links"):
+        deploy._prepare_matrix_config(instance, deploy.MatrixType.SYNAPSE, "homeserver.yaml", template_dir, target_dir)
+
+    assert victim.read_text() == "unchanged"
+    assert _mode(victim) == 0o600
+
+
+def test_credential_copy_refuses_dangling_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dangling credential link must not create a file outside the instance."""
+    source_dir = tmp_path / "home" / ".mindroom" / "credentials"
+    source_dir.mkdir(parents=True)
+    (source_dir / "provider.json").write_text('{"api_key": "test-secret"}')
+    monkeypatch.setattr(deploy.Path, "home", lambda: tmp_path / "home")
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+    target_dir.mkdir(parents=True)
+    victim = tmp_path / "missing-victim"
+    (target_dir / "provider.json").symlink_to(victim)
+
+    with pytest.raises(OSError, match="symbolic links"):
+        deploy._copy_credentials_to_instance(instance)
+
+    assert not victim.exists()
+
+
+def test_unreadable_existing_directory_remains_best_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator unable to open a container-owned directory may still continue deployment."""
+    directory = tmp_path / "credentials"
+    directory.mkdir(mode=0o700)
+
+    def denied_open(*_args: object, **_kwargs: object) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(deploy.os, "open", denied_open)
+    deploy._create_directory_with_permissions(directory)
+
+    assert _mode(directory) == 0o700
 
 
 def _operator_in_group_100(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:

@@ -236,8 +236,8 @@ def _give_to_container_user(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
-            msg = f"Refusing non-file/directory: {path}"
+        if not stat.S_ISREG(info.st_mode):
+            msg = f"Refusing non-regular file: {path}"
             raise ValueError(msg)
         if info.st_uid != CONTAINER_UID:
             os.fchown(fd, CONTAINER_UID, -1)
@@ -334,12 +334,16 @@ def _prepare_matrix_config(
             key_id = f"{instance.name}_{secrets.token_hex(3)}"
             signing_key_content = f"ed25519 {key_id} {key_b64}\n"
 
-            with (target_dir / file.name).open("w") as f:
+            fd = os.open(target_dir / file.name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+            with os.fdopen(fd, "w") as f:
                 f.write(signing_key_content)
             console.print("  [dim]Generated unique signing key for instance[/dim]")
 
         else:
-            shutil.copy(file, target_dir / file.name)
+            fd = os.open(target_dir / file.name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+            with os.fdopen(fd, "wb") as target, file.open("rb") as source:
+                shutil.copyfileobj(source, target)
+                os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
 
 
 def _ensure_env_dir() -> None:
@@ -940,7 +944,10 @@ def _bring_up_instance(
 def _create_directory_with_permissions(path: Path, mode: int = 0o755) -> None:
     """Create a directory owned by the container user with the given mode."""
     path.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except PermissionError:
+        return
     try:
         with contextlib.suppress(OSError):
             os.fchmod(fd, mode)
@@ -961,8 +968,8 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
     # Copy all credential files; the container user owns them, and nobody else may read them.
     for cred_file in source_dir.glob("*.json"):
         target_file = target_dir / cred_file.name
-        if not target_file.exists():
-            shutil.copy2(cred_file, target_file)
+        if not os.path.lexists(target_file):
+            _write_private_file(target_file, cred_file.read_text())
         _restrict_to_container_user(target_file)
 
 
@@ -976,8 +983,8 @@ def _copy_config_to_instance(instance: Instance) -> None:
     target_config = Path(instance.data_dir) / "config" / "config.yaml"
 
     # Only copy if target doesn't exist (preserve customizations)
-    if not target_config.exists():
-        shutil.copy2(source_config, target_config)
+    if not os.path.lexists(target_config):
+        _write_private_file(target_config, source_config.read_text())
         # Set proper permissions for Docker
         with contextlib.suppress(OSError, PermissionError):
             _give_to_container_user(target_config)

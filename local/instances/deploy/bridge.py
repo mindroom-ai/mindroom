@@ -151,13 +151,14 @@ def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
     """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
     for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
         try:
+            info = os.stat(path, follow_symlinks=False)  # noqa: PTH116
+            if not stat.S_ISREG(info.st_mode):
+                msg = f"Refusing non-regular file: {path}"
+                raise ValueError(msg)
+            if info.st_mode & 0o077 == 0:
+                continue
             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
-                info = os.fstat(f.fileno())
-                if not stat.S_ISREG(info.st_mode):
-                    msg = f"Refusing non-regular file: {path}"
-                    raise ValueError(msg)
-                if info.st_mode & 0o077:
-                    os.fchmod(f.fileno(), 0o600)
+                os.fchmod(f.fileno(), 0o600)
         except FileNotFoundError:
             continue
         except PermissionError as e:

@@ -295,6 +295,34 @@ def test_start_strips_tokens_and_world_read_left_by_older_versions(
     }
 
 
+def test_owner_only_bridge_files_need_no_read_permission(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already-private container files need no descriptor or spurious operator warning."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name in ("config.yaml", "registration.yaml"):
+        path = data_dir / name
+        path.write_text("private")
+        path.chmod(0o600)
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type="telegram",
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
+
+    def denied_open(*_args: object, **_kwargs: object) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(bridge_manager.os, "open", denied_open)
+    bridge_manager._protect_bridge_secret_files(bridge)
+
+    assert bridge_manager.console.export_text() == ""
+
+
 def test_unrestrictable_bridge_file_prints_the_exact_fix(
     bridge_manager: ModuleType,
     tmp_path: Path,
