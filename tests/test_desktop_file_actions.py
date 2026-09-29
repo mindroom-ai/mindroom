@@ -2,133 +2,90 @@
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING
+import re
+from pathlib import Path
 
 import pytest
 
-from mindroom.desktop.filesystem import DesktopFilesystem
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES
-from tests.desktop_bridge_helpers import (
+from mindroom.desktop.file_actions import execute_file
+from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
+from mindroom.desktop.protocol import DesktopProtocolError
+from mindroom.desktop.reply_fitting import fits_inline
+from tests.desktop_helpers import (
     _LONGEST_SESSION_ID,
     _MAX_PROTOCOL_IDENTIFIER_LENGTH,
+    APP_ID,
     _command,
-    _event,
-    _handle,
-    _local_bridge,
     _longest_request_id,
-    _response,
     _root_id,
 )
-from tests.desktop_bridge_helpers import selected_root as selected_root  # noqa: PLC0414
-from tests.desktop_bridge_helpers import transport as transport  # noqa: PLC0414
-
-if TYPE_CHECKING:
-    from pathlib import Path
-    from unittest.mock import AsyncMock
+from tests.desktop_helpers import selected_root as selected_root  # noqa: PLC0414
 
 
 @pytest.mark.asyncio
-async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
-    transport: AsyncMock,
+async def test_folder_actions_list_selected_folders_and_directories_and_read_from_an_offset(
     selected_root: Path,
 ) -> None:
-    """Folder reads work through the remote channel without any GUI provider or app selection."""
+    """Folders and their entries are listed, and a file read starts at the requested byte offset."""
     files = DesktopFilesystem((selected_root,))
-    bridge = _local_bridge(filesystem=files)
     root_id = _root_id(files)
 
-    await _handle(bridge, _event(_command("list_folders")))
-    assert _response(transport).result["folders"] == [{"id": root_id, "name": "selected", "path": str(selected_root)}]
-    await _handle(
-        bridge,
-        _event(_command("list_directory", request_id="r2", sequence=2, parameters={"root_id": root_id})),
-    )
-    assert _response(transport).result["entries"] == [
+    folders = await execute_file(files, _command("list_folders"))
+    assert folders["folders"] == [{"id": root_id, "name": "selected", "path": str(selected_root)}]
+    listing = await execute_file(files, _command("list_directory", parameters={"root_id": root_id}))
+    assert listing["entries"] == [
         {"name": "docs", "type": "directory"},
         {"name": "link", "type": "symlink"},
         {"name": "note.txt", "type": "file"},
     ]
-    assert _response(transport).result["truncated"] is False
-    await _handle(
-        bridge,
-        _event(
-            _command("list_directory", request_id="r3", sequence=3, parameters={"root_id": root_id, "path": "docs"}),
-        ),
+    assert listing["truncated"] is False
+    docs = await execute_file(files, _command("list_directory", parameters={"root_id": root_id, "path": "docs"}))
+    assert docs["entries"] == [{"name": "readme.md", "type": "file"}]
+    read = await execute_file(
+        files,
+        _command("read_file", parameters={"root_id": root_id, "path": "note.txt", "offset": 8}),
     )
-    assert _response(transport).result["entries"] == [{"name": "readme.md", "type": "file"}]
-    await _handle(
-        bridge,
-        _event(
-            _command(
-                "read_file",
-                request_id="r4",
-                sequence=4,
-                parameters={"root_id": root_id, "path": "note.txt", "offset": 8},
-            ),
-        ),
-    )
-    assert _response(transport).result["text"] == "text"
-    assert _response(transport).result["eof"] is True
-    await _handle(bridge, _event(_command("status", request_id="r5", sequence=5)))
-    status = _response(transport).result
-    assert status["gui_available"] is False
-    assert status["bridge"]["gui_available"] is False
-    assert status["bridge"]["file_roots"] == [{"id": root_id, "name": "selected", "path": str(selected_root)}]
-    assert status["bridge"]["shell"] == {
-        "enabled": False,
-        "pending": False,
-        "auto_approve_remaining_seconds": 0,
-        "auto_approve_until_revoked": False,
-        "active_request_id": None,
-        "handles": [],
-    }
-    assert type(status["bridge"]["shell"]["auto_approve_remaining_seconds"]) is int
-    await _handle(bridge, _event(_command("list_apps", request_id="r6", sequence=6)))
-    assert _response(transport).result == {"apps": [], "metrics": _response(transport).result["metrics"]}
-    await _handle(bridge, _event(_command("get_app_state", request_id="r7", sequence=7)))
-    assert _response(transport).error == "Desktop command must target an application in the local allowlist."
-    bridge.close()
+    assert read["text"] == "text"
+    assert read["eof"] is True
+    files.close()
 
 
 @pytest.mark.asyncio
-async def test_list_directory_reply_is_bounded_by_the_real_enveloped_response(
-    transport: AsyncMock,
-    tmp_path: Path,
-) -> None:
-    """The trimmed listing must fit the real Olm-encrypted envelope, not just the bare entries dict."""
+async def test_folder_actions_require_a_filesystem() -> None:
+    """Without selected folders there is nothing to read."""
+    with pytest.raises(DesktopProtocolError, match=r"^Local file access is disabled\.$"):
+        await execute_file(None, _command("list_folders"))
+
+
+@pytest.mark.asyncio
+async def test_list_directory_reply_is_bounded_by_the_real_enveloped_response(tmp_path: Path) -> None:
+    """The trimmed listing must fit the enveloped reply with its widest metrics, not just the bare entries dict."""
     root = tmp_path / "root"
     root.mkdir()
     names = sorted(("字" * 60 + f"{number:03}") for number in range(200))
     for name in names:
         (root / name).write_text("x")
     files = DesktopFilesystem((root,))
-    bridge = _local_bridge(filesystem=files)
-    root_id = _root_id(files)
     command = _command(
         "list_directory",
         request_id="r" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
         session_id="s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
-        parameters={"root_id": root_id},
+        parameters={"root_id": _root_id(files)},
     )
-    await _handle(bridge, _event(command))
-    response = _response(transport)
-    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
-    entries = response.result["entries"]
+    result = await execute_file(files, command)
+    assert fits_inline(command, result)
+    entries = result["entries"]
     assert isinstance(entries, list)
-    assert response.result["truncated"] is True
+    assert result["truncated"] is True
     assert 0 < len(entries) < 200
     # The kept prefix stays in the existing deterministic (sorted) order.
     assert [entry["name"] for entry in entries] == names[: len(entries)]
-    bridge.close()
+    files.close()
 
 
 @pytest.mark.asyncio
-async def test_list_folders_reply_is_bounded_by_the_real_enveloped_response(
-    transport: AsyncMock,
-    tmp_path: Path,
-) -> None:
-    """Many long root paths must fit the real Olm-encrypted envelope, not just the bare folders dict."""
+async def test_list_folders_reply_is_bounded_by_the_real_enveloped_response(tmp_path: Path) -> None:
+    """Many long root paths must fit the enveloped reply with its widest metrics, not just the bare folders dict."""
     base = tmp_path / ("a" * 200) / ("b" * 200)
     base.mkdir(parents=True)
     roots = []
@@ -137,59 +94,63 @@ async def test_list_folders_reply_is_bounded_by_the_real_enveloped_response(
         leaf.mkdir()
         roots.append(leaf)
     files = DesktopFilesystem(tuple(roots))
-    bridge = _local_bridge(filesystem=files)
     command = _command(
         "list_folders",
         request_id="r" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
         session_id="s" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
     )
-    await _handle(bridge, _event(command))
-    response = _response(transport)
-    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
-    folders = response.result["folders"]
+    result = await execute_file(files, command)
+    assert fits_inline(command, result)
+    folders = result["folders"]
     assert isinstance(folders, list)
-    assert response.result["truncated"] is True
+    assert result["truncated"] is True
     assert 0 < len(folders) < len(roots)
-    bridge.close()
+    files.close()
 
 
 @pytest.mark.asyncio
-async def test_read_file_replies_fit_as_recorded_and_sent_and_rebuild_the_file(
-    transport: AsyncMock,
-    tmp_path: Path,
-) -> None:
-    """Escape-heavy text arrives in replies within the budget, and reading on from next_offset rebuilds it exactly."""
+async def test_read_file_pages_fit_inline_and_rebuild_the_file(tmp_path: Path) -> None:
+    """Escape-heavy text arrives in pages within the budget, and reading on from next_offset rebuilds it exactly."""
     root = (tmp_path / "selected").resolve()
     root.mkdir()
     content = ("é" * 20_000 + "€" * 5_000 + "\U0001f600" * 3_000 + '"\\\t\n' * 2_000).encode()
     (root / "notes.txt").write_bytes(content)
     files = DesktopFilesystem((root,))
-    bridge = _local_bridge(filesystem=files)
     root_id = _root_id(files)
     received, offset, reads = b"", 0, 0
     while not received or offset < len(content):
         reads += 1
-        request_id = _longest_request_id(f"read-{reads}-")
         command = _command(
             "read_file",
-            request_id=request_id,
+            request_id=_longest_request_id(f"read-{reads}-"),
             session_id=_LONGEST_SESSION_ID,
             sequence=reads,
             parameters={"root_id": root_id, "path": "notes.txt", "offset": offset},
         )
-        await _handle(bridge, _event(command))
-        sent = _response(transport)
-        assert sent.to_content() == bridge._journal.get(request_id).response.to_content()
-        assert sent.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
-        shown = str(sent.result["text"]).encode()
+        result = await execute_file(files, command)
+        assert fits_inline(command, result)
+        shown = str(result["text"]).encode()
         assert shown
-        assert (sent.result["offset"], sent.result["next_offset"]) == (offset, offset + len(shown))
-        assert sent.result["eof"] is (offset + len(shown) == len(content))
-        assert sent.result["truncated"] is not sent.result["eof"]
+        assert (result["offset"], result["next_offset"]) == (offset, offset + len(shown))
+        assert result["eof"] is (offset + len(shown) == len(content))
+        assert result["truncated"] is not result["eof"]
         received, offset = received + shown, offset + len(shown)
     assert received == content
     assert reads > len(content) // 16_384 + 1
-    bridge.close()
+    files.close()
+
+
+@pytest.mark.asyncio
+async def test_long_local_paths_reach_folder_reads(tmp_path: Path) -> None:
+    """Paths inside selected folders are not limited to identifier length."""
+    nested = Path(*["d" * 60] * 5)
+    root = (tmp_path / "selected").resolve()
+    (root / nested).mkdir(parents=True)
+    (root / nested / "note.txt").write_text("deep", encoding="utf-8")
+    files = DesktopFilesystem((root,))
+    read = _command("read_file", parameters={"root_id": _root_id(files), "path": str(nested / "note.txt")})
+    assert (await execute_file(files, read))["text"] == "deep"
+    files.close()
 
 
 @pytest.mark.asyncio
@@ -205,16 +166,38 @@ async def test_read_file_replies_fit_as_recorded_and_sent_and_rebuild_the_file(
     ],
 )
 async def test_file_reads_stay_inside_selected_folder(
-    transport: AsyncMock,
     selected_root: Path,
     action: str,
     parameters: dict[str, object],
 ) -> None:
     """Parent paths, absolute paths, unknown roots, and links never return outside bytes."""
     files = DesktopFilesystem((selected_root,))
-    bridge = _local_bridge(filesystem=files)
-    await _handle(bridge, _event(_command(action, parameters={"root_id": _root_id(files), **parameters})))
-    response = _response(transport)
-    assert not response.ok
-    assert "outside secret" not in json.dumps(response.to_content())
-    bridge.close()
+    with pytest.raises(DesktopFilesystemError) as raised:
+        await execute_file(files, _command(action, parameters={"root_id": _root_id(files), **parameters}))
+    assert "outside secret" not in str(raised.value)
+    files.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters", "error"),
+    [
+        ("list_folders", {"root_id": "x"}, "Unexpected desktop parameters: root_id."),
+        ("list_directory", {"offset": 0}, "Unexpected desktop parameters: offset."),
+        ("read_file", {"path": "note.txt", "app": APP_ID}, "Unexpected desktop parameters: app."),
+        ("read_file", {"path": "note.txt", "offset": "8"}, "Desktop parameter offset must be an integer."),
+    ],
+)
+async def test_folder_actions_reject_unrelated_or_malformed_parameters(
+    selected_root: Path,
+    action: str,
+    parameters: dict[str, object],
+    error: str,
+) -> None:
+    """Each folder action accepts only its own strictly typed parameters."""
+    files = DesktopFilesystem((selected_root,))
+    if action != "list_folders":
+        parameters = {"root_id": _root_id(files), **parameters}
+    with pytest.raises(DesktopProtocolError, match=f"^{re.escape(error)}$"):
+        await execute_file(files, _command(action, parameters=parameters))
+    files.close()

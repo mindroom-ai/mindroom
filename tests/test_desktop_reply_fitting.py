@@ -2,149 +2,77 @@
 
 from __future__ import annotations
 
-import json
-import shlex
-import sys
 from dataclasses import replace
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
-import nio
 import pytest
 
-from mindroom.desktop.bridge import DesktopBridge
-from mindroom.desktop.media import download_encrypted_media
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES, DesktopCommand, DesktopResponse, EncryptedDesktopMedia
-from mindroom.desktop.reply_fitting import _WIDEST_METRICS
-from mindroom.matrix.olm_to_device import PinnedMatrixDevice
-from tests.desktop_bridge_helpers import (
-    _LONGEST_SESSION_ID,
-    _MAX_PROTOCOL_IDENTIFIER_LENGTH,
-    NOW_SECONDS,
-    _command,
-    _event,
-    _execute,
-    _local_shell,
-    _policy,
-    _run_shell,
+from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES, DesktopResponse
+from mindroom.desktop.reply_fitting import (
+    _WIDEST_METRICS,
+    fits_inline,
+    leftmost_fitting,
+    response_metrics,
+    success_response,
 )
-from tests.test_olm_to_device import olm_transport
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-# The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
-# request bodies at 200 * 65,536 bytes and Tuwunel at 24 MiB, and one federation transaction carries up to
-# 50 PDUs and 100 EDUs within that cap. Each encrypted to-device request therefore stays within the
-# 65,536-byte event limit, so a full transaction of them still fits. Only this test checks it: production
-# never reads this value, so it lives here rather than in mindroom.desktop.protocol.
-_MAX_TO_DEVICE_BYTES = 65_536
+from tests.desktop_helpers import _LONGEST_SESSION_ID, MEDIA, _command, _longest_request_id
 
 
-def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
-    """Size the exact completed reply shape the bridge measures, with the metrics room it reserves."""
-    return DesktopResponse(
-        request_id=command.request_id,
-        session_id=command.session_id,
+def test_success_response_answers_the_command_with_its_result_and_screenshot() -> None:
+    """A success reply carries the command's identifiers, the result, and an optional screenshot."""
+    command = _command("list_apps", request_id="request-7", session_id="session-7")
+    assert success_response(command, result={"apps": []}) == DesktopResponse(
+        request_id="request-7",
+        session_id="session-7",
         ok=True,
-        result={
-            "state": "completed",
-            "handle": None,
-            "exit_code": 0,
-            "output": output,
-            "output_bytes": len(output.encode()),
-            "output_truncated": False,
-            "output_attachment": None,
-            "output_start": 0,
-            "next_offset": len(output.encode()),
-            "metrics": _WIDEST_METRICS,
-        },
-    ).content_bytes()
+        result={"apps": []},
+    )
+    assert success_response(command, result={}, screenshot=MEDIA).screenshot == MEDIA
 
 
-def _largest_inline_count(command: DesktopCommand, character: str) -> int:
-    count = (MAX_INLINE_RESPONSE_BYTES - _inline_content_bytes(command, "")) // len(json.dumps(character))
-    while _inline_content_bytes(command, character * (count + 1)) <= MAX_INLINE_RESPONSE_BYTES:
-        count += 1
-    while _inline_content_bytes(command, character * count) > MAX_INLINE_RESPONSE_BYTES:
-        count -= 1
-    return count
+def test_fitting_reserves_the_widest_value_of_every_metric() -> None:
+    """Fitting reserves room for each metric the bridge adds, at the largest integer JSON holds exactly."""
+    assert response_metrics(elapsed_ms=1, structured_bytes=2, screenshot_bytes=3) == {
+        "elapsed_ms": 1,
+        "structured_bytes": 2,
+        "screenshot_bytes": 3,
+    }
+    assert dict.fromkeys(("elapsed_ms", "structured_bytes", "screenshot_bytes"), 2**53 - 1) == _WIDEST_METRICS
 
 
-@pytest.mark.parametrize("character", ["\x01", "€", "😀"], ids=["control", "bmp", "astral"])
-@pytest.mark.asyncio
-async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_reply_fits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    character: str,
-) -> None:
-    """Measured through real Olm encryption, the largest inline reply and its receipt stay one to-device message."""
-    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_args: True)
-    uploaded: list[bytes] = []
+@pytest.mark.parametrize("character", ["x", "\x01", "€", "😀"], ids=["ascii", "control", "bmp", "astral"])
+def test_fits_inline_admits_exactly_the_results_whose_widest_envelope_fits(character: str) -> None:
+    """The largest result that fits with the widest metrics is admitted, and one more character is not."""
+    command = replace(_command("read_file", request_id=_longest_request_id("fit-")), session_id=_LONGEST_SESSION_ID)
 
-    async def upload(_client: object, content: bytes, *, content_type: str, filename: str) -> nio.UploadResponse:
-        del content_type, filename
-        uploaded.append(content)
-        return nio.UploadResponse("mxc://example.org/shell-output")
+    def envelope_bytes(count: int) -> int:
+        result = {"text": character * count, "metrics": _WIDEST_METRICS}
+        return success_response(command, result=result).content_bytes()
 
-    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
-    desktop_user = "@" + "d" * 240 + ":example.org"
-    controller_user = "@" + "c" * 240 + ":example.org"
-    async with olm_transport(sender=desktop_user, recipient=controller_user) as (client, peer, requests, _):
-        assert peer.olm is not None
-        controller = PinnedMatrixDevice(controller_user, "DESKTOP", peer.olm.account.identity_keys["ed25519"])
-        shell = _local_shell()
-        shell.grant(60)
-        bridge = DesktopBridge(
-            client=client,
-            provider=None,
-            policy=replace(_policy(), controller=controller, allowed_app_ids=frozenset(), shell_enabled=True),
-            shell=shell,
-            clock=lambda: NOW_SECONDS,
-        )
-        inline_id, attached_id = "i" * _MAX_PROTOCOL_IDENTIFIER_LENGTH, "a" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
-        probe = replace(
-            _run_shell("true", tmp_path, request_id=inline_id, expires_at_ms=120_000),
-            session_id=_LONGEST_SESSION_ID,
-        )
-        count = _largest_inline_count(probe, character)
-        results = []
-        for sequence, (request_id, repeat) in enumerate(((inline_id, count), (attached_id, count + 1)), start=1):
-            script = f"import sys; sys.stdout.buffer.write(({character!r} * {repeat}).encode())"
-            command = _run_shell(
-                f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
-                tmp_path,
-                request_id=request_id,
-                sequence=sequence,
-                timeout_seconds=30,
-                expires_at_ms=120_000,
-            )
-            await bridge.on_to_device_event(_event(replace(command, session_id=_LONGEST_SESSION_ID)))
-            await _execute(bridge)
-            await bridge.deliver_pending()
-            body = requests[-1]["body"]
-            assert "/sendToDevice/m.room.encrypted/" in requests[-1]["path"]
-            assert len(json.dumps(body, separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
-            recorded = bridge._journal.get(request_id).response
-            assert recorded.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
-            results.append(recorded.result)
-        receipt = _command(
-            "request_status",
-            request_id="q" * _MAX_PROTOCOL_IDENTIFIER_LENGTH,
-            session_id=_LONGEST_SESSION_ID,
-            sequence=3,
-            parameters={"request_id": inline_id},
-        )
-        await bridge.on_to_device_event(_event(receipt))
-        await bridge.deliver_pending()
-        assert len(json.dumps(requests[-1]["body"], separators=(",", ":")).encode()) <= _MAX_TO_DEVICE_BYTES
-        await bridge.stop()
-        bridge.close()
+    low, high = 0, MAX_INLINE_RESPONSE_BYTES
+    while low < high:
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if envelope_bytes(middle) <= MAX_INLINE_RESPONSE_BYTES else (low, middle - 1)
+    assert fits_inline(command, {"text": character * low})
+    assert not fits_inline(command, {"text": character * (low + 1)})
 
-    inline, attached = results
-    assert (inline["output"], inline["output_attachment"]) == (character * count, None)
-    assert attached["output"] == ""
-    media = EncryptedDesktopMedia.from_content(attached["output_attachment"], kind="output_attachment")
-    download = AsyncMock(spec=nio.AsyncClient)
-    download.download.return_value = nio.DownloadResponse(uploaded[0], "application/octet-stream", None)
-    assert await download_encrypted_media(download, media, timeout_seconds=1) == (character * (count + 1)).encode()
+
+def test_leftmost_fitting_finds_the_fewest_characters_to_drop() -> None:
+    """The search returns the smallest drop whose reply fits, so one fewer would overflow."""
+    command = replace(_command("read_file", request_id=_longest_request_id("drop-")), session_id=_LONGEST_SESSION_ID)
+    text = "\x01" * MAX_INLINE_RESPONSE_BYTES
+
+    def reply(dropped: int) -> dict[str, object]:
+        return {"text": text[: len(text) - dropped]}
+
+    dropped = leftmost_fitting(command, 0, len(text), reply)
+    assert fits_inline(command, reply(dropped))
+    assert not fits_inline(command, reply(dropped - 1))
+
+
+def test_leftmost_fitting_keeps_everything_when_the_whole_reply_fits() -> None:
+    """Nothing is dropped from a reply that already fits."""
+    command = _command("list_folders")
+    entries = [{"name": str(number)} for number in range(10)]
+    assert (
+        leftmost_fitting(command, 0, len(entries), lambda dropped: {"folders": entries[: len(entries) - dropped]}) == 0
+    )
