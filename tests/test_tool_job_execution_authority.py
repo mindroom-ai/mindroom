@@ -57,7 +57,10 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
             release_background_tool_jobs(second, second_instance)
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
-        with tool_runtime_context(replace(context, runtime_paths=second)), authorized_tool_call(owner, FunctionCall(function=function)):
+        with (
+            tool_runtime_context(replace(context, runtime_paths=second)),
+            authorized_tool_call(owner, FunctionCall(function=function)),
+        ):
             check_current_execution_authority()
     finally:
         await first_runtime.shutdown()
