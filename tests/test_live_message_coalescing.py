@@ -29,6 +29,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
@@ -57,6 +58,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     AdmissionResult,
     EventClass,
@@ -132,12 +134,16 @@ def _make_config(
     tmp_path: Path,
     *,
     debounce_ms: int = 10,
+    other_agent_names: tuple[str, ...] = (),
 ) -> Config:
     """Build a config with configurable live coalescing timings."""
     return bind_runtime_paths(
         with_current_room_member_access(
             Config(
-                agents={"test_agent": AgentConfig(display_name="TestAgent", rooms=["!room:localhost"])},
+                agents={
+                    "test_agent": AgentConfig(display_name="TestAgent", rooms=["!room:localhost"]),
+                    **{name: AgentConfig(display_name=name.title()) for name in other_agent_names},
+                },
                 teams={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
                 defaults=DefaultsConfig(
@@ -156,9 +162,10 @@ def _make_bot(
     *,
     debounce_ms: int = 10,
     agent_name: str = "test_agent",
+    other_agent_names: tuple[str, ...] = (),
 ) -> AgentBot:
     """Create a bot instance wired to a temporary runtime root."""
-    config = _make_config(tmp_path, debounce_ms=debounce_ms)
+    config = _make_config(tmp_path, debounce_ms=debounce_ms, other_agent_names=other_agent_names)
     agent_user = AgentMatrixUser(
         agent_name=agent_name,
         password=TEST_PASSWORD,
@@ -1800,6 +1807,90 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
             lifecycle_lock.release()
 
     assert runs == [(sender, body) for _event_id, body, sender, _timestamp in messages[:answered_count]]
+
+
+@pytest.mark.parametrize("research_acts_for_alice", [False, True])
+@pytest.mark.asyncio
+async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_requester(
+    tmp_path: Path,
+    research_acts_for_alice: bool,
+) -> None:
+    """An agent reply written for Alice is its own run, so her newer message cannot absorb her earlier one past it."""
+    bot = _make_bot(tmp_path, debounce_ms=0, other_agent_names=("research",))
+    install_direct_response_admission(bot)
+    room = _make_room()
+    research = entity_identity_registry(bot.config, bot.runtime_paths).current_id("research").full_id
+    messages = [
+        ("$alice-first", "alice first", "@alice:localhost", 1001),
+        ("$research", "@test_agent please check this for alice", research, 1002),
+        ("$alice-last", "alice last", "@alice:localhost", 1003),
+    ]
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
+            *(
+                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
+                for event_id, body, sender, timestamp in messages
+            ),
+        ],
+        is_full_history=True,
+    )
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    runs: list[tuple[str | None, str]] = []
+
+    async def fake_ai_response(_ctx: object, prompt: str, *_args: object, **_kwargs: object) -> str:
+        tool_context = get_tool_runtime_context()
+        runs.append((tool_context.requester_id if tool_context is not None else None, prompt))
+        return "ok"
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "_read_thread_messages",
+                new=AsyncMock(return_value=history),
+            ),
+        ):
+            for event_id, body, sender, timestamp in messages:
+                event = _text_event(
+                    event_id=event_id,
+                    body=body,
+                    sender=sender,
+                    server_timestamp=timestamp,
+                    thread_id="$thread",
+                )
+                if sender == research:
+                    event.source["content"]["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
+                    if research_acts_for_alice:
+                        event.source["content"][ACTING_REQUESTER_KEY] = "@alice:localhost"
+                await bot._turn_controller.handle_text_event(room, event)
+            follow_up_key = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _wait_for(lambda: len(bot._coalescing_gate.queued_pending_events(follow_up_key)) == len(messages))
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await bot._coalescing_gate.drain_all()
+            await response_runner.drain_inbox_responses()
+    finally:
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    research_requester = "@alice:localhost" if research_acts_for_alice else research
+    assert runs == [
+        ("@alice:localhost", "alice first"),
+        (research_requester, "@test_agent please check this for alice"),
+        ("@alice:localhost", "alice last"),
+    ]
 
 
 @pytest.mark.asyncio

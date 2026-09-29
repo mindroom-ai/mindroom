@@ -20,7 +20,6 @@ from .coalescing_batch import (
     build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
-    pending_event_requester_user_id,
     pending_event_run_identity,
 )
 from .coalescing_cleanup import (
@@ -260,10 +259,10 @@ class CoalescingGate:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
-    def follow_up_backlog_queues_other_requester(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether an active follow-up backlog still queues events from a different requester."""
+    def follow_up_backlog_queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
+        """Return whether an active follow-up backlog still queues a run other than this requester's own messages."""
         return is_active_follow_up_coalescing_key(key) and any(
-            pending_event_requester_user_id(key, pending_event) != requester_user_id
+            pending_event_run_identity(key, pending_event) != (requester_user_id, None)
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -1156,7 +1155,7 @@ class CoalescingGate:
         )
         if candidate_count == 0:
             return
-        candidate_count = self._front_same_requester_run_length(key, gate, candidate_count)
+        candidate_count = self._front_same_run_identity_length(key, gate, candidate_count)
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
         if parallel_root:
@@ -1167,7 +1166,7 @@ class CoalescingGate:
             gate.drain_all_requested = False
 
     @staticmethod
-    def _front_same_requester_run_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
+    def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
         """Cap a front run at its first run-identity change so each turn runs as its own sender."""
         front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
         for index, queued in enumerate(islice(gate.queue, count)):
@@ -1176,14 +1175,14 @@ class CoalescingGate:
         return count
 
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:
-        """Dispatch the post-idle active-response backlog as receive-ordered per-requester batches."""
+        """Dispatch the post-idle active-response backlog as receive-ordered per-run-identity batches."""
         if not is_active_follow_up_coalescing_key(key):
             return False
         front = gate.queue[0]
         if self._queued_kind(front) is not QueueKind.NORMAL:
             return False
 
-        candidate_count = self._front_same_requester_run_length(
+        candidate_count = self._front_same_run_identity_length(
             key,
             gate,
             self._front_normal_run_length(
