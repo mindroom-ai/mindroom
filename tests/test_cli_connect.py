@@ -922,6 +922,86 @@ def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
 
 
+def test_pair_local_install_notes_a_repaired_owner_missing_from_administrators(tmp_path: Path) -> None:
+    """Re-pairing with another account finds no placeholder, so the config is left alone and a note names the settings."""
+    config_path = tmp_path / "config.yaml"
+    original = 'administrators: ["@bob:mindroom.chat"]\nroom_defaults:\n  admins: ["@bob:mindroom.chat"]\n'
+    config_path.write_text(original)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert (
+        f"Note: @alice:mindroom.chat is not listed in administrators in {config_path}. "
+        "If this account should manage MindRoom, add it to administrators, "
+        "room_defaults.invite_users, and room_defaults.admins."
+    ) in out.getvalue()
+    assert config_path.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        'administrators: ["@bob:mindroom.chat", "@alice:mindroom.chat"]\n',
+    ],
+    ids=["first-pairing", "already-administrator"],
+)
+def test_pair_local_install_does_not_note_an_owner_who_is_administrator(tmp_path: Path, config_text: str) -> None:
+    """The first pairing fills the placeholder, and an owner already listed needs no note."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert "is not listed in administrators" not in out.getvalue()
+    assert "@alice:mindroom.chat" in config_path.read_text()
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    ["- administrators\n", "administrators: 5\n", "administrators: false\n", "administrators: {}\n"],
+    ids=["top-level-list", "scalar-administrators", "false-administrators", "mapping-administrators"],
+)
+def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path, config_text: str) -> None:
+    """A config of the wrong shape leaves the administrator check unknown, so pairing completes without a note."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    out = io.StringIO()
+    post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
+
+    result = cli_connect.pair_local_install(
+        runtime_paths,
+        console=Console(file=out, width=400),
+        provisioning_url="https://provisioning.example",
+        post_request=post,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result is not None
+    assert "is not listed in administrators" not in out.getvalue()
+    assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+    assert config_path.read_text() == config_text
+
+
 def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")

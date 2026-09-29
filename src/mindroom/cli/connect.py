@@ -575,6 +575,32 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
         return
     if replaced:
         console.print(f"  Updated owner placeholder(s) in: {config_path}")
+    elif _should_note_missing_administrator(config_path, owner_user_id):
+        # A re-pair with another account finds no placeholder left, so the earlier account stays in charge.
+        console.print(
+            f"  Note: {owner_user_id} is not listed in administrators in {config_path}. "
+            "If this account should manage MindRoom, add it to administrators, "
+            "room_defaults.invite_users, and room_defaults.admins.",
+            markup=False,
+        )
+
+
+def _should_note_missing_administrator(config_path: Path, owner_user_id: str) -> bool:
+    """Return True when the config's administrators list omits the user.
+
+    Return False when the config cannot be read, does not load as a mapping, or has a non-list administrators value.
+    A missing or null administrators value counts as an empty list.
+    """
+    try:
+        data, _ = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    administrators = data.get("administrators")
+    if administrators is None:
+        return True
+    return isinstance(administrators, list) and owner_user_id not in administrators
 
 
 def _is_hosted_homeserver(homeserver: str) -> bool:

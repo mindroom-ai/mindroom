@@ -1442,6 +1442,7 @@ Answering `n`, pressing Ctrl+C, or closing input discards the credentials withou
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+Owner placeholders in `config.yaml` are replaced only once, so when a later pairing is approved by an account missing from `administrators`, MindRoom prints a note and leaves the config unchanged; add that account to `administrators`, `room_defaults.invite_users`, and `room_defaults.admins` yourself if it should manage MindRoom.
 
 If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
 `connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.

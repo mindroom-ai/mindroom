@@ -28,6 +28,7 @@ from mindroom.oauth.google_docs import _GOOGLE_DOCS_OAUTH_SCOPES, google_docs_oa
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
+from mindroom.oauth.google_tasks import _GOOGLE_TASKS_OAUTH_SCOPES, google_tasks_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClientConfig,
@@ -141,6 +142,18 @@ def test_terminal_oauth_refresh_error_classification(value: object, expected: bo
                 "status_capabilities": ("Sheets read/write",),
             },
         ),
+        (
+            google_tasks_oauth_provider(),
+            {
+                "id": "google_tasks",
+                "display_name": "Google Tasks",
+                "scopes": _GOOGLE_TASKS_OAUTH_SCOPES,
+                "credential_service": "google_tasks_oauth",
+                "tool_config_service": "google_tasks",
+                "client_config_services": ("google_tasks_oauth_client",),
+                "status_capabilities": ("Tasks read/write",),
+            },
+        ),
     ],
 )
 def test_public_google_oauth_providers_preserve_service_specific_fields(
@@ -173,6 +186,10 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
     assert google_docs_oauth_provider().scopes == (
         *GOOGLE_IDENTITY_SCOPES,
         "https://www.googleapis.com/auth/documents",
+    )
+    assert google_tasks_oauth_provider().scopes == (
+        *GOOGLE_IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/tasks",
     )
 
 
@@ -313,6 +330,7 @@ def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
+        google_tasks_oauth_provider(),
     ],
 )
 def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provider: OAuthProvider) -> None:
@@ -330,7 +348,9 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
         f"{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
         f"MINDROOM_OAUTH_{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
     )
-    expected_auth_params = GOOGLE_NARROW_EXTRA_AUTH_PARAMS if provider.id == "google_docs" else GOOGLE_EXTRA_AUTH_PARAMS
+    expected_auth_params = (
+        GOOGLE_NARROW_EXTRA_AUTH_PARAMS if provider.id in {"google_docs", "google_tasks"} else GOOGLE_EXTRA_AUTH_PARAMS
+    )
     assert provider.extra_auth_params == expected_auth_params
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper

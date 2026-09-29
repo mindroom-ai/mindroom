@@ -218,7 +218,7 @@ mindroom run
 - [Deployment](https://docs.mindroom.chat/deployment/) - Docker and Kubernetes deployment
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Custom admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Custom admin OAuth setup for Gmail/Calendar/Drive/Docs/Sheets/Tasks
 - [Google Services OAuth (Local Install)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Connect Google locally without Cloud setup
 - [CLI Reference](https://docs.mindroom.chat/cli/) - Command-line interface
 - [Support](https://docs.mindroom.chat/support/) - Contact and troubleshooting help
@@ -2936,7 +2936,7 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
@@ -4403,7 +4403,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
-- [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
+- [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, Matrix threads, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
@@ -11777,28 +11777,29 @@ The stored file name is always generated from the attachment ID.
 
 # Calendar & Scheduling
 
-Use these tools to read external calendars, manage bookings, and schedule future agent work inside MindRoom.
+Use these tools to read external calendars, manage to-do lists and bookings, and schedule future agent work inside MindRoom.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `calendar-and-scheduling` group.
-Use these tools when you need Google Calendar access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
+Use these tools when you need Google Calendar or Google Tasks access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
 
 ## Tools On This Page
 
 - [`google_calendar`] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
+- [`google_tasks`] - List, create, update, complete, and delete Google Tasks through Google OAuth.
 - [`cal_com`] - Query Cal.com availability and manage bookings through the Cal.com API.
 - [`scheduler`] - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
 
 ## Common Setup Notes
 
-`google_calendar` is a per-service Google OAuth integration.
-It uses the `google_calendar` OAuth provider instead of an API key form.
-It supports shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
-Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
+`google_calendar` and `google_tasks` are per-service Google OAuth integrations.
+They use the `google_calendar` and `google_tasks` OAuth providers instead of an API key form.
+They support shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
+Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling either tool.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
-Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
+Unlike the Google and Cal.com API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
 MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## [`google_calendar`]
@@ -11849,6 +11850,53 @@ create_event(
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
 - If the Google Calendar connection is missing any required Calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
+
+## [`google_tasks`]
+
+`google_tasks` is the native Google Tasks API toolkit for the connected user's task lists.
+
+### What It Does
+
+`google_tasks_list_task_lists()` returns up to 1,000 task lists per page with their IDs and titles, and a `nextPageToken` when more lists remain.
+`google_tasks_list_tasks()` returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat spaces, and returns a `nextPageToken` when more tasks remain.
+Completed tasks are omitted unless `show_completed=True`, which also includes tasks completed in Google's own apps.
+`google_tasks_create_task()` creates a task with optional notes, due date, and parent task.
+`google_tasks_update_task()` changes only the fields you pass: title, notes, due date, or completion state.
+`google_tasks_delete_task()` deletes one task.
+Deleting a task assigned from Google Docs or Chat also deletes the original assignment there.
+Every operation defaults to the user's default list, `@default`, when no `task_list_id` is given.
+Due dates use `YYYY-MM-DD`, because Google Tasks stores a due day without a time.
+Pass an empty string as `notes` or `due` to `google_tasks_update_task()` to remove that field.
+
+### Configuration
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_list_task_lists()` and `google_tasks_list_tasks()`. |
+| `manage_tasks` | `boolean` | `no` | `true` | Expose task creation, updates, completion, and deletion. |
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - google_tasks:
+          read_tasks: true
+          manage_tasks: true
+```
+
+```python
+google_tasks_list_tasks()
+google_tasks_create_task("Renew passport", notes="Bring two photos", due="2026-10-15")
+google_tasks_update_task("dGFzay0x", completed=True)
+```
+
+### Notes
+
+- `google_tasks` uses its own `google_tasks` OAuth provider and `google_tasks_oauth` token service, which request only the Tasks scope plus Google identity scopes.
+- `google_tasks` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
+- Enable the Google Tasks API in the Google Cloud project that owns a custom OAuth client before connecting.
 
 ## [`cal_com`]
 
@@ -13902,7 +13950,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ### Notes
 
 - `homeassistant` requires `worker_scope` to be unset or `shared`, and it is unavailable for `worker_scope: user` or `worker_scope: user_agent`.
-- `homeassistant`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
+- `homeassistant`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `google_tasks` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
 - Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
@@ -13936,7 +13984,7 @@ The tool names in this table are representative highlights rather than an exhaus
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_resolution, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
 | **Project Management** | github, atlassian, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
-| **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
+| **Calendar & Scheduling** | google_calendar, google_tasks, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
 | **Agent Orchestration** | oauth_connections, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
@@ -15113,7 +15161,7 @@ Function names are prefixed, such as `secondary_get_latest_emails` and `secondar
 Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
 
 Add more workspace definitions with distinct names and client services as needed.
-Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
 Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
 Keep workspace names stable because they identify stored connections.
 
@@ -16536,7 +16584,7 @@ If a configured restriction cannot be checked from verified provider claims, the
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](https://docs.mindroom.chat/tools/atlassian/#scopes) call.
 The built-in provider reads its app client from `atlassian_oauth_client`, and each additional site configured through `AtlassianConnectionConfig` gets a separate provider that defaults to its own `<name>_atlassian_oauth_client` service.
-Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
+Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, Tasks, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
@@ -21019,6 +21067,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load pair sessions persisted before device pairing as browser-initiated sessions without device fields. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load device pair sessions persisted without a requester address and inspect them with no address. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] register an older client's own agent password unchanged and return no password for it. |
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
@@ -21102,6 +21151,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C14 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads pair sessions persisted before device pairing, which lack device fields, as browser-initiated sessions. |
 | C15 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still resolves Matrix access tokens through whoami on browser-initiated pairing and connection endpoints when the deployed chat client sends no OpenID token. |
 | C16 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads device pair sessions persisted before requester addresses were recorded with no address, which the approval page shows as unknown. |
+| C17 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still registers the agent password that released clients send to register-agent, instead of generating a one-time password, until no paired installs run a release older than the first release containing #2428. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -21763,7 +21813,7 @@ Connect external messaging platforms to Matrix:
 - [Bridges overview](https://docs.mindroom.chat/deployment/bridges/) - available bridges and how they work
 - [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/) - bridge Telegram chats via mautrix-telegram
 
-## Google Services (Gmail/Calendar/Drive/Sheets)
+## Google Services (Gmail/Calendar/Drive/Docs/Sheets/Tasks)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
 
@@ -22312,6 +22362,7 @@ Public, unpaired, and organization-managed deployments can configure their own G
 | Google Docs | `google_docs` | `/api/oauth/google_docs/callback` | `google_docs_oauth` | `google_docs_oauth_client` | `google_docs` | Docs view/edit/create/delete plus OpenID email/profile |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
+| Google Tasks | `google_tasks` | `/api/oauth/google_tasks/callback` | `google_tasks_oauth` | `google_tasks_oauth_client` | `google_tasks` | Tasks read/write plus OpenID email/profile |
 | Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail modify plus OpenID email/profile |
 
 ## Scope Rationale
@@ -22332,6 +22383,9 @@ MindRoom requests only the scopes required by the operations currently exposed t
 - `calendar.settings.readonly` lets an agent infer working hours and locale without changing Calendar settings.
 - `spreadsheets` lets an agent read and, when enabled, create or update arbitrary spreadsheets named by the user.
   A read-only scope would remove the existing create and update operations.
+- `tasks` lets an agent list task lists and tasks and, when `manage_tasks` is enabled, create, update, complete, and delete tasks.
+  A read-only scope would remove those write operations.
+  The scope also authorizes creating and deleting task lists, although MindRoom's `google_tasks` tool does not expose task-list management.
 - `gmail.modify` is the narrowest single Gmail scope that preserves mailbox search and reading, drafts and sending, replies, labels, archiving, and other mailbox organization.
   MindRoom does not request `mail.google.com`, and `gmail.modify` does not permit bypassing the trash for permanent message deletion.
 - OpenID email and profile scopes identify the connected account and enforce optional account-domain restrictions.
@@ -22345,7 +22399,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
 Skip this section for a normal local installation.
 Create a **Web application** OAuth client in Google Cloud Console when you need a public callback origin or a custom Google OAuth app.
 Enable only the APIs for the tools you plan to use.
-Enable the Google Docs API before connecting `google_docs`.
+Enable the Google Docs API before connecting `google_docs`, and the Google Tasks API before connecting `google_tasks`.
 Add one authorized redirect URI for each provider you enable.
 
 For local development, the redirect URIs are:
@@ -22355,6 +22409,7 @@ http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_tasks/callback
 http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
@@ -22367,6 +22422,7 @@ Do not add this scope to a production OAuth consent configuration while another 
 Use a separate Google Cloud testing project and test users to enable the Docs API, add the `documents` scope, configure the Docs callback, and validate the integration without changing the production submission.
 After the current production review completes, add the Docs API and `documents` scope to the production project's Data Access configuration and submit the required sensitive-scope verification follow-up with a scope justification and end-to-end demo.
 Do not enable production Google Docs connections for general users until Google has approved the added scope, because unapproved sensitive scopes can show an unverified-app warning and remain subject to test-user limits.
+The Google Tasks provider requests the sensitive `https://www.googleapis.com/auth/tasks` scope, so the same testing-project, Data Access, and verification follow-up applies to the Tasks API and `tasks` scope.
 
 ## Custom Client Config
 
@@ -22458,6 +22514,7 @@ agents:
       - google_docs
       - google_calendar
       - google_sheets
+      - google_tasks
       - gmail
 ```
 
@@ -22476,7 +22533,7 @@ As a manual alternative, open the dashboard and select **Connect** for the Googl
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, `google_tasks`, and `gmail`.
 MindRoom does not mirror Google OAuth tokens into worker containers.
 
 ## Privacy and Access Scope
@@ -22510,6 +22567,7 @@ http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_tasks/callback
 http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
@@ -22520,6 +22578,10 @@ Provider-specific services such as `google_drive_oauth_client` override the shar
 Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
 That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
 Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
+
+Google Tasks requires the Google Tasks API and the sensitive `https://www.googleapis.com/auth/tasks` scope in the OAuth consent configuration.
+That scope authorizes viewing, creating, editing, and deleting all tasks and task lists in the connected account, although MindRoom exposes task operations rather than task-list management.
+The same testing-project and verification follow-up applies to the `tasks` scope.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
@@ -24214,7 +24276,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-  The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+  The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
   GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
   Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.
@@ -26373,6 +26435,7 @@ Answering `n`, pressing Ctrl+C, or closing input discards the credentials withou
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
+Owner placeholders in `config.yaml` are replaced only once, so when a later pairing is approved by an account missing from `administrators`, MindRoom prints a note and leaves the config unchanged; add that account to `administrators`, `room_defaults.invite_users`, and `room_defaults.admins` yourself if it should manage MindRoom.
 
 If the approval's response is lost in transit, the provisioning service has already handed out the credentials once and will not send them again.
 `connect` then exits with an explanation and asks you to run it again, while `run` warns and starts a new pairing.
