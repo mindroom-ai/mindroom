@@ -1,4 +1,7 @@
-"""Shared finite policy for application-local keyboard and scroll input."""
+"""Shared finite policy for application-local input: the apps it may never target, keys, and scroll directions."""
+
+# MindRoom's own windows grant shell auto-approval, control leases, and app access, so agent input must never reach them.
+MINDROOM_APP_IDS = frozenset({"chat.mindroom.menubar", "chat.mindroom.desktophelper"})
 
 DESKTOP_SAFE_KEYS = frozenset(
     {
@@ -44,4 +47,4 @@ def normalize_key_chord(keys: list[str]) -> tuple[str, ...]:
     raise ValueError(msg)
 
 
-__all__ = ["DESKTOP_SAFE_KEYS", "DESKTOP_SCROLL_DIRECTIONS", "normalize_key_chord"]
+__all__ = ["DESKTOP_SAFE_KEYS", "DESKTOP_SCROLL_DIRECTIONS", "MINDROOM_APP_IDS", "normalize_key_chord"]

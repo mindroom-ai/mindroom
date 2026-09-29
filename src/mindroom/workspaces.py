@@ -405,7 +405,7 @@ def control_plane_owns_private_templates(runtime_paths: RuntimePaths) -> bool:
 
     The primary validates private template paths against its own config directory
     and seeds requester workspaces from them; a runner resolves the same paths
-    against its seed config location, where they need not exist.
+    against its own config location, where they need not exist.
     """
     return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
 

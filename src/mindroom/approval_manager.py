@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
-from mindroom.redaction import redact_sensitive_data
+from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
@@ -56,14 +56,13 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 )
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
-    "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
-    "exactly what would run. Retry with a smaller payload — for example save large content to a "
+    "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
+    "exactly what would run. Retry with a smaller or simpler payload — for example save large content to a "
     "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
     "body — or auto-approve this tool via a script-based approval rule."
 )
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
-_SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
 
@@ -108,48 +107,18 @@ def _json_preview_length(value: object) -> int:
 
 
 def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
+    # The value is already redacted; redacting its JSON text again could hide text the first pass kept.
     if _json_preview_length(value) <= max_length:
         return value
-    return sanitize_failure_text(_compact_preview_text(value), max_length=max_length)
+    return truncate_review_text(_compact_preview_text(value), max_length)
 
 
-def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
-    if isinstance(sanitized, dict):
-        if not isinstance(original, dict):
-            return "__truncated__" in sanitized or any(
-                _contains_sanitizer_truncation(None, item) for item in sanitized.values()
-            )
-        original_by_text_key = {str(key): item for key, item in original.items()}
-        return (
-            len(sanitized) < len(original)
-            or ("__truncated__" in sanitized and "__truncated__" not in original)
-            or any(
-                _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
-                for key, item in sanitized.items()
-                if key != "__truncated__"
-            )
-        )
-    if isinstance(sanitized, list):
-        original_items = list(original) if isinstance(original, list | tuple | set | frozenset) else []
-        return (
-            len(original_items) > len(sanitized)
-            or (sanitized != original_items and sanitized[-1:] == [_SANITIZER_TRUNCATION_MARKER])
-            or any(
-                _contains_sanitizer_truncation(original_item, sanitized_item)
-                for original_item, sanitized_item in zip(original_items, sanitized, strict=False)
-            )
-        )
-    return isinstance(sanitized, str) and sanitized.endswith(_SANITIZER_TRUNCATION_MARKER) and sanitized != original
-
-
-def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    sanitized = sanitize_failure_value(arguments)
-    sanitizer_truncated = _contains_sanitizer_truncation(arguments, sanitized)
+def _build_event_arguments_preview(arguments: dict[str, Any], placeholders: dict[str, str]) -> dict[str, Any]:
+    sanitized = sanitize_failure_value(arguments, token_placeholders=placeholders)
     if not isinstance(sanitized, dict):
-        wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
-        return wrapped, True
+        return {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
-        return sanitized, sanitizer_truncated
+        return sanitized
     per_value_budget = max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // max(len(sanitized), 1))
     preview = {
         key: _truncate_event_argument_value(value, max_length=per_value_budget) for key, value in sanitized.items()
@@ -163,19 +132,44 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
                 f"{len(sanitized)} arguments omitted because the preview exceeded the size limit.",
                 max_length=max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // 2),
             ),
-        }, True
-    return preview, True
+        }
+    return preview
 
 
-def _full_arguments_json_bytes(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
+def _raw_arguments_json_bytes(arguments: dict[str, Any]) -> int:
+    # Raw tool arguments may carry lone surrogates or values JSON cannot encode; only their size matters here.
+    return len(json.dumps(arguments, ensure_ascii=False, default=repr).encode("utf-8", "surrogatepass"))
 
 
-def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
-    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+def _build_full_event_arguments(arguments: dict[str, Any], placeholders: dict[str, str]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments, or ``None`` when a reviewer could not see all of them.
+
+    The size cap applies to the raw arguments, so redaction itself never makes a card unapprovable.
+    """
+    if nests_beyond_redaction_depth(arguments) or _raw_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
-    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
-    return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
+    return cast("dict[str, Any]", redact_sensitive_data(arguments, token_placeholders=placeholders))
+
+
+@dataclass(frozen=True, slots=True)
+class _EventArguments:
+    """Redacted tool arguments for one approval card."""
+
+    preview: dict[str, Any]
+    full: dict[str, Any] | None
+    """The complete redacted arguments, or ``None`` when a reviewer could not see all of them."""
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the preview shows less than the complete redacted arguments."""
+        return self.preview != self.full
+
+
+def _build_event_arguments(arguments: dict[str, Any]) -> _EventArguments:
+    # One placeholder mapping per card, so a token has the same number in the preview and the full copy.
+    placeholders: dict[str, str] = {}
+    full = _build_full_event_arguments(arguments, placeholders)
+    return _EventArguments(preview=_build_event_arguments_preview(arguments, placeholders), full=full)
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,16 +392,13 @@ class ApprovalManager:
         """Prepare one shared pending-card payload for a typed exact-call target."""
         if self.prepare_event is None:
             return None
-        event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
-        full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
-        )
+        event_arguments = await asyncio.to_thread(_build_event_arguments, raw_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
-            arguments=event_arguments,
-            arguments_truncated=arguments_truncated,
-            full_arguments=full_arguments,
+            arguments=event_arguments.preview,
+            arguments_truncated=event_arguments.truncated,
+            full_arguments=event_arguments.full if event_arguments.truncated else None,
             agent_name=agent_name,
             thread_id=thread_id,
             requester_id=requester_id,

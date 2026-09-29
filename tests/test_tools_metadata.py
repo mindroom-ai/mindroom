@@ -2117,6 +2117,27 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "field_name"),
+    [
+        ("openbb", "openbb_pat"),
+        ("sql", "db_url"),
+        ("custom_api", "headers"),
+        ("daytona", "sandbox_env_vars"),
+        ("baidusearch", "headers"),
+        ("google_bigquery", "credentials"),
+    ],
+)
+def test_credential_bearing_tool_fields_cannot_be_authored_inline(tool_name: str, field_name: str) -> None:
+    """Fields that can carry credentials are only stored through the credential store, never inline in config."""
+    with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed"):
+        validate_authored_tool_entry_overrides(
+            tool_name,
+            {field_name: "credential-sentinel"},
+            config_path_prefix="agents.a.tools",
+        )
+
+
 def test_file_access_rules_survive_the_validation_snapshot() -> None:
     """Worker validation snapshots keep each tool's file-access class."""
     snapshot = {

@@ -158,6 +158,8 @@ _INTERACTIVE_PATTERN = (
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
+# One fence line: its backticks and info string. Info strings cannot contain backticks.
+_FENCE_LINE_PATTERN = r"[ \t]*(`{3,})[ \t]*([^`]*?)[ \t]*\r?"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -336,6 +338,35 @@ def _first_valid_interactive_payload(
         if payload is not None:
             return index, *payload
     return None
+
+
+def hide_unfinished_interactive(formatted_text: str) -> str:
+    """Cut an interactive block that is still streaming, so its partial JSON stays out of the message.
+
+    Complete blocks are already rendered as questions. When the text ends inside a fenced block marked exactly
+    ``interactive`` or ``interactive json``, the text is cut where that block opens; the text before it stays and
+    the question appears once the block closes. Closed blocks, even ones the parser could not use, and every
+    other code block are left as written.
+    """
+    lines = formatted_text.split("\n")
+    open_fence: tuple[int, int, str] | None = None  # line, backtick count, and marker of the block the text ends in
+    for index, line in enumerate(lines):
+        fence = re.fullmatch(_FENCE_LINE_PATTERN, line)
+        if fence is None:
+            continue
+        ticks, info = len(fence.group(1)), fence.group(2)
+        if open_fence is None:
+            open_fence = (index, ticks, info)
+        elif not info and ticks >= open_fence[1]:
+            open_fence = None
+    if open_fence is None:
+        return formatted_text
+    index, _, marker = open_fence
+    if not marker and index + 1 < len(lines):
+        marker = lines[index + 1]  # a bare fence may carry its marker on the next line
+    if not _is_interactive_marker(marker):
+        return formatted_text
+    return "\n".join(lines[:index]).rstrip()
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:

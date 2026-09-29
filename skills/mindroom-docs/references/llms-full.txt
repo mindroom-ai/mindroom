@@ -1493,9 +1493,20 @@ Expiry or revocation stops future automatic decisions without cancelling decisio
 Changes to configured bindings or room membership invalidate matching grants.
 Clients show approval or revocation as submitted until a backend card edit acknowledges the durable change.
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
-When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander and the call stays approvable.
+Approval cards hide a field entirely when its name marks it as secret, such as `password`, `credentials`, or an `Authorization` header, and the card still shows the field name.
+Inside text, approval cards hide only credentials in known token formats with realistic lengths, such as `sk-…`, `ghp_…`, `github_pat_…`, `xoxb-…`, `AIza…`, and JSON Web Tokens, and show the rest of the text exactly as written.
+An `sk-` or `pk-` match must also contain a long run mixing letters and digits or both letter cases, so kebab-case names such as pod, image, or branch names stay visible.
+Each distinct token becomes a numbered placeholder such as `⟦secret-1⟧`, numbered within one card, so equal tokens look equal and different tokens look different.
+A placeholder for a token that contains `--`, which starts a comment in SQL, reads `⟦secret-1 --⟧`, and a literal `⟦` in the arguments is shown as `⟦=` so it cannot pass for a placeholder.
+Floating-point numbers and integers outside ±(2^53 − 1) are shown as text and unpaired surrogates as `�`, because Matrix events cannot carry them.
+Mapping keys get the same treatment as text, and a changed key that would repeat another key's text gets `�` and its position appended so every key stays distinct.
+Other secrets written inline, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, are shown on the card, so keep secrets in credentials or secret-named fields.
+Deny the call when a hidden field, or a placeholder where a command, host, path, or delimiter belongs, could change what runs.
+A card is approvable only when it delivers the complete redacted arguments, because a human must be able to review exactly what would run.
+When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander.
 They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
-When the complete redacted arguments cannot be delivered — over the 2MB completeness cap or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
+When the complete redacted arguments cannot be delivered, the card sets `approvable: false` and any approve action is converted into a denial.
+This happens when the arguments exceed the 2MB completeness cap, when they nest deeper than the 32 levels redaction inspects, or when the sidecar upload fails.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
@@ -5336,9 +5347,8 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 
 `sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
-MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
+MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, `api_key`, `db_url`, and `openbb_pat` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, and `obb`.
-Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
 `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
 `google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
@@ -5354,13 +5364,13 @@ Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_
 The toolkit can connect through `db_url`, an existing `db_engine`, or a URL assembled from `user`, `password`, `host`, `port`, `schema`, and `dialect`.
 `list_tables()` and `describe_table()` use SQLAlchemy inspection, and `run_sql_query()` returns JSON rows with a default limit of 10 unless you pass `limit=None`.
 If you pass a `tables` mapping, `list_tables()` returns that mapping directly instead of live database introspection.
-For dialects where database name and schema are distinct concepts, `db_url` is the safest authored configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
+For dialects where database name and schema are distinct concepts, `db_url` is the safest configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `db_url` | `url` | `no` | `null` | Preferred authored connection string. |
+| `db_url` | `password` | `no` | `null` | Preferred connection string, stored through the dashboard or credential store because it can carry a password. |
 | `db_engine` | `text` | `no` | `null` | Advanced programmatic SQLAlchemy `Engine` input, not the normal YAML path. |
 | `user` | `text` | `no` | `null` | Username for URL assembly when not using `db_url`. |
 | `password` | `password` | `no` | `null` | Database password stored through the dashboard or credential store. |
@@ -5381,7 +5391,6 @@ agents:
   analyst:
     tools:
       - sql:
-          db_url: sqlite:////tmp/analytics.db
           enable_run_sql_query: true
 ```
 
@@ -5393,8 +5402,7 @@ run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
 
 ### Notes
 
-- Use `db_url` for normal YAML authoring, because `db_engine` expects a live SQLAlchemy object rather than a string.
-- If you need passwords, store them through the dashboard or credential store instead of inline YAML.
+- Store `db_url` through the dashboard or credential store, because `db_engine` expects a live SQLAlchemy object rather than a string and connection strings often carry passwords.
 - This generic toolkit is useful for simple SQL inspection, but `postgres` and `redshift` expose richer warehouse-style helpers such as query inspection and exports.
 
 ## [`postgres`]
@@ -5712,7 +5720,7 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 | `dataset` | `text` | `yes` | `null` | BigQuery dataset name. |
 | `project` | `text` | `yes` | `null` | Google Cloud project ID. |
 | `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
-| `credentials` | `text` | `no` | `null` | Advanced Google credentials object passed directly to the BigQuery client. |
+| `credentials` | `text` | `no` | `null` | Advanced programmatic Google credentials object passed directly to the BigQuery client; not accepted as an inline override. |
 | `list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
@@ -5937,7 +5945,7 @@ You can selectively enable additional research functions without exposing the fu
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `obb` | `text` | `no` | `null` | Advanced preconfigured OpenBB instance object. |
-| `openbb_pat` | `text` | `no` | `null` | Optional OpenBB PAT for premium providers. Usually stored in credentials instead of inline YAML. |
+| `openbb_pat` | `password` | `no` | `null` | Optional OpenBB PAT for premium providers, stored through the dashboard or credential store instead of inline YAML. |
 | `provider` | `text` | `no` | `yfinance` | Data provider such as `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `enable_get_stock_price` | `boolean` | `no` | `true` | Enable `get_stock_price()`. |
 | `enable_search_company_symbol` | `boolean` | `no` | `false` | Enable `search_company_symbol()`. |
@@ -6214,7 +6222,7 @@ The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`
 | --- | --- | --- | --- | --- |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for every call. |
 | `fixed_language` | `text` | `no` | `null` | Overrides local language normalization and logging only; does not control request language. |
-| `headers` | `text` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
+| `headers` | `password` | `no` | `null` | Stored through the dashboard or credential store because headers can carry credentials; the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `proxy` | `url` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `timeout` | `number` | `no` | `10` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `debug` | `boolean` | `no` | `false` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
@@ -9687,8 +9695,16 @@ For applications, the local bridge starts in observe-only mode unless a person a
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
 Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
+MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and a bridge whose allowlist names either refuses to start.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
+
+!!! warning "Some allowlisted apps give an agent your own authority"
+    Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
+    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
+    Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
+    Allowlist these only when you would also approve everything the agent could run or send as you.
+
 The local bridge executes actions serially and revalidates each target immediately before input.
 Matrix polling, durable admission, and response delivery continue independently during slow actions.
 Cloud configuration cannot enable control, extend a running lease, change any local allowlist or selected folder, enable shell commands, or approve one.
@@ -9721,9 +9737,15 @@ The control actions are:
 - `hover` moves the pointer within the validated app window.
 - `drag` moves with the left button held between two normalized points in the same window, over 100–2,000 milliseconds.
 - `type_text` types up to 2,000 characters into the validated and focused app; an optional `element_ref` or `element_index` requires that exact element to have focus.
+  Without an element, the text must not contain line breaks, tabs, or other control characters, so send Enter or Tab with `keypress`.
+  Without an element, macOS typing also checks before each 20-character chunk that the app is still frontmost; it fails without typing anything if the app lost focus first, and stops with an unknown outcome if it lost focus partway.
 - `scroll` scrolls a bounded number of pages up, down, left, or right at the app or an optional normalized app coordinate.
 - `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
-  Global switching, quit, launch, and address-bar shortcuts are rejected.
+  Global switching, quit, launch, and address-bar shortcuts are rejected, and the chord is not sent once the app is no longer frontmost.
+
+From the moment a shell command needs local approval until it is answered, every control action above except `launch_app` is refused, and the request is shown for approval only one second after a control action already in progress finishes, so events it posted have time to reach their target.
+Input from this bridge's agents therefore never reaches its waiting approval card or terminal prompt.
+The pause covers only the approvals of the bridge that sends the input, so run at most one bridge in each logged-in graphical session; another bridge's agents could otherwise click or type into this bridge's approval.
 
 Folder reads and shell commands are separate opt-in capabilities with their own limits, described in [Read-Only Folders](#read-only-folders) and [Shell Commands](#shell-commands).
 The bridge does not expose a clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
@@ -9781,6 +9803,8 @@ Shell requests are off by default.
 Enable them locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`; cloud configuration and model output cannot enable them.
 
 - `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the local home directory.
+  A `command` or `cwd` with more than 64 whitespace or invisible characters in a row, more than two blank lines in a row, or more than 8 combining marks on one character is refused before approval, because such padding could push part of the request out of the approver's view.
+  Before approval only the form of `cwd` is checked; whether it exists is checked after approval, so an unapproved request reveals nothing about local directories.
   Its `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
 - `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it has finished.
   With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
@@ -9791,7 +9815,8 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 ### Local Approval
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
-The approver sees the exact command, working directory, requester, agent, and expiry, with control and text-direction characters shown escaped.
+The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
+The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
 The cloud call waits up to 120 seconds, the command's lifetime, and a request that nobody approves in time expires without running.
@@ -9917,6 +9942,7 @@ Stop and Revoke remain available while another setup operation is waiting.
 The menu displays the current mode, remaining lease, and active action without exposing its arguments.
 Each shell command opens a separate approval window without taking keyboard focus from your current app.
 It shows the exact command, working folder, agent, requester, and expiry, with **Reject**, **Approve Once**, and **Approve & Allow…** choices.
+The whole command appears above the choices, never clipped, and **Approve Once** and **Approve & Allow…** stay disabled for one second after a request appears or replaces another one.
 Timed or until-stopped approval still requires a second confirmation describing its scope.
 Closing the window or choosing **Later** leaves the command waiting until it expires.
 The approval card also stays above the **Computer access** steps; **Review Command** in the app or menu bar reopens the separate window.
@@ -10105,6 +10131,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 
 Add only the applications needed for the current task.
 Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
+Controlling `primary-screen`, a terminal emulator, a scripting or automation app, or a browser or Matrix client signed in as you hands the agent your own authority, as the [Security Model](#security-model) warning explains.
 `primary-screen` has no semantic elements.
 On Linux, `primary-screen` is currently the only usable state target.
 
@@ -10186,7 +10213,8 @@ Each request then appears with its ID, expiry, requester, agent, working directo
 ```
 
 The timed and until-stopped answers also approve later commands from every allowed requester and agent, as the prompt says.
-Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, and backslash characters in the request are shown escaped.
+Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, invisible, non-ASCII space, and backslash characters in the request are shown escaped.
+The command's length in characters and lines appears right above the answer prompt, so scroll up when the request is longer than the terminal.
 If standard input is not an interactive terminal, input reaches its end, or the bridge runs as a background job of its terminal, requests are rejected with guidance instead of waiting.
 To approve commands without asking for part of a run, start it with `--shell-auto-approve-minutes`, from 1 to 60; this requires saved shell access and is never saved itself.
 `Ctrl+C` stops the bridge, revokes auto-approval, and stops waiting and running shell commands.
@@ -12813,10 +12841,14 @@ revoke_public_report("pub_...")
 `config_manager` exposes `get_info()`, `manage_config()`, `manage_agent()`, and `manage_team()`.
 `get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
 `tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
-`agent_config` returns the authored YAML for a specific agent.
+`agent_config` returns the redacted authored YAML for a specific agent.
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
 `manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
+Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
+Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
+A patch whose value contains the `***redacted***` marker is refused, so copying inspected output back never replaces a hidden real value.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
 `dry_run=True` validates a patch and returns its receipt without writing.
 Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
@@ -12886,7 +12918,8 @@ manage_team(
 ### What It Does
 
 `self_config` exposes `get_own_config()` and `update_own_config()`.
-`get_own_config()` returns the current agent's authored YAML block.
+`get_own_config()` returns the current agent's authored YAML block, redacted like `config_manager` inspection.
+Reads and writes both require a requester listed in `administrators`.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
 `update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
@@ -13404,7 +13437,7 @@ All seven tools on this page default to the primary agent runtime instead of Min
 `aws_lambda`, `airflow`, and `custom_api` use `setup_type: none`.
 `aws_ses`, `e2b`, `daytona`, and `composio` have `status: requires_config` and `setup_type: api_key`.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
-Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML.
+Password fields such as `api_key`, `password`, `custom_api` `headers`, and Daytona `sandbox_env_vars` must be stored through the dashboard or credential store instead of inline YAML.
 `aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
 That matters especially for `aws_ses`, because the current registry marks it as `setup_type: api_key` even though the tool itself does not expose an API-key field.
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
@@ -13616,7 +13649,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
 | `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `text` | `no` | `null` | JSON object of string environment-variable names and values; MindRoom validates and converts it to the upstream mapping. |
+| `sandbox_env_vars` | `password` | `no` | `null` | JSON object of string environment-variable names and values, stored through the dashboard or credential store; MindRoom validates and converts it to the upstream mapping. |
 | `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
@@ -13739,7 +13772,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `text` | `no` | `null` | Advanced raw default-header mapping. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
@@ -14131,6 +14164,8 @@ Use `stdio` for local subprocess servers.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
+Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value except whole `${ENV_VAR}` placeholders, but show `args` as written, and `args` support no placeholders.
 Static `headers` are process-global and shared by every requester.
 Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
 Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
@@ -14147,7 +14182,7 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
-| `args` | list[string] | `[]` | Optional `stdio` arguments |
+| `args` | list[string] | `[]` | Optional `stdio` arguments; shown unmasked, so never put credentials here |
 | `cwd` | string | `null` | Optional `stdio` working directory |
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
@@ -18675,6 +18710,10 @@ Changes are validated against the Pydantic config schema before applying.
 !config get agents.analyst.display_name
 ```
 
+Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
+Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
+Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+
 **Modify configuration:**
 
 ```
@@ -18701,6 +18740,10 @@ When you use `!config set`, MindRoom:
 
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
+Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
+It stores the new value only when redaction leaves that value unchanged.
+`!config set` refuses a value containing the `***redacted***` marker, which only appears in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
+A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
@@ -18798,6 +18841,9 @@ React with an emoji or type the number to respond.
 ```
 
 The corresponding emoji reactions are added to the message as clickable buttons.
+While a streamed response is still arriving, an `interactive` block that has not closed yet is left out of the progressive edits, so its partial JSON does not show.
+The text before it stays visible, and the formatted question appears as soon as the block's closing fence streams in.
+A response that stops before the block closes ends with the text as the agent wrote it.
 
 ## User Response Methods
 
@@ -20050,8 +20096,9 @@ Session IDs are derived from request headers:
 Agent memory and conversation history persist across requests with the same session ID.
 For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
-Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision.
-Two different API keys using the same `X-Session-Id` value will not share a session.
+Session IDs are namespaced internally with the full SHA-256 digest of the validated API key to prevent cross-key session collision.
+Two different API keys using the same `X-Session-Id` value will not share a session, and differently spaced `Authorization` headers carrying the same key share that key's sessions.
+Without configured API keys, the `Authorization` header authenticates nothing, so every caller shares one unauthenticated namespace.
 
 ### Claude Agent tool sessions
 
@@ -20079,6 +20126,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (usage stats are always zeros)
+- `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
 
 Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
 
@@ -21066,7 +21114,6 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
-| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 | [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
@@ -21093,7 +21140,6 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
-| [`script_runs/legacy_recovery.py`][script-legacy-recovery] and [`workers/backends/kubernetes.py`][kubernetes-worker-backend] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [Kubernetes worker tests][kubernetes-worker-tests] cover byte-compatible unset RuntimeClass authority and rejection after configuration changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
@@ -21296,6 +21342,15 @@ find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
 The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, pair every private agent with its root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/\(notes/notes_data\|mail/inbox\)"`, because a run per root would print the other agents' own workspace links, and roots listed without their agents would also skip a directory of that name under any other agent.
 The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
 
+### Config-free runners and workers
+
+MindRoom no longer mounts the primary's config into the `static_runner` sidecar or dedicated Kubernetes workers, which take agent settings only from the allowlisted snapshot each request carries.
+The runtime chart's `workers.kubernetes.configMapName`, `configKey`, and `configPath` values and the matching `MINDROOM_KUBERNETES_WORKER_CONFIG_*` settings are removed.
+Every script recovery signature written by an older release covers those removed worker settings, so background scripts still running on Kubernetes workers during the upgrade no longer verify and are interrupted once when the primary starts.
+For the same reason the unversioned and pre-seccomp recovery-signature migrations were removed: no record they could adopt still verifies.
+Kubernetes workers pick up their new pod template when they are next recreated.
+Plugin directories beside a file-sourced config are no longer visible to the sidecar or Kubernetes workers, so install proxied plugins as Python packages in the runner image.
+
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
@@ -21340,7 +21395,6 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
-[kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
@@ -21382,8 +21436,6 @@ The first two commands skip links inside workspaces, which are the workers' own,
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
-[script-legacy-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_recovery.py
-[script-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_runtime_lifecycle.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py
@@ -21660,6 +21712,9 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, or a ConfigMap holding it.
+The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
+Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
 Which workspaces a worker mounts follows its scope.
@@ -23596,16 +23651,22 @@ MindRoom currently ships three worker backend shapes:
 
 ## Live config snapshots
 
-A runner's own config file holds only what it loaded at startup, and hosted deployments mount a seed config that never follows the live config the primary hot-reloads and the dashboard edits.
-With the `static_runner` and `kubernetes` backends, the primary therefore sends its live config with every execute, attachment-save, file-view, and background-script launch request.
-Before sending, it removes sensitive keys such as `api_key`, `password`, and names ending in `_token` or `_secret`, plus credential headers, with the same redaction the Docker worker projection applies.
-The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately and a stale startup config cannot widen an agent's settings.
-The runner rejects an invalid snapshot with HTTP 400 instead of falling back to its startup config.
-Requests without a snapshot, such as those from runtimes without a tool context, use the runner's startup config.
-Config-relative paths in the snapshot, such as knowledge base and plugin paths, still resolve against the runner's own config directory, and the runner skips plugins it cannot find there.
+Worker code runs in the runner process, so a runner never receives the primary's config file, the directory around it, its `.env`, or a ConfigMap holding it.
+The runtime and instance charts mount none of them into the `static_runner` sidecar, and the Kubernetes worker manager mounts none of them into dedicated workers.
+Chart sidecars and Kubernetes workers keep the primary's config path in `MINDROOM_CONFIG_PATH` only so config-relative paths resolve the same way; nothing is mounted there.
+With the `static_runner` and `kubernetes` backends, the primary instead sends the part of its live config that runners resolve with every execute, attachment-save, file-view, and background-script launch request.
+The snapshot is built by allowlist.
+It keeps each agent's display name, tool names, `include_default_tools`, `memory_backend`, `knowledge_bases`, `worker_scope`, `file_access`, `delegate_to`, and `private` scope, root, template, and knowledge path.
+It also keeps the `defaults` for `file_access`, `worker_scope`, `worker_grantable_credentials`, `tool_output_auto_save_threshold_bytes`, and tool names, plus `memory.backend`, knowledge base paths, and plugin paths and enabled flags.
+Everything else stays in the primary, including models, MCP servers, plugin settings, memory provider settings, Git sources, instructions, rooms, teams, access policy, and the inline overrides of every tool other than the one being called.
+A worker-routed call still carries the called tool's own inline overrides, and saved tool settings reach the runner as [credential leases](#credential-leases).
+The runner validates the snapshot's shape and resolves the requesting agent, its workspace, and settings such as `file_access` and `worker_scope` from it, so agents added or changed after the runner started work immediately.
+The runner rejects an invalid snapshot with HTTP 400 instead of falling back to another config.
+Requests without a snapshot, such as those from runtimes without a tool context, run under the config the runner loaded at startup from its own `MINDROOM_CONFIG_PATH`; the charts mount nothing there, so that is an empty config or the example `config.yaml` bundled in the image.
+The runner registers plugin tools from the snapshot's plugin paths and skips plugins it cannot find, so plugin code must be present in the runner's filesystem.
+Because the charts mount no config directory, plugin directories that sit beside the primary's config are not visible to the `static_runner` sidecar or Kubernetes workers; install such plugins as Python packages in the runner image instead.
 Private `template_dir` paths belong to the primary, which validates them and seeds requester workspaces from them, so runners skip templates they cannot find.
-Plugin tool registration still uses the runner's startup config, so proxied plugin tools still need that config mounted into the runner.
-Docker workers get no request snapshot; they read a per-worker projection of the live config whose config-relative paths are rewritten for the container, as described in [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
+Docker workers get no request snapshot; they read a per-worker projection with the same allowlisted fields, whose config-relative plugin and knowledge paths are copied into the projection, as described in [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
 
 ## Where Agent Data Lives
 
@@ -23716,12 +23777,10 @@ The sidecar gets:
 
 - Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
 - The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
-- Read-only access to config for plugin tool registration.
-  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
 - The sandbox proxy token that authenticates requests from the primary runtime.
 
-The hosted instance chart mounts only the seed ConfigMap into the sidecar, not the live config that the primary hot-reloads and the dashboard edits.
-The sidecar resolves agents and their settings from the [live config snapshot](#live-config-snapshots) that the primary sends with each request, so agents added or changed after the pod started work immediately.
+The sidecar gets no config: neither the chart's config ConfigMap, nor a file-sourced config or the storage directory holding it.
+It resolves agents and their settings from the [live config snapshot](#live-config-snapshots) that the primary sends with each request, so agents added or changed after the pod started work immediately.
 
 The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
 It never receives the credentials-encryption key.
@@ -23796,7 +23855,9 @@ Upgrading from a release whose workers mounted whole agent state roots stops tho
 If any cannot be stopped, startup fails and the primary restarts until none remain.
 Drain worker activity first, keep worker images on the primary's release, and check agent state roots for links the older workers may have planted, as [Workspace-only worker mounts](https://docs.mindroom.chat/architecture/migrations/#workspace-only-worker-mounts) describes.
 
-Dedicated Kubernetes workers, including background-script workers, also resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request, because the config they mount is only the seed their pod started with.
+Dedicated Kubernetes workers, including background-script workers, mount no config and resolve agents from the [live config snapshot](#live-config-snapshots) sent with each request.
+Assigned knowledge that sits beside a file-sourced config reaches a worker only through its own read-only knowledge mount.
+Upgrading from a release whose workers mounted the primary's config interrupts background scripts still running on Kubernetes workers, as [Config-free runners and workers](https://docs.mindroom.chat/architecture/migrations/#config-free-runners-and-workers) describes.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
@@ -23837,20 +23898,9 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP]
-> If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them:
-> ```bash
-> docker run -d \
->   --name mindroom-sandbox-runner \
->   -p 127.0.0.1:8766:8766 \
->   -v ./config.yaml:/app/config.yaml:ro \
->   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
->   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
->   -e MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token> \
->   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
->   ghcr.io/mindroom-ai/mindroom:latest \
->   /app/run-sandbox-runner.sh
-> ```
+The runner container needs no config file: the primary sends the fields it resolves with every request.
+Do not mount your `config.yaml` or its `.env` into the runner container, because tool code there can read everything the container can.
+Proxied plugin tools register from the snapshot's plugin paths, so install their code in the runner image or mount only the plugin directory where the runner resolves the snapshot's plugin entry.
 
 ### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
 
@@ -23859,11 +23909,9 @@ That most commonly means `shell`, `file`, and `python`, but other worker-safe to
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
-MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
-Control-plane-only sections that a worker never reads are cleared from that snapshot as well, including `teams`, `calls`, `room_models`, `bot_accounts`, `authorization`, and the Matrix room and space settings.
-Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
+The projected worker `config.yaml` holds only the allowlisted fields of a [live config snapshot](#live-config-snapshots), so credentials and control-plane sections never reach the container.
+Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent and its assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
-Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 Everything under that state root is writable by the code running inside the container, so MindRoom keeps each worker's lifecycle record in a control directory beside the worker roots that is never mounted into a container.
 Worker containers are addressed by a name derived from the worker key, and MindRoom only starts, stops, or removes a container that carries its own worker labels and worker-key environment.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
@@ -23985,7 +24033,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and removes sensitive config values plus auth headers from the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and writes only the allowlisted [live config snapshot](#live-config-snapshots) fields into the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
@@ -24217,8 +24265,8 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
-- [Live config snapshots](#live-config-snapshots) carry no sensitive config keys or credential headers, and runners accept them only on requests authenticated with the sandbox token.
-- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
+- [Live config snapshots](#live-config-snapshots) and Docker worker config projections carry only the allowlisted fields runners resolve, and runners accept snapshots only on requests authenticated with the sandbox token.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories, never the primary's config, and it does not receive the credentials-encryption key.
 - With `workers.backend: kubernetes` in the runtime chart or `MINDROOM_WORKER_BACKEND=docker`, dedicated workers mount agent workspaces plus their worker scratch space and read-only assigned knowledge, never the agent state roots around those workspaces.
   `shared`, unscoped, and `user_agent` workers of a non-private agent mount `agents/<agent>/workspace`, and a `user_agent` worker of a private agent mounts only that requester's `private_instances/<scope>/<agent>/<private.root>`.
   `user` mode mounts the workspaces of every non-private `worker_scope: user` agent plus the user's own existing private workspaces of `private.per: user` agents, since it shares one runtime across those agents, and never mounts agents on other scopes.
@@ -24751,7 +24799,7 @@ This keeps the deployment simple, but all proxied tool calls share the same runn
 The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
 It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
 The primary leases each proxied tool's saved settings to the runner per call.
-The runner's own config file is only the seed the pod started with, so each call also carries the primary's [live config snapshot](https://docs.mindroom.chat/deployment/sandbox-proxy/#live-config-snapshots) with sensitive keys removed, and the runner resolves the requesting agent and its settings from it.
+The runner mounts no config, so each call carries the primary's [live config snapshot](https://docs.mindroom.chat/deployment/sandbox-proxy/#live-config-snapshots), limited to the fields runners resolve, and the runner resolves the requesting agent and its settings from it.
 Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
 When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
 See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.

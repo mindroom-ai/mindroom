@@ -7,7 +7,7 @@ import hashlib
 import json
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -809,14 +809,12 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
     assert {"name": "storage", "mountPath": "/mindroom_data"} in mindroom_container["volumeMounts"]
     assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == "/mindroom_data/config/config.yaml"
     assert runner_container["volumeMounts"] == [
-        {"name": "config", "mountPath": "/app/config.yaml", "subPath": "config.yaml", "readOnly": True},
         {"name": "storage", "mountPath": "/mindroom_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/mindroom_data/agents", "subPath": "agents"},
         {"name": "storage", "mountPath": "/mindroom_data/private_instances", "subPath": "private_instances"},
         {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
     ]
     assert volumes["storage"] == {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"}}
-    assert volumes["config"] == {"name": "config", "configMap": {"name": "mindroom-config-demo"}}
     assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {"sizeLimit": "1Gi"}}
     assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/mindroom_data"
     assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
@@ -1337,8 +1335,8 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
     }
 
 
-def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configmap() -> None:
-    """Default config mode should preserve the chart-managed ConfigMap mount and worker projection."""
+def test_runtime_chart_default_configmap_source_mounts_config_only_into_the_primary() -> None:
+    """Default config mode mounts the chart-managed ConfigMap into the primary and hands workers no config."""
     docs = _render_runtime_chart()
     config_map = _resource(docs, "ConfigMap", "mindroom-runtime-config")
     deployment = _resource(docs, "Deployment", "mindroom-runtime")
@@ -1355,9 +1353,7 @@ def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configm
         "readOnly": True,
     } in mindroom_container["volumeMounts"]
     assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == "/app/config.yaml"
-    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME"]["value"] == "mindroom-runtime-config"
-    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_KEY"]["value"] == "config.yaml"
-    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == "/app/config.yaml"
+    assert not any(name.startswith("MINDROOM_KUBERNETES_WORKER_CONFIG_") for name in mindroom_env)
 
 
 def test_runtime_chart_mounts_appservice_token_for_passwordless_managed_accounts() -> None:
@@ -1432,7 +1428,7 @@ def test_tuwunel_chart_mounts_secret_appservice_registration() -> None:
 
 
 def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -> None:
-    """File config mode should point runtime and workers at the bundle file without rendering a ConfigMap."""
+    """File config mode should point the runtime at the bundle file without rendering a ConfigMap."""
     config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
@@ -1458,9 +1454,7 @@ def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -
     assert not any(volume["name"] == "config" for volume in pod_spec["volumes"])
     assert not any(mount["name"] == "config" for mount in mindroom_container["volumeMounts"])
     assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == config_path
-    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME" not in mindroom_env
-    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY" not in mindroom_env
-    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == config_path
+    assert not any(name.startswith("MINDROOM_KUBERNETES_WORKER_CONFIG_") for name in mindroom_env)
     assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH"]["value"] == "/app/agent_data"
     assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME"]["value"] == "mindroom-runtime-storage"
 
@@ -3178,7 +3172,6 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     assert [ref["key"] for ref in _secret_key_refs(runner_container)] == ["MINDROOM_SANDBOX_PROXY_TOKEN"]
     assert {"name": "storage", "mountPath": "/app/agent_data"} in mindroom_container["volumeMounts"]
     assert runner_container["volumeMounts"] == [
-        {"name": "config", "mountPath": "/app/config.yaml", "subPath": "config.yaml", "readOnly": True},
         {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
         {"name": "storage", "mountPath": "/app/agent_data/private_instances", "subPath": "private_instances"},
@@ -3199,47 +3192,77 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     ]
 
 
+_RUNTIME_CHART_BASE_ARGS = (
+    "workers.sandbox.proxyToken.value=test-token",
+    "eventCache.postgres.auth.password=test-password",
+)
+_BUNDLED_CONFIG_PATH = "/app/agent_data/content-bundles/team/prod/agent-config.yaml"
+
+
 @pytest.mark.parametrize(
-    ("config_path", "expected_config_mount"),
+    ("chart", "set_args", "storage_root", "primary_config_path"),
     [
+        ("runtime", (), "/app/agent_data", "/app/config.yaml"),
         (
-            "/app/agent_data/content-bundles/team/prod/agent-config.yaml",
-            {
-                "name": "storage",
-                "mountPath": "/app/agent_data/content-bundles",
-                "subPath": "content-bundles",
-                "readOnly": True,
-            },
+            "runtime",
+            ("config.source=file", f"config.path={_BUNDLED_CONFIG_PATH}"),
+            "/app/agent_data",
+            _BUNDLED_CONFIG_PATH,
         ),
         (
+            "runtime",
+            ("config.source=file", "config.path=/app/agent_data/config.yaml"),
+            "/app/agent_data",
             "/app/agent_data/config.yaml",
-            {"name": "storage", "mountPath": "/app/agent_data/config.yaml", "subPath": "config.yaml", "readOnly": True},
         ),
-        ("/etc/mindroom/config.yaml", None),
+        ("runtime", ("workers.backend=kubernetes",), "/app/agent_data", "/app/config.yaml"),
+        (
+            "runtime",
+            ("workers.backend=kubernetes", "config.source=file", f"config.path={_BUNDLED_CONFIG_PATH}"),
+            "/app/agent_data",
+            _BUNDLED_CONFIG_PATH,
+        ),
+        ("instance", (), "/mindroom_data", "/mindroom_data/config/config.yaml"),
     ],
 )
-def test_runtime_chart_static_runner_reads_file_config_subtree_read_only(
-    config_path: str,
-    expected_config_mount: dict[str, Any] | None,
+def test_charts_never_hand_the_primary_config_to_runners_or_workers(
+    chart: str,
+    set_args: tuple[str, ...],
+    storage_root: str,
+    primary_config_path: str,
 ) -> None:
-    """A file-sourced config is visible to the sidecar only through the read-only subtree dedicated workers mount."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "workers.sandbox.proxyToken.value=test-token",
-        "eventCache.postgres.auth.password=test-password",
-        "config.source=file",
-        f"config.path={config_path}",
-        release_name="mindroom-runtime",
-    )
-    runner_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "sandbox-runner")
-    config_mounts = [mount for mount in runner_container["volumeMounts"] if mount.get("readOnly")]
+    """Runner sidecars and Kubernetes workers get no config file, config directory, or config ConfigMap.
 
-    assert config_mounts == ([expected_config_mount] if expected_config_mount is not None else [])
-    assert [mount for mount in runner_container["volumeMounts"] if mount["name"] == "storage"][:3] == [
-        {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
-        {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
-        {"name": "storage", "mountPath": "/app/agent_data/private_instances", "subPath": "private_instances"},
-    ]
+    They keep the primary's config path so config-relative snapshot paths resolve alike, and take
+    every agent setting from the allowlisted snapshot each request carries.
+    """
+    release_name = "mindroom-runtime" if chart == "runtime" else "mindroom-demo"
+    base_args = _RUNTIME_CHART_BASE_ARGS if chart == "runtime" else ()
+    docs = _render_chart(Path("cluster/k8s") / chart, *base_args, *set_args, release_name=release_name)
+    deployment = _resource(docs, "Deployment", release_name)
+    volumes = _volumes_by_name(deployment)
+    primary_env = _env_by_name(_container(deployment, "mindroom"))
+    config_relative = (
+        PurePosixPath(primary_config_path).relative_to(storage_root).as_posix()
+        if primary_config_path.startswith(f"{storage_root}/")
+        else None
+    )
+
+    assert primary_env["MINDROOM_CONFIG_PATH"]["value"] == primary_config_path
+    # The Kubernetes worker manager has no setting that would mount a config into workers.
+    assert not any(name.startswith("MINDROOM_KUBERNETES_WORKER_CONFIG_") for name in primary_env)
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        if container["name"] == "mindroom":
+            continue
+        assert _env_by_name(container)["MINDROOM_CONFIG_PATH"]["value"] == primary_config_path
+        for mount in container.get("volumeMounts", []):
+            volume = volumes[mount["name"]]
+            assert "configMap" not in volume, mount
+            if "persistentVolumeClaim" in volume and config_relative is not None:
+                sub_path = str(mount.get("subPath", ""))
+                assert sub_path, mount
+                assert config_relative != sub_path, mount
+                assert not config_relative.startswith(f"{sub_path}/"), mount
 
 
 @pytest.mark.parametrize("directory", ["agents", "private_instances", "sandbox-runner"])

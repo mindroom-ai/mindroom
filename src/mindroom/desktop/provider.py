@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -379,23 +380,25 @@ class PyAutoGuiDesktopProvider:
         if not text or len(text) > 2000:
             msg = "text must contain between 1 and 2000 characters."
             raise DesktopProviderError(msg)
+        if element_index is None and any(unicodedata.category(character) == "Cc" for character in text):
+            # Without an exact text field, a line break could submit or run the text in whatever has focus.
+            msg = (
+                "Text without element_ref or element_index must not contain line breaks, tabs, or other control "
+                "characters; send Enter or Tab with keypress."
+            )
+            raise DesktopProviderError(msg)
         self._check_emergency_stop()
-        guard = None
         if element_index is None:
-            self._accessibility.prepare_fallback(app_id, state_id)
+            guard = self._accessibility.prepare_keyboard(app_id, state_id)
         else:
             if type(element_index) is not int or element_index < 0:
                 msg = "element_index must be a nonnegative integer."
                 raise DesktopProviderError(msg)
             guard = self._accessibility.prepare_typing(app_id, state_id, element_index)
         if sys.platform == "darwin":
-            if guard is None:
-                self._run_input(lambda: _type_macos_unicode(text))
-            else:
-                self._run_input(lambda: _type_macos_unicode(text, before_chunk=guard))
+            self._run_input(lambda: _type_macos_unicode(text, before_chunk=guard))
         else:
-            if guard is not None:
-                guard()
+            guard()
             self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
 
     def scroll(
@@ -428,7 +431,7 @@ class PyAutoGuiDesktopProvider:
         except ValueError as exc:
             raise DesktopProviderError(str(exc)) from exc
         self._check_emergency_stop()
-        self._accessibility.prepare_fallback(app_id, state_id)
+        self._accessibility.prepare_keyboard(app_id, state_id)()
         if len(normalized) == 1:
             self._run_input(lambda: self._pyautogui.press(normalized[0]))
         else:
@@ -644,13 +647,12 @@ def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
         return image.copy()
 
 
-def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None] | None = None) -> None:
-    """Post layout-independent Unicode keyboard events to the active macOS app."""
+def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
+    """Post layout-independent Unicode keyboard events to the active macOS app after each focus check."""
     import Quartz  # noqa: PLC0415
 
     for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
-        if before_chunk is not None:
-            before_chunk()
+        before_chunk()
         chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
         utf16_length = len(chunk.encode("utf-16-le")) // 2
         key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]

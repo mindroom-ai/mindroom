@@ -510,79 +510,15 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     assert backend.script_recovery_signature() == initial
 
 
-def test_script_recovery_contract_omits_unset_runtime_class_but_rejects_a_configured_change() -> None:
-    """Existing scripts retain the default authority and cannot cross a RuntimeClass boundary."""
+def test_script_recovery_contract_rejects_a_runtime_class_change() -> None:
+    """Existing scripts cannot cross a RuntimeClass boundary."""
     backend, _apps, _core = _backend(config_snapshot={})
-    initial_payload = backend._script_recovery_payload()
     initial_signature = backend.script_recovery_signature()
-
-    assert "runtime_class_name" not in initial_payload["config"]
 
     backend.config = replace(backend.config, runtime_class_name="sandboxed")
 
     assert backend.script_recovery_signature() != initial_signature
     assert backend._script_recovery_payload()["config"]["runtime_class_name"] == "sandboxed"
-
-
-@pytest.mark.parametrize("seccomp_enabled", [False, True])
-def test_pre_seccomp_recovery_preserves_exact_backend_authority(tmp_path: Path, seccomp_enabled: bool) -> None:
-    """Only an unset seccomp policy can match the historical backend serialization."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "storage",
-        process_env={},
-    )
-    backend, _apps, _core = _backend(
-        runtime_paths=runtime_paths,
-        config_snapshot={},
-        seccomp_profile={"type": "Localhost", "localhostProfile": "worker.json"} if seccomp_enabled else None,
-    )
-    historical_payload = {
-        "config": {
-            "namespace": "chat",
-            "worker_port": 8766,
-            "service_account_name": "mindroom-worker",
-            "storage_pvc_name": "mindroom-storage",
-            "storage_mount_path": "/app/worker",
-            "storage_subpath_prefix": "workers",
-            "config_map_name": "mindroom-config",
-            "config_key": "config.yaml",
-            "config_path": "/app/config.yaml",
-            "idle_timeout_seconds": 60.0,
-            "ready_timeout_seconds": 5.0,
-            "name_prefix": "mindroom-worker",
-            "node_name": None,
-            "colocate_with_control_plane_node": False,
-            "extra_env": {},
-            "extra_labels": {"mindroom.ai/tenant": "test"},
-            "extra_annotations": {},
-            "owner_deployment_name": None,
-            "enable_service_links": False,
-            "auth_secret_name": None,
-            "reconcile_pod_templates": True,
-            "agent_vault": None,
-            "extra_containers": [],
-            "extra_volumes": [],
-        },
-        "owner": None,
-        "auth_token": _TEST_AUTH_TOKEN,
-        "encryption_key": None,
-        "storage_root": str(tmp_path / "storage"),
-        "grantable_credentials": [],
-    }
-    expected = hashlib.sha256(
-        json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode(),
-    ).hexdigest()
-    historical = backend.legacy_pre_seccomp_script_recovery_signature()
-    if seccomp_enabled:
-        assert historical is None
-    else:
-        assert historical == expected
-        assert historical != backend.script_recovery_signature()
-        backend.config = replace(backend.config, extra_env={"SCRIPT_ACCESS": "changed"})
-        assert backend.legacy_pre_seccomp_script_recovery_signature() != historical
 
 
 def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> None:
@@ -632,7 +568,6 @@ def test_script_recovery_contract_survives_unrelated_agent_delegation_change() -
     )
 
     assert updated.script_recovery_signature() == original.script_recovery_signature()
-    assert updated.legacy_script_recovery_signature() != original.legacy_script_recovery_signature()
 
 
 @pytest.mark.parametrize(
@@ -748,8 +683,6 @@ def _backend(
     worker_port: int = 8766,
     storage_subpath_prefix: str = "workers",
     storage_mount_path: str = "/app/worker",
-    config_map_name: str | None = "mindroom-config",
-    worker_config_path: str = "/app/config.yaml",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -786,9 +719,6 @@ def _backend(
         storage_pvc_name="mindroom-storage",
         storage_mount_path=storage_mount_path,
         storage_subpath_prefix=storage_subpath_prefix,
-        config_map_name=config_map_name,
-        config_key="config.yaml",
-        config_path=worker_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix=name_prefix,
@@ -1819,88 +1749,45 @@ def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Pat
         )
 
 
-def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
-    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
-    config_path = tmp_path / "workspace-config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
-
-    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    committed_runtime = deserialize_runtime_paths(
-        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
-    )
-
-    assert committed_runtime.config_path == config_path.resolve()
-
-
 @pytest.mark.parametrize(
-    ("config_relative_path", "worker_config_path", "expected_mount_path", "expected_subpath"),
-    [
-        (
-            "content-bundles/team-config/agent-config.yaml",
-            "/app/agent_data/content-bundles/team-config/agent-config.yaml",
-            "/app/agent_data/content-bundles",
-            "content-bundles",
-        ),
-        (
-            "team-config/content/environments/prod/agent-config.yaml",
-            "/app/agent_data/team-config/content/environments/prod/agent-config.yaml",
-            "/app/agent_data/team-config",
-            "team-config",
-        ),
-    ],
+    "config_relative_path",
+    ["content-bundles/team-config/agent-config.yaml", "team-config/content/environments/prod/agent-config.yaml"],
 )
-def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
-    tmp_path: Path,
-    config_relative_path: str,
-    worker_config_path: str,
-    expected_mount_path: str,
-    expected_subpath: str,
-) -> None:
-    """File-backed configs need bundle visibility without broadening worker state mounts."""
+def test_kubernetes_worker_never_receives_the_primary_config(tmp_path: Path, config_relative_path: str) -> None:
+    """Workers keep the primary's config path for resolving snapshot paths but mount nothing that holds its config."""
     config_path = tmp_path / "storage" / config_relative_path
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config-secret\n"
+        "agents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
+    (config_path.parent / ".env").write_text("OPENAI_API_KEY=sk-env-secret\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/app/agent_data",
-        config_map_name=None,
-        worker_config_path=worker_config_path,
-    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, storage_mount_path="/app/agent_data")
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_by_name = {env["name"]: env for env in container["env"]}
-    mount_paths = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
-    expected_worker_root = f"/app/agent_data/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-
-    assert mount_paths[expected_mount_path] == {
-        "name": "worker-storage",
-        "mountPath": expected_mount_path,
-        "subPath": expected_subpath,
-        "readOnly": True,
-    }
-    assert "/app/agent_data" not in mount_paths
-    assert "/app/agent_data/agents/code" not in mount_paths
-    assert mount_paths["/app/agent_data/agents/code/workspace"]["subPath"] == "agents/code/workspace"
-    assert mount_paths[expected_worker_root]["subPath"] == f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-    assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
+    worker_config_path = f"/app/agent_data/{config_relative_path}"
+    config_top_level = f"/app/agent_data/{config_relative_path.split('/', maxsplit=1)[0]}"
+    assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == str(config_path.resolve())
+    assert not any(
+        worker_config_path.startswith(mount["mountPath"]) or mount["mountPath"].startswith(config_top_level)
+        for mount in container["volumeMounts"]
+    )
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
         {"name": "worker-tmp", "emptyDir": {"sizeLimit": "1Gi"}},
     ]
-    assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == worker_config_path
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    assert committed_runtime.config_path == config_path.resolve()
+    assert "sk-config-secret" not in json.dumps(deployment)
+    assert "sk-env-secret" not in json.dumps(_load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A))
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
@@ -2960,7 +2847,6 @@ router:
         expected_worker_root,
         f"{expected_worker_root}/.shared_credentials",
         f"{expected_worker_root}/.runtime",
-        "/app/config.yaml",
         "/tmp",  # noqa: S108
     }
 

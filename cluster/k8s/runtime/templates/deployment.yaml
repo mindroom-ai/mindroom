@@ -11,11 +11,7 @@
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
-{{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
 {{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
-{{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
-{{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
-{{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -290,16 +286,6 @@ spec:
               value: {{ .Values.storage.mountPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
               value: {{ .Values.workers.kubernetes.storageSubpathPrefix | quote }}
-            {{- if $workerConfigMapName }}
-            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
-              value: {{ $workerConfigMapName | quote }}
-            {{- end }}
-            {{- if $workerConfigKey }}
-            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
-              value: {{ $workerConfigKey | quote }}
-            {{- end }}
-            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
-              value: {{ $workerConfigPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
               value: {{ .Values.workers.kubernetes.idleTimeoutSeconds | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
@@ -533,9 +519,11 @@ spec:
         {{- if eq .Values.workers.backend "static_runner" }}
         {{- /*
         The runner executes agent tool code, so it must not see the credential store, Matrix state,
-        the primary's writable config, or the credentials encryption key.
+        the primary's config file or its directory, or the credentials encryption key.
         It mounts only agent state from the PVC over its own private storage root,
+        takes agent settings from the allowlisted snapshot each request carries,
         and saved tool settings reach it as per-call leases from the primary.
+        Its config path matches the primary's only so config-relative snapshot paths resolve alike; nothing is mounted there.
         */}}
         - name: sandbox-runner
           image: {{ include "mindroom-runtime.image" . | quote }}
@@ -573,12 +561,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            {{- if $usesConfigMapConfig }}
-            - name: config
-              mountPath: {{ .Values.config.mountPath }}
-              subPath: {{ .Values.config.key }}
-              readOnly: true
-            {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
               subPath: sandbox-runner
@@ -588,12 +570,6 @@ spec:
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
               subPath: private_instances
-            {{- with $fileConfigStorageSubpath }}
-            - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
-              mountPath: {{ printf "%s/%s" $storageRoot . | quote }}
-              subPath: {{ . | quote }}
-              readOnly: true
-            {{- end }}
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}

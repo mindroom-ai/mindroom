@@ -133,6 +133,7 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
     assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
+    assert defs["MCPOAuthConfig"]["properties"]["extra_token_params"][HINT_KEY] == {"secret": True}
 
 
 def test_optional_blocks_default_to_their_model_defaults() -> None:

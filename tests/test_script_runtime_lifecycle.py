@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import socket
 import threading
 import time
@@ -37,7 +36,6 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
 )
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
-from mindroom.script_runs.legacy_recovery import legacy_script_recovery_signature
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
     ScriptCallState,
@@ -854,20 +852,12 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
 class _RecoveringBackend(_Backend):
     backend_name: str = "kubernetes"
     signature: str = "worker-authority-v1"
-    legacy_signature: str = "legacy-worker-authority-v1"
-    pre_seccomp_signature: str | None = None
 
     def script_recovery_signature(self) -> str:
         return self.signature
 
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         return {"profile": resource_profile, "requests": {}, "limits": {}}
-
-    def legacy_script_recovery_signature(self) -> str:
-        return self.legacy_signature
-
-    def legacy_pre_seccomp_script_recovery_signature(self) -> str | None:
-        return self.pre_seccomp_signature
 
 
 @dataclass
@@ -1018,84 +1008,6 @@ async def test_incomplete_kubernetes_recovery_backend_cannot_mint_or_adopt_autho
         await runtime.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_startup_migrates_exact_legacy_recovery_contract(tmp_path: Path) -> None:
-    """An exactly verifiable old recovery digest is upgraded after safe adoption."""
-    runtime, run, backend, client = _recovery_scenario(tmp_path)
-    legacy_signature = legacy_script_recovery_signature(
-        backend=backend,
-        config=runtime.config_provider(),
-        agent_name=run.agent_name,
-        gateway_url=runtime.manager.gateway_url,
-    )
-    assert legacy_signature is not None
-    runtime.store.replace_recovery_signature(
-        run.run_id,
-        expected_signature=run.recovery_signature,
-        recovery_signature=legacy_signature,
-    )
-
-    try:
-        await runtime.start()
-        durable = runtime.store.get_run(run.run_id)
-        assert durable.state is ScriptRunState.RUNNING
-        assert durable.cancel_requested_at is None
-        assert durable.recovery_signature is not None
-        assert durable.recovery_signature.startswith("v2:")
-        assert client.exited is False
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("change", [None, "owner", "resources", "gateway"])
-async def test_startup_migrates_pre_seccomp_recovery_contract(tmp_path: Path, change: str | None) -> None:
-    """An unchanged pre-seccomp process survives; its owner, resources and gateway remain bound."""
-    runtime, run, backend, client = _recovery_scenario(tmp_path)
-    backend.pre_seccomp_signature = "pre-seccomp-worker-authority"
-    historical_payload = {
-        "protocol": 1,
-        "backend": "pre-seccomp-worker-authority",
-        "agent": "watcher",
-        "process_authority": {
-            "execution_scope": None,
-            "private": None,
-            "knowledge_paths": [],
-            "grantable_credentials": [],
-        },
-        "gateway": "http://primary.test/api/script-gateway",
-        "resources": {"profile": None, "requests": {}, "limits": {}},
-    }
-    if change == "owner":
-        historical_payload["agent"] = "other"
-    elif change == "resources":
-        historical_payload["resources"] = {"profile": None, "requests": {}, "limits": {"cpu": "2"}}
-    elif change == "gateway":
-        historical_payload["gateway"] = "http://other.test/api/script-gateway"
-    digest = hashlib.sha256(json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    runtime.store.replace_recovery_signature(
-        run.run_id,
-        expected_signature=run.recovery_signature,
-        recovery_signature=f"v2:{digest}",
-    )
-
-    try:
-        await runtime.start()
-        durable = runtime.store.get_run(run.run_id)
-        if change is None:
-            assert durable.state is ScriptRunState.RUNNING
-            assert durable.cancel_requested_at is None
-            assert durable.worker_id == run.worker_id
-            assert durable.recovery_signature == run.recovery_signature
-            assert client.exited is False
-            assert set(backend.actions) == {f"touch:{run.worker_key}"}
-        else:
-            assert durable.state is ScriptRunState.INTERRUPTED
-            assert client.exited is True
-    finally:
-        await runtime.shutdown()
-
-
 def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:
     """An unavailable historical digest cannot match a missing durable authority record."""
     runtime, run, backend, _client = _recovery_scenario(tmp_path)
@@ -1108,71 +1020,6 @@ def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:
         )
         is None
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("migration_race", ["cancellation", "terminal"])
-async def test_startup_legacy_migration_race_does_not_block_later_runs(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    migration_race: str,
-) -> None:
-    """One run changed by another writer cannot abort migration of later runs."""
-    runtime, survivor, backend, _client = _recovery_scenario(tmp_path)
-    legacy_signature = legacy_script_recovery_signature(
-        backend=backend,
-        config=runtime.config_provider(),
-        agent_name=survivor.agent_name,
-        gateway_url=runtime.manager.gateway_url,
-    )
-    assert legacy_signature is not None
-    runtime.store.replace_recovery_signature(
-        survivor.run_id,
-        expected_signature=survivor.recovery_signature,
-        recovery_signature=legacy_signature,
-    )
-    raced = _stored_run_pinned_to_worker(
-        runtime.store,
-        runtime.runtime_paths,
-        run_id=f"script-{'b' * 32}",
-        recovery_signature=legacy_signature,
-    )
-    backend.handles.append(_worker(raced))
-    replace_recovery_signature = runtime.store.replace_recovery_signature
-
-    def race_then_replace(
-        run_id: str,
-        *,
-        expected_signature: str | None,
-        recovery_signature: str,
-    ) -> ScriptRunRecord:
-        if run_id == raced.run_id:
-            if migration_race == "cancellation":
-                runtime.store.request_cancel(run_id, reason="concurrent cancellation")
-            else:
-                runtime.store.transition_run(run_id, state=ScriptRunState.EXITED, exit_code=0)
-        return replace_recovery_signature(
-            run_id,
-            expected_signature=expected_signature,
-            recovery_signature=recovery_signature,
-        )
-
-    monkeypatch.setattr(runtime.store, "replace_recovery_signature", race_then_replace)
-
-    try:
-        await runtime.start()
-        migrated = runtime.store.get_run(survivor.run_id)
-        assert migrated.state is ScriptRunState.RUNNING
-        assert migrated.cancel_requested_at is None
-        assert migrated.recovery_signature is not None
-        assert migrated.recovery_signature.startswith("v2:")
-        raced_after = runtime.store.get_run(raced.run_id)
-        if migration_race == "cancellation":
-            assert raced_after.cancel_requested_at is not None
-        else:
-            assert raced_after.state is ScriptRunState.EXITED
-    finally:
-        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1196,32 +1043,6 @@ async def test_startup_adopts_script_after_compatible_delegation_change(tmp_path
         assert durable.state is ScriptRunState.RUNNING
         assert durable.cancel_requested_at is None
         assert client.exited is False
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_startup_rejects_unverifiable_legacy_recovery_contract(tmp_path: Path) -> None:
-    """A changed unversioned digest fails closed because its old authority cannot be decoded."""
-    runtime, run, backend, client = _recovery_scenario(tmp_path)
-    legacy_signature = legacy_script_recovery_signature(
-        backend=backend,
-        config=runtime.config_provider(),
-        agent_name=run.agent_name,
-        gateway_url=runtime.manager.gateway_url,
-    )
-    assert legacy_signature is not None
-    runtime.store.replace_recovery_signature(
-        run.run_id,
-        expected_signature=run.recovery_signature,
-        recovery_signature=legacy_signature,
-    )
-    backend.legacy_signature = "changed-legacy-authority"
-
-    try:
-        await runtime.start()
-        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
-        assert client.exited is True
     finally:
         await runtime.shutdown()
 

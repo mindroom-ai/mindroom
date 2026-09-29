@@ -16,10 +16,12 @@ from mindroom.config.main import (
     ConfigRuntimeValidationError,
     format_invalid_config_message,
     load_config_or_user_error,
+    redact_authored_config,
 )
+from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_data
+from mindroom.redaction import REDACTED
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -165,23 +167,6 @@ def _format_value(value: Any) -> str:  # noqa: ANN401
     return yaml_str
 
 
-def _display_key_for_path(path: str) -> str | None:
-    for part in reversed(path.split(".")):
-        if not part.isdigit():
-            return part
-    return None
-
-
-def _redact_value_for_display(value: Any, path: str | None = None) -> Any:  # noqa: ANN401
-    if path is None:
-        return redact_sensitive_data(value)
-    key = _display_key_for_path(path)
-    if key is None:
-        return redact_sensitive_data(value)
-    redacted = redact_sensitive_data({key: value})
-    return redacted[key] if isinstance(redacted, dict) else redacted
-
-
 async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     args_text: str,
     runtime_paths: RuntimePaths,
@@ -198,7 +183,6 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
     """
     operation, args = _parse_config_args(args_text)
-    path = runtime_paths.config_path
     load_error_footer = _CONFIG_CHANGE_REJECTED_MESSAGE if operation == "set" else None
 
     # Config loading and validation execute plugin modules and walk the
@@ -213,11 +197,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         return load_error, None
     assert config is not None
     config_dict = config.authored_model_dump()
+    redacted_config_dict = config.redacted_authored_model_dump()
 
     if operation == "show":
         # Show entire config
-        safe_config_dict = _redact_value_for_display(config_dict)
-        yaml_str = yaml.dump(safe_config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        yaml_str = yaml.dump(redacted_config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
         return f"**Current Configuration:**\n```yaml\n{yaml_str}```", None
 
     if operation == "get":
@@ -229,12 +213,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
         config_path_str = args[0]
         try:
-            value = _get_nested_value(config_dict, config_path_str)
+            value = _get_nested_value(redacted_config_dict, config_path_str)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
-            formatted = _format_value(_redact_value_for_display(value, config_path_str))
-            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```", None
+            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{_format_value(value)}\n```", None
 
     elif operation == "set":
         if len(args) < 2:
@@ -249,10 +232,18 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
         # Parse the value - YAML parsing handles both quoted and unquoted formats
         value = _parse_value(value_str)
+        marker_location = redaction_marker_location(value)
+        if marker_location is not None:
+            field_path = ".".join((config_path_str, *marker_location))
+            return (
+                f"❌ `{field_path}` contains the redaction marker `{REDACTED}`, which `!config show` and "
+                "`!config get` print in place of a hidden value. Set that field to its real value instead."
+                f"\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+            ), None
 
         # Get the current value for comparison
         try:
-            old_value = _get_nested_value(config_dict, config_path_str)
+            old_value = _get_nested_value(redacted_config_dict, config_path_str)
         except (KeyError, IndexError):
             old_value = None  # Path doesn't exist yet
 
@@ -270,13 +261,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
-            # Format the preview message
-            formatted_old = (
-                _format_value(_redact_value_for_display(old_value, config_path_str))
-                if old_value is not None
-                else "Not set"
-            )
-            formatted_new = _format_value(_redact_value_for_display(value, config_path_str))
+            # Redact the exact payload that confirmation applies, not a normalized model of it.
+            redacted_value = _get_nested_value(redact_authored_config(test_config_dict), config_path_str)
+            formatted_old = "Not set" if old_value is None else _format_value(old_value)
+            formatted_new = _format_value(redacted_value)
 
             preview_msg = (
                 f"**Configuration Change Preview**\n\n"
@@ -289,9 +277,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             # Return the preview and the change info for confirmation
             change_info = {
                 "config_path": config_path_str,
-                "old_value": old_value,
                 "new_value": value,
-                "path": str(path),
+                # The pending change is stored in room state that every member can read,
+                # so a value that redaction masks stays out of it.
+                "new_value_withheld": redacted_value != value,
             }
 
             return preview_msg, change_info

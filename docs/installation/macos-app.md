@@ -143,6 +143,8 @@ If System Settings already shows MindRoom enabled but the app reports **Not allo
 Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
 In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
+MindRoom itself is never offered in the application list, because its windows grant shell auto-approval and control leases.
+Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you hands the agent your own authority; see [Security Model](../tools/desktop.md#security-model).
 Application observation and control are separate choices.
 **Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
 **Revoke Now** immediately removes input authority while observation continues; **Stop Access** ends the bridge session.
@@ -164,7 +166,8 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
     The working folder does not confine it.
 
 While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
-The card shows the command, working folder, agent, requester, and expiry, with control and text-direction characters shown escaped.
+The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and each line kept left to right.
+**Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.
 Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
 Without a waiting request, **Allow Without Asking…** offers the same durations.
 **Approve & Allow…** and **Allow Without Asking…** ask for confirmation first and list the agents and requesters the choice covers.
