@@ -15,7 +15,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.fallback import FallbackConfig
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
+from agno.run.agent import RunOutput, ToolCallCompletedEvent
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
@@ -300,13 +300,14 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
             (True, False, "same_parent"),
             (True, False, "next_child"),
             (True, False, "revoked"),
+            (True, False, "unavailable"),
             (True, False, "denied_retrieval"),
         ]
         for excluded in [False, True]
         # Both successive children must be managed and remain in their foreground wait; a revoked resume is
         # presented through a later job wait, which needs the detached child.
         if (duplicate != "next_child" or not (detach or human or excluded))
-        and (duplicate not in {"revoked", "denied_retrieval"} or (detach and not human and not excluded))
+        and (duplicate not in {"revoked", "unavailable", "denied_retrieval"} or (detach and not human and not excluded))
     ],
 )
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
@@ -342,7 +343,8 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         None,
         "parent",
     )
-    runtime = tool_job_runtime(tmp_path)
+    job_access = {"allowed": True}
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: job_access["allowed"])
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
@@ -449,7 +451,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             execution_identity=identity,
         )
 
-    async def finish_approval_sequence(result: RunOutput) -> RunOutput:  # noqa: PLR0915 - One ordered approval story.
+    async def finish_approval_sequence(result: RunOutput) -> RunOutput:  # noqa: C901, PLR0915 - One ordered approval story.
         nonlocal runtime
         assert result.status == RunStatus.paused
         assert side_effects == []
@@ -483,7 +485,12 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             assert cancelled.status == RunStatus.cancelled
             assert side_effects == []
 
-        async def approve(paused: RunOutput, *, start_another: bool = False) -> RunOutput:
+        async def approve(
+            paused: RunOutput,
+            *,
+            start_another: bool = False,
+            on_event: Callable[[object], None] | None = None,
+        ) -> RunOutput:
             saved_call = _saved_approval_calls(DelegationState.from_metadata(paused.metadata))[0]
             responses = [ModelResponse(content="Approved parent result")]
             if start_another:
@@ -512,14 +519,28 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 decisions={saved_call.tool_call_id: True},
                 denial_reasons={saved_call.tool_call_id: None},
                 approval_calls=(saved_call,),
+                on_event=on_event,
             )
 
-        if duplicate_approval == "revoked":
-            # Resuming a presented child approval rechecks current delegation policy, like any other resume.
-            config.agents["leader"].delegate_to = []
-            revoked = await approve(result)
+        if duplicate_approval in {"revoked", "unavailable"}:
+            # Resuming a presented child approval rechecks current delegation policy and job access, like any
+            # other resume, and settles the approved child tool its card showed.
+            if duplicate_approval == "revoked":
+                config.agents["leader"].delegate_to = []
+            else:
+                job_access["allowed"] = False
+            events: list[object] = []
+            revoked = await approve(result, on_event=events.append)
             assert revoked.status == RunStatus.completed
             assert side_effects == []
+            settled = [
+                event.tool
+                for event in events
+                if isinstance(event, ToolCallCompletedEvent) and event.tool.tool_name != "job"
+            ]
+            reason = "Cannot delegate" if duplicate_approval == "revoked" else "not available"
+            assert [(tool.tool_call_error, reason in str(tool.result)) for tool in settled] == [(True, True)]
+            job_access["allowed"] = True
             assert (await runtime.lookup(child.delegation_id, owner=identity, depth=0)).status == "awaiting_approval"
             return revoked
         if duplicate_approval:

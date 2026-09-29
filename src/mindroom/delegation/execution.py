@@ -945,6 +945,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 include_result=False,
             )
         except JobAccessError as error:
+            if pending_id == job_id and on_event is not None:
+                _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
             resolve_result(str(error))
             return False
         retained = retained_child(background, background_job)
