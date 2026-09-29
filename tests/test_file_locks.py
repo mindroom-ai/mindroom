@@ -282,8 +282,10 @@ async def test_windows_locks_cover_byte_zero_whatever_the_file_position(
     with windows_file_locks.advisory_file_lock(lock_path, exclusive=False):
         pass
     assert windows_file_locks.file_lock_is_held(lock_path) is False
-    async with windows_file_locks.async_exclusive_file_lock(lock_path, poll_seconds=0.01):
-        pass
+    async with windows_file_locks.async_exclusive_file_lock(lock_path, poll_seconds=0.01) as lock_file:
+        # The yielded handle is writable, so the holder can move the position before the unlock.
+        lock_file.write("written while held")
+        lock_file.flush()
     windows_file_locks.release_file_lock(windows_file_locks.acquire_shared_file_lock(lock_path))
 
     lock, unlock = (_FakeMsvcrt.LK_NBLCK, 1, 0), (_FakeMsvcrt.LK_UNLCK, 1, 0)
