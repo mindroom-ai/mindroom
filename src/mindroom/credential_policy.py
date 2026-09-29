@@ -43,7 +43,6 @@ _OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "desktop",
-        "github",
         "google_calendar",
         "google_docs",
         "google_drive",
@@ -54,6 +53,8 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
         "homeassistant",
     },
 )
+
+_PRIMARY_OWNED_TOOL_CONFIG_SERVICES = frozenset({"browserbase", "composio", "daytona", "github"})
 
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
@@ -84,12 +85,15 @@ class _CredentialServicePolicy:
 def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
     oauth_token_service = is_oauth_token_service(service)
-    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
+    primary_owned_tool_config = service in _PRIMARY_OWNED_TOOL_CONFIG_SERVICES
+    is_local_only = (
+        service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service or primary_owned_tool_config
+    )
     is_primary_runtime_global = is_oauth_client_config_service(service)
-    # OAuth tokens carry one external account identity, so a shared-scope agent's
+    # OAuth tokens and primary-owned tool config carry an identity, so a shared-scope agent's
     # connection must stay bound to that agent instead of the deployment-wide store
     # every other agent reads.
-    uses_agent_scoped = worker_scope == "shared" and oauth_token_service
+    uses_agent_scoped = worker_scope == "shared" and (oauth_token_service or primary_owned_tool_config)
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
