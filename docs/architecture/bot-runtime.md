@@ -294,7 +294,7 @@ Per-source Matrix revision tuples identify the selected canonical prompt body.
 The owning turn's typed physical revision map retains edit ordering independently, so canonical refill may select a surviving original or older body while stale callbacks remain stale.
 `EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
-A drain asked to rebuild the same request more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
+A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
 Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch.

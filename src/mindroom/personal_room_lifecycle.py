@@ -176,9 +176,10 @@ class PersonalRoomLifecycle:
     ) -> None:
         """Serve one onboarding-room trigger without letting a broken personal room hold that room's lane.
 
-        A room no retry can fix is logged and the event settles; a restart or
-        configuration reload reconciles it again. Transient failures still raise
-        so the journal retries the event.
+        A room no retry can fix is logged and the event settles; reconciliation,
+        which runs at startup and after a configuration reload, retries it after
+        doubling delays up to hourly. Transient failures still raise so the
+        journal retries the event.
         """
         try:
             await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)
