@@ -837,7 +837,7 @@ _PROVIDER_WIRES = {
         lambda request: request.get("tool_choice") == "none",
     ),
     "anthropic": _ProviderWire(
-        ModelConfig(provider="anthropic", id="claude-sonnet-5", api_key="test-key"),
+        ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="test-key"),
         (
             _claude_reply(
                 {"type": "tool_use", "id": "toolu_1", "name": "get_skill_instructions", "input": json.loads(_VIEW)},
@@ -1356,7 +1356,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
 async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tmp_path: Path, reason: str) -> None:
     """A request the review cannot use whole, or one too long for several review requests, is replayed instead."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["small"] = ModelConfig(provider="openai", id="gpt-6-astra-mini")
+    config.models["small"] = ModelConfig(provider="openai", id="gpt-6-luna")
     tools = _agent_tools(config, paths, [])
     if reason == "other review model":
         config.agents["mind"].skill_learning.model = "small"
@@ -1560,6 +1560,33 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
 
 
 @pytest.mark.asyncio
+async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_path: Path) -> None:
+    """The notice runs on its own, so a new response in the conversation cannot cancel it halfway."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    sending, release, sent = asyncio.Event(), asyncio.Event(), []
+
+    async def send(_client: object, _room_id: str, content: dict[str, object]) -> object:
+        sending.set()
+        await release.wait()
+        sent.append(content["body"])
+        return object()
+
+    runner = _runner(paths, object())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.runner.send_message_result", send),
+    ):
+        assert await _count(runner, config, identity=ALICE) is not None
+        await asyncio.wait_for(sending.wait(), timeout=10)
+        runner.cancel(config, agent_name="mind", session_id="session", identity=ALICE)
+        release.set()
+        assert await wait_for_background_tasks(10)
+    assert sent == ["💾 Skill review: created `deploy-checks`"]
+
+
+@pytest.mark.asyncio
 async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
     """The response's queued-message state never reaches the review, though the reused model keeps its notice hook."""
     config, paths = _learner(tmp_path)
@@ -1589,7 +1616,7 @@ def test_a_usage_write_that_fails_never_fails_the_skill_change(tmp_path: Path) -
 async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -> None:
     """Without its own model setting, a review that cannot fork uses the response's model, not the agent default."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-astra-thread")
+    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-sol")
     primary = _model(("shell", {"cmd": "make deploy"}))
     capture = SkillReviewCapture()
     await _answer(primary, capture, _agent_tools(config, paths, []), model_name="thread")
@@ -1617,7 +1644,7 @@ class _PendingMessage:
 async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
     """A dynamic continuation can switch models, so the review forks the final attempt's model, not the first one's."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-astra-thread")
+    config.models["thread"] = ModelConfig(provider="openai", id="gpt-6-sol")
     config.agents["mind"].skill_learning.model = "thread"
     model = _model()
     capture = SkillReviewCapture()
@@ -1754,7 +1781,7 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
 async def test_the_review_closes_the_claude_client_it_opens(tmp_path: Path, ending: str) -> None:
     """The response closed its Claude client, so the review opens its own and closes it, even when stopped mid-open."""
     config, paths = _learner(tmp_path)
-    config.models["default"] = ModelConfig(provider="anthropic", id="claude-sonnet-5", api_key="test-key")
+    config.models["default"] = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="test-key")
     _seed(config, paths, _tool_turn("r1"))
     requests: list[httpx.Request] = []
 

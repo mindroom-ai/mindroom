@@ -139,7 +139,7 @@ def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "skill_manage"])},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
     )
 

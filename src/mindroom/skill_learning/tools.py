@@ -143,7 +143,7 @@ class SkillTools:
     catalog: dict[str, _CatalogEntry]
     reserved_names: frozenset[str]
     progress: ReviewProgress | None = None
-    _reads: dict[tuple[str, str], SkillFile] = field(default_factory=dict)
+    _reads: dict[tuple[str, str], SkillFile] = field(default_factory=dict, init=False)
     _turn: asyncio.Lock = field(init=False)
 
     def __post_init__(self) -> None:

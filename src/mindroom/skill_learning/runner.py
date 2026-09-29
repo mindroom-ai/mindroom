@@ -189,23 +189,21 @@ class SkillReviewRunner:
                 ),
                 timeout=settings.timeout_seconds,
             )
-        except asyncio.CancelledError:
-            # A new response stopped the review after some of its writes landed; shutdown sends no notice.
-            if settings.notify and progress.changes and not self._stopped:
-                create_background_task(self._notify(scope, progress.changes), name=f"skill_notice:{scope.agent}")
-            raise
         except TimeoutError:
             logger.info("Skill review reached its timeout", agent=scope.agent, session_id=scope.session)
         except Exception:
             logger.exception("Skill review failed", agent=scope.agent, session_id=scope.session)
+        finally:
+            # The notice runs on its own, so a new response that stops the review after its writes landed cannot stop
+            # the notice too; shutdown sends none.
+            if settings.notify and progress.changes and not self._stopped:
+                create_background_task(self._notify(scope, progress.changes), name=f"skill_notice:{scope.agent}")
         logger.info(
             "Skill review finished",
             agent=scope.agent,
             session_id=scope.session,
             changed=sorted(progress.changes),
         )
-        if settings.notify and progress.changes:
-            await self._notify(scope, progress.changes)
 
     async def _notify(self, scope: _ReviewScope, changes: dict[str, str]) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
