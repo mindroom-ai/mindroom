@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -123,11 +124,7 @@ def format_entity_mention(
 
 def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
     """Return replacement user IDs without duplicates while preserving mention order."""
-    mentioned_user_ids: list[str] = []
-    for replacement in replacements:
-        if replacement.user_id not in mentioned_user_ids:
-            mentioned_user_ids.append(replacement.user_id)
-    return mentioned_user_ids
+    return list(dict.fromkeys(replacement.user_id for replacement in replacements))
 
 
 def _scan_mention_tokens(text: str) -> list[_MentionToken]:
@@ -144,7 +141,7 @@ def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     tokens.extend(
         _scan_entity_alias_tokens(
             text,
-            occupied_ranges=[*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
+            occupied_ranges=sorted([*fenced_code_ranges, *((token.start, token.end) for token in tokens)]),
         ),
     )
     return sorted(tokens, key=lambda token: token.start)
@@ -400,8 +397,9 @@ def resolve_entity_name_for_mention_localpart(
 
 
 def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
-    """Return whether one text span overlaps any existing replacement span."""
-    return any(start < existing_end and end > existing_start for existing_start, existing_end in ranges)
+    """Return whether a text span overlaps sorted, disjoint existing spans."""
+    index = bisect_left(ranges, (end,)) - 1
+    return index >= 0 and start < ranges[index][1]
 
 
 def _apply_replacements(

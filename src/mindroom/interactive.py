@@ -158,8 +158,6 @@ _INTERACTIVE_PATTERN = (
 )
 _INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
-# One fence line: its backticks and info string. Info strings cannot contain backticks.
-_FENCE_LINE_PATTERN = r"[ \t]*(`{3,})[ \t]*([^`]*?)[ \t]*\r?"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -351,10 +349,12 @@ def hide_unfinished_interactive(formatted_text: str) -> str:
     lines = formatted_text.split("\n")
     open_fence: tuple[int, int, str] | None = None  # line, backtick count, and marker of the block the text ends in
     for index, line in enumerate(lines):
-        fence = re.fullmatch(_FENCE_LINE_PATTERN, line)
-        if fence is None:
+        # One fence line: its backticks and info string. Info strings cannot contain backticks.
+        fence = line.lstrip(" \t")
+        ticks = len(fence) - len(fence.lstrip("`"))
+        info = fence[ticks:].removesuffix("\r").strip(" \t")
+        if ticks < 3 or "`" in info:
             continue
-        ticks, info = len(fence.group(1)), fence.group(2)
         if open_fence is None:
             open_fence = (index, ticks, info)
         elif not info and ticks >= open_fence[1]:

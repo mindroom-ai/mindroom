@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from time import process_time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -9,6 +11,23 @@ import pytest
 
 from mindroom import interactive
 from tests.conftest import make_matrix_client_mock
+
+
+def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Long lines finish promptly without entering a backtracking fence matcher."""
+    original_fullmatch = re.fullmatch
+
+    def guarded_fullmatch(pattern: str, string: str, flags: int = 0) -> re.Match[str] | None:
+        assert len(string) < 20_000, "Long fence lines must use the linear parser"
+        return original_fullmatch(pattern, string, flags)
+
+    monkeypatch.setattr(interactive.re, "fullmatch", guarded_fullmatch)
+    for line in (" " * 20_000, "```" + " " * 20_000):
+        text = f"Before.\n{line}\n```interactive\n{{"
+        started = process_time()
+        shown = interactive.hide_unfinished_interactive(text)
+        assert process_time() - started < 0.5
+        assert shown == ("Before." if not line.startswith("`") else text)
 
 
 @pytest.fixture
@@ -43,6 +62,15 @@ class TestInteractiveFunctions:
                 'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
             ),
             ("Code:\n\n````md\n```interactive\n{\n", "Code:\n\n````md\n```interactive\n{\n"),
+            ("Before.\n \t````\tinteractive json \t\r\n{", "Before."),
+            ("Before.\n``interactive\n{", "Before.\n``interactive\n{"),
+            ("Before.\n```interactive`\n{", "Before.\n```interactive`\n{"),
+            ("Before.\n\v```interactive\n{", "Before.\n\v```interactive\n{"),
+            ("Before.\n\r```interactive\n{", "Before.\n\r```interactive\n{"),
+            ("Before.\n````interactive\n{\n```", "Before."),
+            ("Before.\n```interactive\n{\n \t```` \t\r", "Before.\n```interactive\n{\n \t```` \t\r"),
+            ("Before.\n```interactive\n{\n```\r ", "Before."),
+            ("Before.\n```interactive\n{\n```\r\r", "Before."),
         ],
     )
     def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:
