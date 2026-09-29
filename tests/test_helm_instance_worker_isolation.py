@@ -1183,6 +1183,24 @@ def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None
     assert _container(backend, "app")["image"] == "ghcr.io/mindroom-ai/platform-backend:backend-tag"
 
 
+def test_instance_chart_requests_fit_measured_tenant_use() -> None:
+    """Default requests decide how many tenants fit on a node, so they stay near measured idle use."""
+    docs = _render_instance_chart()
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+
+    requests = {
+        "mindroom": _container(mindroom, "mindroom")["resources"]["requests"],
+        "sandbox-runner": _container(mindroom, "sandbox-runner")["resources"]["requests"],
+        "synapse": _container(synapse, "synapse")["resources"]["requests"],
+    }
+    assert requests == {
+        "mindroom": {"cpu": "100m", "memory": "320Mi", "ephemeral-storage": "64Mi"},
+        "sandbox-runner": {"cpu": "25m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
+        "synapse": {"cpu": "50m", "memory": "192Mi", "ephemeral-storage": "64Mi"},
+    }
+
+
 def test_instance_chart_renders_configurable_control_plane_resources() -> None:
     """Tenant MindRoom and Synapse resources should be configurable per release."""
     docs = _render_chart(

@@ -19,8 +19,9 @@ ingressControllerNamespace: ingress-nginx
 # Ephemeral-storage requests stay small: every tenant's requests count against the node's allocatable ephemeral
 # storage, so large ones would leave new tenant pods Pending. They are explicit because a limit without a request
 # makes Kubernetes request the full limit.
-# Memory and CPU requests sit a little above measured idle use (primary ~250 MiB, Synapse ~130 MiB, sandbox runner
-# ~80 MiB, each ~10m CPU), because every tenant's requests count against the node and decide how many tenants fit.
+# Memory and CPU requests sit a little above measured idle use (primary ~250 MiB since v2026.9.396, Synapse ~130 MiB,
+# sandbox runner ~80 MiB, each ~10m CPU), because every tenant's requests count against the node and decide how many
+# tenants fit.
 # The limits absorb bursts such as agent runs and tool installs.
 mindroomResources:
   requests:
