@@ -2405,37 +2405,6 @@ class TestAgentBot(AgentBotTestBase):
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
-    @pytest.mark.asyncio
-    async def test_stop_reaction_on_unanswered_voice_echo_settles_without_stopping(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A voice echo owns a visible event but no response, so a stop on it cannot claim or hold the lane."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        await bot._turn_store.warm()
-        bot.client = make_matrix_client_mock()
-        await bot._turn_store.record_visible_echo("$voice", "$response")
-        echo_record = bot._turn_store.get_turn_record("$voice")
-        seen_reactions = _install_reaction_recorder(bot)
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-
-        await admit_dispatch_event(
-            bot._journal_dispatcher,
-            room,
-            _reaction_event("🛑", "$stop-reaction"),
-            EventKind.REACTION,
-            EventClass.ACTIONABLE,
-        )
-        await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
-
-        assert await bot._journal_dispatcher.store.pending() == ()
-        assert bot._turn_store.get_turn_record("$voice") == echo_record
-        assert seen_reactions == ["$stop-reaction"]
-
     @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_interrupted_stop_reaction_replay_cannot_become_hook_input(

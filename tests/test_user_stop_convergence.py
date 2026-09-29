@@ -13,18 +13,27 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.message_target import MessageTarget
+from mindroom.reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
+from mindroom.stop import StopManager
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
+from tests.conftest import test_runtime_paths
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
+    from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import EventJournalStore
@@ -182,6 +191,54 @@ async def test_one_stop_delivered_concurrently_cancels_once(journal_store: Event
     stopped = store.get_turn_record(_SOURCE_EVENT_ID)
     assert stopped is not None
     assert stopped.user_stop_settled_receipt_order == _STOP_RECEIPT_ORDER
+
+
+async def test_stop_reaction_on_a_voice_echo_is_not_claimed(journal_store: EventJournalStore, tmp_path: Path) -> None:
+    """A voice echo owns a visible event but no response, so a stop on it is left for the other consumers."""
+    store = await _store(journal_store)
+    await store.record_visible_echo("$voice", "$echo")
+    config = Config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    entity_ids(config, runtime_paths)
+    journal = MagicMock(spec=JournalDispatcher)
+    stop_manager = MagicMock(spec=StopManager)
+    stop_manager.can_handle_stop_reaction.return_value = False
+    reconciler = MagicMock(spec=UserStopReconciler)
+    dispatcher = ReactionDispatcher(
+        ReactionDispatcherDeps(
+            runtime=SimpleNamespace(config=config, client=None, orchestrator=None),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="agent",
+            journal_dispatcher=journal,
+            agent_reply_memberships=MagicMock(),
+            turn_policy=MagicMock(),
+            turn_store=store,
+            stop_manager=stop_manager,
+            user_stop_reconciler=reconciler,
+            ingress=MagicMock(),
+            reserve_prompt_ingress_order=MagicMock(),
+            enqueue_interactive_selection=AsyncMock(),
+            emit_reaction_received_hooks=AsyncMock(),
+            wait_for_admission_or_shutdown=AsyncMock(),
+            config_confirmation=MagicMock(),
+        ),
+    )
+    event = nio.Event.parse_event(
+        {
+            "type": "m.reaction",
+            "event_id": "$stop",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$echo", "key": "🛑"}},
+        },
+    )
+    assert isinstance(event, nio.ReactionEvent)
+
+    assert await dispatcher._maybe_handle_stop_reaction(event, None) is False
+
+    journal.claim_semantic_consumer.assert_not_awaited()
+    reconciler.finalize.assert_not_awaited()
 
 
 async def _noop() -> None:
