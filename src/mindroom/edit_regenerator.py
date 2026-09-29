@@ -11,6 +11,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import hook_ingress_policy
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
@@ -35,6 +36,18 @@ if TYPE_CHECKING:
     from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
+
+
+logger = get_logger(__name__)
+# A drain asked to rebuild the same request this many times in a row drops the
+# edit instead of holding the room's event lane.
+_MAX_CONSECUTIVE_EDIT_REBUILDS = 8
+
+
+def _log_dropped_rebuilding_edit(room_id: str, rebuilds: int) -> None:
+    """Report a drain that stopped because every attempt asked to rebuild."""
+    if rebuilds > _MAX_CONSECUTIVE_EDIT_REBUILDS:
+        logger.error("Dropping an edit whose regeneration kept asking to rebuild", room_id=room_id, rebuilds=rebuilds)
 
 
 @dataclass(frozen=True)
@@ -451,7 +464,10 @@ class EditRegenerator:
                 requester_id=requester,
             )
             if message is None:
-                updated = await self.deps.turn_store.mark_source_redacted(source)
+                updated = await self.deps.turn_store.mark_source_redacted(
+                    source,
+                    room_id=record.conversation_target.room_id,
+                )
                 assert updated is not None
                 record = updated
                 continue
@@ -536,7 +552,10 @@ class EditRegenerator:
             self.deps.turn_store.release_pending_turn_claim(claimed_record)
 
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
-        while mailbox.pending:
+        # Counted per attempt: the response runner may run the snapshot check
+        # more than once in one attempt, so only its final verdict counts.
+        rebuilds = 0
+        while mailbox.pending and rebuilds <= _MAX_CONSECUTIVE_EDIT_REBUILDS:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = await self._build_request(room, mailbox)
             if request is None or record is None:
@@ -549,7 +568,9 @@ class EditRegenerator:
                 mailbox.handed_off_revisions.update(request.sources.pending_event_ids)
             if mailbox.rebuild_requested:
                 mailbox.rebuild_requested = False
+                rebuilds += 1
                 continue
+            rebuilds = 0
             if regenerated_event_id is not None:
                 if not applied:
                     return
@@ -575,3 +596,4 @@ class EditRegenerator:
                 )
                 continue
             self._discard(mailbox, applied)
+        _log_dropped_rebuilding_edit(room.room_id, rebuilds)

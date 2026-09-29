@@ -258,24 +258,61 @@ def test_participation_state_has_no_framework_dependencies() -> None:
     )
 
 
-def test_cli_help_does_not_require_unix_file_locking() -> None:
-    """Desktop's platform-specific implementation must not break general CLI help on Windows."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; sys.modules['fcntl'] = None; "
-            "from typer.testing import CliRunner; from mindroom.cli.main import app; "
-            "result = CliRunner().invoke(app, ['--help']); print(result.output); "
-            "raise SystemExit(result.exit_code)",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
+_WINDOWS_DESKTOP_PROBE = """
+import json, sys, types
+
+for name in ("fcntl", "pwd", "termios"):
+    sys.modules[name] = None
+
+# The lock module picks its implementation from the platform. Everything else keeps this
+# host's platform and has no msvcrt, because the standard library and third-party packages
+# take Windows-only branches when either is present.
+import asyncio, mindroom
+msvcrt = types.ModuleType("msvcrt")
+msvcrt.LK_UNLCK, msvcrt.LK_LOCK, msvcrt.LK_NBLCK = 0, 1, 2
+msvcrt.locking = lambda fd, mode, nbytes: None
+sys.modules["msvcrt"] = msvcrt
+host_platform, sys.platform = sys.platform, "win32"
+import mindroom.file_locks
+sys.platform = host_platform
+del sys.modules["msvcrt"]
+
+from typer.testing import CliRunner
+from mindroom.cli.main import app
+
+help_exit_codes = {{" ".join(command): CliRunner().invoke(app, [*command, "--help"]).exit_code for command in {commands!r}}}
+for module in {modules!r}:
+    __import__(module)
+print(json.dumps({{"help": help_exit_codes, "posix_only": sorted(set({posix_only!r}) & set(sys.modules))}}))
+"""
+
+
+def test_desktop_app_observation_imports_without_posix_only_modules() -> None:
+    """Windows has no fcntl, pwd, or termios; CLI help and every module a screenshot-only Desktop run loads must work."""
+    app_observation_modules = (
+        "mindroom.cli.desktop",
+        "mindroom.cli.config",
+        "mindroom.desktop.native_entry",
+        "mindroom.desktop.native_host",
+        "mindroom.desktop.bridge_components",
+        "mindroom.desktop.session",
+        "mindroom.desktop.transport",
+        "mindroom.desktop.startup_errors",
+        "mindroom.desktop.cloudflare_access",
+        "mindroom.desktop.sso",
+        "mindroom.desktop.pairing_client",
+        "mindroom.matrix.olm_to_device",
     )
-    assert result.returncode == 0, result.stderr or result.stdout
-    assert "Usage:" in result.stdout
+    commands = ((), ("desktop",), ("desktop", "run"), ("desktop", "access"), ("desktop", "setup"))
+    posix_only = ("mindroom.desktop.login_environment", "mindroom.desktop.shell_prompt")
+    probe = _WINDOWS_DESKTOP_PROBE.format(commands=commands, modules=app_observation_modules, posix_only=posix_only)
+
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["help"] == {" ".join(command): 0 for command in commands}
+    assert payload["posix_only"] == [], "screenshot-only Desktop loaded folder or shell modules"
 
 
 def test_service_status_pairing_check_does_not_load_matrix_or_http_clients(tmp_path: Path) -> None:

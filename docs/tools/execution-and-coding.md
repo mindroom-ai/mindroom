@@ -390,6 +390,7 @@ square_root(144)
 ### Notes
 
 - Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
+- `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error payload before any computation.
 - Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
 ## [`reasoning`]
@@ -563,7 +564,8 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
+Other durations return an error message without waiting.
 `sleep` defaults to primary execution.
 
 ### Configuration

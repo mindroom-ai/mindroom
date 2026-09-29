@@ -15,6 +15,7 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
 from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
@@ -56,6 +57,9 @@ _LOW_VALUE_NAME_PATTERN = re.compile(r"(?:^|[-_])(nav|navbar|menu|search|modal|h
 _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
 _TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
+_MAX_PAGE_BYTES = 2 * 1024 * 1024
+# The codings httpx decodes, plus the legacy `x-gzip` alias; any of them lets a small body stand for a huge one.
+_COMPRESSED_CONTENT_CODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
 _MAX_REDIRECTS = 10
 
 
@@ -154,13 +158,27 @@ def _server_fetch_get(
     follow_redirects: bool,
     proxy: str | None = None,
 ) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured."""
-    if proxy:
-        # With a configured proxy, URL and redirect validation happen before this handoff.
-        # The proxy owns target DNS resolution and egress policy from here.
-        return httpx.get(url, timeout=timeout, proxy=proxy, follow_redirects=follow_redirects)
-    with httpx.Client(transport=ServerFetchHTTPTransport(), follow_redirects=follow_redirects) as client:
-        return client.get(url, timeout=timeout)
+    """Fetch a URL through the server-fetch transport when no proxy is configured.
+
+    The body is requested uncompressed and read raw up to a limit, so no page is inflated or buffered whole.
+    """
+    # With a configured proxy, URL and redirect validation happen before this handoff.
+    # The proxy owns target DNS resolution and egress policy from here.
+    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
+    with (
+        httpx.Client(follow_redirects=follow_redirects, headers={"Accept-Encoding": "identity"}, **route) as client,
+        client.stream("GET", url, timeout=timeout) as response,
+    ):
+        codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
+        if not codings.isdisjoint(_COMPRESSED_CONTENT_CODINGS):
+            msg = "The page must use identity content encoding."
+            raise httpx.DecodingError(msg, request=response.request)
+        try:
+            body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
+        except ByteLimitExceededError as error:
+            msg = f"The page exceeds {_MAX_PAGE_BYTES} bytes."
+            raise httpx.DecodingError(msg, request=response.request) from error
+    return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
 
 
 def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:

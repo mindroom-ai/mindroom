@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 from pathlib import Path
@@ -677,7 +678,10 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
     tmp_path: Path,
     selected_root: Path,
 ) -> None:
-    """CLI attaches durable admission before the transport runs and closes both owners."""
+    """CLI attaches durable admission before the transport runs and closes both owners.
+
+    Without shell access the run must not load the POSIX-only shell modules, so screenshot-only runs work on Windows.
+    """
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
     config = _run_config(roots=(selected_root,))
     lifecycle = []
@@ -751,6 +755,8 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
         assert client.to_device_callbacks
         lifecycle.append("prepare")
 
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.shell_prompt", None)
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
     monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", Bridge)
 
     await desktop_cli._run_bridge(
@@ -937,7 +943,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
 
     owner = SimpleNamespace(client=client, source=Source(), close=client.close)
     monkeypatch.setattr(
-        "mindroom.desktop.bridge_components.capture_login_environment",
+        "mindroom.desktop.login_environment.capture_login_environment",
         AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
     )
     task = asyncio.create_task(

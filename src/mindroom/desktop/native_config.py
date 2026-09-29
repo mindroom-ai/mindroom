@@ -33,6 +33,13 @@ _TOP_LEVEL_KEYS = frozenset(
 _EXTENDED_KEYS = _TOP_LEVEL_KEYS | {"files", "shell"}
 _MAX_ROOTS = 32
 _MAX_ROOT_LENGTH = 4_096
+# Folder reads confine through POSIX descriptors; shell commands need process groups and the login account.
+_LOCAL_ACCESS_SUPPORTED = os.name == "posix"
+_POSIX_ONLY_ACCESS = (
+    "Read-only folders and shell commands need macOS or Linux; on Windows, MindRoom Desktop supports only "
+    "screenshot observation of the `primary-screen` app. Turn them off with "
+    "`mindroom desktop access --clear-folders --no-shell`."
+)
 
 
 class NativeConfigError(ValueError):
@@ -227,6 +234,12 @@ def native_config_path(storage_root: Path) -> Path:
     return storage_root / "desktop_bridge" / "native_config.json"
 
 
+def require_supported_local_access(config: NativeDesktopConfig) -> None:
+    """Refuse read-only folders or shell access on a computer without the POSIX support they need."""
+    if not _LOCAL_ACCESS_SUPPORTED and (config.files.roots or config.shell.enabled):
+        raise NativeConfigError("invalid_request", _POSIX_ONLY_ACCESS)
+
+
 def load_native_config(path: Path) -> NativeDesktopConfig:
     """Load private native configuration."""
     try:
@@ -398,5 +411,6 @@ __all__ = [
     "NativeShellConfig",
     "load_native_config",
     "native_config_path",
+    "require_supported_local_access",
     "save_native_config",
 ]

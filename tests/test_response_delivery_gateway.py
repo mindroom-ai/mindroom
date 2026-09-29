@@ -4664,7 +4664,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
             await send_started.wait()
             # Started while the answer is on the wire, so it derives its record
             # from a memory the acknowledgement has not published into yet.
-            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source"))
+            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source", room_id=_ROOM_ID))
             finish_send.set()
             outcome = await recovery
             await redaction

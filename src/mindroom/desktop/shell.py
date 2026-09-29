@@ -207,9 +207,6 @@ class DesktopShell:
         clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if not hasattr(os, "killpg"):
-            message = "This platform cannot stop local process groups safely."
-            raise DesktopShellError(message)
         self._environment = dict(environment)
         self._clock = clock
         self._monotonic_clock = monotonic_clock

@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import binascii
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
+from nio.exceptions import EncryptionError
+from PIL import Image as PILImage
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix import image_handler
 from mindroom.matrix.media import (
     _sniff_image_mime_type,
+    decrypt_media_bytes,
     download_media_bytes,
     extract_media_caption,
+    prepare_media_upload,
     resolve_image_mime_type,
     upload_content_uri,
     upload_media_bytes,
@@ -119,6 +125,52 @@ class TestUploadMediaBytes:
         assert upload_call.kwargs["filename"] == "message.txt"
         assert upload_call.kwargs["filesize"] == 7
         assert upload_call.kwargs["data_provider"](None, None).read() == b"payload"
+
+
+class TestPrepareMediaUpload:
+    """Test shared upload preparation and the matching decryption."""
+
+    def test_encrypted_upload_round_trips_through_shared_decryption(self) -> None:
+        """Prepared ciphertext decrypts with its own metadata; a SHA-256 mismatch or non-base64 SHA-256 raises."""
+        prepared = prepare_media_upload(b"payload", filename="note.txt", mimetype="text/plain", encrypt=True)
+        file_content = prepared.encrypted_file_content(url="mxc://server/note")
+
+        assert file_content is not None
+        assert (file_content["url"], file_content["mimetype"], file_content["size"]) == (
+            "mxc://server/note",
+            "text/plain",
+            7,
+        )
+        assert (prepared.content_type, prepared.filename) == ("application/octet-stream", "note.txt.enc")
+        assert prepared.data != b"payload"
+        key = file_content["key"]["k"]
+        sha256 = file_content["hashes"]["sha256"]
+        iv = file_content["iv"]
+        assert decrypt_media_bytes(prepared.data, key=key, sha256=sha256, iv=iv) == b"payload"
+        tampered = bytes([prepared.data[0] ^ 1, *prepared.data[1:]])
+        with pytest.raises(EncryptionError, match="SHA-256"):
+            decrypt_media_bytes(tampered, key=key, sha256=sha256, iv=iv)
+        with pytest.raises(binascii.Error):
+            decrypt_media_bytes(prepared.data, key=key, sha256="a", iv=iv)
+
+    def test_image_dimensions_are_probed_only_when_event_info_is_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Callers that never send Matrix image info do not pay for decoding the image."""
+        png = io.BytesIO()
+        PILImage.new("RGB", (16, 9), "white").save(png, format="PNG")
+        opened: list[object] = []
+        original_open = PILImage.open
+
+        def tracking_open(fp: io.BytesIO) -> PILImage.Image:
+            opened.append(fp)
+            return original_open(fp)
+
+        monkeypatch.setattr("PIL.Image.open", tracking_open)
+        prepared = prepare_media_upload(png.getvalue(), filename="chart.png", mimetype="image/png", encrypt=True)
+
+        assert prepared.encrypted_file_content(url="mxc://server/chart") is not None
+        assert opened == []
+        assert prepared.info() == {"size": len(png.getvalue()), "mimetype": "image/png", "w": 16, "h": 9}
+        assert len(opened) == 1
 
 
 class TestDownloadImage:

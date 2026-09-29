@@ -15,13 +15,27 @@ enum LocalAgentsSetupStep: Int, CaseIterable {
 
 struct LocalAgentsSetupSnapshot: Equatable {
     var runtimePath: String?
+    var runtimeVersion: String?
+    /// The runtime release this app was built with, or nil when any runtime is accepted.
+    var requiredRuntimeVersion: String?
     var configurationExists = false
     var configurationDisplayPath: String?
     var configurationStamp: LocalAgentsConfigurationStamp?
 
     var runtimeInstalled: Bool { runtimePath != nil }
 
+    /// The app passes CLI options that only its own runtime release is guaranteed to accept,
+    /// so a different installed runtime, for example after an app update, must be updated first.
+    var runtimeUpdateReason: String? {
+        guard runtimeInstalled, let requiredRuntimeVersion, runtimeVersion != requiredRuntimeVersion else { return nil }
+        let installed = runtimeVersion.map { "runtime \($0) is installed" } ?? "the installed runtime version is unknown"
+        return "This app needs MindRoom runtime \(requiredRuntimeVersion), but \(installed)."
+    }
+
+    var runtimeReady: Bool { runtimeInstalled && runtimeUpdateReason == nil }
+
     func nextStep(service: MindRoomServiceState, check: CommandResult?) -> LocalAgentsSetupStep {
+        if runtimeUpdateReason != nil { return .install }
         if service == .pairing { return .configure }
         if service == .running || service == .stopped { return .start }
         if !runtimeInstalled { return .install }
@@ -30,14 +44,15 @@ struct LocalAgentsSetupSnapshot: Equatable {
     }
 
     func canStart(service: MindRoomServiceState) -> Bool {
-        // Installed services keep the configuration path saved by the CLI.
-        runtimeInstalled && (service == .stopped || (service == .notInstalled && configurationExists))
+        // Installed services keep the configuration path and runtime version saved by the CLI.
+        (service == .stopped && runtimeInstalled) || (service == .notInstalled && configurationExists && runtimeReady)
     }
 
     func progress(for step: LocalAgentsSetupStep, service: MindRoomServiceState,
                   check: CommandResult?) -> SetupStepProgress {
         switch step {
         case .install:
+            if runtimeUpdateReason != nil { return .needsAction("Update needed") }
             return runtimeInstalled ? .complete("Installed") : .needsAction("Needed")
         case .configure:
             return configurationExists ? .complete("Files found") : .needsAction("Needed")

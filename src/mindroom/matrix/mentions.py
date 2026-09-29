@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
+# Matrix user IDs are at most 255 bytes, so no longer prefix of a token can be one.
+_MAX_MATRIX_USER_ID_LENGTH = 255
 
 
 @dataclass(frozen=True)
@@ -331,6 +333,7 @@ def _literal_user_resolution(user_id: str) -> _MentionResolution:
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
     """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
+    token = token[:_MAX_MATRIX_USER_ID_LENGTH]
     for end in range(len(token), 0, -1):
         candidate = token[:end]
         if _is_valid_explicit_matrix_user_id(candidate):

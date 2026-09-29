@@ -33,17 +33,13 @@ jobs:
   swift-tests:
     runs-on: macos-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        architecture: [arm64, x86_64]
     steps:
       - uses: actions/checkout@v5
         with:
           lfs: true
           persist-credentials: false
       - name: Build and test native app
-        run: /usr/bin/arch -${{ matrix.architecture }} swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
+        run: swift test --package-path macos/MindRoom
 
   packaging:
     runs-on: macos-latest
@@ -54,15 +50,12 @@ jobs:
           lfs: true
           persist-credentials: false
       - uses: astral-sh/setup-uv@v7
-      - name: Build universal uv binary
-        run: macos/build-universal-uv.sh "$RUNNER_TEMP/uv-universal"
-      - name: Build universal installer
+      - name: Build installer
         env:
-          UV_BINARY: ${{ runner.temp }}/uv-universal
           APP_VERSION: '0.0.0'
           BUILD_VERSION: '1'
-        run: macos/build-macos-app.sh --universal --dmg
-      - name: Verify installer and both packaged helpers
+        run: macos/build-macos-app.sh --dmg
+      - name: Verify installer and packaged helper
         run: |
           codesign --verify --deep --strict dist/macos/MindRoom.app
           hdiutil verify dist/macos/MindRoom.dmg
@@ -73,10 +66,8 @@ jobs:
               fatalError("Packaged menu bar artwork is missing or invalid")
           }
           SWIFT
-          for architecture in arm64 x86_64; do
-            uv run --no-project python macos/smoke-desktop-helper.py \
-              "dist/macos/MindRoom.app/Contents/Helpers/$architecture/MindRoom Desktop Helper.app" "$architecture"
-          done
+          uv run --no-project python macos/smoke-desktop-helper.py \
+            "dist/macos/MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-installer

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from itertools import cycle
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -19,7 +20,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
-from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
+from mindroom.edit_regenerator import (
+    _MAX_CONSECUTIVE_EDIT_REBUILDS,
+    EditRegenerator,
+    EditRegeneratorDeps,
+    _Edit,
+    _Mailbox,
+)
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -43,6 +50,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
+from mindroom.turn_record import EditPreparation
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import make_relation_lookup, make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
@@ -879,6 +887,49 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
     }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_that_never_changes_is_capped(tmp_path: Path) -> None:
+    """A snapshot check that keeps asking to rebuild cannot hold the room's lane forever."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    harness.turn_store.prepare_edit_snapshot.side_effect = AsyncMock(return_value=EditPreparation.REBUILD)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_cap_counts_attempts_when_the_check_runs_twice_per_attempt(tmp_path: Path) -> None:
+    """A snapshot check that passes before history refresh and rebuilds after it is still capped."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="edited body")
+    verdicts = cycle([False, EditPreparation.REBUILD])
+    harness.turn_store.prepare_edit_snapshot.side_effect = lambda **_kwargs: next(verdicts)
+
+    async def generate(request: ResponseRequest) -> str | None:
+        # The response runner checks once at admission and again after refreshing history.
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is False
+        assert await request.prepare_source_turn(request.thread_history) is EditPreparation.REBUILD
+        return None
+
+    harness.generate_response.side_effect = generate
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=5)
+
+    assert harness.generate_response.await_count == _MAX_CONSECUTIVE_EDIT_REBUILDS + 1
     assert harness.regenerator._mailboxes == {}
 
 
@@ -2181,7 +2232,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     )
     await store.warm()
     await store.record_responded_turn(record)
-    await store.mark_source_redacted("$deleted-edit")
+    await store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     original = nio.RoomMessageText.from_dict(
         {
             "type": "m.room.message",
@@ -2257,7 +2308,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
         if event.event_id == edit.event_id:
             await _handle_edit(harness, edit, info)
         elif event.room_id == ROOM_ID:
-            await store.mark_source_redacted(redaction.redacts)
+            await store.mark_source_redacted(redaction.redacts, room_id=ROOM_ID)
         return True
 
     worker = PendingEventWorker(store=principal, handle=handle)
@@ -2341,7 +2392,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if deletion_phase == "preparation":
@@ -2350,7 +2401,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     async def generate(request: ResponseRequest) -> str | None:
         attempts.append(request)
         if deletion_phase == "locked" and len(attempts) == 1:
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None
@@ -2366,7 +2417,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=real_store, generate_response=generate)
     if deletion_phase == "before":
-        await real_store.mark_source_redacted("$deleted-edit")
+        await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     event, info = _edit_event(original_event_id=second, new_body="LIVE_SIBLING_EDIT")
     await _handle_edit(harness, event, info)
     assert len(attempts) == (1 if deletion_phase == "before" else 2)
@@ -2440,7 +2491,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if late_preparation:
@@ -2450,7 +2501,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal attempts
         attempts += 1
         if attempts == 1 and not late_preparation:
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None

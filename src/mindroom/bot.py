@@ -2630,7 +2630,7 @@ class AgentBot:
             if early_reservation_owner is not None:
                 await early_reservation_owner.release()
 
-    async def _on_redaction(self, _room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Tombstone the redacted source so no replay reruns the turn it started.
 
         The projection learns about the redaction through journal admission, so
@@ -2638,7 +2638,7 @@ class AgentBot:
         unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
-        await self._turn_store.mark_source_redacted(event.redacts)
+        await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

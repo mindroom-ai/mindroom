@@ -16,7 +16,6 @@ def main() -> None:
     """Run the packaged executable with fresh, unpaired local state."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("helper_app", type=Path)
-    parser.add_argument("architecture", choices=("arm64", "x86_64"))
     args = parser.parse_args()
     executable = args.helper_app / "Contents/MacOS/MindRoom Desktop Helper"
     request_id = str(uuid4())
@@ -25,8 +24,6 @@ def main() -> None:
         state = Path(directory)
         result = subprocess.run(
             [
-                "/usr/bin/arch",
-                f"-{args.architecture}",
                 str(executable),
                 "--config",
                 str(state / "config.yaml"),
@@ -40,7 +37,7 @@ def main() -> None:
             check=False,
         )
     if result.returncode:
-        message = f"{args.architecture} helper exited with {result.returncode}:\n{result.stderr}"
+        message = f"Helper exited with {result.returncode}:\n{result.stderr}"
         raise SystemExit(message)
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     assert messages, result.stdout
@@ -52,7 +49,7 @@ def main() -> None:
     assert response["result"]["status"]["bridge"]["state"] == "stopped", response
     for permission in ("accessibility", "screen_recording"):
         assert response["result"]["status"]["permissions"][permission]["state"] in {"granted", "missing"}, response
-    print(f"Verified {args.architecture} helper startup, status, and clean EOF shutdown.")
+    print("Verified helper startup, status, and clean EOF shutdown.")
 
 
 if __name__ == "__main__":
