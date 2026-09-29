@@ -265,11 +265,13 @@ macOS screenshots require macOS 14 or newer and Screen Recording permission.
 When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
-Local `mindroom desktop` commands, including `mindroom desktop run`, currently need macOS or Linux because the saved Desktop setup and Matrix session use POSIX file locks.
+Windows supports the local `mindroom desktop` commands for screenshot-only observation through the explicit `primary-screen` app ID.
+Coordinate input during a control lease is not a supported Windows target.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.
 They require macOS or Linux.
+On Windows, `mindroom desktop run` refuses to start while either is saved and names `mindroom desktop access --clear-folders --no-shell` to turn them off.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
 Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
 
@@ -480,7 +482,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 Add only the applications needed for the current task.
 Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
 `primary-screen` has no semantic elements.
-On Linux, `primary-screen` is currently the only usable state target.
+On Linux and Windows, `primary-screen` is currently the only usable state target.
 
 ### Read-Only Folders and Shell Commands from the Terminal
 
