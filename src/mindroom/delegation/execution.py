@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -996,15 +997,16 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         else:
             output_request = prepared_output
     if isinstance(authorization, str):
-        if retained is not None and background_job is not None:
-            state.children = [item for item in state.children if item.delegation_id != retained.delegation_id]
-        elif retained is not None:
-            await interrupt_child(
-                retained,
-                config=config,
-                runtime_paths=runtime_paths,
-                reason=authorization,
-            )
+        if retained is not None:
+            if background_job is not None:
+                state.children = [item for item in state.children if item.delegation_id != retained.delegation_id]
+            else:
+                await interrupt_child(
+                    retained,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    reason=authorization,
+                )
             if pending_id == retained.delegation_id and on_event is not None:
                 _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=authorization)
         resolve_result(authorization)
@@ -1077,8 +1079,9 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             parent_requirement_id=requirement.id,
         )
         state.children.append(child)
-    # The liveness claim spans the child's run and its settlement, so recovery never takes a child mid-failure.
-    async with subagent_liveness(child, runtime_paths):
+    # An inline child's liveness claim spans its run and settlement, so recovery never takes it mid-failure.
+    # A managed job claims liveness itself while it runs the child; holding it here would block cancel cleanup.
+    async with subagent_liveness(child, runtime_paths) if background is None else nullcontext():
         if child.result is None or background is not None:
             # Scope violations must propagate; they are not ordinary child failures.
             _validate_child_scope(child, target, caller_identity=caller_identity, config=config, depth=delegation_depth)
@@ -1172,9 +1175,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             claim=claim,
                         )
                     except JobAccessError as error:
-                        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
                         await background.release_wait(child.delegation_id, claim)
+                        if background_job is None:
+                            # No job owns the child yet, so it settles as an ordinary child failure.
+                            raise
+                        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
                         reason = resolve_result(str(error))
+                        if child_decisions is not None and on_event is not None:
+                            _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
                         state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=reason)
                         await persist(state)
@@ -1206,12 +1214,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 state.children.append(replace(child, parent_requirement_id=requirement.id))
                             _pending_child(state, child, child_outcome, job_generation=background_job.generation)
                             await persist(state)
-                            if waited.claim is not None:
-                                await background.acknowledge_wait(
-                                    child.delegation_id,
-                                    waited.claim,
-                                    source_event_id=source_event_id,
-                                )
+                            await background.acknowledge_wait(
+                                child.delegation_id,
+                                waited.claim,
+                                source_event_id=source_event_id,
+                            )
                             return True
                         result = (
                             await delegation_result(background, background_job) if waited.claim is not None else None

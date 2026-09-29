@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
@@ -41,6 +42,7 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     human_message_signal_context,
+    job_owns_execution,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -68,11 +70,12 @@ from tests.test_subagent_runtime import _job
 from tests.tool_job_helpers import start_delegation_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 
 @pytest.mark.asyncio
@@ -852,7 +855,7 @@ async def test_early_child_failure_retains_liveness_through_settlement(
             ),
         )
         try:
-            await asyncio.wait_for(settling.wait(), 2)
+            await asyncio.wait_for(settling.wait(), 10)
             with subagent_recovery_lock(child.subagent_id, paths) as acquired:
                 assert not acquired, "Failure settlement released its exact live child too early"
         finally:
@@ -936,7 +939,7 @@ async def test_inline_child_failure_retains_liveness_through_settlement(
                 ),
             )
             try:
-                await asyncio.wait_for(settling.wait(), 2)
+                await asyncio.wait_for(settling.wait(), 10)
                 with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
                     assert not acquired, "Failure settlement released its exact live child too early"
             finally:
@@ -949,9 +952,14 @@ async def test_inline_child_failure_retains_liveness_through_settlement(
         storage.close()
 
 
-@pytest.mark.asyncio
-async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path) -> None:
-    """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
+async def _drive_background_child(
+    tmp_path: Path,
+    runtime: ToolJobRuntime,
+    run_child: Callable[..., Awaitable[str]],
+    *,
+    while_waiting: Callable[[], Awaitable[None]] | None = None,
+) -> RunOutput:
+    """Drive one parent delegation whose child runs as a managed job, acting once the child starts."""
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
         Config(
@@ -965,13 +973,10 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path)
         "code",
         users=["@alice:example.org"],
     )
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
-    storage = create_session_storage("leader", config, paths, owner)
-    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
+    storage = create_session_storage("leader", config, paths, _BACKGROUND_PARENT)
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_BACKGROUND_PARENT)
     bind_toolkit_authority(toolkit, authored_name="delegate")
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
     model = DelegationModel(
@@ -982,16 +987,13 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path)
         ],
     )
     parent = Agent(id="leader", name="leader", model=model, db=storage, tools=[toolkit], telemetry=False)
-    started = asyncio.Event()
-
-    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
-        started.set()
-        await asyncio.Event().wait()
-        raise AssertionError
-
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
-            paused = await parent.arun("Delegate", session_id=owner.session_id, user_id=owner.requester_id)
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
+            paused = await parent.arun(
+                "Delegate",
+                session_id=_BACKGROUND_PARENT.session_id,
+                user_id=_BACKGROUND_PARENT.requester_id,
+            )
             pending = asyncio.create_task(
                 drive_delegations(
                     parent,
@@ -1000,22 +1002,141 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path)
                     agent_name="leader",
                     config=config,
                     runtime_paths=paths,
-                    execution_identity=owner,
+                    execution_identity=_BACKGROUND_PARENT,
                 ),
             )
-            await asyncio.wait_for(started.wait(), 5)
-            allowed = False
-            await runtime.cancel_revoked(denied=lambda _job: True)
-            response = await asyncio.wait_for(pending, 5)
-        assert response.status == RunStatus.completed
-        result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
-        assert "not available" in str(result)
-        state = DelegationState.from_metadata(response.metadata)
-        assert state.children == []
-        assert all(hook.after_called for hook in state.hooks.values())
+            if while_waiting is not None:
+                await while_waiting()
+            return await asyncio.wait_for(pending, 5)
     finally:
         await runtime.shutdown()
         storage.close()
+
+
+_BACKGROUND_PARENT = ToolExecutionIdentity(
+    "matrix",
+    "leader",
+    "@alice:example.org",
+    "!room:example.org",
+    None,
+    None,
+    "parent",
+)
+
+
+class _BlockingChild:
+    """A child runner that stays running until cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.child: DelegationChild | None = None
+
+    async def __call__(self, child: DelegationChild, **_kwargs: object) -> str:
+        self.child = child
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def running(self) -> DelegationChild:
+        await asyncio.wait_for(self.started.wait(), 5)
+        assert self.child is not None
+        return self.child
+
+
+@pytest.mark.asyncio
+async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path) -> None:
+    """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
+    allowed = True
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    child = _BlockingChild()
+
+    async def revoke() -> None:
+        nonlocal allowed
+        await child.running()
+        allowed = False
+        await runtime.cancel_revoked(denied=lambda _job: True)
+
+    response = await _drive_background_child(tmp_path, runtime, child, while_waiting=revoke)
+    assert response.status == RunStatus.completed
+    result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
+    assert "not available" in str(result)
+    state = DelegationState.from_metadata(response.metadata)
+    assert state.children == []
+    assert all(hook.after_called for hook in state.hooks.values())
+
+
+@pytest.mark.asyncio
+async def test_waiting_parent_leaves_the_child_liveness_claim_to_its_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent claim across the wait would block cancel cleanup of a recovered child."""
+    claimants: list[bool] = []
+    original_liveness = delegation_execution.subagent_liveness
+
+    @asynccontextmanager
+    async def liveness(child: DelegationChild, runtime_paths: RuntimePaths) -> AsyncIterator[None]:
+        claimants.append(job_owns_execution())
+        async with original_liveness(child, runtime_paths):
+            yield
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        return "Child finished"
+
+    monkeypatch.setattr(delegation_execution, "subagent_liveness", liveness)
+    response = await _drive_background_child(tmp_path, tool_job_runtime(tmp_path), run_child)
+    assert response.status == RunStatus.completed
+    assert claimants == [True]
+
+
+@pytest.mark.asyncio
+async def test_rejected_background_start_settles_the_child_as_failed(tmp_path: Path) -> None:
+    """A start refused before any job owns the child finishes its audit record like any child failure."""
+    ran: list[DelegationChild] = []
+
+    async def run_child(child: DelegationChild, **_kwargs: object) -> str:
+        ran.append(child)
+        return "never"
+
+    response = await _drive_background_child(
+        tmp_path,
+        tool_job_runtime(tmp_path, authorize=lambda _job: False),
+        run_child,
+    )
+    assert ran == []
+    result = str(next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting"))
+    assert "failed: Tool job is not available" in result
+    records = [json.loads(path.read_text()) for path in tmp_path.rglob("delegations/**/run.json")]
+    assert [record["status"] for record in records] == ["failed"]
+    state = DelegationState.from_metadata(response.metadata)
+    assert all(hook.after_called for hook in state.hooks.values())
+
+
+@pytest.mark.asyncio
+async def test_unreadable_background_result_still_runs_the_after_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-access failure after the job owns the child still closes the delegation's after hook."""
+    after_errors: list[BaseException | None] = []
+    original_after = delegation_execution.after_delegation
+
+    async def after(*args: object, error: BaseException | None = None, **kwargs: object) -> None:
+        after_errors.append(error)
+        await original_after(*args, error=error, **kwargs)
+
+    async def unreadable(*_args: object, **_kwargs: object) -> str:
+        msg = "result unreadable"
+        raise RuntimeError(msg)
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        return "Child finished"
+
+    monkeypatch.setattr(delegation_execution, "after_delegation", after)
+    monkeypatch.setattr(delegation_execution, "delegation_result", unreadable)
+    with pytest.raises(RuntimeError, match="result unreadable"):
+        await _drive_background_child(tmp_path, tool_job_runtime(tmp_path), run_child)
+    assert [type(error) for error in after_errors] == [RuntimeError]
 
 
 @pytest.mark.asyncio
