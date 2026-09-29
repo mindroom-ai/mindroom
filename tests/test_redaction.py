@@ -1129,7 +1129,8 @@ def test_review_copy_treats_keys_like_text() -> None:
     redacted, placeholders = _review_copy({"⟦secret-1⟧": 1, token: 2})
 
     # The escaped key still names a secret, so its value is hidden like any secret-named field.
-    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧": 2}
+    # The hidden token key would read like the literal key's original text, so it is suffixed by position.
+    assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧\ufffd1": 2}
     assert placeholders == {token: "⟦secret-1⟧"}
 
 
@@ -1164,8 +1165,28 @@ def test_review_copy_keeps_keys_encodable_and_distinct() -> None:
     first, second = "a\ud800", "a\udc00"
     redacted, _ = _review_copy({first: 1, second: 2})
 
-    assert redacted == {"a\ufffd": 1, "a\ufffd\ufffd": 2}
+    assert redacted == {"a\ufffd": 1, "a\ufffd\ufffd1": 2}
     json.dumps(redacted, ensure_ascii=False).encode("utf-8")
+
+
+def test_review_copy_never_renames_a_key_review_left_alone() -> None:
+    """A literal key keeps its text even when a changed key would otherwise take it."""
+    changed, literal = "k\ud800", "k\ufffd"
+
+    assert _review_copy({changed: 1, literal: 2})[0] == {"k\ufffd\ufffd0": 1, "k\ufffd": 2}
+    assert _review_copy({literal: 2, changed: 1})[0] == {"k\ufffd": 2, "k\ufffd\ufffd1": 1}
+
+
+def test_review_copy_stays_linear_when_many_keys_collide() -> None:
+    """Thousands of keys that collide after review get short positional suffixes, not ever-longer ones."""
+    colliding = {"k" + chr(0xD800 + index % 2_048) + chr(0xD800 + index // 2_048): index for index in range(8_000)}
+    started = time.perf_counter()
+
+    redacted, _ = _review_copy(colliding)
+
+    assert time.perf_counter() - started < 1.0
+    assert len(redacted) == len(colliding)
+    assert max(len(key) for key in redacted) <= len("k\ufffd\ufffd\ufffd7999")
 
 
 def test_review_copy_never_cuts_a_placeholder_in_half() -> None:

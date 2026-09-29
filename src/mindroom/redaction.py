@@ -624,6 +624,28 @@ def _is_structured_mapping_key(value: object) -> bool:
     )
 
 
+def _review_mapping_key(
+    key_text: str,
+    index: int,
+    *,
+    original_key_texts: frozenset[str],
+    taken: Mapping[str, object],
+    placeholders: dict[str, str],
+) -> str:
+    """Return a reviewer-facing key that gets the same treatment as text and never takes another key's text.
+
+    A key that review changed and that now collides is suffixed by its position, which stays linear
+    however many keys collide, and a key review left alone always keeps its own text.
+    """
+    review_key = _redact_review_tokens(key_text, max_length=None, placeholders=placeholders)
+    if review_key == key_text or (review_key not in original_key_texts and review_key not in taken):
+        return review_key
+    review_key = f"{review_key}\ufffd{index}"
+    while review_key in original_key_texts or review_key in taken:
+        review_key += "\ufffd"
+    return review_key
+
+
 def _redact_mapping(
     value: Mapping[object, object],
     *,
@@ -643,6 +665,7 @@ def _redact_mapping(
     items = list(value.items()) if max_collection_items is None else list(islice(value.items(), max_collection_items))
     key_texts = [_safe_str(key) for key, _ in items]
     reserved_keys: set[str] | None = None
+    original_key_texts = frozenset(key_texts) if token_placeholders is not None else frozenset()
     for index, (key, item) in enumerate(items):
         key_text = key_texts[index]
         classification = _classify_key(key)
@@ -665,10 +688,13 @@ def _redact_mapping(
                 label_index += 1
                 redacted_key = f"<redacted structured key {label_index}>"
         elif token_placeholders is not None:
-            # Keys get the same review treatment as text; keys that become equal stay distinct.
-            redacted_key = _redact_review_tokens(key_text, max_length=None, placeholders=token_placeholders)
-            while redacted_key in redacted:
-                redacted_key += "\ufffd"
+            redacted_key = _review_mapping_key(
+                key_text,
+                index,
+                original_key_texts=original_key_texts,
+                taken=redacted,
+                placeholders=token_placeholders,
+            )
         else:
             redacted_key = key_text
         redacted[redacted_key] = _redact_sensitive_data(
