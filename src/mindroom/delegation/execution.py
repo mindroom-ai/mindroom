@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import nullcontext
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -1079,9 +1079,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             parent_requirement_id=requirement.id,
         )
         state.children.append(child)
-    # An inline child's liveness claim spans its run and settlement, so recovery never takes it mid-failure.
-    # A managed job claims liveness itself while it runs the child; holding it here would block cancel cleanup.
-    async with subagent_liveness(child, runtime_paths) if background is None else nullcontext():
+    # The liveness claim spans the child's run or job admission and its settlement, so recovery never takes the
+    # child mid-failure. A managed wait releases it: the job claims liveness itself while it runs the child, and a
+    # parent claim held across the wait would block cancel cleanup.
+    async with AsyncExitStack() as liveness:
+        await liveness.enter_async_context(subagent_liveness(child, runtime_paths))
         if child.result is None or background is not None:
             # Scope violations must propagate; they are not ordinary child failures.
             _validate_child_scope(child, target, caller_identity=caller_identity, config=config, depth=delegation_depth)
@@ -1167,6 +1169,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     reason="Delegation cancelled.",
                                 ),
                             )
+                        await liveness.aclose()
                         waited = await background.wait(
                             child.delegation_id,
                             owner=caller_identity,

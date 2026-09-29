@@ -8,7 +8,7 @@ import threading
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1080,26 +1080,42 @@ async def test_waiting_parent_leaves_the_child_liveness_claim_to_its_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A parent claim across the wait would block cancel cleanup of a recovered child."""
-    claimants: list[bool] = []
+    parent_claims = 0
+    parent_idle = asyncio.Event()
+    parent_idle.set()
     original_liveness = delegation_execution.subagent_liveness
 
     @asynccontextmanager
     async def liveness(child: DelegationChild, runtime_paths: RuntimePaths) -> AsyncIterator[None]:
-        claimants.append(job_owns_execution())
+        nonlocal parent_claims
+        parent = not job_owns_execution()
         async with original_liveness(child, runtime_paths):
-            yield
+            if parent:
+                parent_claims += 1
+                parent_idle.clear()
+            try:
+                yield
+            finally:
+                if parent:
+                    parent_claims -= 1
+                    if not parent_claims:
+                        parent_idle.set()
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        # The child can finish only once the waiting parent no longer holds its claim.
+        await asyncio.wait_for(parent_idle.wait(), JOB_TEST_TIMEOUT)
         return "Child finished"
 
     monkeypatch.setattr(delegation_execution, "subagent_liveness", liveness)
     response = await _drive_background_child(tmp_path, tool_job_runtime(tmp_path), run_child)
     assert response.status == RunStatus.completed
-    assert claimants == [True]
 
 
 @pytest.mark.asyncio
-async def test_rejected_background_start_settles_the_child_as_failed(tmp_path: Path) -> None:
+async def test_rejected_background_start_settles_the_child_as_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A start refused before any job owns the child finishes its audit record like any child failure."""
     ran: list[DelegationChild] = []
 
@@ -1107,12 +1123,22 @@ async def test_rejected_background_start_settles_the_child_as_failed(tmp_path: P
         ran.append(child)
         return "never"
 
+    held_during_settlement: list[bool] = []
+    original_interrupt = delegation_execution.interrupt_child
+
+    async def interrupt(child: DelegationChild, **kwargs: Any) -> None:  # noqa: ANN401
+        with subagent_recovery_lock(child.subagent_id, _runtime_paths(tmp_path)) as acquired:
+            held_during_settlement.append(not acquired)
+        await original_interrupt(child, **kwargs)
+
+    monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
     response = await _drive_background_child(
         tmp_path,
         tool_job_runtime(tmp_path, authorize=lambda _job: False),
         run_child,
     )
     assert ran == []
+    assert held_during_settlement == [True], "Recovery could take the child mid-failure"
     result = str(next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting"))
     assert "failed: Tool job is not available" in result
     records = [json.loads(path.read_text()) for path in tmp_path.rglob("delegations/**/run.json")]
