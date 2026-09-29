@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.389</title>
+            <pubDate>Tue, 29 Sep 2026 16:45:36 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1706</sparkle:version>
+            <sparkle:shortVersionString>2026.9.389</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.389
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Count a Vertex Claude thinking turn that used tool search without rewriting its signed blocks (#2446)](https://github.com/mindroom-ai/mindroom/commit/21ee6a916) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.389/MindRoom.zip" length="61631652" type="application/octet-stream" sparkle:edSignature="PJWvUMdSTkUbJnw96tqToQ3X1g5E2i6dWcHz0cZmrCGAzdjt8eN/nUIzXgyZu5jqSOMbWVdX2fx2Z+5htemEBQ=="/>
+        </item>
+        <item>
             <title>2026.9.383</title>
             <pubDate>Tue, 29 Sep 2026 15:41:27 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
