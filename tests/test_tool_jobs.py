@@ -2121,7 +2121,7 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
                     await runtime.stop_jobs(receipt_order=1, matches=every_job)
             else:
                 # Revocation only logs; its next pass retries the failed job.
-                await runtime.cancel_revoked()
+                await runtime.cancel_revoked(denied=lambda _job: revoked)
         failing = revoked = False
         assert [entry["job_id"] for entry in logs if entry["log_level"] == "error"] == ["first"]
         settled = await runtime.wait("second", owner=_owner(), depth=0)

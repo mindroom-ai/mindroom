@@ -264,10 +264,7 @@ def restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     sys.modules.update(snapshot.plugin_modules)
 
 
-def tool_registry_origins() -> dict[str, list[str]]:
-    """Project stable registered callable provenance without importing or constructing tools."""
-    return {
-        name: [factory.__module__, factory.__qualname__]
-        for name, factory in TOOL_REGISTRY.items()
-        if inspect.isfunction(factory)
-    }
+def tool_registry_origin(name: str) -> list[str] | None:
+    """Return one registered factory's stable provenance without importing or constructing its tool."""
+    factory = TOOL_REGISTRY.get(name)
+    return [factory.__module__, factory.__qualname__] if inspect.isfunction(factory) else None

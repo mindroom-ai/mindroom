@@ -220,7 +220,7 @@ def test_mcp_server_and_authored_include_conventions_remain_distinct(
     entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=overrides)
     registry, _ = resolved_mcp_tool_state(config)
     monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
-    construction_origin = authorization_module.tool_registry_origins()["mcp_demo"]
+    construction_origin = authorization_module.tool_registry_origin("mcp_demo")
 
     assert (
         _configured_tool_allowed(
@@ -309,7 +309,7 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
     entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=authored_filters)
     registry, _ = resolved_mcp_tool_state(config)
     monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
-    construction_origin = authorization_module.tool_registry_origins()["mcp_demo"]
+    construction_origin = authorization_module.tool_registry_origin("mcp_demo")
 
     assert "demo_read" not in toolkit.async_functions
     assert not _configured_tool_allowed(
@@ -354,7 +354,7 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
     entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=overrides)
     registry, _ = resolved_mcp_tool_state(config)
     monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
-    construction_origin = authorization_module.tool_registry_origins()["mcp_demo"]
+    construction_origin = authorization_module.tool_registry_origin("mcp_demo")
 
     assert "demo_connection_status" in toolkit.async_functions
     assert _configured_tool_allowed(

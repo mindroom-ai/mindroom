@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from agno.tools.function import Function
+from agno.tools.function import Function, FunctionCall
 
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -51,13 +51,13 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
     second_instance = pin_background_tool_jobs(config, second)
     register_background_runtime(second, second_runtime)
     try:
-        with tool_runtime_context(context), authorized_tool_call(owner, function):
+        with tool_runtime_context(context), authorized_tool_call(owner, FunctionCall(function=function)):
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
             release_background_tool_jobs(second, second_instance)
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
-        with tool_runtime_context(replace(context, runtime_paths=second)), authorized_tool_call(owner, function):
+        with tool_runtime_context(replace(context, runtime_paths=second)), authorized_tool_call(owner, FunctionCall(function=function)):
             check_current_execution_authority()
     finally:
         await first_runtime.shutdown()

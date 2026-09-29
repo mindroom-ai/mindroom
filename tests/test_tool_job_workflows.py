@@ -12,7 +12,7 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.run import RunContext
 from agno.tools import Toolkit
-from agno.tools.function import FunctionCall
+from agno.tools.function import Function, FunctionCall
 
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
@@ -22,7 +22,7 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
-from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
@@ -30,7 +30,7 @@ from tests.test_dynamic_workflows import _make_context, _workflow_spec
 from tests.tool_job_helpers import assembled_function, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
 
@@ -91,6 +91,70 @@ async def test_workflow_participant_runs_multiple_sync_tools(
         assert result[0] is True
         outputs = [message.content for message in child_model.seen_messages if message.role == "tool"]
         assert [json.loads(output)["result"] for output in outputs] == [3, 12]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_nested_workflow_call_is_checked_against_its_own_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant tool whose grant is revoked is denied inside an accepted job, even though the job's call is allowed."""
+    context = _make_context(tmp_path)
+    context.config.background_tool_jobs.enabled = True
+    context.config.agents["general"].tools = [
+        ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
+    ]
+    checked: list[tuple[str, dict[str, object]]] = []
+
+    def authorize_execution(_owner: object, function: Function, arguments: Mapping[str, object]) -> None:
+        checked.append((function.name, dict(arguments)))
+        if function.name == "multiply":
+            msg = "Tool execution is no longer authorized for this caller."
+            raise JobAccessError(msg)
+
+    runtime = tool_job_runtime(context.runtime_paths.storage_root, authorize_execution=authorize_execution)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    child_model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("add", "a", a=1, b=2)]),
+            ModelResponse(tool_calls=[_call("multiply", "b", a=3, b=4)]),
+            ModelResponse(content="workflow done"),
+        ],
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.dynamic_workflow.model_loading.get_model_instance",
+        lambda *_args, **_kwargs: child_model,
+    )
+    outer = DelegationModel(id="test")
+    install_tool_job_execution(outer)
+    toolkit = DynamicWorkflowTools()
+    bind_toolkit_authority(toolkit, authored_name="dynamic_workflow")
+    function = toolkit.get_async_functions()["run_workflow"]
+    function._agent = Agent(id="general", telemetry=False)
+    function._run_context = RunContext(run_id="root", session_id=context.session_id, session_state={})
+    spec = _workflow_spec(
+        participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["calculator"]}],
+        permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
+    )
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                await outer.arun_function_call(
+                    FunctionCall(
+                        function=function,
+                        call_id="outer",
+                        arguments={"workflow_id": "competitor-research-report", "input": {"topic": "test"}},
+                    ),
+                )
+        outputs = [message.content for message in child_model.seen_messages if message.role == "tool"]
+        assert json.loads(outputs[0])["result"] == 3
+        assert "no longer authorized" in str(outputs[1])
+        assert ("multiply", {"a": 3, "b": 4}) in checked
     finally:
         await runtime.shutdown()
 

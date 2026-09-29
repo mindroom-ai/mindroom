@@ -13,7 +13,7 @@ import nio
 import pytest
 from agno.agent import Agent
 from agno.tools import Toolkit
-from agno.tools.function import Function
+from agno.tools.function import Function, FunctionCall
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 import mindroom.tool_system.metadata as metadata_module
@@ -53,7 +53,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origins
+from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origin
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -200,6 +200,55 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
     assert not coordinator._authorized(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost")))
     config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
     assert not coordinator._authorized(job)
+
+
+class _ResolvingMembership(AgentReplyMembershipIndex):
+    """Room membership that is still resolving until a test proves it either way."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = "pending"
+
+    def is_current_room_member(self, *_args: object) -> bool:
+        return self.state == "member"
+
+    def grants_pending(self, *_args: object, **_kwargs: object) -> bool:
+        return self.state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) -> None:
+    """Unresolved membership hides a job from access but cancels it only after a proven denial."""
+    config = _config(tmp_path)
+    for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
+        entity.access = ResponderAccessConfig(current_room_members=True)
+    membership = _ResolvingMembership()
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=test_runtime_paths(tmp_path),
+        config_provider=lambda: config,
+        bot_provider=lambda _: None,
+        agent_reply_memberships=membership,
+    )
+    runtime = tool_job_runtime(tmp_path, authorize=coordinator._authorized)
+    fixture = _job()
+    release = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome("completed", "Saved answer")
+
+    try:
+        membership.state = "member"
+        await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
+        for state, running in (("pending", True), ("member", True), ("pending", True), ("stranger", False)):
+            membership.state = state
+            assert coordinator._authorized(fixture) is (state == "member")
+            await runtime.cancel_revoked(denied=coordinator._denied)
+            status = runtime._entries[fixture.job_id].job.status
+            assert (status == "running") is running, state
+    finally:
+        release.set()
+        await runtime.shutdown()
 
 
 def _delivery_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
@@ -506,7 +555,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
                 **authority_snapshot(config, "lead"),
                 "construction": {
                     "name": "calculator",
-                    "factory_origin": tool_registry_origins()["calculator"],
+                    "factory_origin": tool_registry_origin("calculator"),
                     "config_signature": tool_config_signature(None),
                 },
             },
@@ -665,7 +714,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
             tool_runtime_context(
                 _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
             ),
-            authorized_tool_call(owner, function, arguments={"tool_name": "read"}),
+            authorized_tool_call(owner, FunctionCall(function=function, arguments={"tool_name": "read"})),
         ):
             check_current_execution_authority()
             config.mcp_servers["demo"] = config.mcp_servers["demo"].model_copy(update={"exclude_tools": ["write"]})

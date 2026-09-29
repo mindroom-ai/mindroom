@@ -7,9 +7,9 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
@@ -133,14 +133,22 @@ class ToolJobRuntimeCoordinator:
         )
 
     def _authorized(self, job: BackgroundJob) -> bool:
+        """Grant access only on a proven grant; unresolved membership fails closed."""
+        return self._grant(job) == "allowed"
+
+    def _denied(self, job: BackgroundJob) -> bool:
+        """Revoke execution only on a proven denial, never while membership is still resolving."""
+        return self._grant(job) == "denied"
+
+    def _grant(self, job: BackgroundJob) -> Literal["allowed", "denied", "pending"]:  # noqa: PLR0911
         """Recheck current delegation, team membership, and requester reply access."""
         config = self.config_provider()
         owner = job.owner
         if config is None or owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
-            return False
+            return "denied"
         caller = config.agents.get(owner.agent_name)
         if caller is None:
-            return False
+            return "denied"
         entities = {owner.agent_name, owner.recipient}
         if job.kind == "delegation":
             child = delegation_child(job)
@@ -150,7 +158,7 @@ class ToolJobRuntimeCoordinator:
                 or child_name not in config.agents
                 or child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings)
             ):
-                return False
+                return "denied"
             entities.add(child_name)
         elif not locally_allowed(
             config,
@@ -161,20 +169,25 @@ class ToolJobRuntimeCoordinator:
             depth=job.depth,
             authority=job.adapter.get("authority", {}),
         ):
-            return False
+            return "denied"
         if not _transport_allows_actor(config, owner.recipient, owner.agent_name):
-            return False
-        return all(
-            is_sender_allowed_for_responder(
-                owner.requester_id,
-                entity_name,
-                owner.room_id,
-                config,
-                self.runtime_paths,
-                self.agent_reply_memberships,
-            )
-            for entity_name in entities
-        )
+            return "denied"
+        pending = False
+        for entity_name in entities:
+            try:
+                if not is_sender_allowed_for_responder(
+                    owner.requester_id,
+                    entity_name,
+                    owner.room_id,
+                    config,
+                    self.runtime_paths,
+                    self.agent_reply_memberships,
+                    require_resolved_membership=True,
+                ):
+                    return "denied"
+            except ReplyMembershipPendingError:
+                pending = True
+        return "pending" if pending else "allowed"
 
     def _authorize_execution(
         self,
@@ -308,7 +321,7 @@ class ToolJobRuntimeCoordinator:
 
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
-        await self.runtime.cancel_revoked()
+        await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
         pending = await self.runtime.pending_outcomes()
         self._admitted.intersection_update((job.job_id, job.generation) for job in pending)

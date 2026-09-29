@@ -41,7 +41,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import load_plugins
-    from mindroom.tool_system.registry_state import tool_registry_origins
+    from mindroom.tool_system.registry_state import tool_registry_origin
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -79,7 +79,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         function._agent = bind_actor_authority(Agent(id="lead"), authority_snapshot(config, "lead"))
         construction = get_toolkit_construction(toolkit)
         identity = {
-            "factory": tool_registry_origins()["stable_plugin"],
+            "factory": tool_registry_origin("stable_plugin"),
             "construction": list(construction.factory_origin),
         }
         owner = ToolExecutionIdentity(

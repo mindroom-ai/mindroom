@@ -800,14 +800,14 @@ class ToolJobRuntime:
             drain = await self._request_cancel(entry)
         return await wait_for_future_until_complete(drain)
 
-    async def cancel_revoked(self) -> None:
-        """Withdraw execution when current grants disappear, retaining owned cleanup; a failed job retries next pass."""
+    async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
+        """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""
         async with self._lock:
             self._ensure_open(accepting=True)
             revoked = [
                 entry
                 for entry in self._entries.values()
-                if entry.job.status not in TERMINAL_STATUSES and not self._authorize(entry.job)
+                if entry.job.status not in TERMINAL_STATUSES and denied(entry.job)
             ]
             await self._isolated(revoked, self._request_cancel, "Tool job revocation failed")
 

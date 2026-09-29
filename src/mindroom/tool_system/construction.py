@@ -17,9 +17,11 @@ if TYPE_CHECKING:
 
 def tool_config_signature(overrides: Mapping[str, object] | None) -> str:
     """Digest constructor options without retaining secrets; function filters use current grants."""
+    # YAML overrides may hold values JSON cannot encode natively, such as an unquoted date.
     serialized = json.dumps(
         {key: value for key, value in (overrides or {}).items() if key not in {"include_tools", "exclude_tools"}},
         sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(serialized.encode()).hexdigest()
 

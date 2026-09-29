@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import date
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +23,7 @@ from mindroom.tool_jobs.authorization import (
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
+from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
@@ -156,3 +158,10 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
     finally:
         release.set()
         await coordinator.stop()
+
+
+def test_constructor_signature_accepts_every_yaml_override_value() -> None:
+    """An unquoted YAML date must not crash toolkit construction, and still distinguishes settings."""
+    first = tool_config_signature({"start": date(2026, 9, 28), "include_tools": ["ignored"]})
+    assert first == tool_config_signature({"start": date(2026, 9, 28)})
+    assert first != tool_config_signature({"start": date(2026, 9, 29)})

@@ -12,7 +12,7 @@ from mindroom.tool_jobs.agno_compat_functions import function_actor
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origins
+from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origin
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -122,7 +122,7 @@ def _configured_tool_allowed(
     origin: dict[str, Any],
     construction: dict[str, Any],
 ) -> bool:
-    if tool_registry_origins().get(entry.name) != construction.get("factory_origin"):
+    if tool_registry_origin(entry.name) != construction.get("factory_origin"):
         return False
     metadata = TOOL_METADATA.get(entry.name)
     if metadata is not None and metadata.requires_room_context and owner.room_id is None:

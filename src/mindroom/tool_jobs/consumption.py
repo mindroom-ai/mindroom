@@ -16,6 +16,7 @@ from mindroom.agent_storage import run_session_storage_operation
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
+from mindroom.tool_jobs.execution_authority import current_tool_call
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.results import ToolResultPayload
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
 
-_CALL: ContextVar[FunctionCall | None] = ContextVar("tool_job_consumer_call", default=None)
 _OWNER: ContextVar[ConsumptionOwner | None] = ContextVar("tool_job_consumption", default=None)
 logger = get_logger(__name__)
 
@@ -109,16 +109,6 @@ def consumption_context(owner: ConsumptionOwner) -> Iterator[None]:
         _OWNER.reset(token)
 
 
-@contextmanager
-def consuming_function_call(call: FunctionCall) -> Iterator[None]:
-    """Expose the management tool's exact caller without adding schema arguments."""
-    token = _CALL.set(call)
-    try:
-        yield
-    finally:
-        _CALL.reset(token)
-
-
 def set_consumption_storage(storage_factory: Callable[[], BaseDb] | None) -> None:
     """Bind registered canonical storage after the response opens its scope."""
     owner = _OWNER.get()
@@ -185,7 +175,7 @@ async def retain_claim(
     function_call: FunctionCall | None = None,
 ) -> None:
     """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
-    call = function_call or _CALL.get()
+    call = function_call or current_tool_call()
     owner = _OWNER.get()
     if call is None or owner is None:
         await runtime.release_wait(job_id, claim)
@@ -205,7 +195,7 @@ async def consume_tool_job(
     function_call: FunctionCall | None = None,
 ) -> tuple[Any, ToolResultPayload]:
     """Read a claimed outcome's value and payload, retaining the claim until the parent run saves this tool call."""
-    call = function_call or _CALL.get()
+    call = function_call or current_tool_call()
     try:
         payload = await read_result_payload(runtime, job)
         value = payload.value

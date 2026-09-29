@@ -38,14 +38,13 @@ from mindroom.tool_jobs.agno_compat_functions import (
     uses_sdk_async_dispatch,
 )
 from mindroom.tool_jobs.authorization import function_authority
-from mindroom.tool_jobs.consumption import (
-    consume_tool_job,
-    consuming_function_call,
-    restore_control,
-    session_state_delta,
-)
+from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
-from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
+from mindroom.tool_jobs.execution_authority import (
+    authorized_tool_call,
+    check_current_execution_authority,
+    nested_tool_call,
+)
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
@@ -284,13 +283,14 @@ def _control_payload(error: AgentRunException) -> dict[str, Any]:
 
 
 async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> ToolCallResult:
-    """Drain one SDK dispatch without sharing its synchronous leaf with nested calls."""
+    """Drain one SDK dispatch without sharing its synchronous leaf, checking it as its own call."""
     if not job_owns_execution():
         return await original(call)
     tracker = SyncToolCompletionTracker()
     asynchronous = uses_sdk_async_dispatch(call.function)
     try:
-        with track_sync_tool_completion(tracker if asynchronous else None):
+        # A model embedded without MindRoom's executor still reaches this dispatch; its call keeps its own grant.
+        with track_sync_tool_completion(tracker if asynchronous else None), nested_tool_call(call):
             invocation = original(call)
             if asynchronous:
                 return await invocation
@@ -313,7 +313,7 @@ async def _run_operation(
     try:
         with (
             tool_execution_identity(owner),
-            authorized_tool_call(owner, owned_call.function, arguments=owned_call.arguments),
+            authorized_tool_call(owner, owned_call),
         ):
             job_checkpoint()
             check_current_execution_authority()
@@ -430,7 +430,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         if actor is not None and actor.id:
             owner = replace(owner, agent_name=actor.id)
         job_checkpoint()
-        with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
+        with authorized_tool_call(owner, call):
             check_current_execution_authority()
             if mode != "managed" or call.function.external_execution:
                 return await _execute_inline(original, call, mode=mode)
