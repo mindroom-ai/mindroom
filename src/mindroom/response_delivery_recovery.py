@@ -134,7 +134,7 @@ class ResponseDeliveryRecovery:
             strict=True,
         ):
             if deleted:
-                await self.turn_store().mark_source_redacted(source_id)
+                await self.turn_store().mark_source_redacted(source_id, room_id=initial.room_id)
         event_id = initial.acknowledged_event_id
         if event_id is None and initial.attempted:
             event_id = await worker._resolve_delivered_event(initial)

@@ -6053,7 +6053,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         await store.record_responded_turn(
             TurnRecord.create(source_event_ids=("$root",), response_event_id="$root-reply"),
         )
-        await store.mark_source_redacted("$edit")
+        await store.mark_source_redacted("$edit", room_id="!room:example")
         # Runtime exact-event invalidation establishes the expectation independently of the harness.
         assert store.is_revision_redacted("$edit")
     finally:

@@ -273,7 +273,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_live_redaction_tombstones_the_source_it_names(self, bot: AgentBot) -> None:
-        """The redaction callback owes exactly one thing: the durable tombstone."""
+        """The redaction callback owes exactly one thing: the durable tombstone, scoped to its room."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.redacts = "$source:localhost"
@@ -284,7 +284,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         ) as mark_source_redacted:
             await bot._on_redaction(room, redaction_event)
 
-        mark_source_redacted.assert_called_once_with("$source:localhost")
+        mark_source_redacted.assert_called_once_with("$source:localhost", room_id="!test:localhost")
 
     @pytest.mark.asyncio
     async def test_wait_for_background_tasks_owner_scope_isolated(self, bot: AgentBot) -> None:

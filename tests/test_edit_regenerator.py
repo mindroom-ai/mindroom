@@ -2181,7 +2181,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
     )
     await store.warm()
     await store.record_responded_turn(record)
-    await store.mark_source_redacted("$deleted-edit")
+    await store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     original = nio.RoomMessageText.from_dict(
         {
             "type": "m.room.message",
@@ -2257,7 +2257,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
         if event.event_id == edit.event_id:
             await _handle_edit(harness, edit, info)
         elif event.room_id == ROOM_ID:
-            await store.mark_source_redacted(redaction.redacts)
+            await store.mark_source_redacted(redaction.redacts, room_id=ROOM_ID)
         return True
 
     worker = PendingEventWorker(store=principal, handle=handle)
@@ -2341,7 +2341,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if deletion_phase == "preparation":
@@ -2350,7 +2350,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
     async def generate(request: ResponseRequest) -> str | None:
         attempts.append(request)
         if deletion_phase == "locked" and len(attempts) == 1:
-            await real_store.mark_source_redacted("$deleted-edit")
+            await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None
@@ -2366,7 +2366,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=real_store, generate_response=generate)
     if deletion_phase == "before":
-        await real_store.mark_source_redacted("$deleted-edit")
+        await real_store.mark_source_redacted("$deleted-edit", room_id=ROOM_ID)
     event, info = _edit_event(original_event_id=second, new_body="LIVE_SIBLING_EDIT")
     await _handle_edit(harness, event, info)
     assert len(attempts) == (1 if deletion_phase == "before" else 2)
@@ -2440,7 +2440,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal changed_during_preparation
         if not changed_during_preparation:
             changed_during_preparation = True
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         return await original_prepare(**kwargs)
 
     if late_preparation:
@@ -2450,7 +2450,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         nonlocal attempts
         attempts += 1
         if attempts == 1 and not late_preparation:
-            await store.mark_source_redacted("$driving-edit")
+            await store.mark_source_redacted("$driving-edit", room_id=ROOM_ID)
         assert request.prepare_source_turn is not None
         if await request.prepare_source_turn(request.thread_history):
             return None
