@@ -48,8 +48,8 @@ def selected_root(tmp_path: Path) -> Path:
 
 def _run_config(
     *,
-    apps: tuple[str, ...] = ("com.example.Editor",),
-    roots: tuple[Path, ...] = (),
+    roots: tuple[Path, ...],
+    apps: tuple[str, ...] = (),
     shell_enabled: bool = False,
 ) -> NativeDesktopConfig:
     """Return the resolved configuration a terminal run passes to the bridge."""
@@ -679,7 +679,7 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
 ) -> None:
     """CLI attaches durable admission before the transport runs and closes both owners."""
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
-    config = _run_config(apps=(), roots=(selected_root,))
+    config = _run_config(roots=(selected_root,))
     lifecycle = []
     bridges: list[DesktopBridge] = []
     admitted = asyncio.Event()
@@ -852,7 +852,7 @@ async def test_cli_drains_native_work_before_releasing_owner(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            config=_run_config(apps=(), roots=(selected_root,)),
+            config=_run_config(roots=(selected_root,)),
             allow_control=False,
             lease_minutes=15,
             deps=desktop_cli._BridgeRunDeps(open_client=AsyncMock(return_value=owner), prepare_client=AsyncMock()),
@@ -944,7 +944,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
         desktop_cli._run_bridge(
             runtime_paths=SimpleNamespace(storage_root=tmp_path),
             session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-            config=_run_config(apps=(), roots=(selected_root,), shell_enabled=True),
+            config=_run_config(roots=(selected_root,), shell_enabled=True),
             allow_control=False,
             lease_minutes=15,
             shell_auto_approve_minutes=5,
