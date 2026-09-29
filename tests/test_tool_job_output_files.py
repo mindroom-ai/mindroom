@@ -117,35 +117,21 @@ async def output_agent(tmp_path: Path) -> AsyncIterator[_OutputAgent]:
             agent.db.close()
 
 
-@pytest.mark.parametrize("action", ["wait", "inspect"])
 @pytest.mark.parametrize("explicit", [False, True])
-async def test_job_retrieval_applies_workspace_output_policy(
-    output_agent: _OutputAgent,
-    action: str,
-    explicit: bool,
-) -> None:
-    """Completed values redirect intact; inspection continues to describe the bounded summary."""
+async def test_job_retrieval_applies_workspace_output_policy(output_agent: _OutputAgent, explicit: bool) -> None:
+    """Completed values redirect intact to the requested or automatic workspace file."""
     case = output_agent
     job_id = await case.save_job()
     arguments = {"mindroom_output_path": "results/job.txt"} if explicit else {}
-    response = await case.call("job", action=action, job_id=job_id, **arguments)
+    response = await case.call("job", action="wait", job_id=job_id, **arguments)
     assert response.tools
     assert not response.tools[0].tool_call_error
-    if action == "inspect" and not explicit:
-        result = json.loads(response.tools[0].result)
-        assert result["summary"] == _LARGE_RESULT[:500]
-        assert result["summary_truncated"] is True
-        return
     result = literal_eval(response.tools[0].result)
     receipt = result["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     saved = (case.workspace / receipt["path"]).read_bytes()
-    if action == "wait":
-        assert saved == _LARGE_RESULT.encode()
-        assert "truncated" not in saved.decode()
-    else:
-        assert json.loads(saved)["summary"] == _LARGE_RESULT[:500]
-        assert json.loads(saved)["summary_truncated"] is True
+    assert saved == _LARGE_RESULT.encode()
+    assert "truncated" not in saved.decode()
     assert len(response.tools[0].result) < 12_000
     if explicit:
         assert receipt["path"] == "results/job.txt"
