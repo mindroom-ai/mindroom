@@ -2634,9 +2634,8 @@ class AgentBot:
         """Tombstone the redacted source so no replay reruns the turn it started.
 
         The projection learns about the redaction through journal admission, so
-        this owes only the durable tombstone, scoped to the room the redaction
-        arrived in. Raising leaves the callback unaccepted and the source
-        available for sync to redeliver.
+        this owes only the durable tombstone. Raising leaves the callback
+        unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
         await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
