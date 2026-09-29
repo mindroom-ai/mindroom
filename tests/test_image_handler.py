@@ -132,9 +132,14 @@ class TestPrepareMediaUpload:
     def test_encrypted_upload_round_trips_through_shared_decryption(self) -> None:
         """Prepared ciphertext decrypts only with its own authenticated metadata."""
         prepared = prepare_media_upload(b"payload", filename="note.txt", mimetype="text/plain", encrypt=True)
-        file_content = prepared.encrypted_file_content()
+        file_content = prepared.encrypted_file_content(url="mxc://server/note")
 
         assert file_content is not None
+        assert (file_content["url"], file_content["mimetype"], file_content["size"]) == (
+            "mxc://server/note",
+            "text/plain",
+            7,
+        )
         assert (prepared.content_type, prepared.filename) == ("application/octet-stream", "note.txt.enc")
         assert prepared.data != b"payload"
         key = file_content["key"]["k"]

@@ -216,12 +216,12 @@ class _PreparedMediaUpload:
             **_image_dimensions(self.media_bytes, self.mimetype),
         }
 
-    def encrypted_file_content(self) -> dict[str, Any] | None:
+    def encrypted_file_content(self, url: str = "") -> dict[str, Any] | None:
         """Build encrypted metadata separately so callers retain their error boundaries."""
         if self.encryption_keys is None:
             return None
         return encrypted_file_content(
-            url="",
+            url=url,
             key=self.encryption_keys["key"],
             iv=self.encryption_keys["iv"],
             hashes=self.encryption_keys["hashes"],

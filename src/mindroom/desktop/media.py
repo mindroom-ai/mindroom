@@ -34,7 +34,6 @@ async def upload_encrypted_media(
     """Encrypt a screenshot or shell output locally and upload only ciphertext to Matrix media."""
     _validate_payload(payload, mime_type=mime_type)
     prepared = prepare_media_upload(payload, filename=filename, mimetype=mime_type, encrypt=True)
-    file_content = prepared.encrypted_file_content()
     try:
         # nio uploads ignore the client request timeout, so a stalled homeserver would wait forever.
         async with asyncio.timeout(timeout_seconds):
@@ -51,11 +50,12 @@ async def upload_encrypted_media(
     if mxc_uri is None:
         msg = f"Matrix media upload failed: {response}"
         raise DesktopMediaError(msg)
-    if file_content is not None:
-        file_content["url"] = mxc_uri
     try:
         # Receivers parse this reference strictly, so the bridge never sends one they would refuse.
-        return EncryptedDesktopMedia.from_content(file_content, kind=_media_kind(mime_type))
+        return EncryptedDesktopMedia.from_content(
+            prepared.encrypted_file_content(url=mxc_uri),
+            kind=_media_kind(mime_type),
+        )
     except DesktopProtocolError as exc:
         msg = f"Matrix media upload returned an invalid media reference: {exc}"
         raise DesktopMediaError(msg) from exc
