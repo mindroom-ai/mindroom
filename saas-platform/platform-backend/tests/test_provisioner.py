@@ -158,6 +158,28 @@ async def test_a_stored_key_limit_changes_without_replacing_the_key(old_limit: i
 
 
 @pytest.mark.asyncio
+async def test_limit_update_repairs_a_missing_reset_schedule() -> None:
+    from backend.services.provisioner_service import openrouter_key_matches_plan, set_instance_openrouter_key_limit
+
+    db = _stored_key_db(15)
+    row = db.row("instances", instance_id="123")
+    row["openrouter_key_limit_reset"] = None
+    with (
+        patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "test-management"),
+        patch("backend.openrouter._send_http_request", return_value=(200, b"{}")) as request,
+    ):
+        await set_instance_openrouter_key_limit(db, row, "hobby")
+
+    method, url, _, body = request.call_args.args
+    assert method == "PATCH"
+    assert url.endswith("/keys/old_hash")
+    assert json.loads(body) == {"limit": 15, "limit_reset": "monthly"}
+    assert row["openrouter_key_hash"] == "old_hash"
+    assert row["openrouter_key_limit_reset"] == "monthly"
+    assert openrouter_key_matches_plan(row, "hobby")
+
+
+@pytest.mark.asyncio
 async def test_a_failed_limit_update_preserves_stored_key_metadata() -> None:
     from backend.services.provisioner_service import _provision_openrouter_key
 

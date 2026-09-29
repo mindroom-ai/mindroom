@@ -552,7 +552,9 @@ async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, 
             limit_usd=limit,
         )
     )
-    update_instance(sb, instance_row["instance_id"], {"openrouter_key_limit_usd": limit})
+    update_instance(
+        sb, instance_row["instance_id"], {"openrouter_key_limit_usd": limit, "openrouter_key_limit_reset": "monthly"}
+    )
 
 
 async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:

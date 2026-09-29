@@ -170,7 +170,10 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     subscription_data["cancelled_at"] = maybe_timestamp_to_iso(subscription.get("canceled_at"))
 
     # Update subscription with tenant validation
-    sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+    query = sb.table("subscriptions").update(subscription_data).eq("account_id", account_id)
+    if current_stripe_id:
+        query = query.eq("stripe_subscription_id", current_stripe_id)
+    query.execute()
 
     logger.info(
         "Subscription updated for account %s: tier=%s, status=%s",

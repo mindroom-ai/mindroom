@@ -102,6 +102,30 @@ async def test_subscription_projection_uses_the_live_tier(seam):
     assert row["stripe_price_id"] == "price_hobby"
 
 
+def test_subscription_rebound_during_retrieve_is_not_overwritten():
+    db = database()
+    newer = {"stripe_subscription_id": "sub_new", "tier": "hobby", "status": "trialing"}
+
+    def retrieve(subscription_id):
+        assert subscription_id == "sub_1"
+        db.row("subscriptions", id="local_1").update(newer)
+        return subscription("active", "pro")
+
+    with (
+        patch.object(webhooks, "ensure_supabase", return_value=db),
+        patch.object(webhooks.stripe.Subscription, "retrieve", side_effect=retrieve),
+    ):
+        assert webhooks.handle_subscription_updated(subscription("active", "pro")) == (True, "owner")
+
+    row = db.row("subscriptions", id="local_1")
+    assert row == {
+        "id": "local_1",
+        "account_id": "owner",
+        "updated_at": "before",
+        **newer,
+    }
+
+
 def test_account_suspension_bans_auth_and_generic_reactivation_unbans():
     db = database()
     db.auth.admin = Mock()

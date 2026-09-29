@@ -185,5 +185,7 @@ def set_openrouter_key_limit(
     OpenRouter's limit is a USD spending limit: null means unlimited, while 0 means a zero-dollar limit.
     """
     url, headers = _key_request_target(management_api_key, key_hash, "update")
-    status, response_body = http_patch(url, headers, json.dumps({"limit": limit_usd}).encode("utf-8"))
+    status, response_body = http_patch(
+        url, headers, json.dumps({"limit": limit_usd, "limit_reset": "monthly"}).encode("utf-8")
+    )
     _raise_for_key_status(status, response_body, "update")
