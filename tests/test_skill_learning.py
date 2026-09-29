@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -23,14 +24,14 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
-from agno.skills.skill import Skill
 from agno.tools.function import Function
 from anthropic import AsyncAnthropic
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
-import mindroom.tool_system.workspace_skills as workspace_skills_module
+import mindroom.tool_system.skill_usage as skill_usage_module
+import mindroom.tool_system.skills as skills_module
 from mindroom.agent_storage import create_session_storage
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -40,11 +41,11 @@ from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.mid_turn import QueuedMessage
 from mindroom.model_loading import get_model_instance
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
 from mindroom.skill_learning import runner as runner_module
-from mindroom.skill_learning import tools as tools_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
@@ -52,18 +53,13 @@ from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.skill_usage import forget_missing_skill_usage, record_skill_use, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.tool_system.workspace_skills import (
-    forget_missing_skill_usage,
-    open_skills_root,
-    record_skill_use,
-    update_skill_usages,
-)
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from agno.models.base import Model
@@ -212,6 +208,13 @@ def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIde
         runtime.workspace.root if runtime.workspace is not None else paths.storage_root / "agents/mind/workspace"
     )
     return workspace / "skills"
+
+
+@contextmanager
+def open_skills_root(root: Path) -> Iterator[int]:
+    """Pin a test's skills directory the way the library does."""
+    with open_directory_within_root(root.parent, root.name) as root_fd:
+        yield root_fd
 
 
 def _write_skill(root: Path, name: str, content: str) -> Path:
@@ -1267,22 +1270,8 @@ async def test_retiring_stops_the_reviews_of_agents_that_stopped_learning(tmp_pa
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
 
 
-def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
-    """Hand-written telemetry without a UTC offset still ages its skill instead of failing every review."""
-    root = tmp_path / "skills"
-    now = datetime.now(UTC)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    usage = {
-        "created_by": "learner",
-        "created_at": (now - timedelta(days=45)).replace(tzinfo=None).isoformat(),
-        "last_used_at": (now - timedelta(days=40)).isoformat(),
-    }
-    (root / ".usage.json").write_text(json.dumps({"deploy-checks": usage}))
-    assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks"]
-
-
 def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> None:
-    """Like Hermes, a hand-edited record keeps its own fields and never costs another skill its learner ownership."""
+    """A hand-edited record that does not validate reads as absent and never costs another skill its ownership."""
     root = tmp_path / "skills"
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     # The agent rewrote the learned skill and dropped its marker, so only the usage record says who owns it.
@@ -1290,14 +1279,13 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
     _write_skill(root, "handwritten", HANDWRITTEN)
     usage_path = root / ".usage.json"
     records = json.loads(usage_path.read_text())
-    records["deploy-checks"] |= {"note": "keep", "patch_count": None}
     records["handwritten"] = {"use_count": "many"}
     records["old-habit"] = {"use_count": "many"}
     usage_path.write_text(json.dumps(records))
     record_skill_use(root / "handwritten")
     record_skill_use(root / "deploy-checks")
     stored = json.loads(usage_path.read_text())
-    assert (stored["deploy-checks"]["note"], stored["deploy-checks"]["use_count"]) == ("keep", 1)
+    assert (stored["deploy-checks"]["created_by"], stored["deploy-checks"]["use_count"]) == ("learner", 1)
     assert (stored["handwritten"]["use_count"], stored["old-habit"]) == (1, {"use_count": "many"})
     learned = library.read_skill_file(root, "deploy-checks")
     assert learned is not None
@@ -1312,7 +1300,7 @@ def test_an_unreadable_usage_file_is_left_for_a_person_to_repair(tmp_path: Path)
     (root / ".usage.json").write_text(broken)
     record_skill_use(root / "deploy-checks")
     with open_skills_root(root) as root_fd:
-        forget_missing_skill_usage(root_fd)
+        forget_missing_skill_usage(root_fd, set())
     assert (root / ".usage.json").read_text() == broken
 
 
@@ -1546,19 +1534,6 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, des
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
         library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None, learner=True)
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
-
-
-def test_the_reviewer_catalog_uses_the_strict_ownership_check(tmp_path: Path) -> None:
-    """A pinned skill with loose frontmatter is offered as read-only, matching what edits would decide."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    loose = LEARNED.replace("learned: true", "pinned: true").replace(
-        "Use when deploying the web service",
-        "Use when: deploying",
-    )
-    (root / "deploy-checks/SKILL.md").write_text(loose)
-    assert not load_skill_catalog(config, paths, "mind", root).entries["deploy-checks"].learned
 
 
 def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> None:
@@ -2151,72 +2126,6 @@ _UNMET = (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("directory", "content", "configured", "name"),
-    [
-        ("needs-env", _UNMET.format(name="needs-env"), [], "needs-env"),
-        ("mindroom-docs", _UNMET.format(name="mindroom-docs"), ["mindroom-docs"], "mindroom-docs"),
-        ("broken", "---\nname broken\n---\nExport the variable first.\n", [], "broken"),
-        ("unnamed", "---\nname: ''\ndescription: Use when checking the setup\n---\nExport it first.\n", [], "unnamed"),
-        ("blank", "---\nname: '   '\ndescription: Use when checking the setup\n---\nExport it first.\n", [], "blank"),
-        (
-            "spaced",
-            "---\nname: ' padded '\ndescription: Use when checking the setup\n---\nExport it first.\n",
-            [],
-            "padded",
-        ),
-        (
-            "adopted",
-            "---\nname: other-name\ndescription: Use when checking the setup\n---\nExport it first.\n",
-            [],
-            "other-name",
-        ),
-        ("deploy", "---\nname: deploy-checks\ndescription: Use when: deploying\n---\nRun it.\n", [], "deploy-checks"),
-        ("dated", "---\nname: dated\ndescription: Use when checking\nupdated: 2026-02-30\n---\nRun it.\n", [], "dated"),
-        (
-            "tagged",
-            "---\nname: tagged\ndescription: Use when checking\nflag: !!bool maybe\n---\nRun it.\n",
-            [],
-            "tagged",
-        ),
-    ],
-    ids=[
-        "unmet requirements",
-        "overrides a configured skill",
-        "broken frontmatter",
-        "empty name",
-        "blank name",
-        "padded name",
-        "adopted directory",
-        "loose frontmatter in an adopted directory",
-        "impossible date",
-        "unknown bool",
-    ],
-)
-async def test_chat_skill_manage_finds_workspace_skills_by_their_directory(
-    tmp_path: Path,
-    directory: str,
-    content: str,
-    configured: list[str],
-    name: str,
-) -> None:
-    """Like Hermes' _find_skill, chat finds a workspace skill by its directory, even one this host does not load.
-
-    An edit keeps the name the skill loads under, stripped like skill loading does, or its directory's when it has none.
-    """
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skills = configured
-    root = _skills_root(config, paths)
-    _write_skill(root, directory, content)
-    fixed = f"---\nname: {name}\ndescription: Use when checking the setup\n---\nRun the check.\n"
-    result = json.loads(
-        await SkillManageTools("mind", config, paths, root).skill_manage("edit", directory, content=fixed),
-    )
-    assert result["success"], result
-    assert (root / directory / "SKILL.md").read_text() == fixed
-
-
-@pytest.mark.asyncio
 async def test_chat_skill_manage_refuses_a_skills_directory_replaced_by_a_link(tmp_path: Path) -> None:
     """A skills directory that worker code swapped for a link is refused like any failed edit, and never followed."""
     config, paths = _learner(tmp_path)
@@ -2235,49 +2144,6 @@ async def test_chat_skill_manage_refuses_a_skills_directory_replaced_by_a_link(t
     )
     assert not result["success"]
     assert (elsewhere / "deploy-checks/SKILL.md").read_text() == LEARNED
-
-
-def test_deeply_nested_skill_content_is_refused_and_archival_skips_it(tmp_path: Path) -> None:
-    """Nesting that overflows libyaml's C stack is invalid YAML to the library, never a crash of the primary."""
-    root = tmp_path / "skills"
-    depth = 3000
-    nested = f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n"
-    with pytest.raises(library.SkillEditError, match="not a valid YAML mapping"):
-        library.create_skill(root, "nested", nested, reserved_names=frozenset(), learner=False)
-    _write_skill(root, "nested", nested)
-    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
-
-
-@pytest.mark.asyncio
-async def test_chat_patches_a_skill_written_with_crlf_line_endings(tmp_path: Path) -> None:
-    """Skill tools serve files with normalized line endings, so a patch of that text lands, written with LF."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    (root / "deploy-checks").mkdir(parents=True)
-    (root / "deploy-checks" / "SKILL.md").write_bytes(LEARNED.replace("\n", "\r\n").encode())
-    (root / "deploy-checks" / "references").mkdir()
-    (root / "deploy-checks" / "references" / "notes.md").write_bytes(b"one\r\ntwo\r\n")
-    tools = SkillManageTools("mind", config, paths, root)
-    patched = await tools.skill_manage(
-        "patch",
-        "deploy-checks",
-        old_string="---\n1. Run the smoke test.\n",
-        new_string="---\n1. Run smoke.\n",
-    )
-    assert json.loads(patched)["success"], patched
-    reference = await tools.skill_manage(
-        "patch",
-        "deploy-checks",
-        old_string="one\ntwo\n",
-        new_string="one\n",
-        file_path="references/notes.md",
-    )
-    assert json.loads(reference)["success"], reference
-    assert (root / "deploy-checks" / "SKILL.md").read_bytes() == LEARNED.replace(
-        "1. Run the smoke test.",
-        "1. Run smoke.",
-    ).encode()
-    assert (root / "deploy-checks" / "references" / "notes.md").read_bytes() == b"one\n"
 
 
 def test_deeply_nested_usage_telemetry_never_fails_skill_changes(tmp_path: Path) -> None:
@@ -2306,68 +2172,24 @@ def test_deeply_nested_usage_telemetry_never_fails_skill_changes(tmp_path: Path)
     ids=["count at the integer limit", "key that is not valid Unicode"],
 )
 def test_hand_edited_usage_records_never_fail_skill_changes(tmp_path: Path, record: dict[str, object]) -> None:
-    """A usage record a person or worker code broke is repaired by the next change instead of failing it."""
+    """A usage record a person or worker code broke never fails a skill change or another skill's record."""
     root = tmp_path / "skills"
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     _write_skill(root, "other", HANDWRITTEN.replace("handwritten", "other"))
     (root / ".usage.json").write_text(json.dumps({"deploy-checks": record, "other": {"use_count": 2}}))
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
     library.write_skill_file(root, "deploy-checks", "references/a.md", "A.", expected_digest=None, learner=False)
-    records = json.loads((root / ".usage.json").read_text())
-    assert records["deploy-checks"]["patch_count"] == 1
-    assert records["other"] == {"use_count": 2}
+    assert (root / "deploy-checks/references/a.md").read_text() == "A."
+    assert json.loads((root / ".usage.json").read_text())["other"] == {"use_count": 2}
 
 
 def test_a_usage_write_that_fails_never_fails_the_skill_change(tmp_path: Path) -> None:
     """Telemetry is bookkeeping for a change that already landed, so a failed write is only logged."""
     root = tmp_path / "skills"
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    with patch("mindroom.tool_system.workspace_skills.atomic_write_bytes_at", side_effect=OSError("disk full")):
+    with patch("mindroom.tool_system.skill_usage.atomic_write_bytes_at", side_effect=OSError("disk full")):
         library.write_skill_file(root, "deploy-checks", "references/a.md", "A.", expected_digest=None, learner=False)
     assert (root / "deploy-checks/references/a.md").read_text() == "A."
-
-
-@pytest.mark.asyncio
-async def test_the_review_reads_and_patches_crlf_skills_as_the_text_it_is_served(tmp_path: Path) -> None:
-    """The review loads CRLF files with normalized line endings; patches of that text or of the raw text land as LF."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    (root / "deploy-checks" / "SKILL.md").write_bytes(LEARNED.replace("\n", "\r\n").encode())
-    library.write_skill_file(root, "deploy-checks", "references/notes.md", "x", expected_digest=None, learner=True)
-    (root / "deploy-checks" / "references" / "notes.md").write_bytes(b"one\r\ntwo\r\n")
-    catalog = load_skill_catalog(config, paths, "mind", root)
-    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    loaded = json.loads(await tools.get_skill_instructions("deploy-checks"))["content"]
-    assert loaded == LEARNED
-    reference = json.loads(await tools.get_skill_reference("deploy-checks", "references/notes.md"))["content"]
-    assert reference == "one\ntwo\n"
-    unchanged = json.loads(
-        await tools.skill_manage("patch", "deploy-checks", old_string="1. Run", new_string="1. Run"),
-    )
-    assert "No change was made" in unchanged["error"]
-    patched = await tools.skill_manage(
-        "patch",
-        "deploy-checks",
-        old_string="---\r\n1. Run the smoke test.",
-        new_string="---\n1. Run smoke.",
-    )
-    assert json.loads(patched)["success"], patched
-    patched_reference = await tools.skill_manage(
-        "patch",
-        "deploy-checks",
-        old_string="one\ntwo\n",
-        new_string="one\n",
-        file_path="references/notes.md",
-    )
-    assert json.loads(patched_reference)["success"], patched_reference
-    assert (root / "deploy-checks" / "SKILL.md").read_bytes() == LEARNED.replace(
-        "1. Run the smoke test.",
-        "1. Run smoke.",
-    ).encode()
-    assert (root / "deploy-checks" / "references" / "notes.md").read_bytes() == b"one\n"
-    assert tools.progress is not None
-    assert tools.progress.changes == {"deploy-checks": "updated"}
 
 
 @pytest.mark.asyncio
@@ -2628,7 +2450,7 @@ def test_a_history_snapshot_pruned_by_another_process_never_refuses_a_change(tmp
     history.mkdir(parents=True)
     for index in range(12):
         (history / f"20260101T0000{index:02d}000000Z--SKILL.md").write_text("old")
-    real_list_entries = library.list_entries
+    real_list_entries = library._entries
 
     def listing_then_pruned_elsewhere(directory_fd: int, *, directories: bool) -> list[str]:
         entries = real_list_entries(directory_fd, directories=directories)
@@ -2638,7 +2460,7 @@ def test_a_history_snapshot_pruned_by_another_process_never_refuses_a_change(tmp
 
     current = library.read_skill_file(root, "deploy-checks")
     assert current is not None
-    with patch.object(library, "list_entries", listing_then_pruned_elsewhere):
+    with patch.object(library, "_entries", listing_then_pruned_elsewhere):
         library.write_skill_file(
             root,
             "deploy-checks",
@@ -2676,24 +2498,10 @@ async def test_skill_manage_refuses_metadata_that_skill_loading_drops(tmp_path: 
     assert "probe" in load_skill_catalog(config, paths, "mind", root).entries
 
 
-@pytest.mark.asyncio
-async def test_skill_manage_refuses_frontmatter_aliases(tmp_path: Path) -> None:
-    """Aliases could nest into an expansion bomb, so frontmatter that uses them is refused, not stored."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    aliased = "---\nname: probe\ndescription: Mine\nmetadata:\n  a: &a [x, x]\n  b: *a\n---\nBody\n"
-    result = json.loads(
-        await SkillManageTools("mind", config, paths, root).skill_manage("create", "probe", content=aliased),
-    )
-    assert not result["success"]
-    assert "not a valid YAML mapping" in result["error"]
-    assert not (root / "probe").exists()
-
-
 def test_skill_manage_refuses_changes_past_the_workspace_skill_count(tmp_path: Path) -> None:
     """Skill loading reads at most MAX_WORKSPACE_SKILLS directories, so a create beyond them is refused."""
     root = tmp_path / "skills"
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS):
+    for index in range(skills_module.MAX_WORKSPACE_SKILLS):
         _write_skill(root, f"skill-{index:03d}", HANDWRITTEN.replace("handwritten", f"skill-{index:03d}"))
     with pytest.raises(library.SkillEditError, match="already holds"):
         library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
@@ -2706,195 +2514,11 @@ def test_skill_manage_refuses_a_support_file_past_the_listing_cap(tmp_path: Path
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=False)
     references = root / "deploy-checks" / "references"
     references.mkdir()
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILL_LISTING_ENTRIES):
+    for index in range(skills_module.MAX_WORKSPACE_SKILL_LISTING_ENTRIES):
         (references / f"note-{index:03d}.md").write_text("n")
     with pytest.raises(library.SkillEditError, match="already lists"):
         library.write_skill_file(root, "deploy-checks", "references/zz.md", "z", expected_digest=None, learner=False)
     assert not (references / "zz.md").exists()
-
-
-def test_the_listing_cap_counts_files_the_listing_leaves_out(tmp_path: Path) -> None:
-    """Skill loading caps a listing before leaving out files too large to read, so the check counts those files too."""
-    root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=False)
-    references = root / "deploy-checks" / "references"
-    references.mkdir()
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILL_LISTING_ENTRIES - 1):
-        (references / f"note-{index:03d}.md").write_text("n")
-    (references / "big.md").write_text("x" * (workspace_skills_module.MAX_SKILL_FILE_BYTES + 1))
-    with pytest.raises(library.SkillEditError, match="already lists"):
-        library.write_skill_file(root, "deploy-checks", "references/zz.md", "z", expected_digest=None, learner=False)
-
-
-def test_the_prompt_budget_counts_only_the_skills_loading_reads(tmp_path: Path) -> None:
-    """Directories past the skill count never load, so they never count against a change's prompt budget."""
-    root = tmp_path / "skills"
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS - 1):
-        _write_skill(root, f"a-{index:03d}", HANDWRITTEN.replace("handwritten", f"a-{index:03d}"))
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    for index in range(9):
-        name = f"z-{index}"
-        _write_skill(root, name, f"---\nname: {name}\ndescription: Large\n---\n" + "x" * 1_000_000 + "\n")
-    current = library.read_skill_file(root, "deploy-checks")
-    assert current is not None
-    edited = LEARNED.replace("1. Run the smoke test.", "1. Run smoke.")
-    library.write_skill_file(root, "deploy-checks", "SKILL.md", edited, expected_digest=current.digest, learner=True)
-    assert (root / "deploy-checks" / "SKILL.md").read_text() == edited
-
-
-def test_skill_manage_refuses_frontmatter_past_its_parse_caps(tmp_path: Path) -> None:
-    """A skill's frontmatter over the per-skill cap, or one that crosses the workspace budget, is refused."""
-    root = tmp_path / "skills"
-    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
-    oversized = LEARNED.replace("description:", f"note: {'n' * cap}\ndescription:")
-    with pytest.raises(library.SkillEditError, match="frontmatter exceeds"):
-        library.create_skill(root, "deploy-checks", oversized, reserved_names=frozenset(), learner=True)
-    per_skill = cap - 256
-    for index in range(workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill):
-        name = f"a-{index:02d}"
-        _write_skill(root, name, f"---\nname: {name}\ndescription: d\nnote: {'n' * per_skill}\n---\nbody\n")
-    near_cap = LEARNED.replace("description:", f"note: {'n' * per_skill}\ndescription:")
-    with pytest.raises(library.SkillEditError, match="parse budget"):
-        library.create_skill(root, "deploy-checks", near_cap, reserved_names=frozenset(), learner=True)
-    assert not (root / "deploy-checks").exists()
-
-
-@pytest.mark.parametrize("refusal", ["a name too long", "frontmatter that is a list"])
-def test_skill_manage_counts_the_frontmatter_of_refused_skills(tmp_path: Path, refusal: str) -> None:
-    """Loading charges refused skills' frontmatter too, so a change it would skip is refused instead of saved."""
-    root = tmp_path / "skills"
-    per_skill = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 256
-    for index in range(workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill):
-        name = f"a-{index:02d}"
-        refused = (
-            f"name: {'long-' * 20}{index}\ndescription: d\nnote: {'n' * per_skill}"
-            if refusal == "a name too long"
-            else f"- {index}\n- {'n' * per_skill}"
-        )
-        _write_skill(root, name, f"---\n{refused}\n---\n")
-    near_cap = LEARNED.replace("description:", f"note: {'n' * per_skill}\ndescription:")
-    with pytest.raises(library.SkillEditError, match="parse budget"):
-        library.create_skill(root, "deploy-checks", near_cap, reserved_names=frozenset(), learner=True)
-    assert not (root / "deploy-checks").exists()
-
-
-def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_parse_budget(tmp_path: Path) -> None:
-    """Loading stops at a budget hand edits passed, so a change is refused only when loading would skip one more skill."""
-    root = tmp_path / "skills"
-    names = [f"s-{index:03d}" for index in range(130)]
-    for name in names:
-        # Descriptions up to 1024 characters are allowed, so ordinary hand-written skills can fill the budget.
-        _write_skill(root, name, f"---\nname: {name}\ndescription: {'d' * 1000}\n---\nSteps to follow.\n")
-    _write_skill(root, "a-broken", f"---\n- {'n' * 4000}\n---\nSteps to follow.\n")
-    loaded = set(workspace_skills_module.workspace_skill_load(root).skills)
-    assert names[0] in loaded
-    assert names[-1] not in loaded
-    # Loading stops before skills that sort after the stop, whatever they say, so the refusal points at the others.
-    with pytest.raises(library.SkillEditError, match=r"already stops at .* parse budget before it reaches 'zz-new'"):
-        library.create_skill(
-            root,
-            "zz-new",
-            HANDWRITTEN.replace("handwritten", "zz-new"),
-            reserved_names=frozenset(),
-            learner=False,
-        )
-    grown = f"---\nname: {names[0]}\ndescription: {'d' * 1000}\nmetadata: {{note: {'n' * 3000}}}\n---\nSteps.\n"
-    smallest = f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n"
-    for name, content, refusal in (
-        (names[0], grown, r"would stop at .* parse budget and skip 's-12\d'"),
-        (names[-1], smallest, rf"already stops at .* parse budget before it reaches '{names[-1]}'"),
-    ):
-        current = library.read_skill_file(root, name)
-        assert current is not None
-        with pytest.raises(library.SkillEditError, match=refusal):
-            library.write_skill_file(root, name, "SKILL.md", content, expected_digest=current.digest, learner=False)
-    for name, content in (
-        (names[0], f"---\nname: {names[0]}\ndescription: {'d' * 1000}\n---\nSteps to follow, carefully.\n"),
-        ("a-broken", "---\nname: a-broken\ndescription: Repaired\n---\nSteps.\n"),
-    ):
-        current = library.read_skill_file(root, name)
-        assert current is not None
-        library.write_skill_file(root, name, "SKILL.md", content, expected_digest=current.digest, learner=False)
-        assert (root / name / "SKILL.md").read_text() == content
-    assert loaded | {"a-broken"} <= set(workspace_skills_module.workspace_skill_load(root).skills)
-
-
-def test_skill_manage_keeps_what_loads_in_a_workspace_already_past_the_prompt_budget(tmp_path: Path) -> None:
-    """A skill that loads can shrink in a workspace hand edits put past the prompt budget, and cannot grow into a cut."""
-    root = tmp_path / "skills"
-    names = [f"s-{index:02d}" for index in range(10)]
-    for name in names:
-        # The first eight large skills leave about 10 KB of the prompt budget; the last one is cut.
-        body = "x" * (50_000 if name == names[0] else 1_041_000)
-        _write_skill(root, name, f"---\nname: {name}\ndescription: d\n---\n{body}\n")
-    loaded = set(workspace_skills_module.workspace_skill_load(root).skills)
-    assert names[-2] in loaded
-    assert names[-1] not in loaded
-    current = library.read_skill_file(root, names[0])
-    assert current is not None
-    with pytest.raises(library.SkillEditError, match="prompt budget"):
-        library.write_skill_file(
-            root,
-            names[0],
-            "SKILL.md",
-            current.content.replace("x" * 50_000, "x" * 90_000),
-            expected_digest=current.digest,
-            learner=False,
-        )
-    shrunk = current.content.replace("x" * 50_000, "x")
-    library.write_skill_file(root, names[0], "SKILL.md", shrunk, expected_digest=current.digest, learner=False)
-    assert loaded <= set(workspace_skills_module.workspace_skill_load(root).skills)
-    # A skill that crosses the budget itself is told to shrink, whether it is new or the one that crosses now.
-    with pytest.raises(library.SkillEditError, match=r"'s-085' itself would cross .* prompt budget"):
-        library.create_skill(
-            root,
-            "s-085",
-            f"---\nname: s-085\ndescription: d\n---\n{'x' * 80_000}\n",
-            reserved_names=frozenset(),
-            learner=False,
-        )
-    library.create_skill(
-        root,
-        "s-085",
-        "---\nname: s-085\ndescription: d\n---\nSteps.\n",
-        reserved_names=frozenset(),
-        learner=False,
-    )
-    current = library.read_skill_file(root, names[-1])
-    assert current is not None
-    with pytest.raises(library.SkillEditError, match=rf"'{names[-1]}' itself would cross .* prompt budget"):
-        library.write_skill_file(
-            root,
-            names[-1],
-            "SKILL.md",
-            f"---\nname: {names[-1]}\ndescription: d\n---\n{'x' * 90_000}\n",
-            expected_digest=current.digest,
-            learner=False,
-        )
-    library.write_skill_file(
-        root,
-        names[-1],
-        "SKILL.md",
-        f"---\nname: {names[-1]}\ndescription: d\n---\nSteps.\n",
-        expected_digest=current.digest,
-        learner=False,
-    )
-    assert {*loaded, "s-085", names[-1]} <= set(workspace_skills_module.workspace_skill_load(root).skills)
-
-
-def test_skill_manage_refuses_a_change_past_the_read_budget(tmp_path: Path) -> None:
-    """Loading stops once it has read more than its budget, refused files included, so a change that would cross it is refused."""
-    root = tmp_path / "skills"
-    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
-    size = (workspace_skills_module.MAX_WORKSPACE_SKILL_READ_BYTES - 50_000) // 16
-    refused = f"---\nname: refused\ndescription: d\nnote: {'n' * cap}\n---\n"
-    for index in range(16):
-        _write_skill(root, f"a-{index:02d}", refused + "x" * (size - len(refused)))
-    grown = LEARNED.replace("1. Run the smoke test.", "x" * 60_000)
-    with pytest.raises(library.SkillEditError, match=r"SKILL\.md files it reads"):
-        library.create_skill(root, "deploy-checks", grown, reserved_names=frozenset(), learner=True)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    assert [skill.name for skill in workspace_skills_module.load_workspace_skills(root)] == ["deploy-checks"]
 
 
 def test_the_catalog_reads_the_usage_file_once(tmp_path: Path) -> None:
@@ -2922,26 +2546,6 @@ def test_the_catalog_reads_the_usage_file_once(tmp_path: Path) -> None:
     assert all(catalog.entries[f"skill-{index}"].learned for index in range(5))
 
 
-@pytest.mark.asyncio
-async def test_a_created_skill_is_parsed_off_the_event_loop(tmp_path: Path) -> None:
-    """Parsing long content takes time, so the review's create parses it in a thread like the write."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    threads: list[threading.Thread] = []
-    real = tools_module.parse_skill_markdown
-
-    def recorded(content: str, **kwargs: Any) -> Any:  # noqa: ANN401
-        threads.append(threading.current_thread())
-        return real(content, **kwargs)
-
-    tools = SkillTools(root, {}, frozenset(), progress=ReviewProgress())
-    with patch.object(tools_module, "parse_skill_markdown", recorded):
-        result = json.loads(await tools.skill_manage("create", "deploy-checks", content=LEARNED))
-    assert result["success"], result
-    assert threads
-    assert threading.main_thread() not in threads
-
-
 def test_archival_seeds_every_first_seen_skill_in_one_usage_write(tmp_path: Path) -> None:
     """Starting the inactivity clock of many adopted skills rewrites the usage file once, not once per skill."""
     root = tmp_path / "skills"
@@ -2949,13 +2553,13 @@ def test_archival_seeds_every_first_seen_skill_in_one_usage_write(tmp_path: Path
         name = f"adopted-{index:02d}"
         _write_skill(root, name, LEARNED.replace("deploy-checks", name))
     writes: list[int] = []
-    real = workspace_skills_module._write_usage_records
+    real = skill_usage_module._write
 
     def counted(root_fd: int, records: dict[str, object]) -> None:
         writes.append(len(records))
         real(root_fd, records)
 
-    with patch.object(workspace_skills_module, "_write_usage_records", counted):
+    with patch.object(skill_usage_module, "_write", counted):
         assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
     assert writes == [20]
     records = json.loads((root / ".usage.json").read_text())
@@ -2965,7 +2569,7 @@ def test_archival_seeds_every_first_seen_skill_in_one_usage_write(tmp_path: Path
 def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
     """Directories past the skill count never load, so archival neither parses nor archives them."""
     root = tmp_path / "skills"
-    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
+    count = skills_module.MAX_WORKSPACE_SKILLS
     old = datetime.now(UTC) - timedelta(days=90)
     for index in range(count + 1):
         name = f"s-{index:03d}"
@@ -2976,153 +2580,6 @@ def test_archival_reads_only_the_skills_loading_reads(tmp_path: Path) -> None:
     archived = library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
     assert len(archived) == count
     assert (root / f"s-{count:03d}").exists()
-
-
-@pytest.mark.parametrize("reader", ["catalog", "archival"])
-def test_ownership_reads_stay_within_the_frontmatter_budget(
-    tmp_path: Path,
-    reader: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Files swapped in after loading measured them cannot make the ownership checks parse more than loading may."""
-    root = tmp_path / "skills"
-    names = [f"s-{index:03d}" for index in range(64)]
-    for index, name in enumerate(names):
-        metadata = f"{{mindroom: {{learned: true}}, salt: {index}}}"
-        _write_skill(
-            root,
-            name,
-            f"---\nname: {name}\ndescription: d\nnote: {'n' * 6000}\nmetadata: '{metadata}'\n---\nb\n",
-        )
-    monkeypatch.setattr(workspace_skills_module, "_PARSE_CACHE", workspace_skills_module._ParseCache(8 << 20))
-    parsed: list[int] = []
-    real_yaml = workspace_skills_module.yaml_io.safe_load_untrusted
-    real_json5 = workspace_skills_module.json5.loads
-
-    def yaml_counted(text: str) -> object:
-        parsed.append(len(text.encode()))
-        return real_yaml(text)
-
-    def json5_counted(text: str) -> object:
-        parsed.append(3 * len(text.encode()))
-        return real_json5(text)
-
-    # As if loading had measured small files, which worker code then replaced.
-    stand_in = Skill(name="s", description="d", instructions="", source_path="s")
-    measured = workspace_skills_module._WorkspaceSkillLoad(dict.fromkeys(names, stand_in), None)
-    with (
-        patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", yaml_counted),
-        patch.object(workspace_skills_module.json5, "loads", json5_counted),
-        patch.object(library, "workspace_skill_load", return_value=measured),
-    ):
-        if reader == "catalog":
-            assert library.learned_skill_directories(root, names)
-        else:
-            old = datetime.now(UTC) - timedelta(days=90)
-            with open_skills_root(root) as root_fd:
-                update_skill_usages(
-                    root_fd,
-                    dict.fromkeys(names, lambda usage: usage.model_copy(update={"created_at": old})),
-                )
-            assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
-    assert sum(parsed) <= workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES
-
-
-@pytest.mark.parametrize("reader", ["catalog", "archival"])
-def test_ownership_reads_stay_within_the_read_budget(tmp_path: Path, reader: str) -> None:
-    """Large files swapped in after loading measured them cannot make the ownership checks read more than loading may."""
-    root = tmp_path / "skills"
-    names = [f"s-{index:02d}" for index in range(24)]
-    # A closing fence at the end makes every frontmatter match scan the whole file.
-    large = f"---\nname: s\ndescription: d\nnote: {'n' * (workspace_skills_module.MAX_SKILL_FILE_BYTES - 64)}\n---\n"
-    for name in names:
-        _write_skill(root, name, large)
-    read: list[int] = []
-    real = workspace_skills_module.read_regular_file_within_root
-
-    def counted(directory_fd: int, relative_path: str, **kwargs: Any) -> bytes:  # noqa: ANN401
-        data = real(directory_fd, relative_path, **kwargs)
-        if relative_path == workspace_skills_module.SKILL_FILENAME:
-            read.append(len(data))
-        return data
-
-    stand_in = Skill(name="s", description="d", instructions="", source_path="s")
-    measured = workspace_skills_module._WorkspaceSkillLoad(dict.fromkeys(names, stand_in), None)
-    with (
-        patch.object(workspace_skills_module, "read_regular_file_within_root", counted),
-        patch.object(library, "workspace_skill_load", return_value=measured),
-    ):
-        if reader == "catalog":
-            library.learned_skill_directories(root, names)
-        else:
-            library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC))
-    assert (
-        sum(read)
-        <= workspace_skills_module.MAX_WORKSPACE_SKILL_READ_BYTES + workspace_skills_module.MAX_SKILL_FILE_BYTES
-    )
-
-
-def test_an_edit_repairs_a_skill_whose_name_loading_refuses(tmp_path: Path) -> None:
-    """Loading refuses a skill whose name is too long, so an edit keeps its directory's name and the skill loads again."""
-    root = tmp_path / "skills"
-    _write_skill(root, "deploy-checks", LEARNED.replace("name: deploy-checks", f"name: {'long-' * 14}"))
-    current = library.read_skill_file(root, "deploy-checks")
-    assert current is not None
-    assert current.name == "deploy-checks"
-    kept = current.content.replace("smoke", "unit")
-    with pytest.raises(library.SkillEditError, match="Frontmatter name must be exactly 'deploy-checks'"):
-        library.write_skill_file(root, "deploy-checks", "SKILL.md", kept, expected_digest=current.digest, learner=True)
-    library.write_skill_file(root, "deploy-checks", "SKILL.md", LEARNED, expected_digest=current.digest, learner=True)
-    assert [skill.name for skill in workspace_skills_module.load_workspace_skills(root)] == ["deploy-checks"]
-    long_directory = "d" * 70
-    _write_skill(root, long_directory, LEARNED.replace("deploy-checks", long_directory))
-    current = library.read_skill_file(root, long_directory)
-    assert current is not None
-    with pytest.raises(library.SkillEditError, match="rename the directory"):
-        library.write_skill_file(
-            root,
-            long_directory,
-            "SKILL.md",
-            current.content.replace("smoke", "unit"),
-            expected_digest=current.digest,
-            learner=True,
-        )
-
-
-def test_a_support_file_can_be_added_to_a_skill_loading_skips(tmp_path: Path) -> None:
-    """A skill whose frontmatter is not a mapping never loads, and its owner can still add a file to it."""
-    root = tmp_path / "skills"
-    _write_skill(root, "broken", "---\n- a\n- b\n---\nbody\n")
-    library.write_skill_file(root, "broken", "references/x.md", "Notes.", expected_digest=None, learner=False)
-    assert (root / "broken" / "references" / "x.md").read_text() == "Notes."
-
-
-@pytest.mark.parametrize("change", ["create", "edit"])
-def test_skill_manage_refuses_changes_past_the_workspace_prompt_budget(tmp_path: Path, change: str) -> None:
-    """Skill loading stops at the prompt budget and skips the rest, so a change that would pass it is refused."""
-    root = tmp_path / "skills"
-    for index in range(8):
-        name = f"large-{index}"
-        _write_skill(root, name, f"---\nname: {name}\ndescription: Large\n---\n" + "x" * 1_040_000 + "\n")
-    grown = LEARNED.replace("1. Run the smoke test.", "x" * 90_000)
-    if change == "create":
-        with pytest.raises(library.SkillEditError, match="prompt budget"):
-            library.create_skill(root, "deploy-checks", grown, reserved_names=frozenset(), learner=True)
-        assert not (root / "deploy-checks").exists()
-    else:
-        library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-        current = library.read_skill_file(root, "deploy-checks")
-        assert current is not None
-        with pytest.raises(library.SkillEditError, match="prompt budget"):
-            library.write_skill_file(
-                root,
-                "deploy-checks",
-                "SKILL.md",
-                grown,
-                expected_digest=current.digest,
-                learner=True,
-            )
-        assert (root / "deploy-checks" / "SKILL.md").read_text() == LEARNED
 
 
 def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_path: Path) -> None:

@@ -6,10 +6,6 @@ import json
 import os
 import platform
 import threading
-import time
-import tracemalloc
-from contextlib import contextmanager
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -17,26 +13,22 @@ import pytest
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
-import mindroom.tool_system.workspace_skills as workspace_skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
-from mindroom.skill_learning import library
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from mindroom.tool_system.workspace_skills import MAX_SKILL_FILE_BYTES
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from agno.skills import Skills
@@ -552,474 +544,15 @@ def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
     return storage, workspace_skills
 
 
-def _load_agent_skills(tmp_path: Path, storage: Path, allowlist: list[str] | None = None) -> Skills | None:
+def _load_workspace_only(tmp_path: Path, storage: Path) -> Skills | None:
     return build_agent_skills(
         "code",
-        _base_config(allowlist or []),
+        _base_config([]),
         _runtime_paths(storage),
         skill_roots=[tmp_path / "global"],
         env_vars={},
         credential_keys=set(),
     )
-
-
-def test_a_linked_support_directory_lists_nothing(tmp_path: Path) -> None:
-    """A skill whose references directory is a link to files outside the workspace lists none of them."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "keys.md").write_text("private", encoding="utf-8")
-    good = _write_skill(workspace_skills, "good", "Good skill")
-    (good.parent / "references").symlink_to(outside, target_is_directory=True)
-    (good.parent / "scripts").mkdir()
-    (good.parent / "scripts" / "check.sh").write_text("echo ok", encoding="utf-8")
-
-    skills = _load_agent_skills(tmp_path, storage)
-    assert skills is not None
-    skill = skills.get_skill("good")
-    assert skill is not None
-    assert (skill.scripts, skill.references) == (["check.sh"], [])
-
-
-@pytest.mark.parametrize(
-    ("frontmatter", "description", "newline"),
-    [
-        ("description: Use when: deploying the app to staging\n", "Use when: deploying the app to staging", "\n"),
-        ("description: Use when deploying\nupdated: 2026-02-30\n", "Use when deploying", "\n"),
-        ('description: Use when deploying\nversion: !!int ""\n', "Use when deploying", "\n"),
-        ("description: Use when deploying\nflag: !!bool maybe\n", "Use when deploying", "\n"),
-        ("description: Use when deploying\nwhen: !!timestamp soon\n", "Use when deploying", "\n"),
-        ("description: Use when deploying\n", "Use when deploying", "\r\n"),
-        ("description: Use when deploying\n", "Use when deploying", "\r"),
-    ],
-    ids=["colon in a value", "impossible date", "empty int", "unknown bool", "bad timestamp", "CRLF", "CR"],
-)
-def test_workspace_skill_with_loose_frontmatter_loads_like_agno(
-    tmp_path: Path,
-    frontmatter: str,
-    description: str,
-    newline: str,
-) -> None:
-    """Frontmatter that strict YAML refuses falls back to key: value lines, and line endings read, as in LocalSkills."""
-    storage, root = _workspace_skills(tmp_path)
-    skill_dir = root / "deploy-checks"
-    skill_dir.mkdir()
-    content = f"---\nname: deploy-checks\n{frontmatter}---\nRun the smoke test.\nThen check logs.\n"
-    (skill_dir / "SKILL.md").write_bytes(content.replace("\n", newline).encode())
-    (skill_dir / "references").mkdir()
-    (skill_dir / "references" / "notes.md").write_bytes(f"one{newline}two{newline}".encode())
-    _write_skill(root, "good", "Good")
-    skills = _load_agent_skills(tmp_path, storage)
-    assert skills is not None
-    assert _skill_names(skills) == ["deploy-checks", "good"]
-    skill = skills.get_skill("deploy-checks")
-    assert skill is not None
-    assert skill.description == description
-    assert skill.instructions == "Run the smoke test.\nThen check logs."
-    get_reference = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference").entrypoint
-    assert json.loads(get_reference(skill_name="deploy-checks", reference_path="notes.md"))["content"] == "one\ntwo\n"
-
-
-def test_deeply_nested_frontmatter_falls_back_instead_of_crashing(tmp_path: Path) -> None:
-    """Nesting that overflows libyaml's C stack must fall back like LocalSkills, not kill the process."""
-    storage, root = _workspace_skills(tmp_path)
-    (root / "nested").mkdir()
-    depth = 3000
-    (root / "nested" / "SKILL.md").write_text(
-        f"---\nname: nested\ndescription: d\nk: {'[' * depth}{']' * depth}\n---\nbody\n",
-        encoding="utf-8",
-    )
-    _write_skill(root, "good", "Good")
-    assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["good", "nested"]
-
-
-def test_a_skill_removed_while_the_workspace_is_listed_hides_no_other(tmp_path: Path) -> None:
-    """An entry that disappears between listing and inspection is skipped, like LocalSkills skips it."""
-    storage, root = _workspace_skills(tmp_path)
-    for name in ("aaa", "bbb", "ccc"):
-        _write_skill(root, name, name)
-    real_scandir = os.scandir
-
-    @contextmanager
-    def scandir_removing_bbb(path: int | str) -> Iterator[Iterator[os.DirEntry[str]]]:
-        def entries(listing: Iterator[os.DirEntry[str]]) -> Iterator[os.DirEntry[str]]:
-            for entry in listing:
-                # Only the workspace listing scans a descriptor; configured roots scan by pathname.
-                if isinstance(path, int) and entry.name == "bbb":
-                    (root / "bbb" / "SKILL.md").unlink()
-                    (root / "bbb").rmdir()
-                yield entry
-
-        with real_scandir(path) as listing:
-            yield entries(listing)
-
-    with patch("mindroom.tool_system.workspace_skills.os.scandir", scandir_removing_bbb):
-        assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["aaa", "ccc"]
-
-
-def _alias_bomb(levels: int) -> str:
-    lines = ["  l0: &l0 [x, x, x, x, x, x, x, x, x, x]"]
-    lines += [f"  l{level}: &l{level} [{', '.join([f'*l{level - 1}'] * 10)}]" for level in range(1, levels)]
-    return "metadata:\n" + "\n".join(lines) + "\n"
-
-
-def test_frontmatter_aliases_neither_stall_loading_nor_hide_other_skills(tmp_path: Path) -> None:
-    """A few hundred bytes of nested aliases would expand to gigabytes; the untrusted loader refuses aliases."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    (workspace_skills / "alpha").mkdir()
-    (workspace_skills / "alpha" / "SKILL.md").write_text(
-        f"---\nname: alpha\ndescription: Aliased\n{_alias_bomb(7)}---\nbody\n",
-        encoding="utf-8",
-    )
-    _write_skill(workspace_skills, "zeta", "Loaded after the aliased skill")
-    assert _skill_names(_load_agent_skills(tmp_path, storage)) == ["alpha", "zeta"]
-
-
-def test_planted_frontmatter_never_stalls_loading_or_hides_other_skills(tmp_path: Path) -> None:
-    """Whitespace without a closing fence, and integers too long to write back, neither stall loading nor hide skills."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    (workspace_skills / "alpha").mkdir()
-    (workspace_skills / "alpha" / "SKILL.md").write_text("---" + "\n" * 40_000, encoding="utf-8")
-    (workspace_skills / "beta").mkdir()
-    (workspace_skills / "beta" / "SKILL.md").write_text(
-        "---\nname: beta\ndescription: Big number\nmetadata: {size: 0x" + "f" * 4000 + "}\n---\nbody\n",
-        encoding="utf-8",
-    )
-    _write_skill(workspace_skills, "zeta", "Loaded after the planted skills")
-    started = time.monotonic()
-    names = _skill_names(_load_agent_skills(tmp_path, storage))
-    assert time.monotonic() - started < 2
-    assert names == ["alpha", "beta", "zeta"]
-
-
-def test_workspace_frontmatter_stays_within_its_parse_caps(tmp_path: Path) -> None:
-    """The primary parses at most a bounded amount of worker-writable frontmatter per skill and per workspace."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    cap = workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES
-    (workspace_skills / "aaa").mkdir()
-    (workspace_skills / "aaa" / "SKILL.md").write_text(
-        f"---\nname: aaa\ndescription: d\nnote: {'n' * cap}\n---\nbody\n",
-        encoding="utf-8",
-    )
-    per_skill = cap - 64
-    fitting = workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES // per_skill
-    for index in range(fitting + 3):
-        name = f"b-{index:02d}"
-        (workspace_skills / name).mkdir()
-        (workspace_skills / name / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: d\nnote: {'n' * (per_skill - 40)}\n---\nbody\n",
-            encoding="utf-8",
-        )
-    with capture_logs() as logs:
-        names = _skill_names(_load_agent_skills(tmp_path, storage))
-    assert "aaa" not in names
-    assert 0 < len(names) < fitting + 3
-    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
-    assert "Refused a workspace skill whose frontmatter is too large" in events
-    assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
-
-
-def test_refused_skills_spend_the_frontmatter_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Frontmatter that skill loading parses and then refuses still counts, so refused skills cannot parse for free."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    monkeypatch.setattr(workspace_skills_module, "_PARSE_CACHE", workspace_skills_module._ParseCache(8 << 20))
-    padding = "n" * (workspace_skills_module._MAX_WORKSPACE_SKILL_FRONTMATTER_BYTES - 200)
-    refusals = (
-        lambda index: f"name: {'long-' * 20}{index}\ndescription: d\nnote: {padding}",
-        lambda index: f"- item-{index}\n- {padding}",
-        lambda index: f"name: {'long-' * 20}{index}\ndescription: [unclosed\nnote: {padding}",
-    )
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS):
-        (workspace_skills / f"r-{index:03d}").mkdir()
-        (workspace_skills / f"r-{index:03d}" / "SKILL.md").write_text(
-            f"---\n{refusals[index % len(refusals)](index)}\n---\nbody\n",
-            encoding="utf-8",
-        )
-    real = workspace_skills_module.yaml_io.safe_load_untrusted
-    parsed: list[int] = []
-
-    def counted(text: str) -> object:
-        parsed.append(len(text.encode()))
-        return real(text)
-
-    with patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", counted), capture_logs() as logs:
-        assert _skill_names(_load_agent_skills(tmp_path, storage)) == []
-    assert 0 < sum(parsed) <= workspace_skills_module.MAX_WORKSPACE_FRONTMATTER_BYTES
-    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
-    assert "Workspace skill frontmatter exceeds its parse budget; skipping the rest" in events
-
-
-def test_the_parse_cache_keeps_a_bounded_number_of_bytes() -> None:
-    """Cached parses are keyed by digest and evicted past a byte bound, however much distinct text worker code writes."""
-    cache = workspace_skills_module._ParseCache(1 << 20)
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        for index in range(400):
-            # One character outside the Basic Multilingual Plane makes Python keep the text at four bytes a character.
-            cache.parse("text", f"\U0001f600{index} {'n' * 8000}", str)
-        retained = tracemalloc.get_traced_memory()[0] - before
-    finally:
-        tracemalloc.stop()
-    assert retained < 2 << 20
-
-
-def test_cached_parses_are_returned_as_copies() -> None:
-    """Callers may change what a parse returns without changing what the next caller of the same text gets."""
-    text = "metadata: [" + "{}, " * 2000 + "]\n"
-    first = workspace_skills_module._strict_frontmatter(text, trusted=False)
-    first["metadata"].append("changed")
-    assert len(workspace_skills_module._strict_frontmatter(text, trusted=False)["metadata"]) == 2000
-    metadata = workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s")
-    assert metadata == {"a": {"b": 1}}
-    metadata["a"]["b"] = 2
-    assert workspace_skills_module.parse_skill_metadata("{a: {b: 1}}", path="s") == {"a": {"b": 1}}
-    # A YAML escape can put a lone surrogate in metadata, which the refusal then quotes.
-    assert workspace_skills_module.parse_skill_metadata("{a: \ud800}", path="s") is None
-
-
-def test_a_full_library_of_ordinary_skills_loads(tmp_path: Path) -> None:
-    """The count cap, not the frontmatter budget, bounds a library whose frontmatter is the size real skills use."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
-    for index in range(count):
-        name = f"skill-{index:03d}"
-        (workspace_skills / name).mkdir()
-        # Hermes' own skills have about 390 bytes of frontmatter on average and under 500 at the 90th percentile.
-        (workspace_skills / name / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {'Use when handling a common task. ' * 8}\n"
-            "metadata:\n  hermes:\n    tags: [common, task]\n    related_skills: [other-skill]\n---\nSteps.\n",
-            encoding="utf-8",
-        )
-    assert len(_skill_names(_load_agent_skills(tmp_path, storage))) == count
-
-
-def test_unchanged_frontmatter_is_parsed_once_across_loads(tmp_path: Path) -> None:
-    """Every agent build loads the library, so parses of unchanged frontmatter are reused."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    for index in range(3):
-        _write_skill(workspace_skills, f"cached-{index}-{tmp_path.name}", "Cached skill")
-    real = workspace_skills_module.yaml_io.safe_load_untrusted
-    parses: list[str] = []
-
-    def counted(text: str) -> object:
-        parses.append(text)
-        return real(text)
-
-    with patch.object(workspace_skills_module.yaml_io, "safe_load_untrusted", counted):
-        first = _skill_names(_load_agent_skills(tmp_path, storage))
-        parsed_first = len(parses)
-        assert _skill_names(_load_agent_skills(tmp_path, storage)) == first
-    assert parsed_first == 3
-    assert len(parses) == parsed_first
-
-
-def test_planted_skill_files_stay_within_the_read_budget(tmp_path: Path) -> None:
-    """Refused files count toward what a pass reads, so planted ones cannot make it read without bound."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    oversized = "---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n" + "x" * (1 << 20) + "\n"
-    for index in range(20):
-        (workspace_skills / f"a-{index:02d}").mkdir()
-        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_text(oversized[: (1 << 20) - 100], encoding="utf-8")
-    with capture_logs() as logs:
-        _load_agent_skills(tmp_path, storage)
-    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
-    assert "Workspace skill files exceed their read budget; skipping the rest" in events
-    refused = [entry for entry in logs if entry["event"] == "Refused a workspace skill whose frontmatter is too large"]
-    assert len(refused) < 20
-
-
-@pytest.mark.parametrize("body", ["four-byte characters", "invalid UTF-8"])
-def test_the_read_budget_counts_bytes(tmp_path: Path, body: str) -> None:
-    """A pass counts the bytes it reads, of characters that take four bytes or of files that are not UTF-8."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    frontmatter = ("---\nname: big\ndescription: d\nnote: " + "n" * 9000 + "\n---\n").encode()
-    if body == "invalid UTF-8":
-        content = frontmatter + b"x" * (MAX_SKILL_FILE_BYTES - len(frontmatter) - 1) + b"\xff"
-    else:
-        content = frontmatter + ("\U0001f600" * ((MAX_SKILL_FILE_BYTES - len(frontmatter)) // 4 - 1)).encode()
-    for index in range(20):
-        (workspace_skills / f"a-{index:02d}").mkdir()
-        (workspace_skills / f"a-{index:02d}" / "SKILL.md").write_bytes(content)
-    with capture_logs() as logs:
-        _load_agent_skills(tmp_path, storage)
-    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
-    assert "Workspace skill files exceed their read budget; skipping the rest" in events
-
-
-def test_oversized_support_files_are_unlisted_with_one_warning_per_directory(tmp_path: Path) -> None:
-    """Worker code can plant many oversized support files, so each directory warns once instead of once per file."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    _write_skill(workspace_skills, "planted", "Planted support files")
-    for directory in ("references", "scripts"):
-        (workspace_skills / "planted" / directory).mkdir()
-        for index in range(50):
-            with (workspace_skills / "planted" / directory / f"big-{index:02d}.md").open("wb") as handle:
-                handle.truncate(MAX_SKILL_FILE_BYTES + 1)
-        (workspace_skills / "planted" / directory / "small.md").write_text("small")
-    with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
-        assert skills is not None
-    skill = skills.get_skill("planted")
-    assert skill is not None
-    assert (skill.references, skill.scripts) == (["small.md"], ["small.md"])
-    warnings = [entry for entry in logs if entry["event"] == "Not listing workspace skill files over the size limit"]
-    assert sorted((entry["path"].rsplit("/", 1)[-1], entry["refused"]) for entry in warnings) == [
-        ("references", 50),
-        ("scripts", 50),
-    ]
-
-
-def test_chat_finds_only_skill_directories_loading_reads(tmp_path: Path) -> None:
-    """Directories past the skill count never load, and a SKILL.md that is not a regular file never names a skill."""
-    root = tmp_path / "skills"
-    count = workspace_skills_module.MAX_WORKSPACE_SKILLS
-    (root / "a-dir-skill" / "SKILL.md").mkdir(parents=True)
-    for index in range(count + 3):
-        (root / f"s-{index:03d}").mkdir()
-        (root / f"s-{index:03d}" / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\nbody\n")
-    directories = workspace_skills_module.workspace_skill_directories(root)
-    assert "a-dir-skill" not in directories
-    assert directories == [f"s-{index:03d}" for index in range(count - 1)]
-
-
-def test_a_pass_that_reads_a_proposed_change_logs_no_budget_warning(tmp_path: Path) -> None:
-    """A pass that checks a change describes nothing that happened, so only loading itself warns about its budgets."""
-    root = tmp_path / "skills"
-    for index in range(130):
-        _write_skill(root, f"s-{index:03d}", "d" * 1000)
-    proposed = workspace_skills_module.ProposedSkill(
-        "zz-new",
-        "---\nname: zz-new\ndescription: d\n---\nbody\n",
-        scripts=[],
-        references=[],
-    )
-    with capture_logs() as logs:
-        stopped = workspace_skills_module.workspace_skill_load(root, proposed).stopped
-    assert stopped is not None
-    assert stopped.stop == "parse"
-    assert not [entry for entry in logs if entry["event"].endswith("skipping the rest")]
-    with capture_logs() as logs:
-        workspace_skills_module.workspace_skill_load(root)
-    assert [entry["event"] for entry in logs if entry["event"].endswith("skipping the rest")] == [
-        "Workspace skill frontmatter exceeds its parse budget; skipping the rest",
-    ]
-
-
-@pytest.mark.parametrize("field", ["name", "description", "metadata"])
-def test_a_planted_surrogate_escape_never_hides_other_skills(tmp_path: Path, field: str) -> None:
-    """A YAML escape of a lone surrogate is not text, so it fails its own skill's strict parse and nothing else."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    _write_skill(workspace_skills, "good-one", "Good one")
-    fields = {"name": "planted", "description": "Planted", "metadata": "{}"}
-    fields[field] = '"x \\ud800"'
-    frontmatter = "\n".join(f"{key}: {value}" for key, value in fields.items())
-    (workspace_skills / "planted").mkdir()
-    (workspace_skills / "planted" / "SKILL.md").write_text(f"---\n{frontmatter}\n---\nbody\n", encoding="utf-8")
-    _write_skill(workspace_skills, "good-two", "Good two")
-    names = _skill_names(_load_agent_skills(tmp_path, storage))
-    assert {"good-one", "good-two"} <= set(names)
-    assert set(workspace_skills_module.workspace_skill_load(workspace_skills).skills) >= {"good-one", "good-two"}
-    assert library.archive_unused_skills(workspace_skills, archive_after_days=30, now=datetime.now(UTC)) == []
-    current = library.read_skill_file(workspace_skills, "good-one")
-    assert current is not None
-    edited = current.content.replace("# Body", "# Steps")
-    library.write_skill_file(
-        workspace_skills,
-        "good-one",
-        "SKILL.md",
-        edited,
-        expected_digest=current.digest,
-        learner=False,
-    )
-
-
-def test_json5_metadata_counts_at_its_parse_weight() -> None:
-    """JSON5 parses slower per byte than YAML, so a skill's JSON5 metadata counts more toward the parse budget."""
-    metadata = "{openclaw: {requires: {bins: [git]}}}"
-    assert workspace_skills_module.metadata_surcharge(metadata) == 2 * len(metadata)
-    assert workspace_skills_module.metadata_surcharge({"a": 1}) == 0
-
-
-def test_configured_skill_roots_accept_yaml_aliases(tmp_path: Path) -> None:
-    """Operator-owned roots keep the trusted YAML loader, so a skill using aliases stays listed."""
-    skill_dir = tmp_path / "aliased"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: aliased\ndescription: &d Shared words\nmetadata: {summary: *d}\n---\nbody\n",
-        encoding="utf-8",
-    )
-    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path])] == ["aliased"]
-
-
-def test_a_skill_file_directly_in_the_workspace_skills_directory_is_ignored(tmp_path: Path) -> None:
-    """Only skills/<name>/SKILL.md loads; LocalSkills loaded skills/SKILL.md alone and hid every skill beside it."""
-    storage, root = _workspace_skills(tmp_path)
-    (root / "SKILL.md").write_text("---\nname: rooted\ndescription: d\n---\nbody\n", encoding="utf-8")
-    _write_skill(root, "good", "Good")
-    with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
-        assert skills is not None
-    assert _skill_names(skills) == ["good"]
-    assert any(log["event"] == "Ignoring SKILL.md directly in the workspace skills directory" for log in logs)
-
-
-def test_workspace_support_files_too_large_to_read_are_left_out(tmp_path: Path) -> None:
-    """A support file over the read limit is not offered, with a warning that names its directory and the file."""
-    storage, root = _workspace_skills(tmp_path)
-    skill_path = _write_skill(root, "guide", "Guide")
-    (skill_path.parent / "references").mkdir()
-    (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
-    (skill_path.parent / "references" / "manual.md").write_text("x" * (MAX_SKILL_FILE_BYTES + 1), encoding="utf-8")
-    with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
-    assert skills is not None
-    skill = skills.get_skill("guide")
-    assert skill is not None
-    assert skill.references == ["notes.md"]
-    refused = [entry for entry in logs if entry["event"] == "Not listing workspace skill files over the size limit"]
-    assert [(entry["path"].endswith("guide/references"), entry["first"]) for entry in refused] == [(True, "manual.md")]
-
-
-def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
-    """Loading a workspace skill feeds the learner's inactivity clock; configured skill roots stay untouched."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    _write_skill(workspace_skills, "local", "Workspace skill")
-    _write_skill(tmp_path / "global", "shared", "Configured skill")
-    skills = _load_agent_skills(tmp_path, storage, ["shared"])
-    assert skills is not None
-    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
-    get_instructions(skill_name="local")
-    get_instructions(skill_name="local")
-    get_instructions(skill_name="shared")
-
-    usage = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))
-    assert usage["local"]["use_count"] == 2
-    assert "shared" not in usage
-    assert not (tmp_path / "global" / ".usage.json").exists()
-
-
-@pytest.mark.asyncio
-async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
-    """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    _write_skill(workspace_skills, "local", "Workspace skill")
-    skills = _load_agent_skills(tmp_path, storage, [])
-    assert skills is not None
-    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
-    writers: list[threading.Thread] = []
-    record = skills_module.record_skill_use
-
-    def spy(skill_path: Path) -> None:
-        writers.append(threading.current_thread())
-        record(skill_path)
-
-    with patch.object(skills_module, "record_skill_use", spy):
-        get_instructions(skill_name="local")
-        assert await wait_for_background_tasks(5)
-    assert writers
-    assert threading.main_thread() not in writers
-    assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1
 
 
 def _get_skill_reference(skills: Skills, skill_name: str, reference_path: str) -> dict[str, object]:
@@ -1036,7 +569,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
     (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
     _write_skill(workspace_skills, "own", "Own skill")
 
-    skills = _load_agent_skills(tmp_path, storage)
+    skills = _load_workspace_only(tmp_path, storage)
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
@@ -1067,12 +600,10 @@ def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Pa
                 skill_file.truncate(65 << 20)
 
     with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
+        skills = _load_workspace_only(tmp_path, storage)
 
     assert _skill_names(skills) == []
-    if layout == "linked_skills_dir":
-        assert any(entry["event"] == "Workspace skill root is unavailable" for entry in logs)
-    else:
+    if layout != "linked_skills_dir":
         assert any(str(entry.get("path", "")).endswith("planted/SKILL.md") for entry in logs)
 
 
@@ -1089,7 +620,7 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     (references / "planted.md").symlink_to(secret)
     os.mkfifo(references / "pipe.md")
 
-    skills = _load_agent_skills(tmp_path, storage)
+    skills = _load_workspace_only(tmp_path, storage)
     assert skills is not None
     skill = skills.get_skill("docs")
     assert skill is not None
@@ -1098,11 +629,9 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     (references / "swapped.md").symlink_to(secret)
 
     assert _get_skill_reference(skills, "docs", "guide.md")["content"] == "own guide"
-    with capture_logs() as logs:
-        swapped = _get_skill_reference(skills, "docs", "swapped.md")
+    swapped = _get_skill_reference(skills, "docs", "swapped.md")
     assert "victim-only note" not in json.dumps(swapped)
     assert "error" in swapped
-    assert any(str(entry.get("path", "")).endswith("references/swapped.md") for entry in logs)
     assert "error" in _get_skill_reference(skills, "docs", "planted.md")
 
 
@@ -1377,16 +906,15 @@ def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
     """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    for index in range(workspace_skills_module.MAX_WORKSPACE_SKILLS + 1):
+    for index in range(skills_module.MAX_WORKSPACE_SKILLS + 1):
         _write_skill(workspace_skills, f"skill-{index:04d}", "Numbered skill")
 
     with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
+        skills = _load_workspace_only(tmp_path, storage)
 
-    assert len(_skill_names(skills)) == workspace_skills_module.MAX_WORKSPACE_SKILLS
+    assert len(_skill_names(skills)) == skills_module.MAX_WORKSPACE_SKILLS
     assert any(
-        entry["log_level"] == "warning" and entry.get("limit") == workspace_skills_module.MAX_WORKSPACE_SKILLS
-        for entry in logs
+        entry["log_level"] == "warning" and entry.get("limit") == skills_module.MAX_WORKSPACE_SKILLS for entry in logs
     )
 
 
@@ -1404,7 +932,7 @@ def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Pa
             skill_file.write("x" * (900 << 10))
 
     with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
+        skills = _load_workspace_only(tmp_path, storage)
 
     names = _skill_names(skills)
     assert "huge" not in names
@@ -1418,10 +946,10 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
     """Descriptions reach every system prompt, so they are capped and counted with the rest of each skill."""
     storage, workspace_skills = _workspace_skills(tmp_path)
     for index in range(20):
-        _write_skill(workspace_skills, f"skill-{index:02d}", "d" * 4000)
+        _write_skill(workspace_skills, f"skill-{index:02d}", "d" * (900 << 10))
 
     with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
+        skills = _load_workspace_only(tmp_path, storage)
 
     assert skills is not None
     assert len(skills.get_system_prompt_snippet()) < 1 << 20
@@ -1447,7 +975,59 @@ def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Pa
             (skill_dir / "scripts" / f"script-{index:05d}-{'s' * 150}.sh").touch()
 
     with capture_logs() as logs:
-        skills = _load_agent_skills(tmp_path, storage)
+        skills = _load_workspace_only(tmp_path, storage)
 
     assert skills is None or len(skills.get_system_prompt_snippet()) < 1 << 20
     assert any(entry["log_level"] == "warning" for entry in logs)
+
+
+def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
+    """Loading a workspace skill or one of its files feeds the learner's inactivity clock; configured skills do not."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    skill_path = _write_skill(workspace_skills, "local", "Workspace skill")
+    (skill_path.parent / "references").mkdir()
+    (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
+    _write_skill(tmp_path / "global", "shared", "Configured skill")
+    skills = build_agent_skills(
+        "code",
+        _base_config(["shared"]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    assert get_instructions is not None
+    get_instructions(skill_name="local")
+    get_instructions(skill_name="shared")
+    assert _get_skill_reference(skills, "local", "notes.md")["content"] == "notes"
+
+    usage = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))
+    assert usage["local"]["use_count"] == 2
+    assert "shared" not in usage
+    assert not (tmp_path / "global" / ".usage.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
+    """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "local", "Workspace skill")
+    skills = _load_workspace_only(tmp_path, storage)
+    assert skills is not None
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    assert get_instructions is not None
+    writers: list[threading.Thread] = []
+    record = skills_module.record_skill_use
+
+    def spy(skill_path: Path) -> None:
+        writers.append(threading.current_thread())
+        record(skill_path)
+
+    with patch.object(skills_module, "record_skill_use", spy):
+        get_instructions(skill_name="local")
+        assert await wait_for_background_tasks(5)
+    assert writers
+    assert threading.main_thread() not in writers
+    assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1

@@ -17,43 +17,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from yaml import YAMLError
-
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.redaction import find_credential
-from mindroom.tool_system.workspace_skills import (
-    MAX_SKILL_FILE_BYTES,
-    MAX_WORKSPACE_FRONTMATTER_BYTES,
-    MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
-    MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
-    MAX_WORKSPACE_SKILL_NAME_CHARS,
-    MAX_WORKSPACE_SKILL_READ_BYTES,
-    MAX_WORKSPACE_SKILLS,
-    MAX_WORKSPACE_SKILLS_BYTES,
-    SKILL_FILENAME,
-    BudgetStop,
-    ProposedSkill,
-    SkillFrontmatterTooLargeError,
-    SkillPassBudget,
+from mindroom.tool_system.skill_usage import (
     SkillUsage,
     forget_missing_skill_usage,
-    frontmatter_charge,
-    frontmatter_name,
-    list_entries,
-    list_support_files,
     load_skill_usage,
-    metadata_surcharge,
-    normalized_newlines,
-    open_skills_root,
+    update_skill_usages,
+)
+from mindroom.tool_system.skills import (
+    MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
+    MAX_WORKSPACE_SKILL_FILE_BYTES,
+    MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
+    MAX_WORKSPACE_SKILL_NAME_CHARS,
+    MAX_WORKSPACE_SKILLS,
+    SKILL_FILENAME,
+    SkillMarkdownError,
     parse_skill_markdown,
     parse_skill_metadata,
-    read_text_at,
-    support_entry_count,
-    update_skill_usages,
-    workspace_skill_load,
-    workspace_skill_name,
+    workspace_skill_file_names,
 )
 
 if TYPE_CHECKING:
@@ -75,18 +59,6 @@ _HISTORY_KEEP = 10
 
 class SkillEditError(ValueError):
     """A refused skill edit, worded for the model that asked for it."""
-
-
-# Each budget loading can stop at, and what shrinks a skill's share of it.
-_LOADING_BUDGETS: dict[BudgetStop, tuple[str, str]] = {
-    "prompt": (f"the workspace's {MAX_WORKSPACE_SKILLS_BYTES >> 20} MiB prompt budget", "shorten skills"),
-    "read": (f"the {MAX_WORKSPACE_SKILL_READ_BYTES >> 20} MiB of SKILL.md files it reads", "shorten skills"),
-    "parse": (
-        f"the workspace's {MAX_WORKSPACE_FRONTMATTER_BYTES >> 10} KiB frontmatter parse budget",
-        "move detail from frontmatter into skill bodies",
-    ),
-}
-_NAMED_SKILLS = 5
 
 
 @dataclass(frozen=True)
@@ -124,16 +96,10 @@ def _validate_skill_name(name: str) -> None:
 
 
 def _parsed_markdown(content: str) -> tuple[dict[str, Any], str]:
-    """Return an edited SKILL.md's strict frontmatter and body, refusing what skill loading could not read."""
-    if not content.startswith("---"):
-        msg = "SKILL.md must start with YAML frontmatter (---)."
-        raise SkillEditError(msg)
+    """Return an edited SKILL.md's frontmatter and body, refusing what skill loading could not read."""
     try:
         return parse_skill_markdown(content)
-    except SkillFrontmatterTooLargeError as exc:
-        msg = f"{exc}; keep the frontmatter to the name, description, and metadata, and move detail into the body."
-        raise SkillEditError(msg) from exc
-    except (TypeError, YAMLError) as exc:
+    except SkillMarkdownError as exc:
         msg = f"SKILL.md frontmatter is not a valid YAML mapping: {exc}"
         raise SkillEditError(msg) from exc
 
@@ -149,12 +115,6 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
     frontmatter, body = _parsed_markdown(content)
     description = frontmatter.get("description")
     frontmatter_name = frontmatter.get("name")
-    if len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
-        msg = (
-            f"Skill loading refuses names over {MAX_WORKSPACE_SKILL_NAME_CHARS} characters, and so does this skill's "
-            "directory name; rename the directory to repair the skill."
-        )
-        raise SkillEditError(msg)
     # Like skill loading, surrounding whitespace is not part of the name.
     if not isinstance(frontmatter_name, str) or frontmatter_name.strip() != name:
         msg = f"Frontmatter name must be exactly {name!r}."
@@ -181,8 +141,8 @@ def _validate_markdown(name: str, content: str, *, new: bool, learner: bool) -> 
 
 
 def _validate_content(relative_path: str, content: str) -> None:
-    if len(content.encode()) > MAX_SKILL_FILE_BYTES:
-        msg = f"{relative_path} exceeds {MAX_SKILL_FILE_BYTES} bytes."
+    if len(content.encode()) > MAX_WORKSPACE_SKILL_FILE_BYTES:
+        msg = f"{relative_path} exceeds {MAX_WORKSPACE_SKILL_FILE_BYTES} bytes."
         raise SkillEditError(msg)
     if (position := find_credential(content)) is not None:
         line = content.count("\n", 0, position) + 1
@@ -205,6 +165,33 @@ def _split_relative_path(relative_path: str) -> tuple[str | None, str]:
 
 
 @contextmanager
+def _open_skills_root(skills_root: Path, *, create: bool = False) -> Iterator[int]:
+    """Pin ``<workspace>/skills`` below its workspace without following links."""
+    with open_directory_within_root(skills_root.parent, skills_root.name, create=create) as root_fd:
+        yield root_fd
+
+
+def _entries(directory_fd: int, *, directories: bool) -> list[str]:
+    """Return sorted visible real directories or regular files, never links."""
+    with os.scandir(directory_fd) as entries:
+        return sorted(
+            entry.name
+            for entry in entries
+            if not entry.name.startswith(".")
+            and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
+        )
+
+
+def _read_text(directory_fd: int, relative_path: str) -> str | None:
+    """Return one bounded UTF-8 regular file without following links, or None when it is absent."""
+    try:
+        data = read_regular_file_within_root(directory_fd, relative_path, max_bytes=MAX_WORKSPACE_SKILL_FILE_BYTES)
+    except FileNotFoundError:
+        return None
+    return data.decode("utf-8")
+
+
+@contextmanager
 def _open_skill(root_fd: int, directory: str) -> Iterator[int]:
     """Open one visible skill directory; new learned skills are named by the stricter creation rule."""
     if "/" in directory or directory.startswith("."):
@@ -218,61 +205,30 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     """Return one workspace skill file and whether its skill is learner-owned, or None when absent."""
     _split_relative_path(relative_path)
     try:
-        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-            usage = load_skill_usage(root_fd).get(name, SkillUsage())
-            return _read_skill_file(skill_fd, name, relative_path, usage, budget=SkillPassBudget())
+        with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+            return _read_skill_file(skill_fd, name, relative_path, load_skill_usage(root_fd).get(name, SkillUsage()))
     except FileNotFoundError:
         return None
 
 
-def _read_skill_file(
-    skill_fd: int,
-    name: str,
-    relative_path: str,
-    usage: SkillUsage,
-    *,
-    budget: SkillPassBudget,
-) -> SkillFile | None:
-    """Read one skill file with its skill's ownership, reading and parsing SKILL.md only while ``budget`` lasts."""
-    markdown = budget.read_markdown(skill_fd)
-    if budget.read_spent:
-        # A pass over many skills leaves SKILL.md files past its read limit unread, and pins it cannot read must hold.
-        return None
-    content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
+def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillUsage) -> SkillFile | None:
+    markdown = _read_text(skill_fd, SKILL_FILENAME)
+    content = markdown if relative_path == SKILL_FILENAME else _read_text(skill_fd, relative_path)
     if content is None:
         return None
-    digest = content_digest(content)
-    if markdown is None:
-        return SkillFile(content=content, digest=digest, learned=_learner_owns({}, usage, path=name), name=name)
-    if not budget.spend_parse(frontmatter_charge(markdown)):
-        # A pass over many skills leaves frontmatter past its budget unparsed, and pins it cannot read must still hold.
-        return SkillFile(content=content, digest=digest, learned=False, name=name)
     try:
-        frontmatter = parse_skill_markdown(markdown)[0]
-    except (TypeError, ValueError, YAMLError):
-        # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's; an edit
-        # keeps the name skill loading reads loosely.
-        return SkillFile(
-            content=content,
-            digest=digest,
-            learned=False,
-            name=_edit_name(workspace_skill_name(markdown, name), name),
-        )
-    metadata_parsed = budget.spend_parse(metadata_surcharge(frontmatter.get("metadata")))
+        frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
+    except SkillMarkdownError:
+        # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's.
+        return SkillFile(content=content, digest=content_digest(content), learned=False, name=name)
+    skill_name = frontmatter.get("name")
     return SkillFile(
         content=content,
-        digest=digest,
-        learned=metadata_parsed and _learner_owns(frontmatter, usage, path=name),
-        name=_edit_name(frontmatter_name(frontmatter, name), name),
+        digest=content_digest(content),
+        learned=_learner_owns(frontmatter, usage, path=name),
+        # An edit keeps the name the skill loads under, which may differ from its directory for an adopted skill.
+        name=skill_name.strip() if isinstance(skill_name, str) and skill_name.strip() else name,
     )
-
-
-def _edit_name(loaded_name: str | None, directory: str) -> str:
-    """Return the name an edit keeps: the one the skill loads under, or its directory's when loading reads none."""
-    # Loading refuses a skill whose name is too long, so an edit falls back to the directory's and can repair it.
-    if loaded_name is not None and len(loaded_name) <= MAX_WORKSPACE_SKILL_NAME_CHARS:
-        return loaded_name
-    return directory
 
 
 def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> frozenset[str]:
@@ -281,10 +237,8 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
     if not directories:
         return frozenset()
     learned: set[str] = set()
-    # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
-    budget = SkillPassBudget()
     try:
-        with open_skills_root(skills_root) as root_fd:
+        with _open_skills_root(skills_root) as root_fd:
             usage = load_skill_usage(root_fd)
             for directory in directories:
                 try:
@@ -294,7 +248,6 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
                             directory,
                             SKILL_FILENAME,
                             usage.get(directory, SkillUsage()),
-                            budget=budget,
                         )
                 except (OSError, ValueError):
                     continue
@@ -308,11 +261,11 @@ def learned_skill_directories(skills_root: Path, directories: Iterable[str]) -> 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
     """Return the support files one workspace skill offers as ``directory/filename``, like its skill loading lists them."""
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
         return [
             f"{directory}/{filename}"
             for directory in sorted(_SUPPORT_DIRECTORIES)
-            for filename in list_support_files(skill_fd, skills_root / name, directory)
+            for filename in workspace_skill_file_names(skill_fd, directory)
         ]
 
 
@@ -327,8 +280,8 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
     now = datetime.now(UTC)
     # Workspaces of shared agents without file memory exist only once something is written into them.
     skills_root.parent.mkdir(parents=True, exist_ok=True)
-    with open_skills_root(skills_root, create=True) as root_fd:
-        directories = list_entries(root_fd, directories=True)
+    with _open_skills_root(skills_root, create=True) as root_fd:
+        directories = _entries(root_fd, directories=True)
         if name in {entry.lower() for entry in directories}:
             msg = f"A workspace skill directory named {name!r} already exists."
             raise SkillEditError(msg)
@@ -338,7 +291,6 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
                 "improve or merge an existing skill instead."
             )
             raise SkillEditError(msg)
-        _require_loadable(skills_root, name, content, skill_fd=None)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
@@ -347,60 +299,6 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
             root_fd,
             {name: lambda _usage: SkillUsage(created_by="learner" if learner else None, created_at=now)},
         )
-
-
-def _require_loadable(
-    skills_root: Path,
-    name: str,
-    markdown: str,
-    *,
-    skill_fd: int | None,
-    added: tuple[str, str] | None = None,
-) -> None:
-    """Refuse a change after which skill loading would skip a skill it loads now, or a SKILL.md the change writes.
-
-    Loading itself decides, reading the changed directory as the change would leave it, so the check counts exactly
-    what loading counts, in a workspace already past a budget too.
-    """
-    listings = {
-        kind: list_support_files(skill_fd, skills_root / name, kind) if skill_fd is not None else []
-        for kind in ("scripts", "references")
-    }
-    if added is not None:
-        kind, filename = added
-        listings[kind] = [*listings[kind], filename]
-    required = set(workspace_skill_load(skills_root).skills) | ({name} if added is None else set())
-    proposed = ProposedSkill(name, markdown, scripts=listings["scripts"], references=listings["references"])
-    after = workspace_skill_load(skills_root, proposed)
-    missing = sorted(required - set(after.skills))
-    if not missing:
-        return
-    if after.stopped is None:
-        msg = f"Skill loading would not load {_skill_names(missing)} after this change."
-        raise SkillEditError(msg)
-    budget, remedy = _LOADING_BUDGETS[after.stopped.stop]
-    # Loading reads directories in sorted order, so one it stops before is never reached, whatever the change says.
-    if after.stopped.directory < name:
-        msg = (
-            f"Skill loading already stops at {budget} before it reaches {name!r}, because the skills it loads first "
-            f"spend it; {remedy} among those first."
-        )
-    elif after.stopped.directory == name:
-        msg = (
-            f"After this change, {name!r} itself would cross {budget}, and skill loading would skip "
-            f"{_skill_names(missing)}; {remedy} in {name!r}."
-        )
-    else:
-        msg = (
-            f"After this change, skill loading would stop at {budget} and skip {_skill_names(missing)}; "
-            f"{remedy} instead."
-        )
-    raise SkillEditError(msg)
-
-
-def _skill_names(names: list[str]) -> str:
-    shown = ", ".join(repr(name) for name in names[:_NAMED_SKILLS])
-    return shown if len(names) <= _NAMED_SKILLS else f"{shown} and {len(names) - _NAMED_SKILLS} more"
 
 
 def write_skill_file(
@@ -415,37 +313,30 @@ def write_skill_file(
     """Replace or add one file of a skill whose current version the write is based on."""
     directory, filename = _split_relative_path(relative_path)
     _validate_content(relative_path, content)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
         markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
-        # The skill tools serve files with normalized line endings, so only a change to that text is a change.
-        if current is not None and normalized_newlines(current.content) == normalized_newlines(content):
+        if current is not None and current.content == content:
             # Like Hermes, an unchanged file is refused, so it never reads as an update or resets the skill's age.
             msg = f"No change was made because the new {relative_path} is identical to the current one."
             raise SkillEditError(msg)
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False, learner=learner)
-            _require_loadable(skills_root, name, content, skill_fd=skill_fd)
-        elif current is None:
-            if support_entry_count(skill_fd, directory) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
-                msg = (
-                    f"{directory}/ already lists {MAX_WORKSPACE_SKILL_LISTING_ENTRIES} files, the most skill loading "
-                    "offers; extend an existing file instead."
-                )
-                raise SkillEditError(msg)
-            _require_loadable(
-                skills_root,
-                name,
-                markdown.content,
-                skill_fd=skill_fd,
-                added=(directory, filename),
+        elif (
+            current is None
+            and len(workspace_skill_file_names(skill_fd, directory)) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES
+        ):
+            msg = (
+                f"{directory}/ already lists {MAX_WORKSPACE_SKILL_LISTING_ENTRIES} files, the most skill loading "
+                "offers; extend an existing file instead."
             )
+            raise SkillEditError(msg)
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
             _write_keeping_mode(skill_fd, filename, content)
         else:
-            if directory not in list_entries(skill_fd, directories=True):
+            if directory not in _entries(skill_fd, directories=True):
                 os.mkdir(directory, dir_fd=skill_fd)
             with open_directory_within_root(skill_fd, directory) as support_fd:
                 _write_keeping_mode(support_fd, filename, content)
@@ -465,7 +356,7 @@ def remove_skill_file(
     if directory is None:
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with _open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
         _markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest, learner=learner)
         if current is None:
             msg = f"{relative_path} does not exist."
@@ -487,7 +378,7 @@ def _require_writable(
 ) -> tuple[SkillFile, SkillFile | None]:
     """Return the skill's SKILL.md and the current target, which must be the version the write is based on."""
     usage = load_skill_usage(root_fd).get(name, SkillUsage())
-    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage, budget=SkillPassBudget())
+    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage)
     if markdown is None:
         msg = f"Skill {name!r} has no SKILL.md."
         raise SkillEditError(msg)
@@ -497,7 +388,7 @@ def _require_writable(
             "your reply instead of editing it."
         )
         raise SkillEditError(msg)
-    current = _read_skill_file(skill_fd, name, relative_path, usage, budget=SkillPassBudget())
+    current = _read_skill_file(skill_fd, name, relative_path, usage)
     if current is not None and current.digest != expected_digest:
         loader = (
             "get_skill_instructions" if relative_path == SKILL_FILENAME else "get_skill_reference or get_skill_script"
@@ -533,7 +424,7 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     with open_directory_within_root(root_fd, f"{_HISTORY_DIRNAME}/{name}", create=True) as history_fd:
         atomic_write_bytes_at(history_fd, f"{stamp}--{relative_path.replace('/', '--')}", content.encode())
-        for stale in list_entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
+        for stale in _entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
             # Another process sharing the workspace may prune the same snapshot first.
             with suppress(FileNotFoundError):
                 os.unlink(stale, dir_fd=history_fd)
@@ -549,11 +440,12 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     """
     if not skills_root.is_dir():
         return []
-    # Only skills that loading reads can be learned or used, and reading no more bounds what the pass parses.
-    loaded = list(workspace_skill_load(skills_root).skills) if archive_after_days > 0 else []
-    with open_skills_root(skills_root) as root_fd:
-        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now) if loaded else []
-        forget_missing_skill_usage(root_fd)
+    with _open_skills_root(skills_root) as root_fd:
+        directories = _entries(root_fd, directories=True)
+        # Loading reads only the first directories, so only those can be learned or used.
+        loaded = directories[:MAX_WORKSPACE_SKILLS] if archive_after_days > 0 else []
+        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now)
+        forget_missing_skill_usage(root_fd, set(directories) - set(archived))
     return archived
 
 
@@ -561,18 +453,10 @@ def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: in
     archived: list[str] = []
     first_seen: list[str] = []
     usage = load_skill_usage(root_fd)
-    # Unchanged skills cost what loading charged them, and files swapped in since cannot make this pass parse more.
-    budget = SkillPassBudget()
     for name in loaded:
         try:
             with open_directory_within_root(root_fd, name) as skill_fd:
-                markdown = _read_skill_file(
-                    skill_fd,
-                    name,
-                    SKILL_FILENAME,
-                    usage.get(name, SkillUsage()),
-                    budget=budget,
-                )
+                markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))
         except (OSError, ValueError) as exc:
             # One unreadable user skill must not block archival, and with it every review of the workspace.
             logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))

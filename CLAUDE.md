@@ -192,7 +192,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
-| `tool_system/workspace_skills.py` | No-follow workspace skill discovery, reads, and usage telemetry |
+| `tool_system/skill_usage.py` | Workspace skill usage records the skill learner's archival reads as an inactivity clock |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |

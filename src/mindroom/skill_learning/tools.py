@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import weakref
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never
@@ -29,13 +29,7 @@ from mindroom.skill_learning.library import (
     support_file_paths,
     write_skill_file,
 )
-from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import (
-    SKILL_FILENAME,
-    normalized_newlines,
-    parse_skill_markdown,
-    workspace_skill_directories,
-)
+from mindroom.tool_system.skills import SKILL_FILENAME, build_agent_skills, list_skill_listings, parse_skill_markdown
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -121,28 +115,6 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
     return SkillCatalog(skills, entries, frozenset(reserved))
 
 
-def _chat_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
-    """Return the agent's skills, with every workspace skill directory first under its own name.
-
-    Like Hermes' foreground skill_manage, which finds a skill by its directory, chat reaches a workspace skill that
-    this host does not load, one whose frontmatter is broken, one that overrides a configured skill, and an adopted
-    skill by its directory; configured and adopted skills stay reachable under the names the agent loads them by.
-    """
-    catalog = load_skill_catalog(config, runtime_paths, agent_name, skills_root)
-    entries = dict(catalog.entries)
-    loaded = {entry.directory: entry for entry in catalog.entries.values() if entry.directory is not None}
-    for directory in workspace_skill_directories(skills_root):
-        # Chat only changes files, so it never shows or checks what an unloaded skill says or who owns it.
-        entries[directory] = loaded.get(directory) or _CatalogEntry(
-            name=directory,
-            description="",
-            directory=directory,
-            learned=False,
-            instructions="",
-        )
-    return replace(catalog, entries=entries)
-
-
 @dataclass
 class ReviewProgress:
     """The skills a review changed, recorded as each write lands."""
@@ -159,7 +131,7 @@ async def manage_skill_in_chat(
 ) -> str:
     """Apply one chat-time change to the library as it is once this call's turn comes."""
     async with library_turn(skills_root):
-        catalog = await asyncio.to_thread(_chat_catalog, config, runtime_paths, agent_name, skills_root)
+        catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
         return await SkillTools(skills_root, catalog.entries, catalog.reserved_names)._apply(change)
 
 
@@ -246,7 +218,7 @@ class SkillTools:
             "file_path": relative_path,
             "owner": "learner" if loaded.learned else "user",
             "support_files": await asyncio.to_thread(support_file_paths, self.skills_root, entry.directory),
-            "content": normalized_newlines(loaded.content),
+            "content": loaded.content,
         }
 
     async def skill_manage(
@@ -349,8 +321,7 @@ class SkillTools:
             name=name,
             action="created",
         )
-        # Parsing takes time on long content, so it runs off the event loop like the write.
-        frontmatter, instructions = await asyncio.to_thread(parse_skill_markdown, content)
+        frontmatter, instructions = parse_skill_markdown(content)
         self.catalog[name] = _CatalogEntry(
             name,
             frontmatter["description"],
@@ -416,11 +387,9 @@ def _patched(
     if read is None:
         msg = f"Load {relative_path} of {directory!r} with {_loader(relative_path)} before patching it."
         raise SkillEditError(msg)
-    # The skill tools serve files with normalized line endings, so like Hermes' read_text and write_text, a patch
-    # matches and writes that text.
-    content = normalized_newlines(read.content)
-    old = normalized_newlines(_required(old_string, "old_string"))
-    new = normalized_newlines(_required(new_string, "new_string"))
+    content = read.content
+    old = _required(old_string, "old_string")
+    new = _required(new_string, "new_string")
     matches = content.count(old) if old else 0
     if matches == 0 or (matches > 1 and not replace_all):
         problem = "was not found" if matches == 0 else f"occurs {matches} times; add context or set replace_all"

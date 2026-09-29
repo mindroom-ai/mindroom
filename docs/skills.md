@@ -90,19 +90,8 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 Workspace skills are read through no-follow descriptors because worker code can share the workspace.
-Workspace skill files larger than 1 MiB are not read: such a `SKILL.md` does not load, and such a support file is not listed, with one warning for each support directory that holds any.
-A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
-`skill_manage` refuses a change that would cross one of these limits, so these limits never make loading skip a skill it writes.
-It decides by running skill loading on the workspace as the change would leave it, so in a workspace already past a budget, for example from hand edits, it accepts a change only when loading would still load every skill it loads now, and its refusal names the skills loading would skip.
-The primary parses workspace frontmatter, which worker code can write, with bounded work: at most 8 KiB of frontmatter per skill and 128 KiB per workspace, with JSON5 metadata counting three times its size because it parses that much slower, so a skill with larger frontmatter is refused and skills past the workspace budget are skipped, each with a warning.
-Frontmatter counts toward the workspace budget once it is parsed, including for a skill that loading then refuses, such as one whose name is too long, and `skill_manage` refuses a change that would push the workspace over it.
-A pass stops reading `SKILL.md` files once it has read more than 16 MiB, counting refused and non-UTF-8 ones, and `skill_manage` refuses a change that would cross that limit.
-Parses of unchanged frontmatter and metadata are reused across loads from a cache that keeps at most 8 MiB.
-Reading which skills the learner owns, for a skill catalog or for archival, is a pass with its own read and parse budgets of the same sizes, and a skill past them reads as user-owned, so a pin in it still holds.
-Workspace frontmatter may not use YAML aliases, merge keys, flow collections nested more than 32 levels deep, base-60 integers, integer literals over 1000 characters, or escapes of lone surrogates, which can expand, take superlinear time to parse, or fail to encode; a skill that uses them loads through the `key: value` fallback, and `skill_manage` refuses it.
-Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
-The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
-Each workspace skill lives in its own directory, `skills/<name>/SKILL.md`; a `SKILL.md` placed directly in `skills/` is ignored with a warning.
+A workspace loads at most 256 skills within an 8 MiB budget for names, descriptions, instructions, metadata, and listings; files over 1 MiB are not read, a name over 64 characters is refused, a description is cut to 1024 characters, and each support directory lists at most 256 files, each with a warning.
+Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 ## Authoring skills as an agent
 
@@ -247,13 +236,12 @@ Other agents can list `skill_manage` in `tools` to save skills in chat; like `se
 It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
 Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
 In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
-Like Hermes' `_find_skill`, chat finds a skill by its workspace directory name first, so it also reaches a workspace skill this host does not load, for example because its requirements are unmet or its frontmatter is broken, and configured skills are found by their names.
-An edit of `SKILL.md` keeps the name the skill loads under, or its directory's name when it has none or one too long to load, so an edit can repair a skill that loading refuses.
+An edit of `SKILL.md` keeps the name the skill loads under.
 Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
 The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
-Skill tools serve files with normalized line endings, so like Hermes' `skill_manage`, a patch matches that text and writes the file with LF line endings.
 Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
 A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters, and one the review creates also needs the `learned` marker shown below.
+`skill_manage` refuses a new skill past the 256-skill count and a support file past the 256-file listing; loading skips skills past the prompt budget with a warning, as it does for hand-written skills.
 Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, or a quoted value of at least 20 characters, including a passphrase, of an api-key, token, secret, or password setting such as `password: "..."`, `api_key="..."`, or `{"api_key": "..."}`.
 This is a heuristic for common formats, not a guarantee: like Hermes' guard, it lets an unusual secret format or an unquoted value of an unknown format, such as `API_KEY=...` in an environment file, pass.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, environment variable names like `api_key = "OPENAI_API_KEY"` or `postgres://app:DB_PASSWORD@localhost/app`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
@@ -284,8 +272,7 @@ Archived directories are named `<skill>--<timestamp>`; move one back to `skills/
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
-A field that cannot be read is dropped without affecting the rest of its record or other records, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
-A record that is not an object, or that has a key that is not valid Unicode, is ignored and left in place until its own skill's record is next updated, and a record whose hand-added fields cannot all be written back loses them at its next update while keeping its ownership and counts.
+A record that does not validate, for example after a hand edit, reads as absent without affecting other records.
 A telemetry write that fails, for example on a full disk, is logged and never fails the skill change it records.
 A file that cannot be read at all, for example after a hand edit left invalid JSON, reads as empty and is never rewritten, so a person can repair it without losing its records.
 Rewrites keep a file's existing permissions.

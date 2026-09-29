@@ -4670,15 +4670,16 @@ path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
+    "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.skill_usage",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_system.workspace_skills",
 ]
 
 [[modules]]
-path = "mindroom.tool_system.workspace_skills"
+path = "mindroom.tool_system.skill_usage"
 depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
-visibility = ["mindroom.tool_system.skills", "mindroom.skill_learning.library", "mindroom.skill_learning.tools"]
+visibility = ["mindroom.tool_system.skills", "mindroom.skill_learning.library"]
 
 [[modules]]
 path = "mindroom.tool_system.google_workspaces"
@@ -6405,7 +6406,14 @@ from = ["mindroom.tool_system.sandbox_proxy"]
 
 [[interfaces]]
 expose = [
+    "MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS",
+    "MAX_WORKSPACE_SKILL_FILE_BYTES",
+    "MAX_WORKSPACE_SKILL_LISTING_ENTRIES",
+    "MAX_WORKSPACE_SKILL_NAME_CHARS",
+    "MAX_WORKSPACE_SKILLS",
     "MindroomSkills",
+    "SKILL_FILENAME",
+    "SkillMarkdownError",
     "agent_workspace_skills_root",
     "build_agent_skills",
     "clear_skill_cache",
@@ -6413,9 +6421,12 @@ expose = [
     "get_skill_snapshot",
     "get_user_skills_dir",
     "list_skill_listings",
+    "parse_skill_markdown",
+    "parse_skill_metadata",
     "resolve_skill_listing",
     "set_plugin_skill_roots",
     "skill_can_edit",
+    "workspace_skill_file_names",
 ]
 from = ["mindroom.tool_system.skills"]
 
@@ -7589,7 +7600,8 @@ depends_on = [
     "mindroom.atomic_file",
     "mindroom.path_confinement",
     "mindroom.redaction",
-    "mindroom.tool_system.workspace_skills",
+    "mindroom.tool_system.skill_usage",
+    "mindroom.tool_system.skills",
 ]
 visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
@@ -7608,7 +7620,6 @@ path = "mindroom.skill_learning.tools"
 depends_on = [
     "mindroom.skill_learning.library",
     "mindroom.tool_system.skills",
-    "mindroom.tool_system.workspace_skills",
 ]
 visibility = [
     "mindroom.custom_tools.skill_manage",

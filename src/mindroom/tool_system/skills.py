@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -13,35 +14,40 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import json5
 from agno.skills import LocalSkills, Skills
 from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
+from agno.skills.skill import Skill
 
+from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.skill_usage import record_skill_use
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from mindroom.tool_system.workspace_skills import (
-    SKILL_FILENAME,
-    WORKSPACE_SKILLS_DIRNAME,
-    load_workspace_skills,
-    match_frontmatter,
-    parse_skill_markdown,
-    parse_skill_metadata,
-    read_support_file,
-    record_skill_use,
-)
 
 if TYPE_CHECKING:
-    from agno.skills.skill import Skill
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+SKILL_FILENAME = "SKILL.md"
+_WORKSPACE_SKILLS_DIRNAME = "skills"
+MAX_WORKSPACE_SKILLS = 256
+MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
+_MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
+# Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
+MAX_WORKSPACE_SKILL_NAME_CHARS = 64
+MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
+MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
     "darwin": {"darwin", "macos", "mac", "osx"},
@@ -110,14 +116,14 @@ class _MindroomSkillsLoader(SkillLoader):
 class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
     """Load one workspace's ``skills`` directory through no-follow descriptors."""
 
-    skills_root: Path
+    workspace_root: Path
 
     def _candidate_skills(self) -> list[Skill]:
-        return load_workspace_skills(self.skills_root)
+        return _load_workspace_skills(self.workspace_root)
 
 
 class MindroomSkills(Skills):
-    """MindRoom-specific Skills wrapper for confined workspace reads, script policy, and usage."""
+    """MindRoom-specific Skills wrapper for workspace skill access policy."""
 
     def __init__(
         self,
@@ -125,7 +131,7 @@ class MindroomSkills(Skills):
         loaders: list[SkillLoader],
         output_file_policy: ToolOutputFilePolicy | None = None,
     ) -> None:
-        self._workspace_skill_names: set[str] = set()
+        self._workspace_roots_by_skill: dict[str, Path] = {}
         self._output_file_policy = output_file_policy
         super().__init__(loaders=loaders)
 
@@ -138,19 +144,19 @@ class MindroomSkills(Skills):
 
     def _load_skills(self) -> None:
         """Load skills while tracking which final skills came from workspace loaders."""
-        self._workspace_skill_names.clear()
+        self._workspace_roots_by_skill.clear()
         for loader in self.loaders:
             try:
                 skills = loader.load()
-                workspace = isinstance(loader, _WorkspaceSkillsLoader)
+                workspace_root = loader.workspace_root if isinstance(loader, _WorkspaceSkillsLoader) else None
                 for skill in skills:
                     if skill.name in self._skills:
                         logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
                     self._skills[skill.name] = skill
-                    if workspace:
-                        self._workspace_skill_names.add(skill.name)
+                    if workspace_root is not None:
+                        self._workspace_roots_by_skill[skill.name] = workspace_root
                     else:
-                        self._workspace_skill_names.discard(skill.name)
+                        self._workspace_roots_by_skill.pop(skill.name, None)
             except SkillValidationError:
                 raise
             except Exception as exc:
@@ -158,63 +164,23 @@ class MindroomSkills(Skills):
 
         logger.debug("Loaded skills", count=len(self._skills))
 
-    # AGNO_COMPAT: Skills tool entrypoints are private methods without a load hook or file reader.
-    # Reason: get_tools binds _get_skill_instructions, _get_skill_reference and _get_skill_script directly, and the
-    # latter two read support files by pathname. Workspace skills need no-follow reads, a usage record for the
-    # learner's inactivity clock, and blocked script execution, so the private entrypoints are overridden.
-    # Upstream issue: tracking gap; no Agno issue or PR proposes a skill-load callback or caller-owned file reads.
-    # Upstream PR: none identified.
-    # Remove when: Skills exposes a load callback and reads support files through the loader's reader; the
-    # execution block for workspace scripts remains MindRoom policy.
-    # Coverage: tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links,
-    # tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not, and
-    # tests/test_skills.py::test_workspace_skill_script_read_allowed_but_execute_blocked.
+    # AGNO_COMPAT: Skills offers no hook for when an agent loads a skill.
+    # Reason: Agno 3.0.9 Skills.get_tools binds the private _get_skill_instructions directly, so counting workspace
+    #   skill loads for the skill learner's inactivity clock requires overriding it.
+    # Upstream issue: Tracking gap; no issue for a skill-load callback has been identified.
+    # Upstream PR: None identified.
+    # Remove when: Skills calls a hook when a skill's instructions or files are loaded.
+    # Coverage: tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not.
     def _get_skill_instructions(self, skill_name: str) -> str:
         self.record_use(skill_name)
         return super()._get_skill_instructions(skill_name)
 
-    def _get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
-        skill = self._workspace_skill(skill_name)
-        if skill is None or reference_path is None or reference_path not in skill.references:
-            return super()._get_skill_reference(skill_name, reference_path)
-        return self._read_workspace_support(skill, "references", reference_path, "reference_path")
-
-    def _get_skill_script(
-        self,
-        skill_name: str,
-        script_path: str | None = None,
-        execute: bool = False,
-        args: list[str] | None = None,
-        timeout: int = 30,
-    ) -> str:
-        skill = self._workspace_skill(skill_name)
-        if skill is not None and execute:
-            return json.dumps(
-                {
-                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
-                    "skill_name": skill_name,
-                    "script_path": script_path,
-                },
-            )
-        if skill is None or script_path is None or script_path not in skill.scripts:
-            return super()._get_skill_script(
-                skill_name=skill_name,
-                script_path=script_path,
-                execute=execute,
-                args=args,
-                timeout=timeout,
-            )
-        return self._read_workspace_support(skill, "scripts", script_path, "script_path")
-
-    def _workspace_skill(self, skill_name: str) -> Skill | None:
-        return self.get_skill(skill_name) if skill_name in self._workspace_skill_names else None
-
     def record_use(self, skill_name: str) -> None:
-        """Count one agent load of a workspace skill; configured skills carry no usage telemetry.
+        """Count one agent load of a workspace skill; configured skills are not counted.
 
-        Agno calls the skill tools on the event loop, so there the usage write runs in a thread instead.
+        Agno calls the skill tools on the event loop, so there the usage write runs in a thread.
         """
-        skill = self._workspace_skill(skill_name)
+        skill = self.get_skill(skill_name) if skill_name in self._workspace_roots_by_skill else None
         if skill is None:
             return
         record = partial(record_skill_use, Path(skill.source_path))
@@ -225,21 +191,73 @@ class MindroomSkills(Skills):
             return
         create_background_task(asyncio.to_thread(record), name="record_skill_use")
 
-    def _read_workspace_support(self, skill: Skill, directory: str, filename: str, key: str) -> str:
-        """Read a listed support file through the confined workspace reader."""
-        try:
-            content = read_support_file(Path(skill.source_path), directory, filename)
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Refused a workspace skill file",
-                path=f"{skill.source_path}/{directory}/{filename}",
-                error=str(exc),
-            )
+    # AGNO_COMPAT: Skills reads skill references and scripts by path, following links.
+    # Reason: Agno 3.0.9 Skills._get_skill_reference and _get_skill_script open files below a
+    #   skill's source_path by path, so a workspace skill file swapped for a link or FIFO would
+    #   be followed or block; workspace skills are read through no-follow descriptors instead.
+    # Upstream issue: Tracking gap; no issue for descriptor-safe skill file reads has been identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno lets a loader supply skill file contents or refuses links and non-regular files.
+    # Coverage: tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links.
+    def _get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
+        content = self._read_workspace_skill_file(skill_name, "references", reference_path)
+        if content is None:
+            return super()._get_skill_reference(skill_name, reference_path)
+        return json.dumps({"skill_name": skill_name, "reference_path": reference_path, **content})
+
+    def _get_skill_script(
+        self,
+        skill_name: str,
+        script_path: str | None = None,
+        execute: bool = False,
+        args: list[str] | None = None,
+        timeout: int = 30,
+    ) -> str:
+        if execute and skill_name in self._workspace_roots_by_skill:
             return json.dumps(
-                {"error": f"Error reading {directory} file: {exc}", "skill_name": skill.name, key: filename},
+                {
+                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
+                    "skill_name": skill_name,
+                    "script_path": script_path,
+                },
             )
-        self.record_use(skill.name)
-        return json.dumps({"skill_name": skill.name, key: filename, "content": content})
+        content = None if execute else self._read_workspace_skill_file(skill_name, "scripts", script_path)
+        if content is not None:
+            return json.dumps({"skill_name": skill_name, "script_path": script_path, **content})
+        return super()._get_skill_script(
+            skill_name=skill_name,
+            script_path=script_path,
+            execute=execute,
+            args=args,
+            timeout=timeout,
+        )
+
+    def _read_workspace_skill_file(
+        self,
+        skill_name: str,
+        kind: str,
+        filename: str | None,
+    ) -> dict[str, str] | None:
+        """Read one listed workspace skill file, or return ``None`` for names Agno validates itself."""
+        workspace_root = self._workspace_roots_by_skill.get(skill_name)
+        skill = self.get_skill(skill_name)
+        if workspace_root is None or skill is None or not filename:
+            return None
+        if filename not in (skill.references if kind == "references" else skill.scripts):
+            return None
+        relative_path = Path(skill.source_path).relative_to(workspace_root) / kind / filename
+        try:
+            payload = read_regular_file_within_root(
+                workspace_root,
+                relative_path,
+                max_bytes=MAX_WORKSPACE_SKILL_FILE_BYTES,
+            )
+            content = payload.decode("utf-8")
+        except (OSError, ValueError) as exc:
+            logger.warning("Refused a workspace skill file", path=str(workspace_root / relative_path), error=str(exc))
+            return {"error": f"Error reading workspace skill file {filename}: {type(exc).__name__}"}
+        self.record_use(skill_name)
+        return {"content": content}
 
 
 def build_agent_skills(
@@ -276,7 +294,11 @@ def build_agent_skills(
         runtime_paths=runtime_paths,
         env_vars=env_vars,
         credential_keys=resolved_credential_keys,
-        skills_root=agent_workspace_skills_root(runtime_paths, agent_name, workspace_root=workspace_root),
+        workspace_root=(
+            workspace_root
+            if workspace_root is not None
+            else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
+        ),
     )
 
     loaders: list[SkillLoader]
@@ -354,13 +376,13 @@ def _get_default_skill_roots() -> list[Path]:
 
 
 def agent_workspace_skills_root(runtime_paths: RuntimePaths, agent_name: str, *, workspace_root: Path | None) -> Path:
-    """Return a resolved workspace's skill root, or the agent's canonical shared workspace skill root."""
+    """Return the ``skills`` directory of a resolved workspace, or of the agent's canonical shared workspace."""
     root = (
         workspace_root
         if workspace_root is not None
         else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
     )
-    return root / WORKSPACE_SKILLS_DIRNAME
+    return root / _WORKSPACE_SKILLS_DIRNAME
 
 
 def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
@@ -465,6 +487,38 @@ def _iter_skill_dirs(root: Path) -> list[Path]:
     return sorted(skill_dirs)
 
 
+class SkillMarkdownError(ValueError):
+    """A ``SKILL.md`` whose frontmatter skill loading cannot read."""
+
+
+def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
+    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them."""
+    match = _FRONTMATTER_PATTERN.match(content)
+    if not match:
+        msg = "Skill missing frontmatter"
+        raise SkillMarkdownError(msg)
+    try:
+        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+    except Exception as exc:
+        msg = f"Failed to parse skill frontmatter: {exc}"
+        raise SkillMarkdownError(msg) from exc
+    if not isinstance(frontmatter, dict):
+        msg = "Skill frontmatter must be a mapping"
+        raise SkillMarkdownError(msg)
+    return cast("dict[str, Any]", frontmatter), match.group(2).strip()
+
+
+def _parse_skill_frontmatter(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
+    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, or warn and return None."""
+    if allow_missing and not _FRONTMATTER_PATTERN.match(content):
+        return {}, content
+    try:
+        return parse_skill_markdown(content)
+    except SkillMarkdownError as exc:
+        logger.warning("Refused skill frontmatter", path=path, error=str(exc))
+        return None
+
+
 def _read_skill_frontmatter(
     skill_path: Path,
     *,
@@ -475,18 +529,8 @@ def _read_skill_frontmatter(
     except Exception as exc:
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
-
-    if match_frontmatter(content) is None:
-        if allow_missing:
-            return {}
-        logger.warning("Skill missing frontmatter", path=str(skill_path))
-        return None
-
-    try:
-        return parse_skill_markdown(content, trusted=True)[0]
-    except Exception as exc:
-        logger.warning("Failed to parse skill frontmatter", path=str(skill_path), error=str(exc))
-        return None
+    parsed = _parse_skill_frontmatter(content, path=str(skill_path), allow_missing=allow_missing)
+    return None if parsed is None else parsed[0]
 
 
 def _normalize_skill_identity(
@@ -556,6 +600,118 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
+def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
+    """Return the regular files one workspace skill lists in ``dirname``, never following links."""
+    try:
+        with open_directory_within_root(skill_fd, dirname) as listing_fd:
+            names = sorted(
+                entry.name
+                for entry in os.scandir(listing_fd)
+                if not entry.name.startswith(".") and entry.is_file(follow_symlinks=False)
+            )
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        logger.warning("Refused a linked workspace skill directory", dirname=dirname, error=type(exc).__name__)
+        return []
+    if len(names) > MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+        logger.warning("Listing only the first workspace skill files", dirname=dirname, found=len(names))
+    return names[:MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
+
+
+def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
+    """Build one workspace skill from descriptor reads below its pinned directory."""
+    try:
+        content = read_regular_file_within_root(
+            skill_fd,
+            SKILL_FILENAME,
+            max_bytes=MAX_WORKSPACE_SKILL_FILE_BYTES,
+        ).decode("utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("Refused a workspace skill file", path=str(source_path / SKILL_FILENAME), error=str(exc))
+        return None
+    parsed = _parse_skill_frontmatter(content, path=str(source_path), allow_missing=True)
+    if parsed is None:
+        return None
+    frontmatter, instructions = parsed
+    name = frontmatter.get("name", source_path.name)
+    if isinstance(name, str) and len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
+        logger.warning("Refused a workspace skill whose name is too long", path=str(source_path / SKILL_FILENAME))
+        return None
+    description = frontmatter.get("description", "")
+    if isinstance(description, str) and len(description) > MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
+        logger.warning("Truncated a workspace skill description", path=str(source_path / SKILL_FILENAME))
+        description = description[:MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
+    return Skill(
+        name=name,
+        description=description,
+        instructions=instructions,
+        source_path=str(source_path),
+        scripts=workspace_skill_file_names(skill_fd, "scripts"),
+        references=workspace_skill_file_names(skill_fd, "references"),
+        metadata=frontmatter.get("metadata"),
+        license=frontmatter.get("license"),
+        compatibility=frontmatter.get("compatibility"),
+        allowed_tools=frontmatter.get("allowed-tools"),
+    )
+
+
+def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
+    """Read one workspace's skills through no-follow descriptors; files are reread the same way on use."""
+    skills_root = workspace_root / _WORKSPACE_SKILLS_DIRNAME
+    try:
+        with open_directory_within_root(workspace_root, _WORKSPACE_SKILLS_DIRNAME) as skills_fd:
+            try:
+                os.stat(SKILL_FILENAME, dir_fd=skills_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                skill = _load_workspace_skill(skills_fd, skills_root)
+                return [] if skill is None else [skill]
+            skill_names = sorted(
+                entry.name
+                for entry in os.scandir(skills_fd)
+                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
+            )
+            if len(skill_names) > MAX_WORKSPACE_SKILLS:
+                logger.warning(
+                    "Loading only the first workspace skills",
+                    path=str(skills_root),
+                    limit=MAX_WORKSPACE_SKILLS,
+                    found=len(skill_names),
+                )
+                skill_names = skill_names[:MAX_WORKSPACE_SKILLS]
+            skills: list[Skill] = []
+            loaded_bytes = 0
+            for skill_name in skill_names:
+                try:
+                    with open_directory_within_root(skills_fd, skill_name) as skill_fd:
+                        skill = _load_workspace_skill(skill_fd, skills_root / skill_name)
+                except OSError as exc:
+                    logger.warning(
+                        "Refused a workspace skill",
+                        path=str(skills_root / skill_name),
+                        error=type(exc).__name__,
+                    )
+                    continue
+                if skill is None:
+                    continue
+                prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
+                loaded_bytes += len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
+                if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+                    logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
+                    break
+                skills.append(skill)
+            return skills
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        logger.warning("Refused workspace skills", path=str(skills_root), error=type(exc).__name__)
+        return []
+
+
 def _normalize_skill(skill: Skill) -> Skill | None:
     normalized = _normalize_skill_identity(
         skill.name,
@@ -572,6 +728,27 @@ def _normalize_skill(skill: Skill) -> Skill | None:
         return None
     skill.metadata = metadata
     return skill
+
+
+def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
+    """Return skill metadata as a mapping, accepting OpenClaw JSON5 strings, or warn and return None."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    if isinstance(raw, dict):
+        return cast("dict[str, Any]", raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json5.loads(raw)
+        except Exception as exc:
+            logger.warning("Failed to parse skill metadata JSON5", path=path, error=str(exc))
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning("Skill metadata JSON5 must be an object", path=path)
+        return None
+
+    logger.warning("Skill metadata must be a mapping or JSON5 string", path=path)
+    return None
 
 
 def _is_skill_eligible(
