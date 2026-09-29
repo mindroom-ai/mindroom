@@ -177,15 +177,13 @@ jobs:
               --state open \
               --head "$RELEASE_METADATA_BRANCH" \
               --limit 100 \
-              --json number,headRefName,isCrossRepository,updatedAt \
-              --jq 'map(select(.headRefName == "release-metadata/mindroom" and .isCrossRepository == false)) | sort_by(.updatedAt) | reverse | first | if . == null then "" else .number end'
+              --json number,headRefName,isCrossRepository |
+              jq -r --arg branch "$RELEASE_METADATA_BRANCH" 'map(select(.headRefName == $branch and .isCrossRepository == false)) | first | if . == null then "" else .number end'
           )
 
           if [[ -n "$EXISTING_RELEASE_METADATA_PR" ]]; then
-            EXISTING_RELEASE_METADATA_PR_NUMBER="$EXISTING_RELEASE_METADATA_PR"
-            echo "Updating existing release metadata PR #${EXISTING_RELEASE_METADATA_PR_NUMBER} on ${RELEASE_METADATA_BRANCH}."
+            echo "Updating existing release metadata PR #${EXISTING_RELEASE_METADATA_PR} on ${RELEASE_METADATA_BRANCH}."
           else
-            EXISTING_RELEASE_METADATA_PR_NUMBER=""
             echo "Creating a new release metadata PR on ${RELEASE_METADATA_BRANCH}."
           fi
 
@@ -200,8 +198,8 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "HEAD:${RELEASE_METADATA_BRANCH}"
 
-          if [[ -n "$EXISTING_RELEASE_METADATA_PR_NUMBER" ]]; then
-            gh pr edit "$EXISTING_RELEASE_METADATA_PR_NUMBER" \
+          if [[ -n "$EXISTING_RELEASE_METADATA_PR" ]]; then
+            gh pr edit "$EXISTING_RELEASE_METADATA_PR" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Update MindRoom release metadata to ${TAG_NAME}" \
               --body-file "$PR_BODY"

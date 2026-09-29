@@ -50,8 +50,8 @@ def test_release_metadata_pr_reuses_open_metadata_pr(release_workflow: str, incl
     """Only the fixed branch in this repository can be selected, despite newer matching titles."""
     assert "gh pr list" in release_workflow
     assert "--state open" in release_workflow
-    query_line = next(line for line in release_workflow.splitlines() if "--jq 'map(select(" in line)
-    query = shlex.split(query_line)[1]
+    query_line = next(line for line in release_workflow.splitlines() if "jq -r --arg branch" in line)
+    query_command = shlex.split(query_line.replace("$RELEASE_METADATA_BRANCH", "release-metadata/mindroom"))
     prs = [
         {"number": 12, "headRefName": "unrelated", "isCrossRepository": False, "updatedAt": "2026-09-29"},
         {
@@ -72,13 +72,13 @@ def test_release_metadata_pr_reuses_open_metadata_pr(release_workflow: str, incl
         )
     for pr in prs:
         pr["title"] = "Update MindRoom release metadata for v2026.9.1"
-    result = subprocess.run(["jq", "-r", query], input=json.dumps(prs), text=True, capture_output=True, check=True)
+    result = subprocess.run(query_command, input=json.dumps(prs), text=True, capture_output=True, check=True)
     assert result.stdout.strip() == ("11" if include_matching_pr else "")
     assignments = [
         line.strip() for line in release_workflow.splitlines() if line.strip().startswith("RELEASE_METADATA_BRANCH=")
     ]
     assert assignments == ['RELEASE_METADATA_BRANCH="release-metadata/mindroom"']
-    assert 'gh pr edit "$EXISTING_RELEASE_METADATA_PR_NUMBER"' in release_workflow
+    assert 'gh pr edit "$EXISTING_RELEASE_METADATA_PR"' in release_workflow
 
 
 def test_release_metadata_fallback_branch_is_not_tag_specific(release_workflow: str) -> None:
