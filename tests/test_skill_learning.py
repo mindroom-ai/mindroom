@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import structlog
 from agno.compression.manager import CompressionManager
 from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
@@ -37,6 +38,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
+from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.model_loading import get_model_instance
 from mindroom.path_confinement import open_directory_within_root
@@ -95,6 +97,9 @@ class _ScriptedModel(SyntheticModel):
     tool_requests: list[list[Mapping[str, Any]]] = field(default_factory=list)
     tool_parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider_tools_blocked: list[bool] = field(default_factory=list)
+    # The structured-log and LLM-request-log fields bound while each request was sent.
+    log_contexts: list[dict[str, object]] = field(default_factory=list)
+    request_log_contexts: list[dict[str, object]] = field(default_factory=list)
     failure: Exception | None = None
     started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event | None = None
@@ -122,6 +127,8 @@ class _ScriptedModel(SyntheticModel):
         self.tool_requests.append(list(tools or []))
         self.tool_parameters = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools or []}
         self.provider_tools_blocked.append(provider_tools_disabled())
+        self.log_contexts.append(structlog.contextvars.get_contextvars())
+        self.request_log_contexts.append(current_llm_request_log_context())
         self.started.set()
         if self.release is not None and len(self.requests) > self.released_requests:
             self.blocked.put_nowait(None)
@@ -230,6 +237,7 @@ async def _count(
     identity: ToolExecutionIdentity | None = None,
     run_id: str = "r1",
     captured: CapturedRequest | None = None,
+    correlation_id: str | None = None,
 ) -> asyncio.Task[None] | None:
     """Count one seeded run as a completed response to a person, returning the review it started, if any."""
     await runner.count(
@@ -239,6 +247,7 @@ async def _count(
         identity=identity,
         run_id=run_id,
         captured=captured,
+        correlation_id=correlation_id,
     )
     return runner._reviews.get(runner_module._ReviewScope("mind", session_id, identity).key(config))
 
@@ -324,6 +333,33 @@ def test_setup_instructions_with_placeholders_are_not_credentials(tmp_path: Path
     )
     library.create_skill(root, "deploy-checks", content, reserved_names=frozenset(), learner=True)
     assert (root / "deploy-checks/SKILL.md").read_text() == content
+
+
+def test_new_skill_files_are_readable_like_handwritten_skills(tmp_path: Path) -> None:
+    """New skills, support files, and history snapshots get 0644, like a hand-written skill, not a private temp mode."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    library.write_skill_file(
+        root,
+        "deploy-checks",
+        "references/rollback.md",
+        "Roll back with the previous image.\n",
+        expected_digest=None,
+        learner=True,
+    )
+    library.write_skill_file(
+        root,
+        "deploy-checks",
+        "SKILL.md",
+        LEARNED + "2. More.\n",
+        expected_digest=current.digest,
+        learner=True,
+    )
+    (snapshot,) = (root / ".history/deploy-checks").iterdir()
+    for path in (root / "deploy-checks/SKILL.md", root / "deploy-checks/references/rollback.md", snapshot):
+        assert path.stat().st_mode & 0o777 == 0o644, path
 
 
 def test_rewrites_keep_the_owner_file_mode(tmp_path: Path) -> None:
@@ -982,6 +1018,29 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
         await _review_due(config, paths, object(), identity=ALICE)
     assert not (root / "old-habit").exists()
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_review_requests_log_the_conversation_and_the_response_that_started_it(tmp_path: Path) -> None:
+    """A review's LLM usage and request logs name its conversation and the response's correlation id, as a turn's do."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"), identity=ALICE)
+    model = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        task = await _count(_runner(paths), config, identity=ALICE, correlation_id="$request")
+        assert task is not None
+        await task
+    context = {
+        "agent_id": "mind",
+        "session_id": "session",
+        "requester_id": "@alice:example.test",
+        "room_id": "!room:example.test",
+        "thread_id": "$thread",
+        "correlation_id": "$request",
+        "kind": "skill_learning",
+    }
+    assert model.log_contexts == [context]
+    assert model.request_log_contexts == [context]
 
 
 @pytest.mark.asyncio

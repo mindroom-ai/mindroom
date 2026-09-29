@@ -52,6 +52,8 @@ _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _HISTORY_DIRNAME = ".history"
 _ARCHIVE_DIRNAME = ".archive"
 _HISTORY_KEEP = 10
+# New skill files and history snapshots are readable like a hand-written skill, not left at the temp file's 0o600.
+_NEW_FILE_MODE = 0o644
 # Hermes Agent's skill guard patterns for credentials written into skill content (tools/skills_guard.py, MIT).
 _CREDENTIAL_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -293,7 +295,7 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
             raise SkillEditError(msg)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
-            atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
+            atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode(), file_mode=_NEW_FILE_MODE)
         # Like Hermes' record of a create, a new skill never inherits the record of a deleted one of the same name.
         update_skill_usages(
             root_fd,
@@ -394,11 +396,12 @@ def _require_writable(
 
 def _write_keeping_mode(directory_fd: int, filename: str, content: str) -> None:
     """Replace a file atomically; an existing file keeps the permissions its owner gave it."""
+    file_mode = existing_file_mode(directory_fd, filename)
     atomic_write_bytes_at(
         directory_fd,
         filename,
         content.encode(),
-        file_mode=existing_file_mode(directory_fd, filename),
+        file_mode=_NEW_FILE_MODE if file_mode is None else file_mode,
     )
 
 
@@ -414,7 +417,12 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
     """Keep the replaced file as plain text so a person can restore it by copying it back."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     with open_directory_within_root(root_fd, f"{_HISTORY_DIRNAME}/{name}", create=True) as history_fd:
-        atomic_write_bytes_at(history_fd, f"{stamp}--{relative_path.replace('/', '--')}", content.encode())
+        atomic_write_bytes_at(
+            history_fd,
+            f"{stamp}--{relative_path.replace('/', '--')}",
+            content.encode(),
+            file_mode=_NEW_FILE_MODE,
+        )
         for stale in _entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
             os.unlink(stale, dir_fd=history_fd)
 

@@ -2128,6 +2128,7 @@ class ResponseRunner:
                 identity=execution_identity,
                 run_id=run_id,
                 captured=capture.latest,
+                correlation_id=_correlation_id_for_request(request),
             )
 
         return count, replace(runtime, skill_review_capture=capture)

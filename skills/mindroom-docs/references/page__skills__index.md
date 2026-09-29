@@ -260,9 +260,10 @@ A skill restored or recreated after that starts a new inactivity period and belo
 A use is recorded in `skills/.usage.json` whenever an agent loads a workspace skill or one of its files through the skill tools, also for agents without skill learning.
 Minimal-mode agents read skills through their command line, which records no use, so a learned skill used only in minimal mode is archived after `archive_after_days`.
 Usage records that cannot be read, for example after a hand edit, read as absent, and a usage write that fails is logged and never fails the skill change it records.
-`skill_manage` rewrites of skill files keep their existing permissions.
+`skill_manage` rewrites of skill files keep their existing permissions, and new skill files and history snapshots are created with mode `0644`, like a hand-written skill.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response stopped it after its writes landed; a review stopped by shutdown posts none.
 The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
 Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](https://docs.mindroom.chat/dashboard/), also for a review that times out or is interrupted.
+A review's log lines, including its `LLM usage` lines, carry `kind: skill_learning` with the conversation's `agent_id`, `session_id`, `room_id`, `thread_id`, and `requester_id`, and the `correlation_id` of the response that made the conversation due.
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
