@@ -349,7 +349,7 @@ def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent
     raise ValueError(msg)
 
 
-def pending_event_requester_user_id(key: CoalescingKey, pending_event: PendingEvent) -> str:
+def _pending_event_requester_user_id(key: CoalescingKey, pending_event: PendingEvent) -> str:
     """Resolve one event's effective requester, falling back to a requester owner.
 
     A follow-up owner carries no requester, so a requester-less event falls
@@ -369,7 +369,7 @@ def pending_event_run_identity(key: CoalescingKey, pending_event: PendingEvent) 
     reply an entity wrote for a human never shares a batch with that human's messages.
     """
     event = pending_event.event
-    return pending_event_requester_user_id(key, pending_event), event.sender if event.acts_for_requester else None
+    return _pending_event_requester_user_id(key, pending_event), event.sender if event.acts_for_requester else None
 
 
 def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[PendingEvent]) -> str:
@@ -380,7 +380,7 @@ def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[Pe
     under another sender's identity.
     """
     requester_user_ids = {
-        pending_event_requester_user_id(key, pending_event) for pending_event in ordered_pending_events
+        _pending_event_requester_user_id(key, pending_event) for pending_event in ordered_pending_events
     }
     if len(requester_user_ids) == 1:
         return next(iter(requester_user_ids))
