@@ -266,7 +266,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
 | `desktop/legacy_command_journal.py` | Validates historical JSON v1 receipts for the SQLite journal's one-time import |
-| `desktop/bridge.py` | Enforces current local authority, routes app, folder, and shell actions to their owners, runs browser actions and app observation, and coordinates serial execution and response delivery |
+| `desktop/bridge.py` | Enforces current local authority, routes app input, folder, and shell actions to their owners, runs browser actions, app launch, and app observation, and coordinates serial execution and response delivery |
 | `desktop/command_parameters.py` | Parses the typed, length-bounded parameters of desktop commands |
 | `desktop/reply_fitting.py` | Builds desktop success replies and fits trimmed replies within one encrypted to-device message |
 | `desktop/file_actions.py` | Runs desktop folder listings and reads and fits them into one reply |
