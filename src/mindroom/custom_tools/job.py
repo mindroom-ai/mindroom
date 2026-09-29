@@ -78,9 +78,14 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                'Tools return a job_id when their wait ends before execution completes. Use job(action="list") to rediscover jobs after a new turn. '
-                'Use job(action="wait", job_id=...) to retrieve the actual result. '
+                "Managed tool calls accept wait_timeout: omitted or null waits until completion or human input, "
+                "zero returns a job_id immediately, and a positive number bounds waiting without cancelling work. "
+                "Only use wait_timeout when the tool schema exposes it; excluded toolkits keep their native controls, "
+                "so a shell handle is checked or killed with check_shell_command or kill_shell_command. "
+                "Calls made inside an already running job stay with that job and accept no separate wait budget. "
                 "Human follow-ups release waits while work continues. "
+                'Use job(action="list") to rediscover jobs and their status after a new turn, '
+                'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to stop one. '
                 "Only the agent that started a job can access it; teams must ask that member to manage it."
             ),
         )
@@ -146,23 +151,23 @@ class JobTools(Toolkit):
 
     async def job(  # noqa: PLR0911 - Each public action returns its own result.
         self,
-        action: Literal["list", "inspect", "wait", "cancel"],
+        action: Literal["list", "wait", "cancel"],
         job_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
         wait_timeout: float | None = None,
     ) -> Any:  # noqa: ANN401 - Preserve the original SDK tool result type.
-        """Discover, inspect, wait for or cancel this caller's managed work.
+        """Discover, wait for, or cancel this caller's managed work.
 
         Args:
-            action: Operation; wait retrieves the stored result.
+            action: Operation; list reports status and saved summaries, wait retrieves the stored result.
             job_id: Exact job ID, required except for list.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
             wait_timeout: Seconds to wait; null waits until completion or human input, zero returns immediately.
 
         Returns:
-            Scoped job summaries, the original result, or an unavailable-job error.
+            Scoped job summaries, the original result, or an error message.
 
         """
         runtime = get_background_runtime(self._runtime_paths)
@@ -181,7 +186,10 @@ class JobTools(Toolkit):
                 return "job_id is required for this action."
             if action == "wait":
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
-                if waited.claim is not None:
+                if waited.claim is not None and waited.job.status == "awaiting_approval":
+                    # Only the native delegation projection can present a child's pending approval.
+                    await runtime.release_wait(job_id, waited.claim)
+                elif waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return json.dumps(_summary(waited.job))
             if action == "cancel":
@@ -189,12 +197,11 @@ class JobTools(Toolkit):
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
                 if waited.claim is not None:
                     await retain_claim(runtime, job_id, waited.claim)
-            elif action == "inspect":
-                job = await runtime.lookup(job_id, owner=owner, depth=self._depth, include_result=False)
             else:
                 return "Unknown job action."
             return json.dumps(_summary(job))
-        except JobAccessError as error:
+        except ValueError as error:
+            # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.
             return str(error)
 
 

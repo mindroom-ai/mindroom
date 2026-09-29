@@ -354,15 +354,13 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 | Action | Behavior |
 | --- | --- |
-| `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
-| `inspect` | Read an exact job's status and saved summary without consuming it. |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes. |
 | `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
 | `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
 Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
 Cleanup exceptions reported to the job runtime are retained as failures.
-SDK toolkit disconnects retain Agno's existing best-effort behavior: logged teardown errors do not change the job outcome.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
@@ -372,7 +370,7 @@ Native delegation also rechecks the saved caller and child storage bindings; cha
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
-For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result, while `inspect` saves its bounded summary.
+For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 A team must route management through the member that started the job; a leader cannot read another member's jobs directly.

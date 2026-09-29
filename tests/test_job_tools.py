@@ -185,7 +185,6 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
             assert summary["job_id"] == "durable"
             assert summary["summary_truncated"]
             assert summary.get("subagent_id") == ("reusable-child" if native else None)
-            assert json.loads(await tools.job("inspect", "durable")) == summary
         for foreign in (
             replace(context, requester_id="@foreign:example.org"),
             replace(context, agent_name="other"),
@@ -196,7 +195,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
         allowed = False
         with tool_runtime_context(context):
             assert json.loads(await tools.job("list")) == []
-            assert "not available" in await tools.job("inspect", "durable")
+            assert "not available" in await tools.job("wait", "durable")
     finally:
         await runtime.shutdown()
 
@@ -513,4 +512,71 @@ async def test_cancel_acknowledges_only_saved_management_result(
         assert job.consumed is not save_fails
     finally:
         storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_generic_wait_keeps_a_paused_child_approval(tmp_path: Path) -> None:
+    """Without the native projection, waiting on a paused child reports it and leaves its approval unconsumed."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    await start_job(
+        runtime,
+        "paused",
+        tool_name="delegate",
+        depth=0,
+        kind="delegation",
+        adapter={},
+        owner=owner,
+        operation=operation,
+    )
+    try:
+        with tool_runtime_context(context):
+            assert json.loads(await JobTools(paths, owner).job("wait", "paused"))["status"] == "awaiting_approval"
+        job = await runtime.lookup("paused", owner=owner, depth=0)
+        assert job.status == "awaiting_approval"
+        assert not job.consumed
+        assert await runtime.pending_outcomes() != []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "message"),
+    [
+        ("wait", {}, "job_id is required"),
+        ("list", {"limit": 0}, "limit"),
+        ("wait", {"job_id": "missing", "wait_timeout": -1}, "wait_timeout"),
+        ("cancel", {"job_id": "missing"}, "not available"),
+    ],
+)
+async def test_job_errors_return_as_tool_results(
+    tmp_path: Path,
+    action: str,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """Every expected mistake comes back as a message the model can act on, never a traceback."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        with tool_runtime_context(context):
+            result = await JobTools(paths, build_execution_identity_from_runtime_context(context)).job(
+                action,
+                **arguments,
+            )
+        assert message in result
+    finally:
         await runtime.shutdown()

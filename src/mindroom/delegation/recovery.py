@@ -161,7 +161,10 @@ async def _cancel_delegations(
     background = get_background_runtime(runtime_paths)
     for child in state.children:
         if child.status not in {"completed", "failed", "cancelled", "denied"}:
-            if background is not None and await cancel_retained_delegation(background, child):
+            if background is not None and background.has_job(child.delegation_id):
+                # The job runtime owns this child; only the pending approval generation this run saved may end it.
+                if child.delegation_id == state.pending_child_id:
+                    await cancel_retained_delegation(background, child, generation=state.pending_job_generation)
                 continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for requirement_id, hook_state in state.hooks.items():

@@ -588,7 +588,7 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 {agent_descriptions}
 
 Use run_subagent(task, agent_name=None, model=None) for a bounded subtask whose result you need before continuing.
-The caller waits for the child to finish by default.
+The caller waits for the child to finish; this is not background work.
 The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
 It retains its configured tools, workspace, and memory.
 Set model to a configured model name to choose a different model for the child session, including follow-ups.
@@ -596,7 +596,7 @@ Omit agent_name or pass null to run a fresh copy of yourself, if your own name i
 Delegation is limited to three nested child levels.
 For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
 It uses the current conversation; set new_thread=True to start a separate thread.
-In Matrix, child tools that require approval pause until the user approves or denies them.
+In Matrix, child tools that require approval pause both runs until the user approves or denies them.
 Other runtimes retain their approval restrictions.
 The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
 Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.
@@ -607,11 +607,8 @@ Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
-DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """Managed foreground Matrix calls accept wait_timeout: omitted or null waits until completion or human input, zero returns a Job ID immediately, and a positive number bounds waiting without cancelling work.
-Only use wait_timeout when the tool schema exposes it. Excluded toolkits keep their native controls. For a shell handle, use check_shell_command/kill_shell_command; job controls only Job IDs.
-Managed tools already executing within an outer job stay with that job; nested managed calls do not accept a separate wait budget.
-A human follow-up releases the wait while the child continues working.
-Use job(action="list") to rediscover work, job(action="inspect", job_id=...) for status, job(action="wait", job_id=...) to retrieve results, job(action="cancel", job_id=...) to stop it.
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept wait_timeout like other managed calls, so a child can keep working as a job.
+A human follow-up releases the wait while the child continues working, and a child tool that requires approval pauses only the child.
 Waiting neither restarts the child nor grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
 Direct API calls and nested delegation wait within their existing execution owner.

@@ -578,11 +578,51 @@ async def test_retained_cleanup_can_cancel_after_authorization_revocation(tmp_pa
         allowed = False
         with pytest.raises(ValueError, match="not available"):
             await runtime.cancel(job.job_id, owner=_owner(), depth=0)
-        assert not await cancel_retained_delegation(runtime, replace(delegation_child(job), run_id="other"))
-        assert await cancel_retained_delegation(runtime, delegation_child(job))
+        assert not await cancel_retained_delegation(
+            runtime,
+            replace(delegation_child(job), run_id="other"),
+            generation=job.generation,
+        )
+        assert await cancel_retained_delegation(runtime, delegation_child(job), generation=job.generation)
         allowed = True
         assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
     finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stale_approval_card_cannot_cancel_the_continued_child(tmp_path: Path) -> None:
+    """A duplicate card for an approved generation leaves the child's newer generation running."""
+    runtime = tool_job_runtime(tmp_path)
+    release = asyncio.Event()
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def resumed() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome("completed", "done")
+
+    try:
+        job = await start_delegation_job(runtime, _child(), owner=_owner(), operation=approval)
+        waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, waited.claim)
+        stale = delegation_child(waited.job)
+        continued = await continue_delegation(
+            runtime,
+            job.job_id,
+            owner=_owner(),
+            depth=0,
+            expected_generation=waited.job.generation,
+            operation=resumed,
+        )
+        assert continued.generation == waited.job.generation + 1
+        assert not await cancel_retained_delegation(runtime, stale, generation=waited.job.generation)
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "running"
+        assert await cancel_retained_delegation(runtime, stale, generation=continued.generation)
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
+    finally:
+        release.set()
         await runtime.shutdown()
 
 

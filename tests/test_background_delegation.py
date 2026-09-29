@@ -555,9 +555,8 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []
                 if human:
-                    assert '"status": "running"' in str(
-                        await JobTools(paths, identity).job("inspect", child.delegation_id),
-                    )
+                    listed = json.loads(await JobTools(paths, identity).job("list"))
+                    assert [item["status"] for item in listed if item["job_id"] == child.delegation_id] == ["running"]
                 release.set()
                 await asyncio.wait_for(completed.wait(), 5)
                 signal.clear()

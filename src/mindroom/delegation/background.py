@@ -49,14 +49,22 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild(**job.adapter["child"])
 
 
+def _retain(runtime: ToolJobRuntime, job_id: str, binding: _RetainedDelegation) -> None:
+    """Remember one live child, forgetting children no operation still holds."""
+    retained = _retained.setdefault(runtime, {})
+    for stale in [key for key, item in retained.items() if item.child() is None]:
+        del retained[stale]
+    retained[job_id] = binding
+
+
 def _retained_delegation(runtime: ToolJobRuntime, job: BackgroundJob) -> tuple[DelegationChild, dict[str, Any]]:
     """Recover or reuse the exact live child and adapter owned by one operation."""
-    retained = _retained.setdefault(runtime, {})
-    binding = retained.get(job.job_id)
+    binding = _retained.get(runtime, {}).get(job.job_id)
     child = binding.child() if binding is not None else None
     if child is None:
         child = delegation_child(job)
-        binding = retained[job.job_id] = _RetainedDelegation(ref(child), job.adapter)
+        binding = _RetainedDelegation(ref(child), job.adapter)
+        _retain(runtime, job.job_id, binding)
     assert binding is not None
     return child, binding.adapter
 
@@ -154,7 +162,7 @@ async def start_delegation(
         )
     finally:
         if runtime.owns_execution(child.delegation_id, adapter):
-            _retained.setdefault(runtime, {})[child.delegation_id] = _RetainedDelegation(ref(child), adapter)
+            _retain(runtime, child.delegation_id, _RetainedDelegation(ref(child), adapter))
 
 
 async def continue_delegation(
@@ -197,11 +205,17 @@ def owns_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:
     )
 
 
-async def cancel_retained_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:
-    """Cancel trusted parent ownership even after public delegation authority changes."""
+async def cancel_retained_delegation(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    generation: int | None,
+) -> bool:
+    """Cancel trusted parent ownership of one exact generation, even after public delegation authority changes."""
 
     def matches(job: BackgroundJob) -> bool:
-        if job.kind != "delegation":
+        # A stale approval card names an older generation and must never cancel the newer work that replaced it.
+        if job.kind != "delegation" or job.generation != generation:
             return False
         retained = delegation_child(job)
         return (
