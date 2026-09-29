@@ -732,9 +732,9 @@ class TestProvisionerEndpoints:
         assert secret_data["openrouter_key"] == "sk-or-v1-pro-customer"
         set_args = _helm_set_args(mock_helm.call_args.args[0])
         assert set_args["storage"] == "25Gi"
-        assert set_args["mindroomResources.requests.memory"] == "1Gi"
+        assert set_args["mindroomResources.requests.memory"] == "640Mi"
         assert set_args["mindroomResources.limits.memory"] == "4Gi"
-        assert set_args["synapseResources.requests.memory"] == "1Gi"
+        assert set_args["synapseResources.requests.memory"] == "384Mi"
         assert set_args["sandboxRunnerResources.limits.memory"] == "2Gi"
 
     @pytest.mark.parametrize("namespace", ["", "nginx"])
