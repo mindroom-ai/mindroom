@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -32,6 +31,10 @@ if TYPE_CHECKING:
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
+
+# Turn planning rescans every hydrated message of a thread, whose resolved sidecar text can reach megabytes, on each
+# turn. It reads mentions from at most this prefix of each text field, while explicit ``m.mentions`` stay complete.
+_THREAD_MENTION_SCAN_CHARACTERS = 64 * 1024
 
 _AgentResponseSkipReason = Literal[
     "sender_not_allowed",
@@ -78,6 +81,18 @@ def _extract_mentioned_user_ids(
     if isinstance(body, str):
         return resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
     return []
+
+
+def _thread_mention_scan_content(content: dict[str, object]) -> dict[str, object]:
+    """Return content whose text fields keep only the prefix turn planning scans, without a token cut at its end."""
+    prefixes: dict[str, object] = {}
+    for key in ("body", "formatted_body"):
+        text = content.get(key)
+        if isinstance(text, str) and len(text) > _THREAD_MENTION_SCAN_CHARACTERS:
+            prefix = text[:_THREAD_MENTION_SCAN_CHARACTERS]
+            token_start = max(prefix.rfind(" "), prefix.rfind("\n"), prefix.rfind("\t")) + 1
+            prefixes[key] = prefix if text[len(prefix)].isspace() else prefix[:token_start]
+    return {**content, **prefixes} if prefixes else content
 
 
 def is_router_only_agent_mention(
@@ -162,44 +177,6 @@ def get_agents_in_thread(
             seen_ids.add(sender)
 
     return agents
-
-
-@dataclass(frozen=True, slots=True)
-class _RevisionMentions:
-    config: Config
-    runtime_paths: RuntimePaths
-    user_ids: list[str]
-
-
-# Turn planning rescans every hydrated message of a thread on each turn, so mentions are remembered per visible
-# revision. The key also carries a hash of the text mentions are read from, because a revision served as its
-# sidecar preview for one read has other text than the same revision once its sidecar resolves.
-_REVISION_MENTION_MEMORY_SIZE = 4096
-_revision_mentions: OrderedDict[tuple[str, str, tuple[int, ...]], _RevisionMentions] = OrderedDict()
-
-
-def _revision_mentioned_user_ids(
-    message: ResolvedVisibleMessage,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[str]:
-    """Return one visible revision's mentioned user IDs, extracting them once per config."""
-    content = message.content
-    fingerprint = tuple(
-        hash(value) if isinstance(value, str) else hash(repr(value))
-        for value in (content.get("body"), content.get("formatted_body"), content.get("m.mentions"))
-    )
-    key = (message.event_id, message.latest_event_id, fingerprint)
-    remembered = _revision_mentions.get(key)
-    if remembered is not None and remembered.config is config and remembered.runtime_paths is runtime_paths:
-        _revision_mentions.move_to_end(key)
-        return remembered.user_ids
-    user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-    _revision_mentions[key] = _RevisionMentions(config=config, runtime_paths=runtime_paths, user_ids=user_ids)
-    _revision_mentions.move_to_end(key)
-    while len(_revision_mentions) > _REVISION_MENTION_MEMORY_SIZE:
-        _revision_mentions.popitem(last=False)
-    return user_ids
 
 
 def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
@@ -302,7 +279,8 @@ def get_all_mentioned_agents_in_thread(
     registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
-        agents = _agents_from_user_ids(_revision_mentioned_user_ids(msg, config, runtime_paths), registry)
+        user_ids = _extract_mentioned_user_ids(_thread_mention_scan_content(msg.content), config, runtime_paths)
+        agents = _agents_from_user_ids(user_ids, registry)
 
         for agent in agents:
             if agent.full_id not in seen_ids:

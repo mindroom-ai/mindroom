@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import nio
@@ -161,28 +160,42 @@ def test_check_agent_mentioned_resolves_many_distinct_mentions_with_one_registry
     assert registry_builds == 1
 
 
-def test_thread_mention_planning_scans_each_visible_revision_once(
+def test_thread_mention_planning_scans_a_bounded_prefix_of_each_message(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Planning a later turn over the same history reuses each revision's mentions instead of rescanning its text."""
+    """Turn planning reads text mentions from a bounded prefix of each body but keeps every explicit mention."""
     runtime_paths = runtime_paths_for(config)
     helper_id = entity_identity_registry(config, runtime_paths).current_id("helper")
-    scanned: list[str] = []
+    scanned_lengths: list[int] = []
     original_scan = thread_utils.resolve_mentioned_user_ids_from_text
 
     def counting_scan(text: str, *args: object) -> list[str]:
-        scanned.append(text)
+        scanned_lengths.append(len(text))
         return original_scan(text, *args)
 
     monkeypatch.setattr(thread_utils, "resolve_mentioned_user_ids_from_text", counting_scan)
-    history = [make_visible_message(event_id=f"$m{index}", body=f"@helper step {index}") for index in range(50)]
+    huge_filler = "word " * 400_000
+    late_mention = [make_visible_message(body=f"{huge_filler}@helper please") for _ in range(20)]
+    cut_mention = "x" * (thread_utils._THREAD_MENTION_SCAN_CHARACTERS - 8) + " @helperbot"
+    explicit = make_visible_message(
+        body=huge_filler,
+        content={"body": huge_filler, "m.mentions": {"user_ids": [helper_id.full_id]}},
+    )
 
-    first = thread_utils.get_all_mentioned_agents_in_thread(history, config, runtime_paths)
-    second = thread_utils.get_all_mentioned_agents_in_thread(history, config, runtime_paths)
-    changed_text = [*history[:-1], replace(history[-1], content={"body": "@helper resolved text"})]
-    thread_utils.get_all_mentioned_agents_in_thread(changed_text, config, runtime_paths)
-
-    assert first == second == [helper_id]
-    assert len(scanned) == 51
-    assert scanned[-1] == "@helper resolved text"
+    assert thread_utils.get_all_mentioned_agents_in_thread(late_mention, config, runtime_paths) == []
+    assert (
+        thread_utils.get_all_mentioned_agents_in_thread(
+            [make_visible_message(body=cut_mention)],
+            config,
+            runtime_paths,
+        )
+        == []
+    )
+    assert thread_utils.get_all_mentioned_agents_in_thread([explicit], config, runtime_paths) == [helper_id]
+    assert thread_utils.get_all_mentioned_agents_in_thread(
+        [make_visible_message(body=f"@helper {huge_filler}")],
+        config,
+        runtime_paths,
+    ) == [helper_id]
+    assert max(scanned_lengths) <= thread_utils._THREAD_MENTION_SCAN_CHARACTERS
