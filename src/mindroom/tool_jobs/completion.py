@@ -22,6 +22,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
 from mindroom.tool_jobs.runtime import (
     READY_STATUSES,
+    JobAccessError,
     completion_event_id,
     get_background_runtime,
     parse_completion_event_id,
@@ -223,6 +224,9 @@ async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
     waited: JobWait | None = None
     try:
         waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth)
+    except JobAccessError:
+        # Access revoked while this reply waited: the job is gone for this reply, which still finishes.
+        return
     finally:
         if waited is not None:
             await runtime.release_wait(job.job_id, waited.claim)

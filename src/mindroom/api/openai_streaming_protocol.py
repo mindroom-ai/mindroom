@@ -427,7 +427,7 @@ def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> st
     if isinstance(event, str):
         return event
     if isinstance(event, (BackgroundWaitChunk, StructuredStreamChunk)):
-        return event.content
+        return None  # Only background-job joins emit these, and the API runs without the Matrix job runtime.
     return format_stream_tool_event(event, tool_state)
 
 

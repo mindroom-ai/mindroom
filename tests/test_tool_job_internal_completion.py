@@ -316,6 +316,37 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Path) -> None:
+    """A job whose access is revoked while the reply waits is gone for that reply, which still finishes."""
+    paths = test_runtime_paths(tmp_path)
+    owner = _job().owner
+    allowed = True
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    context = replace(
+        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context):
+            stream = join_conversation_jobs(set())
+            assert "Waiting" in (await anext(stream)).content
+            allowed = False
+            await runtime.cancel_revoked(denied=lambda _job: True)
+            assert [item.content async for item in stream] == [None]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_response_boundary_joins_ready_results_without_repeating_ignored_prompt(
     tmp_path: Path,
