@@ -40,13 +40,13 @@ logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 _WORKSPACE_SKILLS_DIRNAME = "skills"
-MAX_WORKSPACE_SKILLS = 256
+_MAX_WORKSPACE_SKILLS = 256
 MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
 _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 # Names, descriptions, and file listings reach every system prompt, not only the skills a model opens.
 MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
-MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+_MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -122,7 +122,7 @@ class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
         return _load_workspace_skills(self.workspace_root)
 
 
-class MindroomSkills(Skills):
+class _MindroomSkills(Skills):
     """MindRoom-specific Skills wrapper for workspace skill access policy."""
 
     def __init__(
@@ -172,10 +172,10 @@ class MindroomSkills(Skills):
     # Remove when: Skills calls a hook when a skill's instructions or files are loaded.
     # Coverage: tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not.
     def _get_skill_instructions(self, skill_name: str) -> str:
-        self.record_use(skill_name)
+        self._record_use(skill_name)
         return super()._get_skill_instructions(skill_name)
 
-    def record_use(self, skill_name: str) -> None:
+    def _record_use(self, skill_name: str) -> None:
         """Count one agent load of a workspace skill; configured skills are not counted.
 
         Agno calls the skill tools on the event loop, so there the usage write runs in a thread.
@@ -256,7 +256,7 @@ class MindroomSkills(Skills):
         except (OSError, ValueError) as exc:
             logger.warning("Refused a workspace skill file", path=str(workspace_root / relative_path), error=str(exc))
             return {"error": f"Error reading workspace skill file {filename}: {type(exc).__name__}"}
-        self.record_use(skill_name)
+        self._record_use(skill_name)
         return {"content": content}
 
 
@@ -307,7 +307,7 @@ def build_agent_skills(
     else:
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
-    skills = MindroomSkills(loaders=loaders, output_file_policy=output_file_policy)
+    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy)
     if agent_config.skills or skills.get_skill_names():
         return skills
     return None
@@ -614,9 +614,9 @@ def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     except OSError as exc:
         logger.warning("Refused a linked workspace skill directory", dirname=dirname, error=type(exc).__name__)
         return []
-    if len(names) > MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
+    if len(names) > _MAX_WORKSPACE_SKILL_LISTING_ENTRIES:
         logger.warning("Listing only the first workspace skill files", dirname=dirname, found=len(names))
-    return names[:MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
+    return names[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
 
 
 def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
@@ -675,14 +675,14 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                 for entry in os.scandir(skills_fd)
                 if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
             )
-            if len(skill_names) > MAX_WORKSPACE_SKILLS:
+            if len(skill_names) > _MAX_WORKSPACE_SKILLS:
                 logger.warning(
                     "Loading only the first workspace skills",
                     path=str(skills_root),
-                    limit=MAX_WORKSPACE_SKILLS,
+                    limit=_MAX_WORKSPACE_SKILLS,
                     found=len(skill_names),
                 )
-                skill_names = skill_names[:MAX_WORKSPACE_SKILLS]
+                skill_names = skill_names[:_MAX_WORKSPACE_SKILLS]
             skills: list[Skill] = []
             loaded_bytes = 0
             for skill_name in skill_names:

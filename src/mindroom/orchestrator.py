@@ -98,7 +98,6 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling_executor import set_scheduling_hook_registry
-from mindroom.skill_learning.queue import drop_retired_reviews
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -1038,9 +1037,6 @@ class _MultiAgentOrchestrator:
         ensure_default_agent_workspaces(config, self.storage_path)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
-        # Reviews and counts of agents that stopped learning are dropped, so learning turned on again starts from zero.
-        await self._skill_reviews.retire(config)
-        await asyncio.to_thread(drop_retired_reviews, config, self.runtime_paths)
         await self._todo_poke_runtime.sync()
         self._thread_export_runner.start()
         if self.running:

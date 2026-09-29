@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
-from mindroom.redaction import find_credential
 from mindroom.tool_system.skill_usage import (
     SkillUsage,
     forget_missing_skill_usage,
@@ -30,9 +29,7 @@ from mindroom.tool_system.skill_usage import (
 from mindroom.tool_system.skills import (
     MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS,
     MAX_WORKSPACE_SKILL_FILE_BYTES,
-    MAX_WORKSPACE_SKILL_LISTING_ENTRIES,
     MAX_WORKSPACE_SKILL_NAME_CHARS,
-    MAX_WORKSPACE_SKILLS,
     SKILL_FILENAME,
     SkillMarkdownError,
     parse_skill_markdown,
@@ -55,6 +52,20 @@ _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _HISTORY_DIRNAME = ".history"
 _ARCHIVE_DIRNAME = ".archive"
 _HISTORY_KEEP = 10
+# Hermes Agent's skill guard patterns for credentials written into skill content (tools/skills_guard.py, MIT).
+_CREDENTIAL_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:api[_-]?key|token|secret|password)\s*[=:]\s*[\"'](?!(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)[\"'])"
+        r"[A-Za-z0-9+/=_-]{20,}",
+        r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----",
+        r"ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,}",
+        r"sk-[A-Za-z0-9]{20,}",
+        r"sk-ant-[A-Za-z0-9_-]{90,}",
+        r"AKIA[0-9A-Z]{16}",
+        r"glpat-[A-Za-z0-9_\-]{20,}",
+    )
+)
 
 
 class SkillEditError(ValueError):
@@ -144,8 +155,8 @@ def _validate_content(relative_path: str, content: str) -> None:
     if len(content.encode()) > MAX_WORKSPACE_SKILL_FILE_BYTES:
         msg = f"{relative_path} exceeds {MAX_WORKSPACE_SKILL_FILE_BYTES} bytes."
         raise SkillEditError(msg)
-    if (position := find_credential(content)) is not None:
-        line = content.count("\n", 0, position) + 1
+    if match := next(filter(None, (pattern.search(content) for pattern in _CREDENTIAL_PATTERNS)), None):
+        line = content.count("\n", 0, match.start()) + 1
         msg = (
             f"Line {line} of {relative_path} looks like a literal credential; replace it with a placeholder such as "
             "<your token> and describe how to obtain it."
@@ -285,12 +296,6 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         if name in {entry.lower() for entry in directories}:
             msg = f"A workspace skill directory named {name!r} already exists."
             raise SkillEditError(msg)
-        if len(directories) >= MAX_WORKSPACE_SKILLS:
-            msg = (
-                f"The workspace already holds {MAX_WORKSPACE_SKILLS} skill directories, the most skill loading reads; "
-                "improve or merge an existing skill instead."
-            )
-            raise SkillEditError(msg)
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
@@ -322,15 +327,6 @@ def write_skill_file(
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False, learner=learner)
-        elif (
-            current is None
-            and len(workspace_skill_file_names(skill_fd, directory)) >= MAX_WORKSPACE_SKILL_LISTING_ENTRIES
-        ):
-            msg = (
-                f"{directory}/ already lists {MAX_WORKSPACE_SKILL_LISTING_ENTRIES} files, the most skill loading "
-                "offers; extend an existing file instead."
-            )
-            raise SkillEditError(msg)
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
@@ -442,18 +438,18 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
         return []
     with _open_skills_root(skills_root) as root_fd:
         directories = _entries(root_fd, directories=True)
-        # Loading reads only the first directories, so only those can be learned or used.
-        loaded = directories[:MAX_WORKSPACE_SKILLS] if archive_after_days > 0 else []
-        archived = _archive_inactive(root_fd, loaded, archive_after_days=archive_after_days, now=now)
+        archived = _archive_inactive(root_fd, directories, archive_after_days=archive_after_days, now=now)
         forget_missing_skill_usage(root_fd, set(directories) - set(archived))
     return archived
 
 
-def _archive_inactive(root_fd: int, loaded: list[str], *, archive_after_days: int, now: datetime) -> list[str]:
+def _archive_inactive(root_fd: int, directories: list[str], *, archive_after_days: int, now: datetime) -> list[str]:
+    if archive_after_days <= 0:
+        return []
     archived: list[str] = []
     first_seen: list[str] = []
     usage = load_skill_usage(root_fd)
-    for name in loaded:
+    for name in directories:
         try:
             with open_directory_within_root(root_fd, name) as skill_fd:
                 markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))

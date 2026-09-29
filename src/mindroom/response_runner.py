@@ -45,7 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -111,7 +111,6 @@ from mindroom.runtime_shutdown import (
 )
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
-from mindroom.skill_learning.queue import queue_skill_review, review_key
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -874,12 +873,12 @@ class _InboxResponseOwnership:
 def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs, including ones the router or another agent handed on,
-    restart resumes, and replies to other agents never count toward a review; they have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, restart resumes, and replies to other agents never count toward
+    a review; they have no human to learn from.
     """
     return (
         origin.requester_kind == SenderKind.USER
-        and origin.automation_source_kind is None
+        and not is_automation_source_kind(origin.source_kind)
         and not is_auto_resume_relay_body(body)
     )
 
@@ -1241,7 +1240,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[Sequence[str]], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -1739,7 +1738,6 @@ class ResponseRunner:
         async def continue_response(_message_id: str | None) -> None:
             nonlocal post_effect_continuation
             try:
-                self._cancel_approval_skill_review(claimed)
                 outcome, post_effect_continuation = await self._execute_claimed_approval(
                     claimed,
                     request=request,
@@ -2056,9 +2054,6 @@ class ResponseRunner:
         )
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
-            # The resumed run and the final one it may have moved into after a tool reload; a run in between is
-            # left uncounted, which only delays a review.
-            response_run_ids=tuple(dict.fromkeys(filter(None, (continuation.run_id, final.response_run_id)))),
             session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
@@ -2082,7 +2077,6 @@ class ResponseRunner:
             room_id=continuation.room_id,
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
-            queue_skill_review=self._approval_skill_review(continuation),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 
@@ -2101,93 +2095,6 @@ class ResponseRunner:
             for index, turn in enumerate(continuation.memory_thread_history)
         )
 
-    def _approval_skill_review(
-        self,
-        continuation: ApprovalContinuation,
-    ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
-        """Return the normal skill-review handoff for an agent continuation."""
-        if (
-            continuation.entity_kind != "agent"
-            or not self._learns_skills(continuation.entity_name)
-            or not _requested_by_a_person(restore_legacy_approval_origin(continuation), continuation.request_body)
-        ):
-            return None
-        return self._skill_review(
-            agent_name=continuation.entity_name,
-            session_id=continuation.session_id,
-            execution_identity=parse_tool_execution_identity_payload(
-                continuation.execution_identity,
-                error_prefix="Approval continuation execution_identity",
-            ),
-            capture=None,
-        )
-
-    def _cancel_approval_skill_review(self, continuation: ApprovalContinuation) -> None:
-        """Stop the running review of the conversation an agent continuation resumes."""
-        if continuation.entity_kind != "agent" or not self._learns_skills(continuation.entity_name):
-            return
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
-        self._cancel_skill_review(continuation.entity_name, continuation.session_id, execution_identity)
-
-    def _skill_review(
-        self,
-        *,
-        agent_name: str,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None,
-        capture: SkillReviewCapture | None,
-    ) -> Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None:
-        """Build the handoff that counts a response's runs and starts a review when the count is due.
-
-        Returns None without learning. ``capture`` holds the response's final request for the review to fork.
-        """
-        if not self._learns_skills(agent_name):
-            return None
-        config = self.deps.runtime.config
-
-        async def queue(run_ids: Sequence[str]) -> None:
-            due = await asyncio.to_thread(
-                queue_skill_review,
-                config,
-                self.deps.runtime_paths,
-                agent_name=agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
-                run_ids=run_ids,
-            )
-            orchestrator = self.deps.runtime.orchestrator
-            if due is None or orchestrator is None:
-                return
-            final = capture.latest if capture is not None else None
-            key, entry = due
-            orchestrator.skill_reviews.start(
-                config,
-                key,
-                entry,
-                final if final is not None and final.run_id == run_ids[-1] else None,
-            )
-
-        return queue
-
-    def _cancel_skill_review(
-        self,
-        agent_name: str,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> None:
-        """Like Hermes, a response starting in a conversation stops its running review; the count stays."""
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is not None:
-            config = self.deps.runtime.config
-            orchestrator.skill_reviews.cancel(review_key(config, agent_name, session_id, execution_identity))
-
-    def _learns_skills(self, agent_name: str) -> bool:
-        agent = self.deps.runtime.config.agents.get(agent_name)
-        return agent is not None and agent.skill_learning.enabled
-
     def _response_skill_review(
         self,
         request: ResponseRequest,
@@ -2195,24 +2102,35 @@ class ResponseRunner:
         *,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-    ) -> tuple[Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None, _PreparedResponseRuntime]:
+    ) -> tuple[Callable[[str], Coroutine[Any, Any, None]] | None, _PreparedResponseRuntime]:
         """Stop the conversation's running review, and return a person's response's skill-review handoff.
 
-        The returned runtime records the response's final request for the review to fork.
+        Like Hermes, a response starting in a conversation stops its running review. The returned runtime records the
+        response's final request for the review to fork.
         """
-        if not self._learns_skills(self.deps.agent_name):
+        config = self.deps.runtime.config
+        orchestrator = self.deps.runtime.orchestrator
+        agent = config.agents.get(self.deps.agent_name)
+        if orchestrator is None or agent is None or not agent.skill_learning.enabled:
             return None, runtime
-        self._cancel_skill_review(self.deps.agent_name, session_id, execution_identity)
+        reviews = orchestrator.skill_reviews
+        agent_name = self.deps.agent_name
+        reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
             return None, runtime
         capture = SkillReviewCapture()
-        queue = self._skill_review(
-            agent_name=self.deps.agent_name,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            capture=capture,
-        )
-        return queue, replace(runtime, skill_review_capture=capture)
+
+        async def count(run_id: str) -> None:
+            await reviews.count(
+                config,
+                agent_name=agent_name,
+                session_id=session_id,
+                identity=execution_identity,
+                run_id=run_id,
+                captured=capture.latest,
+            )
+
+        return count, replace(runtime, skill_review_capture=capture)
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
         """Return the normal agent-memory handoff for a completed continuation."""
@@ -5658,7 +5576,6 @@ class ResponseRunner:
                 # The live collector list also covers raising exit paths, where the
                 # returned generation outcome never materialized.
                 response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
-                response_run_ids=tuple(attempt_run_ids),
                 session_id=session_id,
                 session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
                 execution_identity=execution_identity,

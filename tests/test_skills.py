@@ -906,15 +906,15 @@ def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
     """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    for index in range(skills_module.MAX_WORKSPACE_SKILLS + 1):
+    for index in range(skills_module._MAX_WORKSPACE_SKILLS + 1):
         _write_skill(workspace_skills, f"skill-{index:04d}", "Numbered skill")
 
     with capture_logs() as logs:
         skills = _load_workspace_only(tmp_path, storage)
 
-    assert len(_skill_names(skills)) == skills_module.MAX_WORKSPACE_SKILLS
+    assert len(_skill_names(skills)) == skills_module._MAX_WORKSPACE_SKILLS
     assert any(
-        entry["log_level"] == "warning" and entry.get("limit") == skills_module.MAX_WORKSPACE_SKILLS for entry in logs
+        entry["log_level"] == "warning" and entry.get("limit") == skills_module._MAX_WORKSPACE_SKILLS for entry in logs
     )
 
 

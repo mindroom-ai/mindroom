@@ -10,11 +10,10 @@ compaction summary of removed turns.
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING
 
 from mindroom.history_run_visibility import is_model_history_visible_run
-from mindroom.redaction import redact_private_keys, redact_sensitive_text
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -24,7 +23,6 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
 _CONVERSATION_ROLES = frozenset({"user", "assistant", "tool"})
-_CLOSING_TAG = re.compile(r"</\s*conversation\s*>", re.IGNORECASE)
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
@@ -105,8 +103,7 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
     if omitted_messages:
         sections.append(f"[{omitted_messages} further messages omitted to fit the review budget.]")
     sections.extend(verbatim)
-    # Conversation content must not close the reviewer's <conversation> evidence block.
-    return _CLOSING_TAG.sub("<\\/conversation>", "\n\n".join(sections))
+    return "\n\n".join(sections)
 
 
 def _digest_line(message: Message) -> str | None:
@@ -139,12 +136,12 @@ def _render_message(message: Message, limit: int) -> str:
 
 
 def _render_text(text: str, limit: int) -> str:
-    """Remove private keys from the whole text, keep its start and end, and redact what remains.
+    """Keep the text's start and end, and redact what remains.
 
     The evidence is a conversation the agent's model already processed, so redaction is best-effort; learned files
     are checked again for credentials when they are written.
     """
-    return redact_sensitive_text(_clip(redact_private_keys(text), limit))
+    return redact_sensitive_text(_clip(text, limit))
 
 
 def _tool_call_names(message: Message) -> list[str]:

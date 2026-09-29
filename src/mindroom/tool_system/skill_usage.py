@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
-from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
@@ -96,12 +96,7 @@ def forget_missing_skill_usage(root_fd: int, present: set[str]) -> None:
 
 def _write(root_fd: int, records: dict[str, object]) -> None:
     try:
-        atomic_write_bytes_at(
-            root_fd,
-            _USAGE_FILENAME,
-            json.dumps(records, separators=(",", ":")).encode(),
-            file_mode=existing_file_mode(root_fd, _USAGE_FILENAME),
-        )
+        atomic_write_bytes_at(root_fd, _USAGE_FILENAME, json.dumps(records, separators=(",", ":")).encode())
     except (OSError, ValueError) as exc:
         # A hand-edited record may hold a value JSON cannot write back, such as an integer too long to print.
         logger.warning("Could not write skill usage records", error=str(exc))

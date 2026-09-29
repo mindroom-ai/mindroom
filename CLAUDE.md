@@ -212,9 +212,8 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
-| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, chat-time restarts, scope keys, retries, and retention |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
-| `skill_learning/runner.py` | Starts a review after the response that makes a conversation due, stops it when a new response starts, and posts change notices |
+| `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
