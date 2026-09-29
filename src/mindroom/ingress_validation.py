@@ -324,7 +324,9 @@ class IngressValidator:
 
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
         authorized_requester = self.acting_requester_for_event(event) or requester_user_id
-        if not self.deps.turn_policy.can_reply_to_sender_in_room(authorized_requester, room.room_id, observed_room=room):
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(
+            authorized_requester, room.room_id, observed_room=room
+        ):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
