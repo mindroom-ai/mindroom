@@ -158,8 +158,9 @@ Session IDs are derived from request headers:
 Agent memory and conversation history persist across requests with the same session ID.
 For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
-Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision.
-Two different API keys using the same `X-Session-Id` value will not share a session.
+Session IDs are namespaced internally with the full SHA-256 digest of the validated API key to prevent cross-key session collision.
+Two different API keys using the same `X-Session-Id` value will not share a session, and differently spaced `Authorization` headers carrying the same key share that key's sessions.
+Without configured API keys, the `Authorization` header authenticates nothing, so every caller shares one unauthenticated namespace.
 
 ### Claude Agent tool sessions
 
@@ -187,6 +188,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (usage stats are always zeros)
+- `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
 
 Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
 

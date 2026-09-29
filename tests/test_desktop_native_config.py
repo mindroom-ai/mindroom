@@ -195,6 +195,8 @@ def test_simultaneous_app_and_terminal_saves_have_one_winner(tmp_path: Path, mon
         {"allowed_requester_ids": []},
         {"allowed_agent_names": ["same", "same"]},
         {"allowed_app_ids": [""]},
+        {"allowed_app_ids": ["com.example.Editor", "chat.mindroom.menubar"]},
+        {"allowed_app_ids": ["chat.mindroom.desktophelper"]},
         {"capture": {"max_screenshot_width": 319, "jpeg_quality": 80}},
         {"capture": {"max_screenshot_width": 1568, "jpeg_quality": 96}},
         {

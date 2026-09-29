@@ -25,6 +25,7 @@ from mindroom.agents import create_agent
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
@@ -189,19 +190,22 @@ def test_routing_preserves_sql_memory_database_across_calls(
         pytest.fail("SQL call was sent to a fresh worker toolkit")
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", no_worker)
+    process_env = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"}
+    # A database URL can carry a password, so it is a stored credential rather than an inline override.
+    get_runtime_credentials_manager(
+        resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env=process_env,
+        ),
+    ).save_credentials(
+        "sql",
+        {"db_url": f"sqlite:///file:{tmp_path.name}?mode=memory&cache=shared&uri=true&check_same_thread=false"},
+    )
     agent = _create_routing_agent(
         tmp_path,
-        {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
-        agent_settings={
-            "tools": [
-                {
-                    "sql": {
-                        "db_url": f"sqlite:///file:{tmp_path.name}?mode=memory&cache=shared&uri=true&check_same_thread=false",
-                    },
-                },
-            ],
-            **({"worker_tools": ["sql"]} if explicit else {}),
-        },
+        process_env,
+        agent_settings={"tools": ["sql"], **({"worker_tools": ["sql"]} if explicit else {})},
     )
     toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, SQLTools))
     try:

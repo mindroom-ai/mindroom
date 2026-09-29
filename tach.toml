@@ -86,6 +86,7 @@ depends_on = []
 visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
+    "mindroom.script_runs.worker_client",
 ]
 
 [[modules]]
@@ -1903,7 +1904,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.script_runs.worker_client"
-depends_on = ["mindroom.script_runs.compatibility", "mindroom.workers.models"]
+depends_on = ["mindroom.http_error_detail", "mindroom.script_runs.compatibility", "mindroom.workers.models"]
 
 [[modules]]
 path = "mindroom.script_runs.compatibility"
@@ -2839,6 +2840,10 @@ visibility = [
     "mindroom.turn_policy",
 ]
 
+[[modules]]
+path = "mindroom.config.worker_projection"
+depends_on = ["mindroom.config.models"]
+
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
@@ -3429,7 +3434,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.shell"]
 
 [[modules]]
 path = "mindroom.desktop.shell_prompt"
-depends_on = []
+depends_on = ["mindroom.desktop.shell"]
 visibility = ["mindroom.cli.desktop"]
 
 [[modules]]
@@ -4322,8 +4327,10 @@ path = "mindroom.commands.config_commands"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.config.main",
+    "mindroom.config.schema_hints",
     "mindroom.event_journal_open",
     "mindroom.logging_config",
+    "mindroom.redaction",
 ]
 
 [[modules]]
@@ -4672,6 +4679,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
@@ -6643,7 +6651,7 @@ depends_on = ["mindroom.config.main"]
 
 [[modules]]
 path = "mindroom.config.schema_hints"
-depends_on = []
+depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.api.config_reload"
@@ -7052,7 +7060,7 @@ depends_on = ["mindroom.desktop.accessibility"]
 
 [[modules]]
 path = "mindroom.desktop.native_config"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.matrix.device_identity"]
+depends_on = ["mindroom.desktop.input", "mindroom.durable_write", "mindroom.file_locks", "mindroom.matrix.device_identity"]
 
 [[modules]]
 path = "mindroom.desktop.native_entry"

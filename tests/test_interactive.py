@@ -23,6 +23,33 @@ class TestInteractiveFunctions:
     """Test pure interactive formatting and Matrix button delivery."""
 
     @pytest.mark.parametrize(
+        ("streamed", "shown"),
+        [
+            ('Two things.\n\n```interactive\n{"question": "What next?", "opt', "Two things."),
+            ("Two things.\n\n```interactive json\n", "Two things."),
+            ("Two things.\n\n```\ninteractive\n{", "Two things."),
+            ("Two things.\n\n```inter", "Two things.\n\n```inter"),
+            ("Two things.\n\n```", "Two things.\n\n```"),
+            ("Two things.\n\n```\nin", "Two things.\n\n```\nin"),
+            ("Two things.\n\n```python\nprint(", "Two things.\n\n```python\nprint("),
+            ('Two things.\n\n```json\n{"a": 1', 'Two things.\n\n```json\n{"a": 1'),
+            ("Two things.\n\nWhat next?\n1. 📊 Numbers", "Two things.\n\nWhat next?\n1. 📊 Numbers"),
+            ("Two things.\n\n```interactive js", "Two things.\n\n```interactive js"),
+            ("Notes:\n\n```text\ninteractive\n{", "Notes:\n\n```text\ninteractive\n{"),
+            ("Two things.\r\n\r\n```interactive\r\n{", "Two things."),
+            ("Before.\n\n```python\nprint(1)\n```", "Before.\n\n```python\nprint(1)\n```"),
+            (
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+                'Pick:\n\n```interactive\n{"question": "Pick", "options": ["Yes", "No"]}\n```\n\nMore text.',
+            ),
+            ("Code:\n\n````md\n```interactive\n{\n", "Code:\n\n````md\n```interactive\n{\n"),
+        ],
+    )
+    def test_hide_unfinished_interactive_cuts_only_a_block_still_arriving(self, streamed: str, shown: str) -> None:
+        """Only a block marked exactly interactive is cut; partial markers and other code blocks stay as streamed."""
+        assert interactive.hide_unfinished_interactive(streamed) == shown
+
+    @pytest.mark.parametrize(
         "response_text",
         [
             """Please choose.

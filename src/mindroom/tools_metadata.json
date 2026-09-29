@@ -2462,7 +2462,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -2645,7 +2645,7 @@
           "options": null,
           "placeholder": "{\"ENV_VAR\": \"value\"}",
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -3960,7 +3960,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Optional Google Cloud credentials object passed directly to the toolkit",
           "label": "Credentials",
@@ -8964,7 +8964,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -9210,7 +9210,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "url",
+          "type": "password",
           "validation": null
         },
         {
@@ -9996,7 +9996,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {

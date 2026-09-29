@@ -1,4 +1,4 @@
-"""Check that CI jobs which run repository and dependency code hold only the token scopes they use."""
+"""Check CI workflow policies: least-privilege job tokens and cancellation of superseded pull request runs."""
 
 from __future__ import annotations
 
@@ -84,3 +84,23 @@ def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
 
     assert workflow["permissions"] == {"contents": "read"}
     assert _job_permissions(workflow, "deploy") == {"contents": "read", "pages": "write", "id-token": "write"}
+
+
+# Pull request runs share one group per ref; every other event gets its own group, so it is never cancelled.
+PULL_REQUEST_CONCURRENCY = {
+    "group": "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+    "cancel-in-progress": True,
+}
+# Workflows that deliberately keep their own older concurrency policy.
+_OWN_CONCURRENCY_POLICY = {"docs.yml", "plugin-fleet.yml"}
+_PULL_REQUEST_WORKFLOWS = sorted(
+    path.name
+    for path in WORKFLOW_DIR.glob("*.yml")
+    if path.name not in _OWN_CONCURRENCY_POLICY and "pull_request" in _load_workflow(path.name)["on"]
+)
+
+
+@pytest.mark.parametrize("name", _PULL_REQUEST_WORKFLOWS)
+def test_pull_request_workflows_cancel_only_superseded_pull_request_runs(name: str) -> None:
+    """A newer push to a pull request cancels its older runs, and no other event ever shares their group."""
+    assert _load_workflow(name).get("concurrency") == PULL_REQUEST_CONCURRENCY

@@ -8,6 +8,7 @@ import json
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
@@ -26,7 +27,7 @@ from mindroom.desktop.command_parameters import (
 )
 from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
-from mindroom.desktop.input import normalize_key_chord
+from mindroom.desktop.input import MINDROOM_APP_IDS, normalize_key_chord
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
@@ -66,6 +67,7 @@ from mindroom.matrix.olm_to_device import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     import nio
@@ -139,6 +141,14 @@ class DesktopBridgePolicy:
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
+            raise ValueError(msg)
+        # Saved configuration already refuses these; this also covers one-run --allow-app overrides. Every policy
+        # change goes through replace(), which runs this check again, so admission needs no second one.
+        if reserved := sorted(self.allowed_app_ids & MINDROOM_APP_IDS):
+            msg = (
+                f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
+                "remove it from the allowed applications."
+            )
             raise ValueError(msg)
         if self.allow_control and self.control_lease_expires_at_ms is None:
             msg = "Control-enabled desktop bridge requires a lease expiry."
@@ -848,14 +858,19 @@ class DesktopBridge:
 
         app_id = required_str_parameter(parameters, "app")
         state_id = required_str_parameter(parameters, "state_id")
-        if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
-            await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
-        else:
-            await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
+        with self._agent_input():
+            if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
+                await self._execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
+            else:
+                await self._execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
         return _Execution(
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
         )
+
+    def _agent_input(self) -> AbstractContextManager[None]:
+        """Keep app input and a shell approval card or prompt from ever being live at the same time."""
+        return self.shell.agent_input() if self.shell is not None else nullcontext()
 
     def _required_gui_provider(self) -> DesktopProvider:
         provider = self.provider

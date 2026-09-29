@@ -23,7 +23,7 @@ All seven tools on this page default to the primary agent runtime instead of Min
 `aws_lambda`, `airflow`, and `custom_api` use `setup_type: none`.
 `aws_ses`, `e2b`, `daytona`, and `composio` have `status: requires_config` and `setup_type: api_key`.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
-Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML.
+Password fields such as `api_key`, `password`, `custom_api` `headers`, and Daytona `sandbox_env_vars` must be stored through the dashboard or credential store instead of inline YAML.
 `aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
 That matters especially for `aws_ses`, because the current registry marks it as `setup_type: api_key` even though the tool itself does not expose an API-key field.
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
@@ -235,7 +235,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
 | `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `text` | `no` | `null` | JSON object of string environment-variable names and values; MindRoom validates and converts it to the upstream mapping. |
+| `sandbox_env_vars` | `password` | `no` | `null` | JSON object of string environment-variable names and values, stored through the dashboard or credential store; MindRoom validates and converts it to the upstream mapping. |
 | `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
@@ -358,7 +358,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `text` | `no` | `null` | Advanced raw default-header mapping. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |

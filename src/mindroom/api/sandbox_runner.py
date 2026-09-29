@@ -329,13 +329,25 @@ def initialize_sandbox_runner_app(
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
     committed_config = config or _runtime_config_or_empty(runtime_paths)
-    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
-    api_app.state.sandbox_runner_context = _SandboxRunnerContext(
+    context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
-        tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
+    _ensure_request_tool_registry(context, committed_config)
+    api_app.state.sandbox_runner_context = context
+
+
+def _ensure_request_tool_registry(context: _SandboxRunnerContext, config: Config) -> None:
+    """Register one request config's plugin tools, reloading only when its plugin entries change.
+
+    Snapshots carry no MCP servers, and MCP tools never run on a runner, so only plugin entries key the reload.
+    """
+    plugins = tuple((entry.path, entry.enabled) for entry in config.plugins)
+    if context.tool_registry.loaded_plugins == plugins:
+        return
+    _ensure_registry_loaded_with_config(context.runtime_paths, config)
+    context.tool_registry.loaded_plugins = plugins
 
 
 def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
@@ -448,7 +460,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution after the lease has been resolved.
     ``execution_env`` is reserved for execution tools such as ``shell`` and
     sandboxed ``python`` that intentionally receive runtime env during execution.
-    ``config_snapshot`` is the primary's live config without secrets; when present
+    ``config_snapshot`` holds the live config fields runners resolve; when present
     it replaces the runner's startup config for this request.
     """
 
@@ -575,13 +587,20 @@ class _SandboxRunnerCliState:
     runtime: CliWorkerRuntime | None = None
 
 
+@dataclass
+class _SandboxRunnerToolRegistryState:
+    """Plugin entries this runner process last loaded, so repeated snapshots do not reload plugins."""
+
+    loaded_plugins: tuple[tuple[str, bool], ...] | None = None
+
+
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
-    tool_metadata: dict[str, Any]
     runner_token: str | None
     cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
+    tool_registry: _SandboxRunnerToolRegistryState = field(default_factory=_SandboxRunnerToolRegistryState)
 
 
 @dataclass(frozen=True)
@@ -625,8 +644,8 @@ def app_runtime_config(app: FastAPI) -> Config:
 def request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None) -> Config:
     """Return the config one request runs under: the primary's live snapshot when sent, else the startup config.
 
-    The runner's own config file is only a seed, so agents added or edited after
-    seeding exist only in the snapshot the authenticated primary sends.
+    Deployments give runners no config file from the primary, so agents exist only
+    in the allowlisted snapshot the authenticated primary sends.
     Plugins missing from this runner are skipped silently here, because every
     request carries the snapshot and would otherwise repeat the same log line.
     """
@@ -841,7 +860,7 @@ def _resolve_entrypoint(
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    _ensure_registry_loaded_with_config(runtime_paths, config)
+    """Build one tool's entrypoint from a registry its caller already loaded for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
         routing_agent_name,
@@ -1392,7 +1411,8 @@ def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     include: dict[str, object] | None = None
     if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
         default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
-        include = {"plugins": True, "mcp_servers": True, "defaults": default_fields}
+        # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.
+        include = {"plugins": {"__all__": {"path", "enabled"}}, "defaults": default_fields}
         if ToolManagedInitArg.FILE_ACCESS in builtin_metadata.managed_init_args:
             # The injected file_access resolves the routing agent through config.resolve_entity().
             default_fields.add("file_access")
@@ -1531,6 +1551,8 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
         # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
         sys.path.append(str(Path.cwd()))
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
+        # A fresh child registers the request's plugin tools itself.
+        _ensure_registry_loaded_with_config(runtime_paths, config)
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
     tool_output = captured_out.getvalue() + captured_err.getvalue()
@@ -1847,7 +1869,6 @@ async def _execute_worker_browser(
             status_code=400,
             detail="Worker computer requires an unambiguous dedicated user_agent worker.",
         )
-    _ensure_registry_loaded_with_config(runtime_paths, config)
     provider = select_browser_provider(
         payload.tool_name,
         payload.function_name,
@@ -1964,10 +1985,11 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
-    tool_metadata = context.tool_metadata
+    # Plugin tools come from the request's config, not from a startup config runners never receive.
+    _ensure_request_tool_registry(context, config)
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
-    _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
+    _validate_execute_request_payload(payload, tool_metadata=TOOL_METADATA)
     credential_overrides: dict[str, object] = {}
     if payload.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(

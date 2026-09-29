@@ -178,6 +178,58 @@ async def test_script_worker_client_classifies_request_and_worker_failures(
 
 
 @pytest.mark.asyncio
+async def test_script_worker_client_never_relays_rejected_request_values() -> None:
+    """A worker validation error names the rejected field but never echoes the launch body back to the model."""
+    snapshot = {"agents": {"watcher": {"display_name": "snapshot-sentinel"}}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # FastAPI's default 422 for a field an older worker does not know repeats the field's value.
+        return httpx.Response(
+            422,
+            request=request,
+            json={
+                "detail": [
+                    {
+                        "type": "extra_forbidden",
+                        "loc": ["body", "config_snapshot"],
+                        "msg": "Extra inputs are not permitted",
+                        "input": snapshot,
+                    },
+                ],
+            },
+        )
+
+    with pytest.raises(ScriptWorkerError) as exc_info:
+        await _client(handler).launch(
+            _handle(),
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            source_digest="a" * 64,
+            gateway_url="http://primary.test/api/script-gateway",
+            max_runtime_seconds=3600,
+            config_snapshot=snapshot,
+        )
+
+    assert "snapshot-sentinel" not in str(exc_info.value)
+    assert "body.config_snapshot: Extra inputs are not permitted" in str(exc_info.value)
+    assert exc_info.value.failure_kind == "tool"
+
+
+@pytest.mark.asyncio
+async def test_script_worker_client_bounds_plain_text_worker_errors() -> None:
+    """A non-JSON error body is shortened instead of relayed whole."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, request=request, text="upstream failure " * 1000)
+
+    with pytest.raises(ScriptWorkerError) as exc_info:
+        await _client(handler).status(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+    assert str(exc_info.value).startswith("upstream failure")
+    assert len(str(exc_info.value)) < 1000
+    assert exc_info.value.failure_kind == "worker"
+
+
+@pytest.mark.asyncio
 async def test_script_worker_client_rejects_missing_worker_token_before_transport() -> None:
     """A remote worker operation without its existing handle token must fail closed."""
 

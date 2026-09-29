@@ -152,7 +152,7 @@ The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`
 | --- | --- | --- | --- | --- |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for every call. |
 | `fixed_language` | `text` | `no` | `null` | Overrides local language normalization and logging only; does not control request language. |
-| `headers` | `text` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
+| `headers` | `password` | `no` | `null` | Stored through the dashboard or credential store because headers can carry credentials; the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `proxy` | `url` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `timeout` | `number` | `no` | `10` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `debug` | `boolean` | `no` | `false` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |

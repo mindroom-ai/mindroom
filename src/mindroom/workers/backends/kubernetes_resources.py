@@ -20,11 +20,10 @@ import importlib
 import json
 import math
 import os
-import posixpath
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -70,7 +69,6 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     AGENT_VAULT_MINT_CONTAINER_NAME,
     AGENT_VAULT_TOKEN_VOLUME_NAME,
     SANDBOX_RUNNER_CONTAINER_NAME,
-    WORKER_CONFIG_VOLUME_NAME,
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
 )
@@ -1551,7 +1549,7 @@ class KubernetesResourceManager:
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
                 "value": startup_manifest_path,
             },
-            {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
+            {"name": "MINDROOM_CONFIG_PATH", "value": str(self._worker_config_path())},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
@@ -1645,17 +1643,21 @@ class KubernetesResourceManager:
         )
         return self._startup_manifest_path_and_hash(worker_key=worker_key, dedicated_root=dedicated_root)
 
+    def _worker_config_path(self) -> Path:
+        """Return the primary's config path, which workers use only to resolve config-relative snapshot paths.
+
+        Nothing is mounted there: a worker never receives the primary's config file, its directory, or its
+        `.env`, and takes agent settings only from the allowlisted snapshot each request carries.
+        """
+        return self.runtime_paths.config_path.expanduser().resolve()
+
     def _worker_runtime_paths(
         self,
         *,
         worker_key: str,
         dedicated_root: Path,
     ) -> RuntimePaths:
-        config_path = (
-            Path(self.config.config_path)
-            if self.config.config_map_name is not None
-            else self.runtime_paths.config_path.expanduser().resolve()
-        )
+        config_path = self._worker_config_path()
         process_env = {
             key: value
             for key, value in self.runtime_paths.process_env.items()
@@ -1710,17 +1712,6 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
         )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
-        if self.config.config_map_name is None:
-            mounts.extend(self._file_config_storage_mounts())
-        if self.config.config_map_name is not None:
-            mounts.append(
-                {
-                    "name": WORKER_CONFIG_VOLUME_NAME,
-                    "mountPath": self.config.config_path,
-                    "subPath": self.config.config_key,
-                    "readOnly": True,
-                },
-            )
         if include_agent_vault:
             mounts.append(
                 {
@@ -1757,26 +1748,6 @@ class KubernetesResourceManager:
             return None
         return cfg.worker_ca_configmap_name
 
-    def _file_config_storage_mounts(self) -> list[dict[str, object]]:
-        storage_root = PurePosixPath(posixpath.normpath(self.config.storage_mount_path))
-        config_path = PurePosixPath(posixpath.normpath(self.config.config_path))
-        try:
-            relative_config_path = config_path.relative_to(storage_root)
-        except ValueError:
-            return []
-        if not relative_config_path.parts:
-            return []
-
-        visible_subpath = PurePosixPath(relative_config_path.parts[0])
-        return [
-            {
-                "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": str(storage_root / visible_subpath),
-                "subPath": str(visible_subpath),
-                "readOnly": True,
-            },
-        ]
-
     def _volumes(self, *, include_agent_vault: bool) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
@@ -1785,13 +1756,6 @@ class KubernetesResourceManager:
             },
             {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {"sizeLimit": _WORKER_TMP_SIZE_LIMIT}},
         ]
-        if self.config.config_map_name is not None:
-            volumes.append(
-                {
-                    "name": WORKER_CONFIG_VOLUME_NAME,
-                    "configMap": {"name": self.config.config_map_name},
-                },
-            )
         if include_agent_vault:
             volumes.extend(self._agent_vault_volumes())
         ca_configmap_name = self._agent_vault_worker_ca_configmap_name() if include_agent_vault else None

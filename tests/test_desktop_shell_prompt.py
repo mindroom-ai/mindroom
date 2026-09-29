@@ -148,6 +148,16 @@ def test_request_text_escapes_control_and_directional_characters() -> None:
     assert _escape_terminal_text("café 日本 ~/src") == "café 日本 ~/src"
 
 
+def test_request_text_escapes_every_space_except_the_ascii_space() -> None:
+    """Look-alike and wide spaces are shown as escapes, so they can neither disguise nor pad a command."""
+    assert _escape_terminal_text("rm\u00a0-rf a b\u2003c\u3000d\u202fe") == "rm\\xa0-rf a b\\u2003c\\u3000d\\u202fe"
+    assert _escape_terminal_text("ls #\u2800\u3164\uffa0\u115f\u1160") == "ls #\\u2800\\u3164\\uffa0\\u115f\\u1160"
+    assert (
+        _escape_terminal_text("ls #\u034f\u180b\ufe0f\U000e0100\U0001d159x")
+        == "ls #\\u034f\\u180b\\ufe0f\\U000e0100\\U0001d159x"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interactive_input", [False, True])
 async def test_noninteractive_input_rejects_pending_commands_with_guidance(
@@ -201,6 +211,11 @@ async def test_terminal_shows_escaped_request_and_runs_only_after_approval(
         assert "\x1b" not in shown
         assert "\u202e" not in shown
         assert "full access" in shown
+        # The command's size sits right above the choices, so a long command cannot hide its start off-screen.
+        assert shown.splitlines()[-2:] == [
+            f"The command is {len(command)} characters on 2 lines; read all of it before answering.",
+            f"{CHOICES}: ",
+        ]
         assert not (tmp_path / "marker").exists()
         os.write(master, b"a\n")
         result = await asyncio.wait_for(execution, 5)
