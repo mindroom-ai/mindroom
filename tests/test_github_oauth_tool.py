@@ -29,10 +29,7 @@ from urllib3.response import HTTPResponse
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
-    delete_scoped_credentials,
     get_runtime_credentials_manager,
-    load_scoped_credentials,
-    save_scoped_credentials,
     scoped_credentials_path,
 )
 from mindroom.custom_tools import github as mindroom_github_module
@@ -759,63 +756,6 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert tool.access_token == ENV_ACCESS_TOKEN
-
-
-@pytest.mark.parametrize(
-    ("service", "url_field", "token_field"),
-    [
-        ("github", "base_url", "access_token"),
-        ("browserbase", "base_url", "api_key"),
-        ("daytona", "api_url", "api_key"),
-        ("composio", "base_url", "api_key"),
-    ],
-)
-def test_primary_tool_config_stays_isolated_per_shared_agent(
-    tmp_path: Path,
-    service: str,
-    url_field: str,
-    token_field: str,
-) -> None:
-    manager = get_runtime_credentials_manager(_runtime_paths(tmp_path))
-    alpha = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
-    beta = resolve_worker_target("shared", "beta", None, tenant_id="test-tenant")
-    unscoped_config = {token_field: "unscoped-token"}
-    alpha_config = {token_field: "alpha-token", url_field: "https://primary.example.test"}
-    beta_config = {token_field: "beta-token"}
-    manager.save_credentials(service, unscoped_config)
-    for target, config in ((alpha, alpha_config), (beta, beta_config)):
-        save_scoped_credentials(service, config, credentials_manager=manager, worker_target=target)
-        assert target.worker_key is not None
-        manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
-
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) == alpha_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
-    delete_scoped_credentials(service, credentials_manager=manager, worker_target=alpha)
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) is None
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
-
-
-@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-@pytest.mark.parametrize(
-    ("service", "url_field"),
-    [("browserbase", "base_url"), ("daytona", "api_url"), ("composio", "base_url")],
-)
-def test_primary_tool_config_ignores_requester_worker_document(
-    tmp_path: Path,
-    worker_scope: WorkerScope,
-    service: str,
-    url_field: str,
-) -> None:
-    manager = get_runtime_credentials_manager(_runtime_paths(tmp_path))
-    target = _worker_target_for_scope("@alice:example.test", worker_scope)
-    primary_config = {"api_key": "primary-key", url_field: "https://primary.example.test"}
-    save_scoped_credentials(service, primary_config, credentials_manager=manager, worker_target=target)
-    assert target.worker_key is not None
-    manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
-
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=target) == primary_config
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])

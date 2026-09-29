@@ -18,6 +18,7 @@ from mindroom.credentials import (
     WorkerCredentialPathError,
     _merge_credential_layers,
     _reset_credentials_manager_cache,
+    delete_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
@@ -1922,3 +1923,97 @@ class TestSharedIntegrationCredentialTagging:
 
         assert worker_manager.load_credentials("google") == {"token": "refreshed-token", "_source": "ui"}
         assert not (worker_root / "workers").exists()
+
+
+@pytest.mark.parametrize(
+    ("service", "url_field", "token_field"),
+    [
+        ("github", "base_url", "access_token"),
+        ("browserbase", "base_url", "api_key"),
+        ("daytona", "api_url", "api_key"),
+        ("composio", "base_url", "api_key"),
+    ],
+)
+def test_primary_tool_config_stays_isolated_per_shared_agent(
+    credentials_manager: CredentialsManager,
+    service: str,
+    url_field: str,
+    token_field: str,
+) -> None:
+    """Shared agents keep independent primary settings and ignore worker documents."""
+    manager = credentials_manager
+    alpha = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    beta = resolve_worker_target("shared", "beta", None, tenant_id="test-tenant")
+    unscoped_config = {token_field: "unscoped-token"}
+    alpha_config = {token_field: "alpha-token", url_field: "https://primary.example.test"}
+    beta_config = {token_field: "beta-token"}
+    manager.save_credentials(service, unscoped_config)
+    for target, config in ((alpha, alpha_config), (beta, beta_config)):
+        save_scoped_credentials(service, config, credentials_manager=manager, worker_target=target)
+        assert target.worker_key is not None
+        manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
+
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) == alpha_config
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
+    delete_scoped_credentials(service, credentials_manager=manager, worker_target=alpha)
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) is None
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
+
+
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+@pytest.mark.parametrize(
+    ("service", "url_field"),
+    [("browserbase", "base_url"), ("daytona", "api_url"), ("composio", "base_url")],
+)
+def test_primary_tool_config_ignores_requester_worker_document(
+    credentials_manager: CredentialsManager,
+    worker_scope: str,
+    service: str,
+    url_field: str,
+) -> None:
+    """Requester settings come from the primary store even when a worker file exists."""
+    manager = credentials_manager
+    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.test", None, None, None, None)
+    target = _worker_target(worker_scope, "general", identity)
+    primary_config = {"api_key": "primary-key", url_field: "https://primary.example.test"}
+    save_scoped_credentials(service, primary_config, credentials_manager=manager, worker_target=target)
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
+
+    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=target) == primary_config
+
+
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+@pytest.mark.parametrize("shared_layer", ["grant", "denied", "mirror", "mirror_disabled"])
+def test_primary_tool_config_preserves_shared_layer(
+    tmp_path: Path,
+    worker_scope: str,
+    shared_layer: str,
+) -> None:
+    """Only the scoped layer moves to primary storage; shared grants and mirrors remain."""
+    shared_path = tmp_path / "shared"
+    manager = CredentialsManager(
+        tmp_path / "credentials",
+        shared_base_path=shared_path if shared_layer.startswith("mirror") else None,
+    )
+    shared_manager = CredentialsManager(manager.shared_base_path)
+    shared_config = {"api_key": "shared-key", "project_id": "shared-project", "_source": "ui"}
+    shared_manager.save_credentials("browserbase", shared_config)
+    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.test", None, None, None, None)
+    target = _worker_target(worker_scope, "general", identity)
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials("browserbase", {"base_url": "https://worker.example.test"})
+    allowed = frozenset({"browserbase"}) if shared_layer == "grant" else frozenset()
+    kwargs = {
+        "credentials_manager": manager,
+        "worker_target": target,
+        "allowed_shared_services": allowed,
+        "allow_shared_mirror": shared_layer != "mirror_disabled",
+    }
+    expected = shared_config if shared_layer in {"grant", "mirror"} else None
+    assert load_scoped_credentials("browserbase", **kwargs) == expected
+    primary_config = {"api_key": "scoped-key"}
+    save_scoped_credentials("browserbase", primary_config, credentials_manager=manager, worker_target=target)
+    assert load_scoped_credentials("browserbase", **kwargs) == {**(expected or {}), **primary_config}

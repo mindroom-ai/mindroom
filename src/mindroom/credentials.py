@@ -1052,17 +1052,18 @@ def load_scoped_credentials(
         manager=manager,
         worker_target=worker_target,
     )
-    uses_local_shared_credentials = credential_service_policy(
+    policy = credential_service_policy(
         service,
         worker_target.worker_scope,
-    ).uses_local_shared_credentials
+    )
+    uses_local_shared_credentials = policy.uses_local_shared_credentials
     worker_manager = None
     if primary_runtime_manager is None and not uses_local_shared_credentials:
         worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
             credentials_manager=manager,
             worker_target=worker_target,
         )
-    if primary_runtime_manager is not None:
+    if primary_runtime_manager is not None and not policy.primary_owned_tool_config:
         shared_credentials = None
     elif uses_local_shared_credentials or (allow_shared_mirror and manager.shared_base_path != manager.base_path):
         shared_credentials = shared_manager.load_credentials(service)

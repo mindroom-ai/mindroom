@@ -54,7 +54,27 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     },
 )
 
-_PRIMARY_OWNED_TOOL_CONFIG_SERVICES = frozenset({"browserbase", "composio", "daytona", "github"})
+_PRIMARY_OWNED_TOOL_CONFIG_SERVICES = frozenset(
+    {
+        "agent_vault_access",
+        "approved_egress",
+        "atlassian",
+        "browserbase",
+        "claude_agent",
+        "composio",
+        "daytona",
+        "duckdb",
+        "e2b",
+        "github",
+        "mem0",
+        "pandas",
+        "reasoning",
+        "script",
+        "slack",
+        "sql",
+        "zep",
+    },
+)
 
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
@@ -75,6 +95,7 @@ class _CredentialServicePolicy:
 
     service: str
     worker_scope: _WorkerScope | None
+    primary_owned_tool_config: bool
     uses_local_shared_credentials: bool
     uses_primary_runtime_global_credentials: bool
     uses_primary_runtime_scoped_credentials: bool
@@ -90,13 +111,13 @@ def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -
         service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service or primary_owned_tool_config
     )
     is_primary_runtime_global = is_oauth_client_config_service(service)
-    # OAuth tokens and primary-owned tool config carry an identity, so a shared-scope agent's
-    # connection must stay bound to that agent instead of the deployment-wide store
-    # every other agent reads.
+    # Scoped OAuth tokens and primary-owned tool settings stay bound to their
+    # agent even when its worker scope is shared.
     uses_agent_scoped = worker_scope == "shared" and (oauth_token_service or primary_owned_tool_config)
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
+        primary_owned_tool_config=primary_owned_tool_config,
         uses_local_shared_credentials=worker_scope == "shared" and is_local_only and not uses_agent_scoped,
         uses_primary_runtime_global_credentials=is_primary_runtime_global,
         uses_primary_runtime_scoped_credentials=(

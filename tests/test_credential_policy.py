@@ -4,14 +4,33 @@ from __future__ import annotations
 
 import pytest
 
+import mindroom.tools  # noqa: F401
 from mindroom.credential_policy import (
+    _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES,
+    _PRIMARY_OWNED_TOOL_CONFIG_SERVICES,
     _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     OAUTH_CREDENTIAL_FIELDS,
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
+    is_oauth_client_config_service,
+    is_oauth_token_service,
     looks_like_oauth_credentials,
 )
+from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+
+
+def test_primary_owned_tool_config_services_match_builtin_registry() -> None:
+    """Every primary-built tool with settings must use primary-owned credential storage."""
+    assert {
+        service
+        for service, metadata in BUILTIN_TOOL_METADATA.items()
+        if metadata.requires_primary_runtime
+        and metadata.config_fields
+        and service not in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+        and not is_oauth_token_service(service)
+        and not is_oauth_client_config_service(service)
+    } == _PRIMARY_OWNED_TOOL_CONFIG_SERVICES
 
 
 @pytest.mark.parametrize(
