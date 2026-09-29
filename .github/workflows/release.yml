@@ -148,6 +148,7 @@ jobs:
           GH_TOKEN: ${{ steps.release-bot.outputs.token }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
+          set -o pipefail
           python3 .github/scripts/normalize_appcast.py macos/appcast.xml
 
           if git diff --quiet -- macos/appcast.xml; then
