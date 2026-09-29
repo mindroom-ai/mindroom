@@ -7,7 +7,7 @@ import json
 import threading
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -20,6 +20,7 @@ import mindroom.tool_system.metadata as metadata_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
@@ -36,6 +37,7 @@ from mindroom.tool_jobs.authorization import (
     function_authority,
 )
 from mindroom.tool_jobs.control import human_message_signal_context, job_checkpoint
+from mindroom.tool_jobs.disabled import ParkedWork
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
@@ -70,7 +72,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
 
@@ -844,5 +845,25 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
             with pytest.raises(JobAccessError):
                 coordinator._authorize_execution(owner, function)
             assert not coordinator._authorized(stored)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_the_journal_of_an_initialize_that_ran_before_config(tmp_path: Path) -> None:
+    """Parking indexes the startup journal even when configuration arrived only after the first initialize."""
+    config: Config | None = None
+    paths = test_runtime_paths(tmp_path)
+    coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _name: None, AgentReplyMembershipIndex())
+    journal = MagicMock()
+    await coordinator.initialize(journal)
+    config = Config()
+    with patch(
+        "mindroom.orchestration.tool_job_runtime.index_parked_work",
+        new=AsyncMock(return_value=ParkedWork()),
+    ) as index:
+        await coordinator.sync()
+    try:
+        index.assert_awaited_once_with(paths, journal)
     finally:
         await coordinator.stop()

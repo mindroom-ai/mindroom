@@ -242,7 +242,7 @@ class ToolJobRuntimeCoordinator:
 
     async def sync(self) -> None:
         """Recover once, publish the service, and wake it after config changes."""
-        await self.initialize()
+        await self.initialize(self._journal)
         config = self.config_provider()
         if config is None:
             await self.stop()
