@@ -361,6 +361,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 - `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
+- `tool_jobs/` – Background tool job snapshots, outcomes, and result claims when `background_tool_jobs.enabled` is set
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences

@@ -20,6 +20,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
 - A restart preserves outcomes and approvals, interrupts abandoned local execution, and never automatically reruns a tool.
+  Recovery rechecks current permissions and room membership before any saved approval runs.
   Turning the feature off parks saved work.
 
 ## Ownership
@@ -41,6 +42,9 @@ Consumption records the reply that first consumed each generation, so that unfin
 Approval continuations bind both job ID and generation, so stale cards cannot mutate newer work.
 Cancellation publishes its generation before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
+Config reload retains active jobs; controls and result admission check current authorization.
+Completion enters the existing response owner as a nonprojected internal journal source carrying the original requester and exact recipient; it never sends Matrix messages back through ingress.
+Accepted jobs retain their original source identity, so a still-pending request recovers stored outcomes instead of repeating its tool calls, and internal completion defers to that source while it remains pending.
 
 Shutdown first stops completion admission and drains execution.
 Receipt access and the storage lease remain available until response finalizers finish.
@@ -75,11 +79,3 @@ Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
-
-## Verification contract
-
-Regressions cover SDK calls, native approvals, current grants, output files, transient waiting, foreground release, Stop, shutdown ordering and restart consumption.
-Fresh process tests check that disabled construction does not install job SDK bindings.
-Real Matrix exploration additionally checks follow-ups, active streaming, Stop and restart with a supported model and independently inspected durable effects.
-
-Completion requires passing relevant tests and repository checks, recording any unverified live scenarios, and independent review of the final pushed commit.

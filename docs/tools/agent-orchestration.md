@@ -294,12 +294,8 @@ Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions
 
 ### Background jobs
 
-This experimental feature requires the root configuration option `background_tool_jobs.enabled: true` and a restart.
-It is disabled by default for the whole instance.
-When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function.
-This does not disable shell tools' own background commands.
-Changes to either `enabled` or `exclude_toolkits` during hot reload take effect only after a restart.
-Previously accepted job sources and related approvals stay parked while disabled; their saved outcomes remain available after re-enabling and restarting, without replaying the original tool calls.
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; see [Background Tool Jobs](../configuration/index.md#background-tool-jobs).
+When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
 
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
@@ -327,7 +323,7 @@ Names identify registered toolkits, including custom/plugin toolkits; plugin pac
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
 The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls on human input.
 A tool's own argument named `wait_timeout` remains its native argument.
-Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and approval continuations retain their accepted execution owner.
+Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
 Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and cannot be controlled with `job`.
@@ -346,7 +342,7 @@ Pressing **Stop** cancels the reply and requests cancellation of this agent's ou
 It also stops automatic replies and further managed work originating from those jobs; a restart does not resume them.
 Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
-Saved results remain available for explicit inspection or retrieval.
+Saved results remain available for explicit retrieval.
 Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
 
 The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
@@ -400,7 +396,7 @@ Automatic joins keep quiet and ordinary results separate.
 As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
 
 A result is consumed only after exact persisted parent tool-result evidence is verified.
-Inspecting, listing, or scheduling internal completion work does not consume it.
+Listing jobs or scheduling internal completion work does not consume it.
 Consumed results, errors, and acknowledged cancellation do not cause another completion response.
 If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
