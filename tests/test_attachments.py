@@ -491,7 +491,11 @@ def test_attachment_cleanup_does_not_retry_unadoptable_legacy_record(tmp_path: P
     assert load_attachment(storage, "att_legacy") is None
 
 
-def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_number", [errno.ENOSPC, errno.ENOENT])
+def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(
+    tmp_path: Path,
+    error_number: int,
+) -> None:
     """A failure writing the retained copy says nothing about the source, so a later load still adopts it."""
     storage = tmp_path / "storage"
     workspace = tmp_path / "workspace"
@@ -503,7 +507,7 @@ def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(
 
     with patch(
         "mindroom.attachments.atomic_write_file_at",
-        side_effect=OSError(errno.ENOSPC, "No space left on device"),
+        side_effect=OSError(error_number, os.strerror(error_number)),
     ):
         assert load_attachment(storage, "att_legacy") is None
 

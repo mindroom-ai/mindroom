@@ -988,13 +988,13 @@ def _adopt_legacy_attachment(
     source_path, content_sha256 = source
     mime_type = raw_payload.get("mime_type")
     media_name = _retained_media_name(attachment_id, mime_type if isinstance(mime_type, str) else None)
+    source_opened = False
     try:
-        media_dir = _prepare_retained_media_dir(storage_path)
-        with (
-            open_legacy_attachment_source(source_path) as source_fd,
-            open_directory_within_root(media_dir) as media_fd,
-        ):
-            _retain_media_copy(source_fd, media_fd, media_name, expected_sha256=content_sha256)
+        with open_legacy_attachment_source(source_path) as source_fd:
+            source_opened = True
+            media_dir = _prepare_retained_media_dir(storage_path)
+            with open_directory_within_root(media_dir) as media_fd:
+                _retain_media_copy(source_fd, media_fd, media_name, expected_sha256=content_sha256)
     except (OSError, ValueError) as exc:
         logger.warning(
             "Legacy attachment cannot be adopted into retained media",
@@ -1003,8 +1003,10 @@ def _adopt_legacy_attachment(
             error=str(exc),
         )
         # Rejected bytes, a missing source, or a link on its path never becomes the registered file again;
-        # other I/O errors, such as a full disk while copying, leave the record for a later load.
-        if isinstance(exc, ValueError) or exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+        # retained-media errors, such as a full disk while copying, leave the record for a later load.
+        if isinstance(exc, ValueError) or (
+            not source_opened and exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}
+        ):
             _discard_unadoptable_legacy_record(storage_path, attachment_id)
         return None
     filename = raw_payload.get("filename")
