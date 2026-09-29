@@ -68,7 +68,7 @@ enum MindRoomCommand: Equatable {
         case .installRuntime:
             return "The command-line runtime is installed. The background service is a separate step. Continue to Configure, or use your existing configuration."
         case .updateRuntime:
-            return "The runtime update finished. In Settings, use Apply Runtime to Service to start or restart local agents with this version."
+            return "The runtime update finished. If the background service is installed, use Apply Runtime to Service in Settings to run local agents on this version."
         case .installService:
             return "The background service was installed and started. Open Chat or Open Dashboard to check that your agents are ready."
         case .startService:
