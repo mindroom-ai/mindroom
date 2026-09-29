@@ -102,7 +102,7 @@ _MEDIA_MIME_TYPES: dict[DesktopMediaKind, frozenset[str]] = {
     "screenshot": frozenset({"image/jpeg", "image/png"}),
     "output_attachment": frozenset({SHELL_OUTPUT_MIME_TYPE}),
 }
-_MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
+MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
     "screenshot": MAX_SCREENSHOT_BYTES,
     "output_attachment": MAX_SHELL_OUTPUT_BYTES,
 }
@@ -273,8 +273,8 @@ class EncryptedDesktopMedia:
             msg = f"{kind}.v must be {ENCRYPTED_FILE_VERSION}."
             raise DesktopProtocolError(msg)
         size = _required_int(content, "size", kind)
-        if size <= 0 or size > _MEDIA_MAX_BYTES[kind]:
-            msg = f"{kind}.size must be between 1 and {_MEDIA_MAX_BYTES[kind]}."
+        if size <= 0 or size > MEDIA_MAX_BYTES[kind]:
+            msg = f"{kind}.size must be between 1 and {MEDIA_MAX_BYTES[kind]}."
             raise DesktopProtocolError(msg)
         mime_type = _required_str(content, "mimetype", kind)
         if mime_type not in _MEDIA_MIME_TYPES[kind]:
@@ -491,6 +491,7 @@ __all__ = [
     "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
     "MAX_SHELL_OUTPUT_BYTES",
+    "MEDIA_MAX_BYTES",
     "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",

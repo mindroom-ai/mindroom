@@ -7,8 +7,7 @@ import asyncio
 import nio
 
 from mindroom.desktop.protocol import (
-    MAX_SCREENSHOT_BYTES,
-    MAX_SHELL_OUTPUT_BYTES,
+    MEDIA_MAX_BYTES,
     SHELL_OUTPUT_MIME_TYPE,
     DesktopMediaKind,
     DesktopProtocolError,
@@ -77,7 +76,7 @@ async def download_encrypted_media(
     if not isinstance(response, nio.DownloadResponse) or not isinstance(response.body, bytes):
         msg = f"Matrix media download failed: {response}"
         raise DesktopMediaError(msg)
-    if len(response.body) > _max_bytes(media.mime_type):
+    if len(response.body) > MEDIA_MAX_BYTES[_media_kind(media.mime_type)]:
         msg = "Encrypted Matrix media exceeds the desktop media limit."
         raise DesktopMediaError(msg)
     try:
@@ -109,13 +108,10 @@ def _media_kind(mime_type: str) -> DesktopMediaKind:
     return "output_attachment" if mime_type == SHELL_OUTPUT_MIME_TYPE else "screenshot"
 
 
-def _max_bytes(mime_type: str) -> int:
-    return MAX_SHELL_OUTPUT_BYTES if _media_kind(mime_type) == "output_attachment" else MAX_SCREENSHOT_BYTES
-
-
 def _validate_payload(payload: bytes, *, mime_type: str) -> None:
-    if not payload or len(payload) > _max_bytes(mime_type):
-        msg = f"Desktop media must contain between 1 and {_max_bytes(mime_type)} bytes."
+    max_bytes = MEDIA_MAX_BYTES[_media_kind(mime_type)]
+    if not payload or len(payload) > max_bytes:
+        msg = f"Desktop media must contain between 1 and {max_bytes} bytes."
         raise DesktopMediaError(msg)
     if mime_type == SHELL_OUTPUT_MIME_TYPE:
         try:

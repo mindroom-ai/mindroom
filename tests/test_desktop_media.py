@@ -18,6 +18,7 @@ from mindroom.desktop.media import (
 from mindroom.desktop.protocol import (
     MAX_SCREENSHOT_BYTES,
     MAX_SHELL_OUTPUT_BYTES,
+    MEDIA_MAX_BYTES,
     SHELL_OUTPUT_MIME_TYPE,
     EncryptedDesktopMedia,
 )
@@ -384,6 +385,37 @@ async def test_download_rejects_oversized_ciphertext_before_decrypting(
     with pytest.raises(DesktopMediaError, match=r"^Encrypted Matrix media exceeds the desktop media limit"):
         await download_encrypted_media(client, media, timeout_seconds=1)
     decrypt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_media_limits_come_from_the_protocol_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upload validation and the ciphertext cap use the same per-kind limits the receiver's parser enforces."""
+    limit = len(OUTPUT) - 1
+    monkeypatch.setitem(MEDIA_MAX_BYTES, "output_attachment", limit)
+    uploaded = _capture_uploads(monkeypatch)
+
+    with pytest.raises(DesktopMediaError, match=rf"^Desktop media must contain between 1 and {limit} bytes\.$"):
+        await upload_encrypted_media(
+            AsyncMock(spec=nio.AsyncClient),
+            OUTPUT,
+            mime_type=SHELL_OUTPUT_MIME_TYPE,
+            filename="output.txt",
+            timeout_seconds=1,
+        )
+    assert uploaded == []
+
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.download.return_value = nio.DownloadResponse(OUTPUT, "application/octet-stream", None)
+    media = EncryptedDesktopMedia(
+        url="mxc://example.org/output",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type=SHELL_OUTPUT_MIME_TYPE,
+        size=limit,
+    )
+    with pytest.raises(DesktopMediaError, match=r"^Encrypted Matrix media exceeds the desktop media limit"):
+        await download_encrypted_media(client, media, timeout_seconds=1)
 
 
 @pytest.mark.asyncio
