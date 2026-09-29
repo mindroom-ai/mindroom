@@ -56,10 +56,10 @@ def saas_config() -> dict:
     }
 
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
-    # Hosted agents also learn workspace skills from their conversations.
     config["defaults"]["tools"].remove("update_awareness")
     for agent in config["agents"].values():
         agent["tools"].remove("update_awareness")
+        # Hosted agents learn workspace skills from their conversations.
         agent["skill_learning"] = {"enabled": True}
     return config
 

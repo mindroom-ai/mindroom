@@ -97,6 +97,8 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert "worker_tools" not in generated["defaults"]
     # The platform upgrades hosted instances, so tenants must not be told to update themselves.
     assert "update_awareness" not in yaml.dump(generated)
+    # Hosted agents learn workspace skills by default.
+    assert all(agent["skill_learning"] == {"enabled": True} for agent in generated["agents"].values())
 
 
 def test_saas_default_uses_current_gemini_flash() -> None:

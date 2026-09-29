@@ -175,6 +175,9 @@ agents:
       archive_after_days: 30
 ```
 
+Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
+Self-hosted configurations from `mindroom config init` leave it off.
+
 All fields, defaults, and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).
 
 ### When reviews run
