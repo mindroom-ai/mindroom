@@ -364,8 +364,8 @@ class ApprovalResponseCoordinator:
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
     def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
-        """Recognize a paused call that can resume only through the native job tool or managed execution."""
-        if any(call.toolkit_name == "job" for call in calls):
+        """Recognize a paused call that can resume only through the job runtime."""
+        if paused.job_owned_child or any(call.toolkit_name == "job" for call in calls):
             return True
         config = self.config()
         if not background_tool_jobs_enabled(config, self.runtime_paths):

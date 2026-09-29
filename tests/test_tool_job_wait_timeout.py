@@ -30,6 +30,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import assembled_function, tool_job_runtime
@@ -484,6 +485,14 @@ class MCPTools(Toolkit):
         return "rows"
 
 
+def _excluded_function() -> Function:
+    """A function of a toolkit built as shell, which the default settings exclude."""
+    toolkit = Toolkit(name="shell", tools=[_ordinary])
+    bind_toolkit_construction(toolkit, ToolConstruction("shell", None))
+    bind_toolkit_authority(toolkit, authored_name="shell")
+    return toolkit.get_functions()["_ordinary"]
+
+
 def _bound(function: Function, agent: Agent) -> Function:
     function._agent = agent
     return function
@@ -509,6 +518,7 @@ def _stopping() -> str:
         ("job", 1, True, "native"),
         ("run_connection", 0, False, "native"),
         ("mcp", 0, False, "native"),
+        ("excluded", 0, False, "native"),
     ],
 )
 def test_wait_mode_classifies_every_call_from_current_policy(
@@ -533,6 +543,7 @@ def test_wait_mode_classifies_every_call_from_current_policy(
         ],
         "run_connection": lambda: _ConnectedTools().get_functions()["query"],
         "mcp": lambda: MCPTools().get_functions()["query"],
+        "excluded": lambda: _excluded_function(),
     }
     function = _bound(functions[case](), agent)
     with tool_runtime_context(context), job_control_context(JobControl()) if owned else nullcontext():

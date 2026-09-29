@@ -3435,14 +3435,15 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "toolkit_name", "completion_origin", "wait_argument", "feature_enabled", "expected"),
+    ("tool_name", "toolkit_name", "completion_origin", "wait_argument", "feature_enabled", "job_child", "expected"),
     [
-        ("job", "job", False, False, False, True),
-        ("job", "custom", False, False, False, False),
-        ("inspect", "test_toolkit", True, False, False, True),
-        ("inspect", "test_toolkit", False, False, False, False),
-        ("report", "reports", False, True, False, False),
-        ("report", "reports", False, True, True, True),
+        ("job", "job", False, False, False, False, True),
+        ("job", "custom", False, False, False, False, False),
+        ("inspect", "test_toolkit", True, False, False, False, True),
+        ("inspect", "test_toolkit", False, False, False, False, False),
+        ("report", "reports", False, True, False, False, False),
+        ("report", "reports", False, True, True, False, True),
+        ("write_report", "file", False, False, True, True, True),
     ],
     ids=[
         "native-job-toolkit",
@@ -3451,6 +3452,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
         "ordinary",
         "wait-argument-feature-disabled",
         "wait-argument-feature-enabled",
+        "background-child-approval",
     ],
 )
 @pytest.mark.asyncio
@@ -3461,6 +3463,7 @@ async def test_pause_writer_persists_background_tool_job_ownership(
     completion_origin: bool,
     wait_argument: bool,
     feature_enabled: bool,
+    job_child: bool,
     expected: bool,
 ) -> None:
     """The suspension writer records whether a paused call can resume only through background jobs."""
@@ -3483,6 +3486,7 @@ async def test_pause_writer_persists_background_tool_job_ownership(
                 ),
             ),
             toolkit_owners={("general", tool_name): toolkit_name},
+            job_owned_child=job_child,
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(

@@ -32,7 +32,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.user_stop import restore_user_stops
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from agno.tools.function import Function
 
@@ -140,7 +140,7 @@ class ToolJobRuntimeCoordinator:
         """Revoke execution only on a proven denial, never while membership is still resolving."""
         return self._grant(job) == "denied"
 
-    def _grant(self, job: BackgroundJob) -> Literal["allowed", "denied", "pending"]:  # noqa: PLR0911
+    def _grant(self, job: BackgroundJob) -> Literal["allowed", "denied", "pending"]:
         """Recheck current delegation, team membership, and requester reply access."""
         config = self.config_provider()
         owner = job.owner
@@ -172,13 +172,23 @@ class ToolJobRuntimeCoordinator:
             return "denied"
         if not _transport_allows_actor(config, owner.recipient, owner.agent_name):
             return "denied"
+        return self._requester_access(config, owner.requester_id, owner.room_id, entities)
+
+    def _requester_access(
+        self,
+        config: Config,
+        requester_id: str,
+        room_id: str | None,
+        entities: Iterable[str],
+    ) -> Literal["allowed", "denied", "pending"]:
+        """Whether the requester may still converse with every entity, or membership is still resolving."""
         pending = False
         for entity_name in entities:
             try:
                 if not is_sender_allowed_for_responder(
-                    owner.requester_id,
+                    requester_id,
                     entity_name,
-                    owner.room_id,
+                    room_id,
                     config,
                     self.runtime_paths,
                     self.agent_reply_memberships,
@@ -220,21 +230,12 @@ class ToolJobRuntimeCoordinator:
         allowed_edges = all(
             caller in config.agents and child in config.agents[caller].delegate_to for caller, child in edges
         )
+        # Accepted work keeps executing while membership resolves; only a proven denial stops it, as revocation does.
         if (
             not valid_transport
             or not allowed_edges
             or owner.requester_id is None
-            or not all(
-                is_sender_allowed_for_responder(
-                    owner.requester_id,
-                    name,
-                    owner.room_id,
-                    config,
-                    self.runtime_paths,
-                    self.agent_reply_memberships,
-                )
-                for name in callers
-            )
+            or self._requester_access(config, owner.requester_id, owner.room_id, callers) == "denied"
         ):
             msg = "Tool execution is no longer authorized for this caller."
             raise JobAccessError(msg)

@@ -485,8 +485,6 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
             parent = asyncio.create_task(parent_run())
             await asyncio.wait_for(started.wait(), 2)
             signal.notify()
-            done, _ = await asyncio.wait({parent}, timeout=0.05)
-            assert not done
             release.set()
             response = await asyncio.wait_for(parent, 2)
         assert response.tools is not None

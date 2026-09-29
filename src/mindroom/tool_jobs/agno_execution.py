@@ -173,6 +173,11 @@ def _holds_run_connection(function: Function) -> bool:
     )
 
 
+def _carries_own_grant(function: Function) -> bool:
+    """Only a toolkit MindRoom assembled for an actor with an authority snapshot grants its function on its own."""
+    return not _is_framework_function(function) and "scope" in function_authority(function)
+
+
 def wait_mode(function: Function, *, depth: int) -> ToolWaitMode:
     """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job."""
     if (
@@ -289,8 +294,11 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
     tracker = SyncToolCompletionTracker()
     asynchronous = uses_sdk_async_dispatch(call.function)
     try:
-        # A model embedded without MindRoom's executor still reaches this dispatch; its call keeps its own grant.
-        with track_sync_tool_completion(tracker if asynchronous else None), nested_tool_call(call):
+        # A model embedded without MindRoom's executor still reaches this dispatch.
+        with (
+            track_sync_tool_completion(tracker if asynchronous else None),
+            nested_tool_call(call, own_grant=_carries_own_grant(call.function)),
+        ):
             invocation = original(call)
             if asynchronous:
                 return await invocation
@@ -467,8 +475,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),
                 reattach=True,
             )
-            waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
-            timer = Timer()
+            with Timer() as timer:
+                waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
             if waited.claim is None:
                 call.result = format_job_handle(waited.job)
                 return True, timer, call, FunctionExecutionResult(status="success", result=call.result)

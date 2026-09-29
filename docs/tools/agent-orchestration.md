@@ -312,6 +312,7 @@ Only functions of toolkits that MindRoom assembles for an agent can become jobs.
 Functions the SDK generates itself, including knowledge search, skill access, learning, and team delegation, always run inline without `wait_timeout`.
 Toolkits whose SDK connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, also run inline without `wait_timeout`.
 Waiting policy is decided when a call executes, so an approved call that resumes after a restart follows the exclusions configured at that point.
+If its toolkit became excluded meanwhile and the call carried a wait budget, it fails instead of running without the budget it asked for.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 

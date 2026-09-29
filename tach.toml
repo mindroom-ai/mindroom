@@ -7745,12 +7745,10 @@ visibility = [
 path = "mindroom.tool_jobs.agno_compat_execution"
 depends_on = [
     "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.custom_tools.job",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_jobs.wait_timeout",
 ]
 visibility = [
     "mindroom.agents",

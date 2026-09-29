@@ -63,7 +63,10 @@ from tests.test_queued_message_notify import _envelope
 from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -209,10 +212,24 @@ class _ResolvingMembership(AgentReplyMembershipIndex):
         super().__init__()
         self.state = "pending"
 
-    def is_current_room_member(self, *_args: object) -> bool:
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        del sender_id, room_id, config, runtime_paths
         return self.state == "member"
 
-    def grants_pending(self, *_args: object, **_kwargs: object) -> bool:
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        del config, joined_rooms, current_room_id
         return self.state == "pending"
 
 
@@ -681,6 +698,49 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
                     coordinator._authorize_execution(owner, function)
                 config.agents["worker"].tools = ["calculator"]
                 config.agents["lead"].delegate_to = []
+                with pytest.raises(JobAccessError):
+                    coordinator._authorize_execution(owner, function)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_accepted_execution_continues_while_room_membership_resolves(tmp_path: Path) -> None:
+    """A running job's leaf call is stopped by a proven denial, never by membership that is still resolving."""
+    config = _config(tmp_path)
+    config.agents["worker"].tools = ["calculator"]
+    for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
+        entity.access = ResponderAccessConfig(current_room_members=True)
+    coordinator = _delivery_coordinator(tmp_path, config)
+    membership = _ResolvingMembership()
+    coordinator.agent_reply_memberships = membership
+    await coordinator.initialize()
+    owner = replace(_job().owner, agent_name="worker", session_id="child_session")
+    child = delegation_child(_job())
+    child.execution_identity = serialize_tool_execution_identity(owner)
+    await start_child_turn(
+        child,
+        parent_run_id="parent",
+        config=config,
+        runtime_paths=coordinator.runtime_paths,
+        caller_execution_identity=_job().owner,
+    )
+    function = Function(name="add", entrypoint=lambda: None)
+    toolkit = Toolkit(name="calculator", auto_register=False)
+    toolkit.functions["add"] = function
+    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
+    bind_toolkit_authority(toolkit, authored_name="calculator")
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "worker"))
+    register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
+    try:
+        with tool_runtime_context(
+            _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
+        ):
+            async with child_run_context(child, config=config, runtime_paths=coordinator.runtime_paths):
+                for state in ("pending", "member"):
+                    membership.state = state
+                    coordinator._authorize_execution(owner, function)
+                membership.state = "stranger"
                 with pytest.raises(JobAccessError):
                     coordinator._authorize_execution(owner, function)
     finally:

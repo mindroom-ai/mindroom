@@ -30,7 +30,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/agno_compat_*.py` | Explicit, version-checked SDK bindings; no application authorization policy |
 | `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution and acknowledgement after the SDK saves consumption |
-| `tool_jobs/resources.py` | Retain toolkit resources until every accepted user drains |
+| `tool_jobs/resources.py` | Defer model and storage cleanup until the reply and its detached jobs release them |
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
 | `orchestration/tool_job_runtime.py` | Startup, policy revocation, completion wakeups and shutdown coordination |
 | Response and delivery owners | Serialize replies, preserve published text and tool traces, settle visible delivery |
