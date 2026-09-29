@@ -31,7 +31,7 @@ from mindroom.credential_policy import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
-# The authlib OAuth clients pull in requests and joserfc, so they are imported where a client is built.
+# Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
 warnings.filterwarnings(
     "ignore",
     category=AuthlibDeprecationWarning,
