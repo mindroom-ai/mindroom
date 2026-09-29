@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import EditTextRequest
+    from mindroom.tool_jobs.runtime import JobWait
 
 import pytest
 
@@ -332,7 +333,12 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("other_job", [False, True])
-async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Path, *, other_job: bool) -> None:
+async def test_revocation_during_the_reply_wait_finishes_the_reply(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    other_job: bool,
+) -> None:
     """A job whose access is revoked while the reply waits is gone for that reply; its other jobs still join."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
@@ -351,10 +357,23 @@ async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Pat
         raise AssertionError
 
     finish = asyncio.Event()
+    rejoined = asyncio.Event()
+    kept_waits = 0
+    original_wait = runtime.wait
 
     async def kept() -> BackgroundOutcome:
         await finish.wait()
         return BackgroundOutcome("completed", "Kept result")
+
+    async def wait(job_id: str, **kwargs: Any) -> JobWait:  # noqa: ANN401
+        nonlocal kept_waits
+        if job_id == "kept":
+            kept_waits += 1
+            if kept_waits == 2:
+                rejoined.set()
+        return await original_wait(job_id, **kwargs)
+
+    monkeypatch.setattr(runtime, "wait", wait)
 
     try:
         await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
@@ -371,10 +390,9 @@ async def test_revocation_during_the_reply_wait_finishes_the_reply(tmp_path: Pat
             allowed = False
             await runtime.cancel_revoked(denied=lambda job: job.job_id == "revoked")
             if other_job:
-                # This is a bounded assertion of non-completion while the kept job's gate is closed.
-                with pytest.raises(TimeoutError):
-                    async with asyncio.timeout(0.1):
-                        await asyncio.shield(joining)
+                # The reply keeps waiting on the job it can still access.
+                await asyncio.wait_for(rejoined.wait(), JOB_TEST_TIMEOUT)
+                assert not joining.done()
             finish.set()
             joined = await joining
         assert [item.content for item in joined[:1]] == [None]
@@ -891,9 +909,9 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("used", [DYNAMIC_TOOL_CONTINUATION_LIMIT - 1, DYNAMIC_TOOL_CONTINUATION_LIMIT])
+@pytest.mark.parametrize("used", [0, DYNAMIC_TOOL_CONTINUATION_LIMIT - 1, DYNAMIC_TOOL_CONTINUATION_LIMIT])
 async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_path: Path, used: int) -> None:
-    """A resumed approval that already used its turn's continuations joins no further ready results."""
+    """A resumed approval joins ready results only within the continuations its turn has left."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
@@ -909,22 +927,28 @@ async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_p
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "done")
 
+    async def leave_ready_result() -> None:
+        job_id = f"ready-{len(continued)}"
+        await start_job(runtime, job_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait(job_id, owner=owner, depth=0)
+        await runtime.release_wait(job_id, waited.claim)
+
     async def continue_response(response: str, prompt: str) -> str:
         continued.append(prompt)
+        # Each continuation leaves another ready result, so only the budget ends the joins.
+        await leave_ready_result()
         return response
 
     try:
-        await start_job(runtime, "ready", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        waited = await runtime.wait("ready", owner=owner, depth=0)
-        await runtime.release_wait("ready", waited.claim)
+        await leave_ready_result()
         with tool_runtime_context(context):
-            await join_approval_jobs(
+            _, joins = await join_approval_jobs(
                 "completed run",
                 is_complete=lambda _response: True,
                 continue_response=continue_response,
                 presentation=lambda: StreamingPresentation(response_text=""),
                 continuation_count=used,
             )
-        assert len(continued) == DYNAMIC_TOOL_CONTINUATION_LIMIT - used
+        assert joins == len(continued) == DYNAMIC_TOOL_CONTINUATION_LIMIT - used
     finally:
         await runtime.shutdown()

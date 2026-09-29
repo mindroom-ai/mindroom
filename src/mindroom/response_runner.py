@@ -145,7 +145,7 @@ from mindroom.tool_jobs.completion import (
     completion_envelope,
     completion_origin,
     completion_prompt,
-    published_wait_presentation,
+    reported_wait_presentation,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime, parse_completion_event_id
@@ -2450,8 +2450,8 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            # Text published beside wait progress is newer than the response's recovered body.
-            initial_presentation = published_wait_presentation() or initial_presentation
+            # Text reported beside wait progress is newer than the response's recovered body.
+            initial_presentation = reported_wait_presentation() or initial_presentation
             return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                 CancelledVisibleNoteRequest(
                     target=delivery_target,

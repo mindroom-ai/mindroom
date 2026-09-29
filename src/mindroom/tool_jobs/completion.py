@@ -70,8 +70,8 @@ async def report_background_wait(presentation: StreamingPresentation, notice: st
         await wait.callback(presentation, notice)
 
 
-def published_wait_presentation() -> StreamingPresentation | None:
-    """Return the answer text and trace this blocking response last published beside wait progress."""
+def reported_wait_presentation() -> StreamingPresentation | None:
+    """Return the answer text and trace this blocking response last reported beside wait progress."""
     wait = _WAIT_NOTICE.get()
     return wait.presentation if wait is not None else None
 
@@ -291,11 +291,15 @@ async def join_approval_jobs[RunT](
     is_complete: Callable[[RunT], bool],
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
     presentation: Callable[[], StreamingPresentation],
+    continuation_count: int,
     agent_names: Sequence[str] | None = None,
-    continuation_count: int = 0,
-) -> RunT:
-    """Join ready jobs after a reconstructed approval, within the continuation budget its turn has left."""
+) -> tuple[RunT, int]:
+    """Join ready jobs after a reconstructed approval, within the continuation budget its turn has left.
+
+    Returns the final response and how many continuations the joins spent.
+    """
     attempted: set[tuple[str, int]] = set()
+    joins = 0
     for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT - continuation_count):
         if not is_complete(response):
             break
@@ -308,4 +312,5 @@ async def join_approval_jobs[RunT](
         if prompt is None:
             break
         response = await continue_response(response, prompt)
-    return response
+        joins += 1
+    return response, joins
