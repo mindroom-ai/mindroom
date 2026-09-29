@@ -28,7 +28,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_runner import _is_silent_schedule_response, _with_silent_schedule_delivery
-from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
+from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -70,7 +70,6 @@ async def _run_silent_turn(
     collect_stream: bool,
     record_turn: bool = True,
     quiet_job: bool = False,
-    recovered: bool = False,
 ) -> _SilentTurn:
     """Run one silent scheduled agent turn; `quiet_job` leaves one finished job for the reply to join."""
     config = Config(
@@ -115,14 +114,6 @@ async def _run_silent_turn(
             requester_id=owner.requester_id,
         ),
         allow_no_report_response=True,
-        initial_presentation=(
-            StreamingPresentation(
-                response_text="Earlier finding\n\n🔧 `earlier_check` [1]",
-                tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="earlier_check"),),
-            )
-            if recovered
-            else None
-        ),
     )
     trace: list[ToolTraceEntry] = []
     recorder = TurnRecorder(user_message="Silent check") if record_turn else None
@@ -193,7 +184,6 @@ def _job_wait_call() -> ModelResponse:
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("collect_stream", [False, True])
 @pytest.mark.parametrize("record_turn", [False, True])
-@pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize(
     ("first", "second", "expected"),
     [
@@ -209,7 +199,6 @@ async def test_silent_join_preserves_the_deliverable_report(
     enabled: bool,
     collect_stream: bool,
     record_turn: bool,
-    recovered: bool,
     first: str,
     second: str,
     expected: str,
@@ -231,13 +220,10 @@ async def test_silent_join_preserves_the_deliverable_report(
         collect_stream=collect_stream,
         record_turn=record_turn,
         quiet_job=enabled,
-        recovered=recovered,
     )
     answer, trace = turn.answer, turn.trace
     assert tool_markers_match_trace(answer, trace)
     clean = strip_matching_visible_tool_markers(answer, trace).strip()
-    if recovered:
-        expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" or not enabled else "")
     if expected == "NO_REPLY":
         assert is_silent_schedule_no_report_response(clean)
     else:
@@ -245,42 +231,17 @@ async def test_silent_join_preserves_the_deliverable_report(
             line for line in expected.splitlines() if line.strip()
         ]
         assert not is_silent_schedule_no_report_response(clean)
-    assert [(tool.tool_name, tool.result_preview) for tool in trace] == (
-        ([("earlier_check", None)] if recovered else [])
-        + [("probe_tool", "Job evidence")]
-        + ([("job", "Job evidence")] if enabled else [])
+    assert [(tool.tool_name, tool.result_preview) for tool in trace] == [("probe_tool", "Job evidence")] + (
+        [("job", "Job evidence")] if enabled else []
     )
     if enabled and first == "First finding":
         assert answer.index(first) < answer.index("`job`")
-    if enabled and (collect_stream or recovered) and second == "New finding":
+    if enabled and collect_stream and second == "New finding":
         assert answer.index("`job`") < answer.index(second)
     assert turn.pending_outcomes == []
     if turn.recorder is not None:
         assert turn.recorder.outcome == "completed"
-        # The recovered prefix's tool belongs to the earlier recorded turn.
-        assert [tool.tool_name for tool in turn.recorder.completed_tools] == [
-            tool.tool_name for tool in trace[int(recovered) :]
-        ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("collect_stream", [False, True])
-async def test_recovered_single_quiet_attempt_keeps_only_the_recovered_report(
-    tmp_path: Path,
-    *,
-    collect_stream: bool,
-) -> None:
-    """Recovered prose already belongs to the reply, so a lone quiet attempt after it adds no `NO_REPLY`."""
-    turn = await _run_silent_turn(
-        tmp_path,
-        [_job_wait_call(), ModelResponse(content="NO_REPLY")],
-        enabled=True,
-        collect_stream=collect_stream,
-        quiet_job=True,
-        recovered=True,
-    )
-    assert tool_markers_match_trace(turn.answer, turn.trace)
-    assert strip_matching_visible_tool_markers(turn.answer, turn.trace).strip() == "Earlier finding"
+        assert [tool.tool_name for tool in turn.recorder.completed_tools] == [tool.tool_name for tool in trace]
 
 
 @pytest.mark.asyncio

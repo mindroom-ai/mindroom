@@ -314,7 +314,6 @@ class ResponseTurnContext:
     allow_no_report_response: bool = False
     background_tool_jobs: bool = False
     tool_job_agent_names: tuple[str, ...] | None = None
-    initial_presentation: StreamingPresentation | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -1176,19 +1175,7 @@ async def _settle_joined_blocking_attempt(
     if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
         async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
             if isinstance(joined, BackgroundWaitChunk):
-                initial = ctx.initial_presentation
-                visible_text = (
-                    append_stream_text(initial.response_text, response_text, separate=True)
-                    if initial is not None
-                    else response_text
-                )
-                await report_background_wait(
-                    StreamingPresentation(
-                        response_text=visible_text,
-                        tool_trace=initial.tool_trace if initial is not None else (),
-                    ),
-                    joined.content,
-                )
+                await report_background_wait(StreamingPresentation(response_text=response_text), joined.content)
             else:
                 joined_continuation = _advance_job_continuation(
                     ctx,

@@ -272,23 +272,16 @@ def _format_team_header(agent_names: list[str]) -> str:
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
 
 
-def _prepend_team_response_prefix(text: str, initial_presentation: StreamingPresentation | None) -> str:
-    """Keep delivered text before any recovered response or terminal notice."""
-    if initial_presentation is None:
-        return text
-    return append_stream_text(initial_presentation.response_text, text, separate=True)
-
-
 def _prefix_team_stream_chunk(
     chunk: _TeamStreamChunk,
-    initial_presentation: StreamingPresentation | None,
+    prefix: StreamingPresentation | None,
 ) -> _TeamStreamChunk:
-    """Carry recovered metadata with replacement text; structured documents already include it."""
-    if initial_presentation is None or not isinstance(chunk, str):
+    """Keep a joined reply's published document before replacement text; structured documents already include it."""
+    if prefix is None or not isinstance(chunk, str):
         return chunk
     return StructuredStreamChunk(
-        content=_prepend_team_response_prefix(chunk, initial_presentation),
-        tool_trace=list(deepcopy(initial_presentation.tool_trace)),
+        content=append_stream_text(prefix.response_text, chunk, separate=True),
+        tool_trace=list(deepcopy(prefix.tool_trace)),
     )
 
 
@@ -428,7 +421,7 @@ class _TeamStreamPresentation:
         display_names: Sequence[str],
         *,
         show_tool_calls: bool,
-        initial_presentation: StreamingPresentation | None = None,
+        prefix: StreamingPresentation | None = None,
     ) -> _TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
         frozen_config_names = list(config_names)
@@ -448,9 +441,9 @@ class _TeamStreamPresentation:
             display_names_by_id=dict(zip(ids, names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
-            prefix_response_text=initial_presentation.response_text if initial_presentation is not None else "",
-            prefix_tool_count=len(initial_presentation.tool_trace) if initial_presentation is not None else 0,
-            tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
+            prefix_response_text=prefix.response_text if prefix is not None else "",
+            prefix_tool_count=len(prefix.tool_trace) if prefix is not None else 0,
+            tool_trace=list(deepcopy(prefix.tool_trace)) if prefix is not None else [],
         )
 
     @classmethod
@@ -832,14 +825,14 @@ def _attach_team_pause_presentation(
     config_names: Sequence[str],
     display_names: Sequence[str],
     show_tool_calls: bool,
-    initial_presentation: StreamingPresentation | None = None,
+    prefix: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
     presentation = _TeamStreamPresentation.new(
         config_names,
         display_names,
         show_tool_calls=show_tool_calls,
-        initial_presentation=initial_presentation,
+        prefix=prefix,
     )
     scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
@@ -3129,7 +3122,7 @@ async def team_response(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        return _prepend_team_response_prefix(str(exc), ctx.initial_presentation)
+        return str(exc)
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -3309,15 +3302,12 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
-                initial_presentation = ctx.initial_presentation
-                if run.attempted_job_outcomes:
-                    initial_presentation = StreamingPresentation(
-                        response_text=_prepend_team_response_prefix(run.prior_response_text, initial_presentation),
-                        tool_trace=(
-                            *(initial_presentation.tool_trace if initial_presentation is not None else ()),
-                            *run.prior_response_tools,
-                        ),
-                    )
+                # A pause after a job join keeps the output the reply already published.
+                joined_output = (
+                    StreamingPresentation(response_text=run.prior_response_text, tool_trace=run.prior_response_tools)
+                    if run.attempted_job_outcomes
+                    else None
+                )
                 return replace(
                     _attach_team_pause_presentation(
                         paused_attempt,
@@ -3325,7 +3315,7 @@ async def team_response(  # noqa: C901, PLR0915
                         config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
-                        initial_presentation=initial_presentation,
+                        prefix=joined_output,
                     ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
@@ -3411,7 +3401,7 @@ async def team_response(  # noqa: C901, PLR0915
                 else _format_terminal_team_response(
                     response,
                     team_display_names=team_members.display_names,
-                    include_header=not (run.prior_response_text or ctx.initial_presentation),
+                    include_header=not run.prior_response_text,
                 )
             )
         else:
@@ -3473,7 +3463,7 @@ async def team_response(  # noqa: C901, PLR0915
         ),
         discard_empty_run=discard_team_empty_run,
     )
-    response_text = await run_blocking_response_turn(
+    return await run_blocking_response_turn(
         ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
@@ -3485,7 +3475,6 @@ async def team_response(  # noqa: C901, PLR0915
             run_id=ctx.run_id,
         ),
     )
-    return _prepend_team_response_prefix(response_text, ctx.initial_presentation)
 
 
 async def _team_response_stream_raw(
@@ -3618,7 +3607,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        yield _prefix_team_stream_chunk(str(exc), ctx.initial_presentation)
+        yield str(exc)
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
@@ -3639,8 +3628,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
         team_members=team_members,
         member_model_names=team_members.model_names,
     )
-    previous_presentation = ctx.initial_presentation
-    attempt_prefix = ctx.initial_presentation
+    previous_presentation: StreamingPresentation | None = None
+    attempt_prefix: StreamingPresentation | None = None
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
@@ -3650,7 +3639,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         nonlocal attempt_prefix
         # Background joins continue the already-published document. A fresh
         # tracker owns this attempt while the prior trace remains a frozen prefix.
-        attempt_prefix = previous_presentation if run.attempted_job_outcomes else ctx.initial_presentation
+        attempt_prefix = previous_presentation if run.attempted_job_outcomes else None
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(
                 requested_agent_names,
@@ -3726,7 +3715,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
-            initial_presentation=attempt_prefix,
+            prefix=attempt_prefix,
         )
         attempt_member_ids = presentation.member_ids
         attempt_display_names_by_id = presentation.display_names_by_id
@@ -3949,9 +3938,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     return
                 replayable_text = response_text if event_has_visible else ""
                 join_document = None
-                if emitted_output and (ctx.background_tool_jobs or ctx.initial_presentation is not None):
-                    # A recovered or job-joined reply keeps the live document and its trace, which the prose-only
-                    # terminal rendering drops.
+                if emitted_output and ctx.background_tool_jobs:
+                    # A job-joined reply keeps the live document and its trace, which the prose-only terminal
+                    # rendering drops; the driver publishes it only once a join continues the reply.
                     _append_team_output_text(
                         presentation,
                         event,
@@ -3967,10 +3956,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         tool_trace=presentation.tool_trace.copy(),
                         presentation_state=presentation.to_state(),
                     )
-                    if ctx.initial_presentation is not None:
-                        yield join_document
-                        join_document = None
-                        response_text = ""
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale

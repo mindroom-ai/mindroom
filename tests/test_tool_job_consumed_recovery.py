@@ -248,8 +248,9 @@ async def test_consumed_completion_recovers_only_its_unfinished_response(
             assert final.acknowledged_event_id is not None
             assert "Recovered answer." in final.payload["body"]
             if visible:
+                # The re-run replaces the interrupted reply in place, like any recovered request.
                 assert final.edits_event_id == "$placeholder"
-                assert "Already visible." in final.payload["body"]
+                assert "Already visible." not in final.payload["body"]
         assert not await store.is_pending(event.event_id)
         assert executions == ["executed"]
     finally:

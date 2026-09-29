@@ -364,7 +364,8 @@ class CancelledVisibleNoteRequest:
     existing_event_is_placeholder: bool
     cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
     identity: ResponseIdentity
-    initial_presentation: StreamingPresentation | None = None
+    # Text and trace the message already shows, when a blocking wait published them beside its notice.
+    visible_presentation: StreamingPresentation | None = None
 
 
 @dataclass(frozen=True)
@@ -1801,9 +1802,9 @@ class DeliveryGateway:
         request: CancelledVisibleNoteRequest,
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
-        initial = request.initial_presentation
-        prior_text = initial.response_text if initial is not None else ""
-        tool_trace = initial.tool_trace if initial is not None else ()
+        visible = request.visible_presentation
+        prior_text = visible.response_text if visible is not None else ""
+        tool_trace = visible.tool_trace if visible is not None else ()
         cancelled_text, stream_status = build_cancelled_response_update(prior_text, cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
@@ -1848,7 +1849,7 @@ class DeliveryGateway:
                 terminal_status="cancelled",
                 event_id=request.event_id,
                 is_visible_response=True,
-                final_visible_body=prior_text if initial is not None else cancelled_text,
+                final_visible_body=prior_text if visible is not None else cancelled_text,
                 cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,

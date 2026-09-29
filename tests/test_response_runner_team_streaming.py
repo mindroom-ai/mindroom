@@ -909,9 +909,8 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recovered", [False, True])
-async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_path: Path, recovered: bool) -> None:
-    """Stopping a fresh or recovered team keeps its latest Matrix prose and tool markers."""
+async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_path: Path) -> None:
+    """Stopping a team during a job wait keeps the prose and tool markers the wait published."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     config.background_tool_jobs.enabled = True
@@ -943,7 +942,6 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         existing_event_id="$existing",
         existing_event_is_placeholder=False,
-        initial_presentation=StreamingPresentation(prior_text, tool_trace=(prior_trace,)) if recovered else None,
     )
 
     async def wait_then_stop(*_args: object, **_kwargs: object) -> str:

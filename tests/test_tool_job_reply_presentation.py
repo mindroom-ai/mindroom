@@ -1,4 +1,4 @@
-"""Recovery keeps the authoritative visible response while accepted jobs resume."""
+"""A reply keeps its published text and tool trace across job joins, recovery re-runs, and cancellation."""
 
 from __future__ import annotations
 
@@ -17,22 +17,20 @@ from mindroom.ai import ai_response, stream_agent_response
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, send_streaming_response
 from mindroom.tool_jobs.completion import _ReadyJobContinuation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
     ToolTraceEntry,
-    build_tool_trace_content,
     deserialize_tool_trace,
 )
-from mindroom.turn_record import RevisionSnapshotChangedError
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
+from tests.test_stale_stream_cleanup import _make_message_event
 from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -76,18 +74,10 @@ async def test_nested_completion_does_not_repeat_parent_text(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("readable", [False, True])
-@pytest.mark.parametrize("show_tools", [False, True])
-async def test_recovered_job_source_preserves_latest_visible_edit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    readable: bool,
-    show_tools: bool,
-) -> None:
-    """Recovery must not replace a long edited answer with an empty presentation."""
+async def test_recovered_job_source_reruns_into_its_reply_without_repeating_accepted_work(tmp_path: Path) -> None:
+    """A re-run of a source whose tool calls became jobs replaces the old reply and retrieves, never repeats, them."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
-    bot.config.agents["general"].show_tool_calls = show_tools
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = replace(
         _plain_request(_target(thread_id="$thread")),
@@ -104,26 +94,6 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
     runtime = tool_job_runtime(tmp_path)
     pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
-    old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
-    narrative = ("Long analysis already visible. " * 100).rstrip()
-    body = narrative + "\n\n🔧 `original_tool` [1]"
-    original = _make_message_event(
-        event_id="$response",
-        body="Thinking...",
-        timestamp_ms=10,
-        sender=bot.matrix_id.full_id,
-    )
-    latest = _make_message_event(
-        event_id="$edit",
-        body="* latest",
-        timestamp_ms=20,
-        sender=bot.matrix_id.full_id,
-        relates_to={"rel_type": "m.replace", "event_id": "$response"},
-        new_content={"msgtype": "m.text", "body": body, **(build_tool_trace_content([old_trace]) or {})},
-    )
-    bot.client.room_get_event.side_effect = None
-    bot.client.room_get_event.return_value = _room_get_event_response(original) if readable else None
-    bot.client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter(latest))
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved result")
@@ -139,130 +109,34 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
             owner=owner,
             operation=operation,
         )
-        if not readable:
-            with pytest.raises(RevisionSnapshotChangedError):
-                await runner._recover_tool_job_source(request)
-            return
         recovered = await runner._recover_tool_job_source(request)
-        assert recovered.existing_event_id == "$response"
-        assert recovered.initial_presentation is not None
-        assert recovered.initial_presentation.response_text == (body if show_tools else narrative)
-        assert recovered.initial_presentation.tool_trace == ((old_trace,) if show_tools else ())
-        assert narrative in recovered.prompt
-        assert recovered.sources == request.sources
-        monkeypatch.setattr(
-            "mindroom.knowledge.utils.KnowledgeAccessSupport.resolve_for_agent_async",
-            AsyncMock(side_effect=RuntimeError("knowledge unavailable")),
-        )
-        outcome = await runner._process_and_respond_streaming(recovered)
-        bot.client.room_redact.assert_not_called()
-        assert outcome.delivery.event_id == "$response"
-        assert not recovered.existing_event_is_placeholder
     finally:
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_recovered_agent_retains_prose_and_trace_through_real_tool_execution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-) -> None:
-    """New tool markers must append after the restored text and keep earlier trace slots."""
-    bot = _bot(tmp_path)
-    bot.config.memory.backend = "none"
-    target = _target(thread_id="$thread")
-    prefix = "Previous detailed answer.\n\n🔧 `original_tool` [1]\n\nMore earlier text."
-    old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="old result")
-    context = replace(
-        make_turn_context("general", session_id="recovered", requester_id="@user:localhost"),
-        initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)),
-    )
-    calls = []
-
-    def retrieve() -> str:
-        calls.append("retrieve")
-        return "retained value"
-
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("retrieve", "new-call")]),
-            ModelResponse(content="The recovered result."),
-        ],
-    )
-
-    def create_agent(*_args: object, **kwargs: object) -> Agent:
-        return Agent(id="general", model=model, tools=[retrieve], db=kwargs["history_storage"], telemetry=False)
-
-    monkeypatch.setattr("mindroom.ai.create_agent", create_agent)
-    trace = []
-    deliveries = []
-    if streaming:
-
-        async def edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            new_content: dict[str, object],
-            new_text: str,
-            *,
-            retry_sync_recovery: bool = False,  # noqa: ARG001
-        ) -> DeliveredMatrixEvent:
-            deliveries.append(new_text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
-
-        monkeypatch.setattr("mindroom.streaming.edit_message_result", edit)
-        outcome = await send_streaming_response(
-            bot.client,
-            target,
-            bot.config,
-            bot.runtime_paths,
-            stream_agent_response(context, prompt="Continue.", runtime_paths=bot.runtime_paths, config=bot.config),
-            existing_event_id="$response",
-            tool_trace_collector=trace,
-        )
-        body = outcome.visible_body_text
-        assert deliveries
-        assert all(text.startswith(prefix) for text in deliveries)
-    else:
-        body = await ai_response(
-            context,
-            prompt="Continue.",
-            runtime_paths=bot.runtime_paths,
-            config=bot.config,
-            tool_trace_collector=trace,
-        )
-    assert body.startswith(prefix)
-    assert body.endswith("The recovered result.")
-    assert "`retrieve` [2]" in body
-    assert [entry.tool_name for entry in trace] == ["original_tool", "retrieve"]
-    assert trace[0] == old_trace
-    assert trace[1].result_preview == "retained value"
-    assert calls == ["retrieve"]
+    assert (recovered.existing_event_id, recovered.existing_event_is_placeholder) == ("$response", True)
+    assert recovered.sources == request.sources
+    assert "Do not repeat its original tool calls." in recovered.prompt
+    assert 'job_id="retained"' in recovered.prompt
+    bot.client.room_get_event.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("has_delta", [False, True])
-@pytest.mark.parametrize("joined", [False, True])
 @pytest.mark.parametrize("prefix", ["", "## "])
 async def test_prior_prose_does_not_hide_terminal_only_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
     has_delta: bool,
-    joined: bool,
     prefix: str,
 ) -> None:
-    """Recovery and joins retain distinct paragraphs for incremental and terminal-only prose."""
+    """A job join retains distinct paragraphs for incremental and terminal-only prose."""
     attempts = 0
 
     async def events(*_args: object, **_kwargs: object) -> AsyncIterator[RunContentEvent | RunCompletedEvent]:
         nonlocal attempts
         attempts += 1
-        if joined and attempts == 1:
+        if attempts == 1:
             yield RunContentEvent(content="Earlier visible answer.")
             yield RunCompletedEvent(content="Earlier visible answer.", run_id="first", session_id="session1")
             return
@@ -275,17 +149,14 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
     monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
     ctx = make_turn_context("general", session_id="session1")
     config = _config()
-    if joined:
-        config.background_tool_jobs.enabled = True
+    config.background_tool_jobs.enabled = True
 
-        async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
-            if not attempted:
-                attempted.add(("job", 0))
-                yield _ReadyJobContinuation("Retrieve completed background result")
+    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        if not attempted:
+            attempted.add(("job", 0))
+            yield _ReadyJobContinuation("Retrieve completed background result")
 
-        monkeypatch.setattr("mindroom.response_turn.join_conversation_jobs", join)
-    else:
-        ctx = replace(ctx, initial_presentation=StreamingPresentation("Earlier visible answer."))
+    monkeypatch.setattr("mindroom.response_turn.join_conversation_jobs", join)
     paths = _runtime_paths(tmp_path)
     if streaming:
         bot = _bot(tmp_path / "matrix")
@@ -324,47 +195,7 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
     assert body.strip().endswith(expected)
     assert body.strip() == "Earlier visible answer.\n\n" + expected
     assert body.count("Fresh terminal answer.") == int(not has_delta)
-    assert attempts == (2 if joined else 1)
-
-
-@pytest.mark.asyncio
-async def test_recovered_blocking_cancellation_keeps_visible_body_and_trace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancelling a recovery appends the restart note without replacing prior content."""
-    bot = _bot(tmp_path)
-    bot.config.memory.backend = "none"
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
-    prefix = "Already visible analysis.\n\n🔧 `original_tool` [1]"
-    request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        existing_event_id="$response",
-        initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)),
-    )
-    original = _make_message_event(
-        event_id="$response",
-        body=prefix,
-        timestamp_ms=10,
-        sender=bot.matrix_id.full_id,
-        extra_content=build_tool_trace_content([old_trace]),
-    )
-    bot.client.room_get_event.side_effect = None
-    bot.client.room_get_event.return_value = _room_get_event_response(original)
-    bot.client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter())
-    monkeypatch.setattr(
-        "mindroom.response_runner.ai_response",
-        AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
-    )
-    edit = AsyncMock(return_value=True)
-    monkeypatch.setattr(DeliveryGateway, "edit_text", edit)
-    outcome = await runner._process_and_respond(request)
-    delivered = edit.await_args.args[0]
-    assert delivered.new_text == prefix + "\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE
-    assert delivered.tool_trace == [old_trace]
-    assert outcome.delivery.final_visible_body == delivered.new_text
-    assert outcome.delivery.tool_trace == (old_trace,)
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
@@ -393,27 +224,19 @@ async def test_blocking_cancellation_without_a_wait_matches_a_disabled_reply(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
 async def test_blocking_wait_cancellation_preserves_latest_presentation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    recovered: bool,
     cancel_source: str,
 ) -> None:
-    """A published wait is the cancellation baseline, including newly numbered tools."""
+    """A published wait is the cancellation baseline, including its numbered tools."""
     bot = _bot(tmp_path)
     bot.config.memory.backend = "none"
     bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread")
-    old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
-    prefix = "Already visible analysis.\n\n🔧 `original_tool` [1]"
-    request = replace(
-        _plain_request(target),
-        existing_event_id="$response",
-        initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)) if recovered else None,
-    )
+    request = replace(_plain_request(target), existing_event_id="$response")
     edits = []
 
     async def edit(
@@ -439,7 +262,7 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(
         return DeliveredMatrixEvent(event_id=edit_id, content_sent=dict(content))
 
     async def events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield RunContentEvent(content="New recovery analysis.")
+        yield RunContentEvent(content="New analysis.")
         yield ToolCallStartedEvent(tool=ToolExecution(tool_call_id="new-call", tool_name="retrieve"))
         yield ToolCallCompletedEvent(
             tool=ToolExecution(tool_call_id="new-call", tool_name="retrieve", result="new result"),
@@ -469,16 +292,14 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(
     assert outcome.cancel_source == cancel_source
     assert len(edits) == 2
     assert outcome.final_visible_body is not None
-    assert "New recovery analysis." in outcome.final_visible_body
+    assert "New analysis." in outcome.final_visible_body
     note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
     assert outcome.final_visible_body.endswith(note)
     wait_content = edits[0].source["content"]["m.new_content"]
-    assert wait_content["body"].startswith(prefix if recovered else "New recovery analysis.")
-    assert f"`retrieve` [{2 if recovered else 1}]" in wait_content["body"]
+    assert wait_content["body"].startswith("New analysis.")
+    assert "`retrieve` [1]" in wait_content["body"]
     trace = deserialize_tool_trace(wait_content.get("io.mindroom.tool_trace", {}).get("events", []))
-    assert trace == ([old_trace] if recovered else []) + [
-        ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result"),
-    ]
+    assert trace == [ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result")]
     assert outcome.tool_trace == tuple(trace)
     final_content = edits[-1].source["content"]["m.new_content"]
     assert final_content["io.mindroom.tool_trace"] == wait_content["io.mindroom.tool_trace"]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,7 +20,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.streaming import StreamingPresentation
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -374,8 +372,7 @@ async def test_team_uses_latest_successful_nested_switch_when_later_call_is_reje
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recovered", [False, True])
-async def test_team_response_returns_limit_message_after_dynamic_tool_limit(recovered: bool) -> None:
+async def test_team_response_returns_limit_message_after_dynamic_tool_limit() -> None:
     """Repeated dynamic-tool calls without an answer should surface the limit message."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
@@ -383,11 +380,6 @@ async def test_team_response_returns_limit_message_after_dynamic_tool_limit(reco
         side_effect=[_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1)],
     )
     recorder = TurnRecorder(user_message="Keep loading tools.")
-    prefix = "Already delivered answer."
-    context = replace(
-        make_turn_context(session_id=None),
-        initial_presentation=StreamingPresentation(prefix) if recovered else None,
-    )
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2]:
@@ -398,14 +390,11 @@ async def test_team_response_returns_limit_message_after_dynamic_tool_limit(reco
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=context,
+            ctx=make_turn_context(session_id=None),
         )
 
     assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
     assert "did not produce a final answer" in response
-    if recovered:
-        assert response.startswith(prefix + "\n\n")
-        assert response.count(prefix) == 1
     assert recorder.outcome == "completed"
     assert "did not produce a final answer" in recorder.assistant_text
 

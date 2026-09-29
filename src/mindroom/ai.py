@@ -112,7 +112,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.skill_learning.capture import observe_final_request
-from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
+from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
@@ -126,7 +126,6 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     complete_pending_tool_block,
     format_tool_combined,
-    tool_marker_text,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
 
@@ -553,22 +552,14 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
     earlier_output = False
     terminal_echo: str | None = None
     try:
-        async for incoming in response_stream:
-            chunk = incoming
+        async for chunk in response_stream:
             expected, terminal_echo = terminal_echo, None
             if isinstance(chunk, RunContentEvent) and expected is not None and chunk.content == expected:
                 continue
             for item in _without_quiet_prose(quiet_attempt):
                 yield item
             quiet_attempt.clear()
-            if isinstance(chunk, StructuredStreamChunk):
-                prose = strip_matching_visible_tool_markers(chunk.content, chunk.tool_trace or ())
-                if is_silent_schedule_no_report_response(prose):
-                    chunk = replace(chunk, content=tool_marker_text(chunk.content))
-                else:
-                    # Recovered prose already belongs to this reply.
-                    earlier_output = True
-            if isinstance(chunk, (StructuredStreamChunk, BackgroundWaitChunk)):
+            if isinstance(chunk, BackgroundWaitChunk):
                 for item in pending:
                     yield item
                 pending.clear()
@@ -722,14 +713,14 @@ def _attach_blocking_pause_presentation(
     response: RunOutput,
     *,
     show_tool_calls: bool,
-    initial_presentation: StreamingPresentation | None = None,
+    prior_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
-    """Render a blocking pause once, before it crosses the approval boundary."""
+    """Render a blocking pause once, before it crosses the approval boundary, after any joined prior output."""
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
-        response_text=initial_presentation.response_text if initial_presentation is not None else "",
-        tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
+        response_text=prior_presentation.response_text if prior_presentation is not None else "",
+        tool_trace=list(deepcopy(prior_presentation.tool_trace)) if prior_presentation is not None else [],
     )
     presentation.separate_next_text = bool(presentation.response_text)
     presentation.append_text(_extract_replayable_response_text(response))
@@ -1630,7 +1621,7 @@ async def ai_response(  # noqa: C901, PLR0915
     ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
-    if collect_streamed_response or ctx.agent_mode == "minimal" or ctx.initial_presentation is not None:
+    if collect_streamed_response or ctx.agent_mode == "minimal":
         return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
@@ -1829,7 +1820,7 @@ async def ai_response(  # noqa: C901, PLR0915
                         paused_attempt,
                         response,
                         show_tool_calls=show_tool_calls,
-                        initial_presentation=StreamingPresentation(
+                        prior_presentation=StreamingPresentation(
                             response_text=run.prior_response_text,
                             tool_trace=run.prior_response_tools,
                         ),
@@ -2477,11 +2468,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         # Only the owning attempt can supply terminal-only text. Nested tool
         # completions must not reset this attempt's record of streamed content.
-        if (
-            (ctx.background_tool_jobs or ctx.initial_presentation is not None)
-            and not state.assistant_text
-            and state.canonical_final_body_candidate
-        ):
+        if ctx.background_tool_jobs and not state.assistant_text and state.canonical_final_body_candidate:
             yield RunContentEvent(content=state.canonical_final_body_candidate)
 
         metadata_content: dict[str, Any] | None = None
@@ -2575,12 +2562,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     try:
         async with aclosing(response_stream) as closing_stream:
-            if ctx.initial_presentation is not None:
-                initial = ctx.initial_presentation
-                yield StructuredStreamChunk(
-                    content=initial.response_text.rstrip() + "\n\n" if initial.response_text else "",
-                    tool_trace=list(deepcopy(initial.tool_trace)),
-                )
             async for chunk in closing_stream:
                 yield chunk
     finally:

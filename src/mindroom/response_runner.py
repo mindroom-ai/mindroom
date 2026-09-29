@@ -44,7 +44,6 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
-    TOOL_TRACE_CONTENT_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -66,7 +65,6 @@ from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
-    fetch_latest_visible_message,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
@@ -124,7 +122,6 @@ from mindroom.streaming import (
     StreamingResponse,
     build_cancelled_response_update,
     clean_partial_reply_text,
-    strip_matching_visible_tool_markers,
     strip_visible_tool_markers,
 )
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
@@ -515,7 +512,6 @@ class ResponseRequest:
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
-    initial_presentation: StreamingPresentation | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -2437,7 +2433,6 @@ class ResponseRunner:
         restart_message: str,
         user_stop_message: str,
         interrupted_message: str,
-        initial_presentation: StreamingPresentation | None = None,
     ) -> FinalDeliveryOutcome:
         """Settle one blocking-mode cancellation through the visible note or a no-event outcome."""
         cancel_source = classify_cancel_source(exc)
@@ -2450,8 +2445,6 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            # Text reported beside wait progress is newer than the response's recovered body.
-            initial_presentation = reported_wait_presentation() or initial_presentation
             return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                 CancelledVisibleNoteRequest(
                     target=delivery_target,
@@ -2459,7 +2452,7 @@ class ResponseRunner:
                     existing_event_is_placeholder=existing_event_is_placeholder,
                     cancel_source=cancel_source,
                     identity=response_identity,
-                    initial_presentation=initial_presentation,
+                    visible_presentation=reported_wait_presentation(),
                 ),
             )
         return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
@@ -3596,7 +3589,6 @@ class ResponseRunner:
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
-            initial_presentation=request.initial_presentation,
         )
 
     def _notify_interrupted_response_recoverable(
@@ -3706,22 +3698,6 @@ class ResponseRunner:
             reply_entity_names=reply_entity_names,
         )
 
-    async def _read_response_presentation(self, *, room_id: str, event_id: str) -> StreamingPresentation | None:
-        """Read the exact latest owned response before a recovery or cancellation edit."""
-        visible = await fetch_latest_visible_message(
-            self._client(),
-            room_id=room_id,
-            event_id=event_id,
-            trusted_sender_ids=(self.deps.matrix_full_id,),
-        )
-        if visible is None or visible.sender != self.deps.matrix_full_id:
-            return None
-        trace_content = visible.content.get(TOOL_TRACE_CONTENT_KEY, {})
-        return StreamingPresentation(
-            response_text=clean_partial_reply_text(visible.body),
-            tool_trace=tuple(deserialize_tool_trace(trace_content.get("events", []))),
-        )
-
     async def _recover_tool_job_source(self, request: ResponseRequest) -> ResponseRequest:
         """Resume accepted source work without asking the model to repeat its original side effects."""
         runtime = get_background_runtime(self.deps.runtime_paths)
@@ -3738,36 +3714,11 @@ class ResponseRunner:
         )
         if not jobs:
             return request
-        initial_presentation = None
-        existing_event_is_placeholder = request.existing_event_is_placeholder
-        if request.existing_event_id is not None:
-            initial_presentation = await self._read_response_presentation(
-                room_id=request.room_id,
-                event_id=request.existing_event_id,
-            )
-            if initial_presentation is None:
-                msg = "Cannot recover accepted tool work without its latest visible response"
-                raise RevisionSnapshotChangedError(msg)
-            if initial_presentation.response_text or initial_presentation.tool_trace:
-                existing_event_is_placeholder = False
-            if not self._show_tool_calls():
-                initial_presentation = replace(
-                    initial_presentation,
-                    response_text=strip_matching_visible_tool_markers(
-                        initial_presentation.response_text,
-                        initial_presentation.tool_trace,
-                    ),
-                    tool_trace=(),
-                )
+        # The re-run replaces the interrupted reply like any recovered request; it only must not repeat accepted work.
         prompt = (
             "Previously accepted work belongs to this recovered response. Do not repeat its original tool calls. "
             + completion_prompt(jobs)
         )
-        if initial_presentation is not None and initial_presentation.response_text:
-            prompt += (
-                "\nContinue after the following already-displayed response; it will be preserved automatically. "
-                "Do not repeat it:\n" + initial_presentation.response_text
-            )
         origin = replace(
             completion_origin(jobs[0], sender_id=self.deps.matrix_full_id),
             source_kind=envelope.source_kind,
@@ -3779,8 +3730,6 @@ class ResponseRunner:
             current_prompt_is_structured=False,
             current_timestamp_ms=None,
             payload_preparation=None,
-            initial_presentation=initial_presentation,
-            existing_event_is_placeholder=existing_event_is_placeholder,
             response_envelope=replace(envelope, body=prompt, origin=origin),
         )
 
@@ -4609,7 +4558,6 @@ class ResponseRunner:
             system_enrichment_items=request.system_enrichment_items,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
-            initial_presentation=request.initial_presentation,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=prepared_prompt,
@@ -4841,7 +4789,6 @@ class ResponseRunner:
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
                             interrupted_message="Team non-streaming response interrupted — traceback for diagnosis",
-                            initial_presentation=request.initial_presentation,
                         ),
                     )
                     return
@@ -4858,9 +4805,7 @@ class ResponseRunner:
                             existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                             response_text=response_text,
                             identity=response_identity,
-                            tool_trace=list(request.initial_presentation.tool_trace)
-                            if request.initial_presentation is not None
-                            else None,
+                            tool_trace=None,
                             extra_content=_merge_response_extra_content(
                                 team_run_metadata_content
                                 or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
@@ -5396,7 +5341,6 @@ class ResponseRunner:
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
                     interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
-                    initial_presentation=request.initial_presentation,
                 ),
             )
         except Exception as error:

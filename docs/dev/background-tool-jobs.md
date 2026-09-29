@@ -45,6 +45,7 @@ Permission revocation uses internal ownership to stop execution, even though pub
 Config reload retains active jobs; controls and result admission check current authorization.
 Completion enters the existing response owner as a nonprojected internal journal source carrying the original requester and exact recipient; it never sends Matrix messages back through ingress.
 Accepted jobs retain their original source identity, so a still-pending request recovers stored outcomes instead of repeating its tool calls, and internal completion defers to that source while it remains pending.
+That re-run replaces the interrupted reply, as it does for any recovered request.
 
 Shutdown first stops completion admission and drains execution.
 Receipt access and the storage lease remain available until response finalizers finish.

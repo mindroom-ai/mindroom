@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +29,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, ResponseTurnContext
-from mindroom.streaming import StreamingPresentation
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -60,6 +58,8 @@ from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_jo
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.streaming import StreamingPresentation
 
 
 async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event) -> None:
@@ -461,12 +461,10 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("recovered", [False, True])
 @pytest.mark.parametrize("repeat_join", [False, True])
 async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C901, PLR0915 - One native job lifecycle across delivery modes.
     tmp_path: Path,
     streaming: bool,
-    recovered: bool,
     repeat_join: bool,
 ) -> None:
     """Both ordinary team entry points acknowledge only their saved native result receipt."""
@@ -532,12 +530,6 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         thread_id=owner.resolved_thread_id,
         requester_id=owner.requester_id,
     )
-    prefix = StreamingPresentation(
-        "🤝 **Team Response** (Leader):\n\nEarlier team answer.\n\n🔧 `original_tool` [1]",
-        tool_trace=(ToolTraceEntry("tool_call_completed", "original_tool", result_preview="earlier result"),),
-    )
-    if recovered:
-        ctx = replace(ctx, initial_presentation=prefix)
 
     async def prepare(*_args: object, **kwargs: object) -> _PreparedMaterializedTeamExecution:
         return _PreparedMaterializedTeamExecution(
@@ -600,10 +592,6 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                 if pending.done():
                     pending.result()
                 assert waiting.is_set()
-                if recovered and not streaming:
-                    assert notices[-1].response_text.startswith(prefix.response_text + "\n\n")
-                    assert notices[-1].response_text.count(prefix.response_text) == 1
-                    assert notices[-1].tool_trace == prefix.tool_trace
             finally:
                 notice_waiter.cancel()
                 await asyncio.gather(notice_waiter, return_exceptions=True)
@@ -651,12 +639,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                 assert answer.count("Second independent stage done.") == 1
                 assert recorder.assistant_text.count("Second independent stage done.") == 1
             if streaming:
-                assert [entry.tool_name for entry in final_trace] == (
-                    (["original_tool"] if recovered else []) + expected_tools
-                )
-            if recovered:
-                assert answer.startswith(prefix.response_text + "\n\n")
-                assert answer.count(prefix.response_text) == 1
+                assert [entry.tool_name for entry in final_trace] == expected_tools
             assert calls == (2 if repeat_join else 1)
             assert await runtime.pending_outcomes() == []
     finally:
