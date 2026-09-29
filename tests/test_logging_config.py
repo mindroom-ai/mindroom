@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 import warnings
 from typing import TYPE_CHECKING, NoReturn
@@ -14,7 +15,7 @@ import nio
 import pytest
 
 from mindroom.constants import RuntimePaths
-from mindroom.logging_config import bound_log_context, get_logger, setup_logging
+from mindroom.logging_config import bound_log_context, configure_default_logging, get_logger, setup_logging
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
@@ -47,6 +48,16 @@ def _raise_value_error() -> NoReturn:
 
 def _raise_secret_value_error() -> NoReturn:
     msg = "api_key=api-secret"
+    raise ValueError(msg)
+
+
+# No redaction rule recognizes this value, so only omitting frame locals keeps it out of logs.
+_FRAME_LOCAL_CREDENTIAL = "frame-local-credential"
+
+
+def _raise_with_credential_in_frame(extra_header: str) -> NoReturn:
+    git_env = {"GIT_CONFIG_VALUE_0": extra_header}
+    msg = f"git failed with {', '.join(git_env)} configured"
     raise ValueError(msg)
 
 
@@ -512,3 +523,59 @@ def test_setup_logging_json_mode_renders_exception_field_for_exc_info_tuple(
     assert payload["event"] == "test_exception_tuple"
     assert isinstance(payload["exception"], str)
     assert "ValueError: boom" in payload["exception"]
+
+
+@pytest.mark.parametrize(
+    ("renderer", "is_terminal"),
+    [("json", False), ("text", False), ("text", True), ("default", False)],
+    ids=["json", "text", "colored", "default"],
+)
+def test_logged_tracebacks_omit_frame_locals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    renderer: str,
+    is_terminal: bool,
+) -> None:
+    """Every renderer keeps the traceback without printing the locals of its frames."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", renderer)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
+    if renderer == "default":
+        configure_default_logging()
+    else:
+        setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    try:
+        _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
+    except ValueError:
+        get_logger("tests.logging").exception("test_exception")
+
+    captured = capsys.readouterr()
+    output = captured.out if renderer == "default" else captured.err
+
+    assert "_raise_with_credential_in_frame" in output
+    assert "git failed with GIT_CONFIG_VALUE_0 configured" in output
+    assert _FRAME_LOCAL_CREDENTIAL not in output
+
+
+def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
+    """The refresh child never calls setup_logging, yet its failure traceback still omits frame locals."""
+    request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "mindroom.knowledge_refresh_runner"],
+        input=json.dumps(request).encode(),
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    stderr = completed.stderr.decode()
+    assert completed.returncode == 1
+    assert "Knowledge refresh subprocess failed" in stderr
+    assert _FRAME_LOCAL_CREDENTIAL not in stderr
+    assert "Traceback (most recent call last):" in stderr
+    assert "_load_subprocess_refresh_request" in stderr
+    assert "missing config_path" in stderr

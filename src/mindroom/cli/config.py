@@ -826,13 +826,15 @@ def _call_config_loader_quietly(loader: Callable[[], Config]) -> Config:
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
     route it through stdlib with the root level at WARNING for the
-    duration of the load then reset so later callers (e.g. the bot)
-    can configure structlog themselves.
+    duration of the load then restore the default so later callers
+    (e.g. the bot) can configure structlog themselves.
     """
     import structlog  # noqa: PLC0415
 
-    was_configured = structlog.is_configured()
-    if not was_configured:
+    from mindroom.logging_config import configure_default_logging, uses_default_logging  # noqa: PLC0415
+
+    was_default = uses_default_logging()
+    if was_default:
         logging.basicConfig(format="%(message)s", level=logging.WARNING)
         structlog.configure(
             wrapper_class=structlog.stdlib.BoundLogger,
@@ -841,8 +843,8 @@ def _call_config_loader_quietly(loader: Callable[[], Config]) -> Config:
     try:
         return loader()
     finally:
-        if not was_configured:
-            structlog.reset_defaults()
+        if was_default:
+            configure_default_logging()
 
 
 def load_config_quiet(

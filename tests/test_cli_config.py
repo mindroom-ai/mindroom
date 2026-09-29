@@ -41,6 +41,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PL
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.logging_config import configure_default_logging, uses_default_logging
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
@@ -170,19 +171,18 @@ def test_format_config_search_locations_numbers_paths_and_statuses(
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
-    """Quiet CLI loads must exercise and restore the unconfigured structlog path."""
+    """Quiet CLI loads must exercise and restore the default structlog path."""
     config_path = tmp_path / "config.yaml"
     _write_minimal_runtime_config(config_path)
     runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=config_path, process_env={})
 
-    structlog.reset_defaults()
-    assert structlog.is_configured() is False
+    configure_default_logging()
     with patch.object(structlog, "configure", wraps=structlog.configure) as configure:
         loaded_config = config_cli.load_config_quiet(runtime_paths)
 
-    configure.assert_called_once()
+    assert isinstance(configure.call_args_list[0].kwargs["logger_factory"], structlog.stdlib.LoggerFactory)
     assert loaded_config.agents
-    assert structlog.is_configured() is False
+    assert uses_default_logging()
 
 
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
