@@ -28,6 +28,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, send_message_result
 from mindroom.matrix.personal_room_store import (
+    personal_room_digest,
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
@@ -36,7 +37,7 @@ from mindroom.matrix.personal_room_store import (
     retained_personal_rooms,
     write_personal_room,
 )
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
+from mindroom.matrix.personal_rooms import PersonalRoomValidationError, PersonalRoomRosterMismatchError, PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -717,6 +718,30 @@ async def test_existing_alias_requires_creator_marker(
 
 
 @pytest.mark.asyncio
+async def test_squatted_alias_settles_the_lobby_join_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another account holding the requester's alias cannot make the router's lobby callback raise forever."""
+    server = MatrixServer()
+    router, _ = bots(tmp_path, server, monkeypatch)
+    alias = "#personal_" + personal_room_digest("@alice:localhost")[:20] + ":localhost"
+    server.aliases[alias] = "!squatted:localhost"
+    server.state["!squatted:localhost"] = [
+        {"type": "m.room.create", "state_key": "", "sender": "@mallory:localhost", "content": {}},
+    ]
+    room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
+
+    with capture_logs() as logs:
+        await _dispatch_member(router, room, _room_member_event())
+
+    warnings = [entry for entry in logs if entry["event"] == "Personal-room validation failed for an onboarding trigger"]
+    assert [entry["user_id"] for entry in warnings] == ["@alice:localhost"]
+    assert alias in warnings[0]["error"]
+    assert server.create_count == 0
+
+
+@pytest.mark.asyncio
 async def test_two_users_have_distinct_rooms_and_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Room lifecycle storage never reads or combines requester-private agent state."""
     server = MatrixServer()
@@ -770,7 +795,7 @@ async def test_alias_adoption_rejects_unrelated_or_exposed_rooms(
     record = read_personal_room(path)
     record.room_id = None
     write_personal_room(path, record)
-    with pytest.raises(RuntimeError, match="ownership"):
+    with pytest.raises(PersonalRoomValidationError, match="which this agent does not own"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
 
 
