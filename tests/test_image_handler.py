@@ -9,12 +9,14 @@ import nio
 import pytest
 from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
+from nio.exceptions import EncryptionError
 from PIL import Image as PILImage
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix import image_handler
 from mindroom.matrix.media import (
     _sniff_image_mime_type,
+    decrypt_media_bytes,
     download_media_bytes,
     extract_media_caption,
     prepare_media_upload,
@@ -125,7 +127,23 @@ class TestUploadMediaBytes:
 
 
 class TestPrepareMediaUpload:
-    """Test shared upload preparation."""
+    """Test shared upload preparation and the matching decryption."""
+
+    def test_encrypted_upload_round_trips_through_shared_decryption(self) -> None:
+        """Prepared ciphertext decrypts only with its own authenticated metadata."""
+        prepared = prepare_media_upload(b"payload", filename="note.txt", mimetype="text/plain", encrypt=True)
+        file_content = prepared.encrypted_file_content()
+
+        assert file_content is not None
+        assert (prepared.content_type, prepared.filename) == ("application/octet-stream", "note.txt.enc")
+        assert prepared.data != b"payload"
+        key = file_content["key"]["k"]
+        sha256 = file_content["hashes"]["sha256"]
+        iv = file_content["iv"]
+        assert decrypt_media_bytes(prepared.data, key=key, sha256=sha256, iv=iv) == b"payload"
+        tampered = bytes([prepared.data[0] ^ 1, *prepared.data[1:]])
+        with pytest.raises(EncryptionError, match="SHA-256"):
+            decrypt_media_bytes(tampered, key=key, sha256=sha256, iv=iv)
 
     def test_image_dimensions_are_probed_only_when_event_info_is_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Callers that never send Matrix image info do not pay for decoding the image."""

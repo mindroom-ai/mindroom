@@ -365,6 +365,11 @@ def extract_media_caption(
     return default
 
 
+def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:
+    """Authenticate and decrypt one Matrix encrypted file, raising when its SHA-256, key, or IV does not match."""
+    return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+
+
 def _decrypt_encrypted_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,
@@ -379,7 +384,7 @@ def _decrypt_encrypted_media_bytes(
         return None
 
     try:
-        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+        return decrypt_media_bytes(encrypted_bytes, key=key, sha256=sha256, iv=iv)
     except Exception:
         logger.exception("Media decryption failed", event_id=_event_id_for_log(event))
         return None

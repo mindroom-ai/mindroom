@@ -309,6 +309,25 @@ async def test_upload_error_response_is_reported(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_upload_rejects_a_content_uri_that_receivers_would_refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge validates its upload with the receiver's parser, so a non-mxc reference never leaves it."""
+
+    async def upload(*_args: object, **_kwargs: object) -> nio.UploadResponse:
+        return nio.UploadResponse("https://example.org/shell-output")
+
+    monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
+
+    with pytest.raises(DesktopMediaError, match=r"output_attachment\.url must be an mxc:// URI"):
+        await upload_encrypted_media(
+            AsyncMock(spec=nio.AsyncClient),
+            OUTPUT,
+            mime_type=SHELL_OUTPUT_MIME_TYPE,
+            filename="shell.txt",
+            timeout_seconds=1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_download_error_response_is_reported() -> None:
     """A homeserver download error surfaces as a desktop media failure naming the response."""
     client = AsyncMock(spec=nio.AsyncClient)

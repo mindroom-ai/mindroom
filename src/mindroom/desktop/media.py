@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 
 import nio
-from nio import crypto
 
 from mindroom.desktop.protocol import (
     MAX_SCREENSHOT_BYTES,
     MAX_SHELL_OUTPUT_BYTES,
     SHELL_OUTPUT_MIME_TYPE,
+    DesktopMediaKind,
+    DesktopProtocolError,
     EncryptedDesktopMedia,
 )
-from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import decrypt_media_bytes, prepare_media_upload, upload_content_uri, upload_media_bytes
 
 _IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 
@@ -32,15 +33,16 @@ async def upload_encrypted_media(
 ) -> EncryptedDesktopMedia:
     """Encrypt a screenshot or shell output locally and upload only ciphertext to Matrix media."""
     _validate_payload(payload, mime_type=mime_type)
-    encrypted_bytes, encryption = crypto.attachments.encrypt_attachment(payload)
+    prepared = prepare_media_upload(payload, filename=filename, mimetype=mime_type, encrypt=True)
+    file_content = prepared.encrypted_file_content()
     try:
         # nio uploads ignore the client request timeout, so a stalled homeserver would wait forever.
         async with asyncio.timeout(timeout_seconds):
             response = await upload_media_bytes(
                 client,
-                encrypted_bytes,
-                content_type="application/octet-stream",
-                filename=f"{filename}.enc",
+                prepared.data,
+                content_type=prepared.content_type,
+                filename=prepared.filename,
             )
     except TimeoutError as exc:
         msg = f"Matrix media upload did not finish within {timeout_seconds:g} seconds."
@@ -49,32 +51,14 @@ async def upload_encrypted_media(
     if mxc_uri is None:
         msg = f"Matrix media upload failed: {response}"
         raise DesktopMediaError(msg)
-
-    key = encryption.get("key")
-    hashes = encryption.get("hashes")
-    if not isinstance(key, dict) or not isinstance(hashes, dict):
-        msg = "Matrix attachment encryption returned malformed key metadata."
-        raise DesktopMediaError(msg)
-    key_value = key.get("k")
-    iv = encryption.get("iv")
-    sha256 = hashes.get("sha256")
-    if not isinstance(key_value, str) or not key_value:
-        msg = "Matrix attachment encryption returned incomplete key metadata."
-        raise DesktopMediaError(msg)
-    if not isinstance(iv, str) or not iv:
-        msg = "Matrix attachment encryption returned incomplete key metadata."
-        raise DesktopMediaError(msg)
-    if not isinstance(sha256, str) or not sha256:
-        msg = "Matrix attachment encryption returned incomplete key metadata."
-        raise DesktopMediaError(msg)
-    return EncryptedDesktopMedia(
-        url=mxc_uri,
-        key=key_value,
-        iv=iv,
-        sha256=sha256,
-        mime_type=mime_type,
-        size=len(payload),
-    )
+    if file_content is not None:
+        file_content["url"] = mxc_uri
+    try:
+        # Receivers parse this reference strictly, so the bridge never sends one they would refuse.
+        return EncryptedDesktopMedia.from_content(file_content, kind=_media_kind(mime_type))
+    except DesktopProtocolError as exc:
+        msg = f"Matrix media upload returned an invalid media reference: {exc}"
+        raise DesktopMediaError(msg) from exc
 
 
 async def download_encrypted_media(
@@ -97,12 +81,7 @@ async def download_encrypted_media(
         msg = "Encrypted Matrix media exceeds the desktop media limit."
         raise DesktopMediaError(msg)
     try:
-        payload = crypto.attachments.decrypt_attachment(
-            response.body,
-            media.key,
-            media.sha256,
-            media.iv,
-        )
+        payload = decrypt_media_bytes(response.body, key=media.key, sha256=media.sha256, iv=media.iv)
     except Exception as exc:
         msg = "Matrix media authentication or decryption failed."
         raise DesktopMediaError(msg) from exc
@@ -124,6 +103,10 @@ async def download_encrypted_screenshot(
         msg = "Only screenshots can be downloaded as desktop images."
         raise DesktopMediaError(msg)
     return await download_encrypted_media(client, media, timeout_seconds=timeout_seconds)
+
+
+def _media_kind(mime_type: str) -> DesktopMediaKind:
+    return "output_attachment" if mime_type == SHELL_OUTPUT_MIME_TYPE else "screenshot"
 
 
 def _max_bytes(mime_type: str) -> int:
