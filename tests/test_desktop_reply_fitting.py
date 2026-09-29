@@ -12,9 +12,10 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.desktop.bridge import _WIDEST_METRICS, DesktopBridge
+from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.media import download_encrypted_media
 from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES, DesktopCommand, DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.reply_fitting import _WIDEST_METRICS
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from tests.desktop_bridge_helpers import (
     _LONGEST_SESSION_ID,

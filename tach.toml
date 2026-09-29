@@ -3556,17 +3556,29 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.desktop.command_parameters"
+depends_on = ["mindroom.desktop.protocol"]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
+path = "mindroom.desktop.reply_fitting"
+depends_on = ["mindroom.desktop.protocol"]
+visibility = ["mindroom.desktop.bridge"]
+
+[[modules]]
 path = "mindroom.desktop.bridge"
 depends_on = [
     "mindroom.desktop.observations",
     "mindroom.desktop.accessibility",
     "mindroom.desktop.command_journal",
+    "mindroom.desktop.command_parameters",
     "mindroom.desktop.media",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.protocol",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.shell",
     "mindroom.desktop.provider",
+    "mindroom.desktop.reply_fitting",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
  "mindroom.desktop.input"]
