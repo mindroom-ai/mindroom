@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from agno.run.base import RunStatus
 
+from mindroom.tool_system.events import append_stream_text
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -30,7 +32,7 @@ class AITurnState:
 
     def assistant_text_for(self, attempt_text: str) -> str:
         """Keep completed background-join prose before the current attempt."""
-        return "\n\n".join(text for text in (self.prior_assistant_text, attempt_text) if text)
+        return append_stream_text(self.prior_assistant_text, attempt_text, separate=True)
 
     def sync_partial(
         self,

@@ -783,7 +783,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.ai_turn_state"
-depends_on = []
+depends_on = ["mindroom.tool_system.events"]
 visibility = ["mindroom.response_turn"]
 
 [[modules]]
