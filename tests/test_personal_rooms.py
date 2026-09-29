@@ -28,16 +28,20 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, send_message_result
 from mindroom.matrix.personal_room_store import (
-    personal_room_digest,
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
+    personal_room_digest,
     personal_room_record_path,
     read_personal_room,
     retained_personal_rooms,
     write_personal_room,
 )
-from mindroom.matrix.personal_rooms import PersonalRoomValidationError, PersonalRoomRosterMismatchError, PersonalRoomService
+from mindroom.matrix.personal_rooms import (
+    PersonalRoomRosterMismatchError,
+    PersonalRoomService,
+    PersonalRoomValidationError,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -735,7 +739,9 @@ async def test_squatted_alias_settles_the_lobby_join_with_a_warning(
     with capture_logs() as logs:
         await _dispatch_member(router, room, _room_member_event())
 
-    warnings = [entry for entry in logs if entry["event"] == "Personal-room validation failed for an onboarding trigger"]
+    warnings = [
+        entry for entry in logs if entry["event"] == "Personal-room validation failed for an onboarding trigger"
+    ]
     assert [entry["user_id"] for entry in warnings] == ["@alice:localhost"]
     assert alias in warnings[0]["error"]
     assert server.create_count == 0

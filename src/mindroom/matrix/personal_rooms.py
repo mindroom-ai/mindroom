@@ -61,6 +61,7 @@ _GUEST_REMOVAL_NOTICE = (
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
+_UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
 class _PolicyChangedError(Exception):
@@ -362,19 +363,17 @@ class PersonalRoomService:
     async def _validate_room(self, record: PersonalRoomRecord) -> dict[str, str]:
         assert record.room_id is not None
         response = await self._client().room_get_state(record.room_id)
-        if isinstance(response, nio.RoomGetStateError) and response.status_code in {"M_FORBIDDEN", "M_NOT_FOUND"}:
-            msg = "Personal-room state is not visible to this agent"
-            raise PersonalRoomValidationError(msg)
         if not isinstance(response, nio.RoomGetStateResponse):
+            # A room this agent cannot read, such as one another account bound
+            # to the alias, stays unreadable; other failures are transient.
+            hidden = isinstance(response, nio.RoomGetStateError) and response.status_code in _UNREADABLE_ROOM_ERRCODES
             msg = "Personal-room ownership state unavailable"
-            raise RuntimeError(msg)  # noqa: TRY004 - a Matrix transport failure is retryable, not a caller type error
+            raise (PersonalRoomValidationError if hidden else RuntimeError)(msg)
         visibility = await self._client().room_get_visibility(record.room_id)
-        if not isinstance(visibility, nio.RoomGetVisibilityResponse):
-            msg = "Personal-room directory visibility unavailable"
-            raise RuntimeError(msg)  # noqa: TRY004 - a Matrix transport failure is retryable, not a caller type error
-        if visibility.visibility != "private":
+        if not isinstance(visibility, nio.RoomGetVisibilityResponse) or visibility.visibility != "private":
+            public = isinstance(visibility, nio.RoomGetVisibilityResponse)
             msg = "Personal-room directory must remain private"
-            raise PersonalRoomValidationError(msg)
+            raise (PersonalRoomValidationError if public else RuntimeError)(msg)
         state = {(event["type"], event.get("state_key", "")): event for event in response.events}
         creator = state.get(("m.room.create", ""), {}).get("sender")
         marker = state.get((_OWNERSHIP_EVENT, ""), {})
