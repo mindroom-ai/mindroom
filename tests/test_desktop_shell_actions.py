@@ -187,7 +187,7 @@ async def test_caller_shell_status_hides_another_callers_pending_command(tmp_pat
     command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_pending(shell)
-    status = caller_shell_status(shell, _command("status", request_id="status", sequence=3, requester_id=BOB))
+    status = caller_shell_status(shell, _command("status", requester_id=BOB))
     assert status == {
         "enabled": True,
         "pending": True,
@@ -212,9 +212,9 @@ async def test_other_callers_see_active_shell_without_its_request_id(tmp_path: P
     command = _command("run_shell", parameters={"command": "sleep 30", "cwd": str(tmp_path)})
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_active(shell)
-    bob = _command("status", request_id="status-bob", sequence=2, requester_id=BOB)
+    bob = _command("status", requester_id=BOB)
     assert caller_shell_status(shell, bob)["active_request_id"] is None
-    alice = _command("status", request_id="status-alice", sequence=3)
+    alice = _command("status")
     assert caller_shell_status(shell, alice)["active_request_id"] == "request-1"
     await asyncio.wait_for(shell.close(), timeout=3)
     with pytest.raises(DesktopShellError):
@@ -446,7 +446,7 @@ async def test_remote_status_lists_only_the_callers_own_handles(tmp_path: Path) 
     shell = _local_shell()
     shell.grant(60)
     handle = (await _execute(shell, _run_shell("sleep 30", tmp_path)))["handle"]
-    [entry] = caller_shell_status(shell, _command("status", request_id="own", sequence=2))["handles"]
+    [entry] = caller_shell_status(shell, _command("status"))["handles"]
     assert {key: entry[key] for key in ("handle", "requester_id", "agent_name", "command_preview", "state")} == {
         "handle": handle,
         "requester_id": ALICE,
@@ -454,10 +454,7 @@ async def test_remote_status_lists_only_the_callers_own_handles(tmp_path: Path) 
         "command_preview": "sleep 30",
         "state": "running",
     }
-    assert (
-        caller_shell_status(shell, _command("status", request_id="other", sequence=3, requester_id=BOB))["handles"]
-        == []
-    )
+    assert caller_shell_status(shell, _command("status", requester_id=BOB))["handles"] == []
     assert [local["handle"] for local in shell_status(shell)["handles"]] == [handle]
     await shell.close()
 

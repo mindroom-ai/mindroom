@@ -69,7 +69,7 @@ MEDIA = EncryptedDesktopMedia(
 
 @dataclass
 class FakeProvider:
-    """Record the local operations the bridge actually authorized."""
+    """Record the local operations requested of the GUI provider."""
 
     calls: list[tuple[str, object]] = field(default_factory=list)
     emergency_stop: bool = False
@@ -164,9 +164,9 @@ class FakeProvider:
             msg = "Unexpected click failure."
             raise RuntimeError(msg)
 
-    def type_text(self, *, app_id: str, state_id: str, text: str) -> None:
-        """Record fallback text."""
-        self.calls.append(("type_text", (app_id, state_id, text)))
+    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
+        """Record fallback text and the element it targets, if any."""
+        self.calls.append(("type_text", (app_id, state_id, text, element_index)))
 
     def scroll(
         self,

@@ -75,7 +75,8 @@ async def test_semantic_actions_reach_the_provider_with_their_exact_target(
                 },
             ),
         ),
-        ("type_text", {"text": "hello"}, ("type_text", (APP_ID, "state-1", "hello"))),
+        ("type_text", {"text": "hello"}, ("type_text", (APP_ID, "state-1", "hello", None))),
+        ("type_text", {"text": "hi", "element_index": 0}, ("type_text", (APP_ID, "state-1", "hi", 0))),
         ("scroll", {"direction": "up", "pages": 2}, ("scroll", (APP_ID, "state-1", "up", 2, None, None))),
         ("scroll", {"direction": "up", "pages": 2, "x": 5, "y": 6}, ("scroll", (APP_ID, "state-1", "up", 2, 5, 6))),
         ("keypress", {"keys": ["command", "a"]}, ("keypress", (APP_ID, "state-1", ["command", "a"]))),
@@ -94,19 +95,14 @@ async def test_fallback_inputs_reach_the_provider_with_their_defaults(
 
 
 @pytest.mark.asyncio
-async def test_bridge_allows_empty_semantic_value_but_rejects_shortcut_chord() -> None:
-    """Clearing a field is supported while global keyboard shortcuts stay local-policy errors."""
+async def test_empty_semantic_value_is_allowed_but_shortcut_chords_are_rejected() -> None:
+    """Clearing a field is supported, while a global keyboard shortcut is rejected before the provider sees it."""
     provider = FakeProvider()
     set_value = _command("set_value", parameters={**_TARGET, "element_index": 0, "value": ""})
     await execute_semantic_control(provider, set_value, app_id=APP_ID, state_id="state-1")
     assert ("set_value", (APP_ID, "state-1", 0, "")) in provider.calls
 
-    keypress = _command(
-        "keypress",
-        request_id="request-2",
-        sequence=2,
-        parameters={**_TARGET, "keys": ["command", "tab"]},
-    )
+    keypress = _command("keypress", parameters={**_TARGET, "keys": ["command", "tab"]})
     with pytest.raises(DesktopProtocolError, match="not allowed"):
         await execute_fallback_control(provider, keypress, app_id=APP_ID, state_id="state-1")
     assert all(call[0] != "keypress" for call in provider.calls)
@@ -148,6 +144,12 @@ async def test_keypress_requires_a_list_of_key_names(keys: object, error: str) -
             "Unexpected desktop parameters: button.",
         ),
         (execute_fallback_control, "type_text", {"text": ""}, "Desktop parameter text must be a non-empty string."),
+        (
+            execute_fallback_control,
+            "type_text",
+            {"text": "hi", "element_index": True},
+            "Desktop parameter element_index must be an integer.",
+        ),
         (
             execute_fallback_control,
             "click_element",
