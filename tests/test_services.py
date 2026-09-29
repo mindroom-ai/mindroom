@@ -32,6 +32,7 @@ from mindroom.services.runtime import ServiceConfigMissingError, resolve_service
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
 from mindroom.services.systemd import _get_log_args as _get_systemd_log_args
 from mindroom.services.systemd import _get_service_environment as _get_systemd_service_environment
+from mindroom.services.systemd import _install_service as _install_systemd_service
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
@@ -159,6 +160,46 @@ def test_systemd_unit_runs_mindroom() -> None:
     assert 'Environment="MINDROOM_STORAGE_PATH=/Users/test/Mind Room/data%%root"' in unit
     assert 'Environment="PATH=/Users/test/.local/bin:/usr/bin"' in unit
     assert "Restart=on-failure" in unit
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/srv/mindroom\nExecStartPre=/bin/sh -c id\n#",
+        "/srv/mindroom\rExecStartPre=/bin/sh -c id",
+        "/srv/mindroom\x00",
+        "/srv/mindroom\x1b[2J",
+        "/srv/mindroom\x7f",
+    ],
+)
+def test_systemd_unit_refuses_control_characters_in_environment(value: str) -> None:
+    """An Environment= value can never start another unit directive."""
+    with (
+        patch("mindroom.services.config.distribution_version", return_value="2026.8.1"),
+        pytest.raises(ValueError, match="MINDROOM_STORAGE_PATH"),
+    ):
+        _generate_unit_file(Path("/usr/bin/uv"), {"MINDROOM_STORAGE_PATH": value, "PATH": "/usr/bin"})
+
+
+def test_systemd_install_reports_an_unwritable_environment_without_touching_the_unit(tmp_path: Path) -> None:
+    """Installation fails with a message, and neither writes the unit nor runs systemctl."""
+    unit_path = tmp_path / "mindroom.service"
+    systemctl = MagicMock()
+    with patch.multiple(
+        "mindroom.services.systemd",
+        find_uv=MagicMock(return_value=Path("/usr/bin/uv")),
+        _get_unit_path=MagicMock(return_value=unit_path),
+        resolve_service_environment=MagicMock(
+            return_value={"MINDROOM_STORAGE_PATH": "/srv/mindroom\nExecStartPre=/bin/id"},
+        ),
+        subprocess=systemctl,
+    ):
+        result = _install_systemd_service()
+
+    assert result.success is False
+    assert "MINDROOM_STORAGE_PATH" in result.message
+    assert not unit_path.exists()
+    systemctl.run.assert_not_called()
 
 
 def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:

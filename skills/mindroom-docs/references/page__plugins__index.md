@@ -325,7 +325,7 @@ Function names are prefixed, such as `secondary_get_latest_emails` and `secondar
 Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
 
 Add more workspace definitions with distinct names and client services as needed.
-Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
 Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
 Keep workspace names stable because they identify stored connections.
 

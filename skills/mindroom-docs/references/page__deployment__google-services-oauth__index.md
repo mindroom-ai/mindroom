@@ -13,6 +13,7 @@ Public, unpaired, and organization-managed deployments can configure their own G
 | Google Docs | `google_docs` | `/api/oauth/google_docs/callback` | `google_docs_oauth` | `google_docs_oauth_client` | `google_docs` | Docs view/edit/create/delete plus OpenID email/profile |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
+| Google Tasks | `google_tasks` | `/api/oauth/google_tasks/callback` | `google_tasks_oauth` | `google_tasks_oauth_client` | `google_tasks` | Tasks read/write plus OpenID email/profile |
 | Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail modify plus OpenID email/profile |
 
 ## Scope Rationale
@@ -33,6 +34,9 @@ MindRoom requests only the scopes required by the operations currently exposed t
 - `calendar.settings.readonly` lets an agent infer working hours and locale without changing Calendar settings.
 - `spreadsheets` lets an agent read and, when enabled, create or update arbitrary spreadsheets named by the user.
   A read-only scope would remove the existing create and update operations.
+- `tasks` lets an agent list task lists and tasks and, when `manage_tasks` is enabled, create, update, complete, and delete tasks.
+  A read-only scope would remove those write operations.
+  The scope also authorizes creating and deleting task lists, although MindRoom's `google_tasks` tool does not expose task-list management.
 - `gmail.modify` is the narrowest single Gmail scope that preserves mailbox search and reading, drafts and sending, replies, labels, archiving, and other mailbox organization.
   MindRoom does not request `mail.google.com`, and `gmail.modify` does not permit bypassing the trash for permanent message deletion.
 - OpenID email and profile scopes identify the connected account and enforce optional account-domain restrictions.
@@ -46,7 +50,7 @@ MindRoom does not use Google user data to train or improve generalized, foundati
 Skip this section for a normal local installation.
 Create a **Web application** OAuth client in Google Cloud Console when you need a public callback origin or a custom Google OAuth app.
 Enable only the APIs for the tools you plan to use.
-Enable the Google Docs API before connecting `google_docs`.
+Enable the Google Docs API before connecting `google_docs`, and the Google Tasks API before connecting `google_tasks`.
 Add one authorized redirect URI for each provider you enable.
 
 For local development, the redirect URIs are:
@@ -56,6 +60,7 @@ http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_tasks/callback
 http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
@@ -68,6 +73,7 @@ Do not add this scope to a production OAuth consent configuration while another 
 Use a separate Google Cloud testing project and test users to enable the Docs API, add the `documents` scope, configure the Docs callback, and validate the integration without changing the production submission.
 After the current production review completes, add the Docs API and `documents` scope to the production project's Data Access configuration and submit the required sensitive-scope verification follow-up with a scope justification and end-to-end demo.
 Do not enable production Google Docs connections for general users until Google has approved the added scope, because unapproved sensitive scopes can show an unverified-app warning and remain subject to test-user limits.
+The Google Tasks provider requests the sensitive `https://www.googleapis.com/auth/tasks` scope, so the same testing-project, Data Access, and verification follow-up applies to the Tasks API and `tasks` scope.
 
 ## Custom Client Config
 

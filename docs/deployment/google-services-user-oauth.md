@@ -25,6 +25,7 @@ agents:
       - google_docs
       - google_calendar
       - google_sheets
+      - google_tasks
       - gmail
 ```
 
@@ -43,7 +44,7 @@ As a manual alternative, open the dashboard and select **Connect** for the Googl
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, `google_tasks`, and `gmail`.
 MindRoom does not mirror Google OAuth tokens into worker containers.
 
 ## Privacy and Access Scope
@@ -77,6 +78,7 @@ http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_tasks/callback
 http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
@@ -87,6 +89,10 @@ Provider-specific services such as `google_drive_oauth_client` override the shar
 Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
 That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
 Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
+
+Google Tasks requires the Google Tasks API and the sensitive `https://www.googleapis.com/auth/tasks` scope in the OAuth consent configuration.
+That scope authorizes viewing, creating, editing, and deleting all tasks and task lists in the connected account, although MindRoom exposes task operations rather than task-list management.
+The same testing-project and verification follow-up applies to the `tasks` scope.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.

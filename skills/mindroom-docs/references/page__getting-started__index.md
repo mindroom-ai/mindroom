@@ -120,7 +120,7 @@ Then run `uvx mindroom run`.
 **In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
-Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+Setup writes a generated `MINDROOM_API_KEY` to your `.env`, and the dashboard asks for it before loading, because `mindroom run` serves the dashboard on every network interface by default.
 
 **Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
 Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.

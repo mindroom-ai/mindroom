@@ -9,6 +9,7 @@ import {
   SiGoogledocs,
   SiGoogledrive,
   SiGooglesheets,
+  SiGoogletasks,
 } from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
@@ -299,6 +300,23 @@ const googleSheetsIntegration = new GenericOAuthIntegrationProvider(
   "google_sheets",
 );
 
+const googleTasksIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_tasks",
+    name: "Google Tasks",
+    description:
+      "List, create, update, complete, and delete tasks with Google Tasks",
+    category: "productivity",
+    icon: createElement(SiGoogletasks, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_tasks",
+);
+
 const googleGmailIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_gmail",
@@ -322,6 +340,7 @@ export const integrationProviders: Record<string, IntegrationProvider> = {
   google_drive: googleDriveIntegration,
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,
+  google_tasks: googleTasksIntegration,
   spotify: spotifyIntegration,
   homeassistant: homeAssistantIntegration,
 };

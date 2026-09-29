@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from backend.deps import verify_user
+from backend.deps import verify_user, verify_user_allow_deleted
+from backend.routes.admin import ACCOUNT_STATUSES
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
@@ -14,6 +15,8 @@ from main import app
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
 ACCOUNT_GRANTS_MIGRATION_SQL = MIGRATIONS_DIR / "002_restrict_account_grants.sql"
+ACCOUNT_STATUS_MIGRATION_SQL = MIGRATIONS_DIR / "006_require_account_status.sql"
+ACCOUNT_STATUS_CHECK = "CHECK (status IN ({}))".format(", ".join(f"'{status}'" for status in ACCOUNT_STATUSES))
 
 
 def assert_account_grants_restricted(sql: str) -> None:
@@ -35,6 +38,23 @@ def test_accounts_baseline_migration_restricts_authenticated_updates_to_profile_
 def test_accounts_incremental_migration_restricts_existing_authenticated_grants() -> None:
     """Existing databases receive the same account grant restriction."""
     assert_account_grants_restricted(ACCOUNT_GRANTS_MIGRATION_SQL.read_text(encoding="utf-8"))
+
+
+def test_accounts_baseline_migration_requires_a_known_status() -> None:
+    """Fresh databases refuse a missing or unknown account status, matching the statuses admins may set."""
+    sql = BASELINE_MIGRATION_SQL.read_text(encoding="utf-8")
+
+    assert f"status TEXT NOT NULL DEFAULT 'active' {ACCOUNT_STATUS_CHECK}," in sql
+
+
+def test_accounts_incremental_migration_requires_a_known_status() -> None:
+    """Existing databases backfill missing statuses as active before requiring a known status."""
+    sql = ACCOUNT_STATUS_MIGRATION_SQL.read_text(encoding="utf-8")
+
+    backfill = sql.index("UPDATE accounts SET status = 'active' WHERE status IS NULL;")
+    assert backfill < sql.index("ALTER TABLE accounts ALTER COLUMN status SET NOT NULL;")
+    assert f"ADD CONSTRAINT accounts_status_check\n    {ACCOUNT_STATUS_CHECK};" in sql
+    assert sql.index("BEGIN;") < backfill < sql.index("COMMIT;")
 
 
 class TestAccountsEndpoints:
@@ -61,6 +81,7 @@ class TestAccountsEndpoints:
             return {"account_id": "acc_test_123", "email": "test@example.com"}
 
         app.dependency_overrides[verify_user] = override_verify_user
+        app.dependency_overrides[verify_user_allow_deleted] = override_verify_user
         yield
         app.dependency_overrides.clear()
 
@@ -115,7 +136,7 @@ class TestAccountsEndpoints:
         def override_verify_user():
             raise HTTPException(status_code=401, detail="Unauthorized")
 
-        app.dependency_overrides[verify_user] = override_verify_user
+        app.dependency_overrides[verify_user_allow_deleted] = override_verify_user
         try:
             response = client.get("/my/account")
             assert response.status_code == 401

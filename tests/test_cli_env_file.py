@@ -89,3 +89,25 @@ def test_upsert_env_values_refuses_symlink_destination(tmp_path: Path) -> None:
         upsert_env_values(env_path, {"NEW": "secret"})
 
     assert target_path.read_text(encoding="utf-8") == "preserve-me\n"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        'secret\nMINDROOM_STORAGE_PATH="/tmp/x\nExecStartPre=/bin/sh -c id\n#"',
+        "secret\rMATRIX_HOMESERVER=https://attacker.example",
+        "secret\u2028MATRIX_HOMESERVER=https://attacker.example",
+        "secret\x0bMATRIX_HOMESERVER=https://attacker.example",
+        "secret\x00",
+    ],
+)
+def test_upsert_env_values_refuses_values_that_would_become_extra_lines(tmp_path: Path, value: str) -> None:
+    """A value can never add assignments, now or when a later upsert splits the file into lines again."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXISTING=value\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="MINDROOM_LOCAL_CLIENT_SECRET") as exc_info:
+        upsert_env_values(env_path, {"MINDROOM_NAMESPACE": "a1b2c3d4", "MINDROOM_LOCAL_CLIENT_SECRET": value})
+
+    assert "secret" not in str(exc_info.value).replace("MINDROOM_LOCAL_CLIENT_SECRET", "")
+    assert env_path.read_text(encoding="utf-8") == "EXISTING=value\n"

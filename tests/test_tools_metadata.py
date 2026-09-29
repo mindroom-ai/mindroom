@@ -2,12 +2,13 @@
 
 import contextlib
 import gc
+import gzip
 import inspect
 import json
 import sys
 import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Never
 from unittest.mock import AsyncMock
 
 import agno.tools.crawl4ai as agno_crawl4ai
+import httpx
 import pytest
 from agno.tools import Toolkit
 
@@ -256,60 +258,174 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
     assert exc_info.value.reason == reason
 
 
-def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Custom API output should keep safe response headers without exposing credentials."""
+class _TrackedStream(httpx.SyncByteStream):
+    """A response body that records whether anything read it."""
 
-    class FakeResponse:
-        status_code = 200
-        text = "{}"
-        is_success = True
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read = False
 
-        def __init__(self) -> None:
-            self.headers = {
-                "content-type": "application/json",
-                "x-request-id": "req-123",
-                "set-cookie": "session=secret",
-                "authorization": "Bearer secret",
-                "proxy-authorization": "Basic secret",
-                "cookie": "session=secret",
-                "www-authenticate": "Bearer challenge",
-                "authentication-info": "nextnonce=secret",
-                "x-api-key": "secret",
-                "x-auth-token": "secret",
-                "x-api-token": "secret",
-                "api-token": "secret",
-                "x-token": "secret",
-                "token": "secret",
-                "x-amz-security-token": "secret",
-                "x_api_token": "secret",
-                "x-ratelimit-remaining-tokens": "99",
-                "x-total-tokens": "100",
-            }
+    def __iter__(self) -> Iterator[bytes]:
+        self.read = True
+        yield self.body
 
-        def json(self) -> dict[str, str]:
-            return {"ok": "true"}
 
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+def _install_custom_api_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> list[httpx.Request]:
+    """Route custom_api requests to an in-memory handler and record every request it sends."""
+    sent: list[httpx.Request] = []
 
-        def __enter__(self) -> object:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def request(self, **_kwargs: object) -> FakeResponse:
-            return FakeResponse()
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        response = respond(request)
+        if isinstance(response.stream, httpx.ByteStream):
+            # Responses built from bytes are preloaded; a network transport streams its body instead.
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                stream=_TrackedStream(response.content),
+            )
+        return response
 
     monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
-    monkeypatch.setattr(custom_api_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(custom_api_module, "ServerFetchHTTPTransport", lambda **_kwargs: httpx.MockTransport(handle))
+    return sent
 
-    tool = custom_api_tools()()
 
-    payload = json.loads(tool.make_request("https://example.com/data"))
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"api_key": "sk-operator"},
+        {"username": "operator", "password": "operator-password"},
+        {"headers": {"X-Api-Key": "operator-secret"}},
+    ],
+)
+def test_custom_api_tool_refuses_configured_credentials_without_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    credentials: dict[str, object],
+) -> None:
+    """Configured credentials are never sent to a URL the model chooses."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(**credentials)
 
-    assert payload["headers"] == {
+    payload = json.loads(tool.make_request("https://attacker.example/collect"))
+
+    assert "base_url" in payload["error"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("base_url", "location", "keeps_credentials"),
+    [
+        ("https://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("http://api.example.com/v1", "https://api.example.com/v1/current", True),
+        ("https://api.example.com/v1", "https://cdn.example/object?signature=abc", False),
+        ("https://api.example.com/v1", "http://api.example.com/v1/current", False),
+        ("https://api.example.com/v1", "https://api.example.com:8443/v1/current", False),
+    ],
+)
+def test_custom_api_tool_strips_configured_credentials_from_hops_off_the_base_url_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    location: str,
+    *,
+    keeps_credentials: bool,
+) -> None:
+    """Redirects are followed; only the base_url origin and its direct https upgrade still receive credentials."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/start":
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(
+        base_url=base_url,
+        api_key="sk-operator",
+        headers={"X-Api-Key": "operator-secret", "Accept": "application/json"},
+    )
+
+    payload = json.loads(tool.make_request("start", headers={"X-Request-Id": "req-1"}))
+
+    assert payload["data"] == {"ok": True}
+    first, followed = sent
+    assert str(followed.url) == location
+    for request in (first, followed) if keeps_credentials else (first,):
+        assert request.headers["Authorization"] == "Bearer sk-operator"
+        assert request.headers["X-Api-Key"] == "operator-secret"
+    if not keeps_credentials:
+        assert "Authorization" not in followed.headers
+        assert "X-Api-Key" not in followed.headers
+        assert "Accept" not in followed.headers
+    assert followed.headers["X-Request-Id"] == "req-1"
+
+
+def test_custom_api_tool_strips_basic_auth_from_hops_off_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Basic auth pair reaches the base_url origin but not a presigned download on another host."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/object"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+    tool = custom_api_tools()(base_url="https://api.example.com", username="operator", password="operator-password")  # noqa: S106
+
+    assert json.loads(tool.make_request("download"))["data"] == {"ok": True}
+    assert sent[0].headers["Authorization"].startswith("Basic ")
+    assert [request.url.host for request in sent] == ["api.example.com", "cdn.example"]
+    assert "Authorization" not in sent[1].headers
+
+
+def test_custom_api_tool_without_credentials_follows_redirects_anywhere_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An uncredentialed request has nothing to leak, so full URLs and cross-origin redirects keep working."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "start.example":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/data"})
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://start.example/data"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.host for request in sent] == ["start.example", "cdn.example"]
+
+
+def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API output should keep safe response headers without exposing credentials."""
+    response_headers = {
+        "content-type": "application/json",
+        "x-request-id": "req-123",
+        "set-cookie": "session=secret",
+        "authorization": "Bearer secret",
+        "proxy-authorization": "Basic secret",
+        "cookie": "session=secret",
+        "www-authenticate": "Bearer challenge",
+        "authentication-info": "nextnonce=secret",
+        "x-api-key": "secret",
+        "x-auth-token": "secret",
+        "x-api-token": "secret",
+        "api-token": "secret",
+        "x-token": "secret",
+        "token": "secret",
+        "x-amz-security-token": "secret",
+        "x_api_token": "secret",
+        "x-ratelimit-remaining-tokens": "99",
+        "x-total-tokens": "100",
+    }
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers=response_headers, content=b'{"ok": "true"}'),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
+
+    assert payload["data"] == {"ok": "true"}
+    assert {name: value for name, value in payload["headers"].items() if name != "content-length"} == {
         "content-type": "application/json",
         "x-request-id": "req-123",
         "set-cookie": REDACTED,
@@ -329,6 +445,121 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
         "x-ratelimit-remaining-tokens": "99",
         "x-total-tokens": "100",
     }
+
+
+def test_custom_api_tool_drops_a_model_host_header_from_credentialed_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The base_url alone picks the virtual host that receives configured credentials, in any header casing."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={}))
+    tool = custom_api_tools()(base_url="https://api.example.com", api_key="sk-operator")
+
+    tool.make_request("data", headers={"Host": "internal.example", "hOST": "admin.example"})
+
+    assert sent[0].headers.get_list("Host") == ["api.example.com"]
+    assert sent[0].headers["Authorization"] == "Bearer sk-operator"
+
+
+_GZIP_BOMB = gzip.compress(b"\0" * (32 * 1024 * 1024))
+
+
+def test_custom_api_tool_never_inflates_a_compressed_final_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity is requested even over a model header, and a server that compresses anyway gets an error, not an inflate."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=_TrackedStream(_GZIP_BOMB)),
+    )
+
+    payload = json.loads(
+        custom_api_tools()().make_request("https://example.com/data", headers={"accept-encoding": "br"}),
+    )
+
+    assert sent[0].headers.get_list("Accept-Encoding") == ["identity"]
+    assert payload["status_code"] == 200
+    assert "Content-Encoding gzip" in payload["error"]
+    assert "data" not in payload
+
+
+@pytest.mark.parametrize(
+    ("content_encoding", "refused"),
+    [
+        ("x-gzip", "x-gzip"),
+        ("identity, DEFLATE", "deflate"),
+        ("br", "br"),
+        ("zstd, gzip", "gzip, zstd"),
+        ("none", None),
+        ("utf-8", None),
+        ("binary", None),
+        ("", None),
+    ],
+)
+def test_custom_api_tool_refuses_only_codings_httpx_would_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    content_encoding: str,
+    refused: str | None,
+) -> None:
+    """Each listed coding counts, while tokens HTTPX passes through leave the body readable as plain bytes."""
+    _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Encoding": content_encoding},
+            stream=_TrackedStream(b'{"ok": true}'),
+        ),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/data"))
+
+    if refused is None:
+        assert payload["data"] == {"ok": True}
+        assert "error" not in payload
+    else:
+        assert payload["error"] == f"Response used Content-Encoding {refused} although identity was requested"
+        assert "data" not in payload
+
+
+def test_custom_api_tool_follows_redirects_without_reading_their_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compressed redirect body is closed unread, and only the final body is collected."""
+    redirect_body = _TrackedStream(_GZIP_BOMB)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://example.com/final", "Content-Encoding": "gzip"},
+                stream=redirect_body,
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    sent = _install_custom_api_transport(monkeypatch, respond)
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/start"))
+
+    assert payload["data"] == {"ok": True}
+    assert [request.url.path for request in sent] == ["/start", "/final"]
+    assert redirect_body.read is False
+
+
+def test_custom_api_tool_caps_the_final_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An identity body over the cap is reported as an error instead of being buffered whole."""
+    monkeypatch.setattr(custom_api_module, "_MAX_RESPONSE_BYTES", 1024)
+    _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, content=b"x" * 4096))
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/large"))
+
+    assert payload["error"] == "Response body exceeds 1024 bytes"
+    assert "data" not in payload
+
+
+def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A redirect loop stops after the hop limit."""
+    sent = _install_custom_api_transport(
+        monkeypatch,
+        lambda _request: httpx.Response(302, headers={"Location": "https://example.com/loop"}),
+    )
+
+    payload = json.loads(custom_api_tools()().make_request("https://example.com/loop"))
+
+    assert payload["error"] == "Request failed: more than 10 redirects"
+    assert len(sent) == 11
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:

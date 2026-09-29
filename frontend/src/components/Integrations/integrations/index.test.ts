@@ -26,6 +26,16 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
+  it("registers Google Tasks as a first-class OAuth integration", () => {
+    const config = integrationProviders.google_tasks.getConfig();
+
+    expect(config.integration).toMatchObject({
+      id: "google_tasks",
+      name: "Google Tasks",
+      setup_type: "oauth",
+    });
+  });
+
   it("resolves connect once and releases observers after popup completion", async () => {
     vi.useFakeTimers();
     const removeListener = vi.spyOn(window, "removeEventListener");

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import fcntl
 import hashlib
 import importlib
 import json
 import os
+import threading
+import tracemalloc
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,12 +23,25 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from types import ModuleType
 
 
 def _records_module() -> ModuleType:
     return importlib.import_module("mindroom.delegation.records")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_record_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test its own kept record states; teardown restores the module's."""
+    module = _records_module()
+    monkeypatch.setattr(module, "_RECORD_STATES", module._RecordStates())
+
+
+def _restart_process(module: ModuleType) -> None:
+    """Drop the record states this process keeps, as a primary restart would, so the next use reads the record."""
+    module._RECORD_STATES = module._RecordStates()
 
 
 @pytest.mark.asyncio
@@ -101,6 +119,7 @@ async def test_event_log_refuses_an_oversized_event_line(tmp_path: Path) -> None
     huge = {"sequence": 2, "kind": "output", "timestamp": "2026-01-01T00:00:00Z", "data": {"content": "x" * (5 << 20)}}
     with event_path.open("a", encoding="utf-8") as events:
         events.write(json.dumps(huge) + "\n")
+    _restart_process(module)
 
     with pytest.raises(ValueError, match="unreadable"):
         await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
@@ -181,11 +200,778 @@ async def test_event_append_never_writes_through_a_hard_link(tmp_path: Path) -> 
     outside.write_bytes(event_path.read_bytes())
     event_path.unlink()
     os.link(outside, event_path)
+    _restart_process(module)
 
     with pytest.raises(ValueError, match="hard link"):
         await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
 
     assert outside.read_bytes().count(b"\n") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lock_worker_code_holds_in_the_record_directory_never_stalls_record_writes(tmp_path: Path) -> None:
+    """Worker code shares the record directory, so the primary never waits on a lock taken there."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    failures: list[BaseException] = []
+
+    def append() -> None:
+        try:
+            owner._append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        except BaseException as exc:
+            failures.append(exc)
+
+    with (_record_dir(handle) / ".record.lock").open("a") as planted_lock:
+        fcntl.flock(planted_lock.fileno(), fcntl.LOCK_EX)
+        writer = threading.Thread(target=append, daemon=True)
+        writer.start()
+        writer.join(timeout=5)
+        stalled = writer.is_alive()
+    writer.join(timeout=5)
+
+    assert not stalled
+    assert failures == []
+    assert [event["sequence"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_appends_to_one_record_keep_one_gapless_sequence(tmp_path: Path) -> None:
+    """Record writers still exclude each other without a lock file in the workspace."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+
+    await asyncio.gather(
+        *(
+            owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+            for index in range(8)
+        ),
+    )
+
+    events = _read_events(_record_dir(handle) / "events.jsonl")
+    assert [event["sequence"] for event in events] == list(range(1, 10))
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 9
+    assert not (_record_dir(handle) / ".record.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_append_over_a_planted_log_holds_one_event_at_a_time(tmp_path: Path) -> None:
+    """A long or deeply nested log planted by worker code costs each append memory for one line, not the log."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    filler = "f" * 4096
+    nested = "[" * 400 + "[]," * 50_000 + "[]" + "]" * 400
+    with event_path.open("a", encoding="utf-8") as events:
+        for sequence in range(2, 2002):
+            events.write(
+                json.dumps({"sequence": sequence, "kind": "output", "timestamp": "t", "data": {"content": filler}})
+                + "\n",
+            )
+        events.write(f'{{"sequence": 2002, "kind": "output", "timestamp": "t", "data": {nested}}}\n')
+    _restart_process(module)
+
+    tracemalloc.start()
+    try:
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 8 << 20
+    assert _read_events(event_path)[-1]["sequence"] == 2003
+    assert not (_record_dir(handle) / "transcript.md").exists()
+    tracemalloc.start()
+    try:
+        await owner.finish(handle, status="completed", output="Done")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 << 20
+    assert (_record_dir(handle) / "transcript.md").stat().st_size < 2 * event_path.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_a_log_with_more_events_than_the_cap_is_refused_once_the_fold_passes_the_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiny planted events cannot multiply the per-event parse cost past the event cap."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    monkeypatch.setattr(module, "_MAX_EVENTS", 8)
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.writelines(f'{{"sequence": {sequence}}}\n' for sequence in range(2, 11))
+    committed = event_path.read_bytes()
+    _restart_process(module)
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+
+    assert event_path.read_bytes() == committed
+
+
+def _nested_value(depth: int = 400, width: int = 300_000) -> str:
+    """Return JSON text that indenting would multiply by its depth."""
+    return "[" * depth + "[]," * width + "[]" + "]" * depth
+
+
+@pytest.mark.asyncio
+async def test_a_planted_run_view_field_is_dropped_instead_of_rendered(tmp_path: Path) -> None:
+    """Only the typed run fields survive a load, so a nested value planted beside them costs nothing to rewrite."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    planted = run_path.read_text(encoding="utf-8").rstrip().removesuffix("}") + f', "padding": {_nested_value()}}}'
+    run_path.write_text(planted, encoding="utf-8")
+    _restart_process(module)
+
+    tracemalloc.start()
+    try:
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert "padding" not in _read_json(run_path)
+    assert run_path.stat().st_size < 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["output", "error", "usage"])
+async def test_a_planted_run_view_value_larger_than_an_inline_value_is_refused(tmp_path: Path, field_name: str) -> None:
+    """The primary moves values above 64 KiB to artifacts, so a larger nested one in run.json is refused, not rendered."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    run[field_name] = None
+    planted = json.dumps(run).replace(f'"{field_name}": null', f'"{field_name}": {_nested_value()}')
+    run_path.write_text(planted, encoding="utf-8")
+    _restart_process(module)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="unreadable"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert run_path.read_text(encoding="utf-8") == planted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_field",
+    ["model_name", "task", "record_reference", "finished_at", "event_count", "status"],
+)
+async def test_a_run_view_missing_or_mistyping_a_field_is_refused(tmp_path: Path, run_field: str) -> None:
+    """A run.json a worker rewrote without a field the views need is unreadable, not a crash while rendering."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    del run[run_field]
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    _restart_process(module)
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    run[run_field] = ["not", "a", "scalar"]
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.finish(handle, status="completed", output="Done")
+
+
+@pytest.mark.asyncio
+async def test_a_planted_terminal_event_larger_than_an_inline_value_is_refused(tmp_path: Path) -> None:
+    """A planted terminal event cannot carry a nested output into run.json that the primary would never keep inline."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.write(
+            '{"sequence": 2, "kind": "delegation_finished", "timestamp": "2026-01-01T00:00:00Z", '
+            f'"data": {{"status": "failed", "output": null, "error": {_nested_value()}, "usage": null}}}}\n',
+        )
+    run_before = (_record_dir(handle) / "run.json").read_bytes()
+    _restart_process(module)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="size limit"):
+            await owner.finish(handle, status="failed", error="Failed")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 32 << 20
+    assert (_record_dir(handle) / "run.json").read_bytes() == run_before
+
+
+class _LogReads:
+    """Count the primary's full passes over event logs and the lines they parse."""
+
+    def __init__(self, module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.passes = 0
+        self.lines = 0
+        self.run_reads = 0
+        read_values = module._read_event_values
+        read_file = module.read_regular_file_within_root
+
+        def counted_values(descriptor: int) -> Iterator[object]:
+            self.passes += 1
+            for value in read_values(descriptor):
+                self.lines += 1
+                yield value
+
+        def counted_file(root: object, relative_path: object, **kwargs: object) -> bytes:
+            self.run_reads += str(relative_path) == "run.json"
+            return read_file(root, relative_path, **kwargs)
+
+        monkeypatch.setattr(module, "_read_event_values", counted_values)
+        monkeypatch.setattr(module, "read_regular_file_within_root", counted_file)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("planted_events", [0, 5000])
+async def test_record_writes_parse_the_log_at_most_once_per_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planted_events: int,
+) -> None:
+    """Appends and reopens reuse the primary's own view, so their cost never grows with what the log holds."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.writelines(
+            json.dumps({"sequence": sequence, "kind": "output", "timestamp": "t", "data": {}}) + "\n"
+            for sequence in range(2, planted_events + 2)
+        )
+    # Worker code planted the lines before a restart, so the first use reads them once.
+    _restart_process(module)
+    reads = _LogReads(module, monkeypatch)
+
+    for index in range(5):
+        await owner.reopen(handle.locator)
+        await owner.append_event(
+            handle,
+            module.DelegationEvent(kind="output", data={"content": f"part {index}"}, event_id=f"part-{index}"),
+        )
+        await owner.append_event(
+            handle,
+            module.DelegationEvent(kind="output", data={"content": f"part {index}"}, event_id=f"part-{index}"),
+        )
+
+    assert (reads.passes, reads.lines, reads.run_reads) == (1, planted_events + 1, 1)
+    assert _read_events(event_path)[-1]["sequence"] == planted_events + 6
+    await owner.finish(handle, status="completed", output="Done")
+    await owner.append_event(
+        handle,
+        module.DelegationEvent(kind="output", data={"content": "part 0"}, event_id="part-0"),
+    )
+    await owner.finish(handle, status="completed", output="Done")
+    # Only the first finish renders the transcript, the one pass that reads the whole log again.
+    assert (reads.passes, reads.run_reads) == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["append", "rewrite", "truncate", "replace"])
+async def test_a_log_changed_outside_the_primary_is_refused_without_being_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """Only the primary writes the log, so any other change marks the record tampered instead of costing a parse."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    planted = json.dumps({"sequence": 2, "kind": "output", "timestamp": "t", "data": _nested_value()})
+    if change == "append":
+        with event_path.open("a", encoding="utf-8") as events:
+            events.write(planted + "\n")
+    elif change == "rewrite":
+        event_path.write_text(planted + "\n", encoding="utf-8")
+    elif change == "truncate":
+        os.truncate(event_path, 0)
+    else:
+        event_path.unlink()
+        event_path.write_text(planted + "\n", encoding="utf-8")
+    tampered = event_path.read_bytes()
+    reads = _LogReads(module, monkeypatch)
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="changed outside the primary"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    with pytest.raises(ValueError, match="changed outside the primary"):
+        await owner.finish(handle, status="completed", output="Done")
+
+    assert reads.passes == 0
+    assert event_path.read_bytes() == tampered
+
+
+@pytest.mark.asyncio
+async def test_permission_and_access_time_changes_are_not_tampering(tmp_path: Path) -> None:
+    """The child may chmod its workspace or read the log; only writes to the log count as changes."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    os.chmod(event_path, 0o644)  # noqa: PTH101 - mirrors the child's chmod -R
+    status = event_path.stat()
+    os.utime(event_path, ns=(status.st_atime_ns + 10**9, status.st_mtime_ns))
+
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    await owner.finish(handle, status="completed", output="Done")
+
+    assert [event["kind"] for event in _read_events(event_path)] == [
+        "delegation_started",
+        "output",
+        "delegation_finished",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["append", "finish_transcript"])
+async def test_a_log_renamed_into_place_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """The primary checks the log it opened, so a planted log renamed over the checked one is never adopted."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    planted_path = event_path.with_name("planted.jsonl")
+    planted_path.write_text(
+        event_path.read_text(encoding="utf-8")
+        + json.dumps({"sequence": 2, "kind": "output", "timestamp": "t", "data": {"content": "planted"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    planted = planted_path.read_bytes()
+
+    def swap() -> None:
+        planted_path.rename(event_path)
+
+    if operation == "append":
+        checked_state = module._record_state
+
+        def swap_after_check(record_handle: object, record_fd: int) -> object:
+            state = checked_state(record_handle, record_fd)
+            swap()
+            return state
+
+        monkeypatch.setattr(module, "_record_state", swap_after_check)
+        with pytest.raises(ValueError, match="changed outside the primary"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    else:
+        write_views = module._write_record_views
+
+        def swap_after_views(record_handle: object, record_fd: int, run: object) -> None:
+            write_views(record_handle, record_fd, run)
+            if run.status == "completed":
+                swap()
+
+        monkeypatch.setattr(module, "_write_record_views", swap_after_views)
+        with pytest.raises(ValueError, match="changed outside the primary"):
+            await owner.finish(handle, status="completed", output="Done")
+        assert not (_record_dir(handle) / "transcript.md").exists()
+
+    assert event_path.read_bytes() == planted
+
+
+@pytest.mark.asyncio
+async def test_a_new_record_refuses_a_log_planted_before_it_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new record's log must be empty, so a log worker code planted where the record will live is never adopted."""
+    module = _records_module()
+    monkeypatch.setattr(module, "_utc_timestamp", lambda: "2026-09-28T00:00:00Z")
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    record_dir = (
+        runtime_paths.storage_root / "agents" / "child" / "workspace" / ".mindroom/delegations/2026-09-28/planted"
+    )
+    record_dir.mkdir(parents=True)
+    planted = json.dumps({"sequence": 1, "kind": "output", "timestamp": "t", "data": {}}) + "\n"
+    (record_dir / "events.jsonl").write_text(planted, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed outside the primary"):
+        await owner.start(
+            _metadata(module),
+            caller_execution_identity=_identity("caller"),
+            child_execution_identity=_identity("child"),
+            delegation_id="planted",
+        )
+
+    assert (record_dir / "events.jsonl").read_text(encoding="utf-8") == planted
+
+
+@pytest.mark.asyncio
+async def test_a_broken_log_is_refused_again_without_being_read_while_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first fold of a broken log remembers its refusal, so later writes do not parse it again."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = _record_dir(handle) / "events.jsonl"
+    with event_path.open("a", encoding="utf-8") as events:
+        events.writelines(
+            json.dumps({"sequence": sequence, "kind": "output", "timestamp": "t", "data": {}}) + "\n"
+            for sequence in range(2, 1002)
+        )
+        events.write("{broken\n")
+    _restart_process(module)
+    reads = _LogReads(module, monkeypatch)
+
+    for _ in range(3):
+        with pytest.raises(ValueError, match="unreadable"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+
+    assert reads.passes == 1
+    with event_path.open("a", encoding="utf-8") as events:
+        events.write("{}\n")
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    assert reads.passes == 2
+
+
+@pytest.mark.asyncio
+async def test_kept_states_drop_finished_records_first_and_never_running_ones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the memory budget, finished records leave in least recently used order and running ones stay."""
+    module = _records_module()
+    _restart_process(module)
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+
+    async def start(delegation_id: str) -> object:
+        return await owner.start(
+            _metadata(module),
+            caller_execution_identity=_identity("caller"),
+            child_execution_identity=_identity("child"),
+            delegation_id=delegation_id,
+        )
+
+    running = [await start(f"running-{index}") for index in range(4)]
+    finished = [await start(f"finished-{index}") for index in range(4)]
+    for handle in finished:
+        await owner.finish(handle, status="completed", output="x" * 30_000)
+    # The next write goes over the budget, so finished records leave until a quarter below it.
+    monkeypatch.setattr(module, "_MAX_RETAINED_STATE_BYTES", module._RECORD_STATES.retained_bytes)
+    await owner.append_event(
+        running[0],
+        module.DelegationEvent(kind="output", data={"content": "More"}, event_id="grows-the-state"),
+    )
+
+    kept = set(module._RECORD_STATES.states)
+    kept_finished = [_record_dir(handle) in kept for handle in finished]
+    assert all(_record_dir(handle) in kept for handle in running)
+    assert kept_finished == sorted(kept_finished)
+    assert kept_finished[0] is False
+    assert kept_finished[-1] is True
+    assert module._RECORD_STATES.retained_bytes == sum(module._RECORD_STATES.sizes.values())
+    assert module._RECORD_STATES.retained_bytes <= module._MAX_RETAINED_STATE_BYTES * 3 // 4
+    # A dropped record folds again when used, and running records are never dropped even over the budget.
+    monkeypatch.setattr(module, "_MAX_RETAINED_STATE_BYTES", 0)
+    await owner.append_event(running[1], module.DelegationEvent(kind="output", data={"content": "More"}))
+    assert set(module._RECORD_STATES.states) == {_record_dir(handle) for handle in running}
+    await owner.reopen(finished[0].locator)
+
+
+@pytest.mark.asyncio
+async def test_a_planted_view_is_kept_as_the_bytes_it_was_read_as(tmp_path: Path) -> None:
+    """Inline values stay compact JSON text in memory, so a kept view costs about what its file holds."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    run["status"] = "failed"
+    run["error"] = None
+    planted = json.dumps(run).replace('"error": null', f'"error": {_nested_value(depth=40, width=20_000)}')
+    run_path.write_text(planted, encoding="utf-8")
+    _restart_process(module)
+
+    tracemalloc.start()
+    try:
+        await owner.reopen(handle.locator)
+        retained, _peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    state = module._RECORD_STATES.get(_record_dir(handle))
+    assert isinstance(state.run.error_json, str)
+    assert len(state.run.error_json) < 64 << 10
+    # The parsed value would hold about 1.3 MB of list objects; its compact text holds about 60 KB.
+    assert retained < 256 << 10
+    assert module._RECORD_STATES.sizes[_record_dir(handle)] >= len(state.run.error_json)
+
+
+@pytest.mark.asyncio
+async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) -> None:
+    """A new run.json keeps room for what finish adds, so a record never starts that could not finish."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    near_cap = (4 << 20) - (64 << 10)
+
+    with pytest.raises(module.DelegationRecordLimitError):
+        await owner.start(
+            _metadata(module, task="t" * near_cap),
+            caller_execution_identity=_identity("caller"),
+            child_execution_identity=_identity("child"),
+        )
+
+    handle = await owner.start(
+        _metadata(module, task="t" * (near_cap - 4 * (64 << 10))),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    large_inline = "v" * ((64 << 10) - 16)
+    await owner.finish(handle, status="failed", output=large_inline, error=large_inline, usage={"note": large_inline})
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["status"] == "failed"
+    assert run["output"] == large_inline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["tampered_log", "failed_start", "failed_finish"])
+async def test_delegations_that_can_never_settle_keep_no_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Only a record its owner can still settle keeps state, so refused or failed records never pile up."""
+    module = _records_module()
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    if failure == "failed_start":
+        # The caller's worker left a file where its receipts go.
+        receipts = runtime_paths.storage_root / "agents" / "caller" / "workspace" / ".mindroom" / "delegation_receipts"
+        receipts.parent.mkdir(parents=True)
+        receipts.write_text("blocked", encoding="utf-8")
+
+    for index in range(20):
+        if failure == "failed_start":
+            with pytest.raises(OSError, match="Not a directory"):
+                await owner.start(
+                    _metadata(module),
+                    caller_execution_identity=_identity("caller"),
+                    child_execution_identity=_identity("child"),
+                    delegation_id=f"never-settles-{index}",
+                )
+            continue
+        handle = await owner.start(
+            _metadata(module),
+            caller_execution_identity=_identity("caller"),
+            child_execution_identity=_identity("child"),
+            delegation_id=f"never-settles-{index}",
+        )
+        if failure == "tampered_log":
+            with (_record_dir(handle) / "events.jsonl").open("a", encoding="utf-8") as events:
+                events.write('{"sequence": 2}\n')
+            with pytest.raises(ValueError, match="changed outside the primary"):
+                await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        else:
+            with monkeypatch.context() as full:
+                full.setattr(module, "_MAX_EVENTS", 1)
+                with pytest.raises(module.DelegationRecordLimitError):
+                    await owner.finish(handle, status="completed", output="Done")
+
+    assert module._RECORD_STATES.states == {}
+    assert module._RECORD_STATES.retained_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_name", ["run.json", "events.jsonl"])
+async def test_a_record_that_could_not_be_opened_is_read_again_on_its_next_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_name: str,
+) -> None:
+    """Running out of descriptors or an I/O error is not a verdict on the record, so it is never remembered."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    _restart_process(module)
+    failures = [OSError(errno.EMFILE, "Too many open files")]
+    read_file = module.read_regular_file_within_root
+    open_file = module.open_regular_file_at
+
+    def read_or_fail(root: object, relative_path: object, **kwargs: object) -> bytes:
+        if str(relative_path) == file_name and failures:
+            raise failures.pop()
+        return read_file(root, relative_path, **kwargs)
+
+    def open_or_fail(directory_fd: int, name: str, *args: object) -> int:
+        if name == file_name and not args and failures:
+            raise failures.pop()
+        return open_file(directory_fd, name, *args)
+
+    monkeypatch.setattr(module, "read_regular_file_within_root", read_or_fail)
+    monkeypatch.setattr(module, "open_regular_file_at", open_or_fail)
+
+    with pytest.raises(module._RecordAccessError, match="unreadable"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Lost"}))
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Kept"}))
+
+    assert failures == []
+    assert [event["data"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [{}, {"content": "Kept"}]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_append_keeps_the_view_matched_to_the_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write the primary rolls back leaves a log it still recognizes as its own."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+
+    def interrupted_flush(_fd: int) -> None:
+        message = "Interrupted durable write"
+        raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "fsync", interrupted_flush)
+        with pytest.raises(OSError, match="Interrupted durable write"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Lost"}))
+    reads = _LogReads(module, monkeypatch)
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Kept"}))
+
+    assert reads.passes == 0
+    assert [event["data"] for event in _read_events(_record_dir(handle) / "events.jsonl")] == [{}, {"content": "Kept"}]
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_reached_its_event_cap_can_still_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Events stop one short of the event cap, so the terminal event always fits."""
+    module = _records_module()
+    monkeypatch.setattr(module, "_MAX_EVENTS", 4)
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    for index in range(2):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+
+    with pytest.raises(ValueError, match="size limit"):
+        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "one too many"}))
+    await owner.finish(handle, status="completed", output="Done")
+
+    events = _read_events(_record_dir(handle) / "events.jsonl")
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4]
+    assert _read_json(_record_dir(handle) / "run.json")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_planted_oversized_run_view_is_refused_instead_of_parsed(tmp_path: Path) -> None:
+    """Worker code cannot make every reopen parse a many-megabyte run.json."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    run_path = _record_dir(handle) / "run.json"
+    run = _read_json(run_path)
+    run["padding"] = "p" * (5 << 20)
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    _restart_process(module)
+
+    with pytest.raises(ValueError, match="unreadable"):
+        await owner.reopen(handle.locator)
 
 
 def _config(*, private_child: bool = False) -> Config:
@@ -289,8 +1075,14 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("contents", "error"),
-    [(b"\n", "unreadable"), (b"{", "unreadable"), (b"[]\n", "malformed"), (b"\xff\n", "unreadable")],
-    ids=["blank-line", "invalid-json", "non-object", "invalid-utf8"],
+    [
+        (b"\n", "unreadable"),
+        (b"{", "unreadable"),
+        (b"[]\n", "malformed"),
+        (b"\xff\n", "unreadable"),
+        (b"[" * 100_000 + b"]" * 100_000 + b"\n", "unreadable"),
+    ],
+    ids=["blank-line", "invalid-json", "non-object", "invalid-utf8", "too-deeply-nested"],
 )
 async def test_invalid_event_stream_blocks_finish_without_mutation(tmp_path: Path, contents: bytes, error: str) -> None:
     """Invalid records must fail closed instead of being skipped during settlement."""
@@ -305,6 +1097,7 @@ async def test_invalid_event_stream_blocks_finish_without_mutation(tmp_path: Pat
     event_path.write_bytes(contents)
     run_path = _record_dir(handle) / "run.json"
     original_run = run_path.read_bytes()
+    _restart_process(module)
 
     with pytest.raises(ValueError, match=f"Delegation event stream is {error}"):
         await owner.finish(handle, status="completed", output="Done")
@@ -361,7 +1154,8 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     assert str(run["started_at"]).endswith("Z")
     events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [(event["sequence"], event["kind"]) for event in events] == [(1, "delegation_started")]
-    assert "Investigate the failure" in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
+    # Rendering reads the whole log, so the transcript waits for the terminal event.
+    assert not (_record_dir(handle) / "transcript.md").exists()
 
     receipt = _read_json(_receipt_path(handle))
     assert receipt["delegation_id"] == "delegation-123"
@@ -424,8 +1218,10 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         "result": {"items": [{"name": "first"}, {"name": "second"}]},
     }
     assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
+    await owner.finish(handle, status="completed", output="Done")
     transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
-    assert transcript.index("tool_call") < transcript.index("tool_result")
+    assert "Investigate the failure" in transcript
+    assert transcript.index("tool_call") < transcript.index("tool_result") < transcript.index("delegation_finished")
 
 
 @pytest.mark.asyncio
@@ -496,9 +1292,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
         delegation_id="event-repair",
     )
     run_path = _record_dir(handle) / "run.json"
-    transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
-    stale_transcript = transcript_path.read_bytes()
     stale_receipt = _receipt_path(handle).read_bytes()
     event = module.DelegationEvent(
         kind="approval_requested",
@@ -508,7 +1302,6 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     )
     await owner.append_event(handle, event)
     run_path.write_bytes(stale_run)
-    transcript_path.write_bytes(stale_transcript)
     _receipt_path(handle).write_bytes(stale_receipt)
 
     if fresh_event:
@@ -518,9 +1311,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     assert _read_json(run_path)["event_count"] == 2 + fresh_event
     assert _read_json(run_path)["status"] == "paused"
     assert _read_json(_receipt_path(handle))["status"] == "paused"
-    transcript = transcript_path.read_text(encoding="utf-8")
-    assert "Status: paused" in transcript
-    assert "approval_requested" in transcript
+    assert not (_record_dir(handle) / "transcript.md").exists()
 
 
 @pytest.mark.asyncio
@@ -538,12 +1329,13 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
     run_path = _record_dir(handle) / "run.json"
     transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
-    stale_transcript = transcript_path.read_bytes()
     stale_receipt = _receipt_path(handle).read_bytes()
     await owner.finish(handle, status="completed", output="durable result", usage={"output_tokens": 4})
     run_path.write_bytes(stale_run)
-    transcript_path.write_bytes(stale_transcript)
+    transcript_path.write_text("stale\n", encoding="utf-8")
     _receipt_path(handle).write_bytes(stale_receipt)
+    # Views are left stale by an interrupted write, which a restart then repairs.
+    _restart_process(module)
 
     if reject_fresh_event:
         with pytest.raises(ValueError, match="already terminal"):
@@ -746,7 +1538,6 @@ def test_locator_rejects_malformed_present_execution_identity() -> None:
         ("run.json", ValueError),
         ("events.jsonl", ValueError),
         ("transcript.md", None),
-        (".record.lock", OSError),
         ("receipt", None),
     ],
 )
@@ -766,14 +1557,18 @@ async def test_record_mutation_never_follows_a_symlinked_leaf(
         delegation_id=f"symlink-{leaf_name.replace('.', 'dot')}",
     )
     target = _receipt_path(handle) if leaf_name == "receipt" else _record_dir(handle) / leaf_name
-    target.unlink()
+    target.unlink(missing_ok=leaf_name == "transcript.md")
     outside = tmp_path / f"outside-{leaf_name.replace('.', 'dot')}"
     outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     target.symlink_to(outside)
+    _restart_process(module)
 
     async def mutate_record() -> None:
         if leaf_name == "run.json":
             await owner.reopen(handle.locator)
+            return
+        if leaf_name == "transcript.md":
+            await owner.finish(handle, status="completed", output="blocked")
             return
         await owner.append_event(
             handle,
@@ -888,6 +1683,7 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
         child_execution_identity=identity,
         delegation_id="self-call",
     )
+    await owner.finish(handle, status="completed", output="Done")
 
     workspace = runtime_paths.storage_root / "agents" / "caller" / "workspace"
     assert list(workspace.rglob("transcript.md")) == [_record_dir(handle) / "transcript.md"]

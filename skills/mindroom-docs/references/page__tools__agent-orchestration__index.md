@@ -283,8 +283,18 @@ After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is 
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
+`run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
 Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
+Because the workspace is writable by the child's worker, each record is capped: 1 MiB per event, 64 MiB and 65,536 events per event log, and 4 MiB for `run.json`.
+A delegation whose task leaves no room in `run.json` for the output, error, and usage that finishing adds is refused before it starts.
+A running child whose record reaches a cap fails, so very long delegations that keep large tool results inline stop there; a child that has already finished still settles, because its terminal event keeps reserved room.
+A record already above these caps is unreadable, so a delegation that resumes with one fails.
+MindRoom keeps each record's state in memory and reads the whole event log only on the record's first use in a process and when it renders `transcript.md` at the finish.
+Only MindRoom writes `events.jsonl`, so while it keeps a record's state, a log whose size or modification time changed, or that was replaced, fails that delegation as tampered; changing its permissions or access time does not.
+Finished records leave memory first when kept states grow past 64 MiB, and a record that left is read again on its next use.
+A running or paused record stays in memory until it finishes, or until its start or finish fails or its log is refused as tampered, so only delegations MindRoom can still settle keep state.
+A failure to open or read a record, such as running out of file descriptors, fails only that attempt; a refusal of the record's content is remembered while the log stays unchanged.
 The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
 Completed task results include a reference to the child's record.
 

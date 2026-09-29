@@ -4892,6 +4892,31 @@ def test_docker_backend_refuses_a_linked_nested_mount_target(
     assert list(elsewhere.iterdir()) == []
 
 
+def test_docker_backend_never_restarts_a_worker_over_a_link_planted_at_a_nested_mount_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker resolves bind destinations again on every start, so a stopped worker's nested targets are walked first."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset())
+    handle = backend.ensure_worker(spec, now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    container.stop()
+    # Worker code renamed the parent it owns and left a link where the workspace mount lands.
+    agents = worker_root_path(tmp_path, worker_key) / "agents"
+    agents.rename(agents.with_name("agents.old"))
+    (agents / "alpha").mkdir(parents=True)
+    (agents / "alpha" / "workspace").symlink_to("/app", target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="must be a real directory"):
+        backend.ensure_worker(spec, now=20.0)
+
+    assert container.started == 0
+    assert len(fake_client.containers.run_calls) == 1
+
+
 def test_docker_backend_never_mounts_a_missing_or_linked_private_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

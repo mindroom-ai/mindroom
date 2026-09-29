@@ -25,7 +25,7 @@ Connect external messaging platforms to Matrix:
 - [Bridges overview](https://docs.mindroom.chat/deployment/bridges/) - available bridges and how they work
 - [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/) - bridge Telegram chats via mautrix-telegram
 
-## Google Services (Gmail/Calendar/Drive/Sheets)
+## Google Services (Gmail/Calendar/Drive/Docs/Sheets/Tasks)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
 

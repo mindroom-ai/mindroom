@@ -2698,7 +2698,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Whether to verify SSL certificates",
           "label": "Verify SSL",
           "name": "verify_ssl",
@@ -8593,6 +8593,65 @@
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "google_tasks",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow listing task lists and tasks.",
+          "label": "Read Tasks",
+          "name": "read_tasks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, updating, completing, and deleting tasks.",
+          "label": "Manage Tasks",
+          "name": "manage_tasks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "List, create, update, complete, and delete tasks in the connected user's Google Tasks",
+      "display_name": "Google Tasks",
+      "docs_url": "https://developers.google.com/workspace/tasks/reference/rest",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "google_tasks_create_task",
+        "google_tasks_delete_task",
+        "google_tasks_list_task_lists",
+        "google_tasks_list_tasks",
+        "google_tasks_update_task"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogletasks",
+      "icon_color": "text-blue-600",
+      "name": "google_tasks",
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
