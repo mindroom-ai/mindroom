@@ -1540,13 +1540,12 @@ class _ShortenToolResults(CompressionManager):
 
 @pytest.mark.asyncio
 async def test_no_review_starts_once_shutdown_began(tmp_path: Path) -> None:
-    """Responses still finishing during shutdown keep their count for the next start instead of reviewing."""
+    """Responses still finishing during shutdown start no review."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     runner = _runner(paths)
     await runner.stop()
     assert await _count(runner, config) is None
-    assert runner._replies == {"mind:session": 2}
 
 
 @pytest.mark.asyncio

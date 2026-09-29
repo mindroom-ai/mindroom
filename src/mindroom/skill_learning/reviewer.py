@@ -35,7 +35,7 @@ from mindroom.skill_learning.transcript import conversation_messages, render_tra
 from mindroom.tool_call_budget import install_model_call_cap
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from agno.models.base import Model
@@ -96,7 +96,7 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
 
 
 def _review_tools(
-    schemas: Iterable[Function | dict[str, Any]],
+    schemas: Sequence[Function | dict[str, Any]],
     tools: SkillTools,
 ) -> tuple[list[Function | dict[str, Any]], list[str]]:
     """Keep every tool definition of the agent's request, but run only the skill tools, as the review's.
@@ -208,10 +208,9 @@ def _agent_skill_schemas(
         *(catalog.skills.get_tools() if catalog.skills is not None else []),
         *SkillManageTools(agent_name, config, runtime_paths, skills_root).get_async_functions().values(),
     ]
-    schemas = [function.model_copy() for function in functions]
-    for schema in schemas:
-        schema.process_entrypoint()
-    return schemas
+    for function in functions:
+        function.process_entrypoint()
+    return functions
 
 
 def _replay_model_name(
