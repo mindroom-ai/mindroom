@@ -308,21 +308,33 @@ async def test_upload_error_response_is_reported(monkeypatch: pytest.MonkeyPatch
         )
 
 
+@pytest.mark.parametrize(
+    ("payload", "mime_type", "kind"),
+    [(JPEG, "image/jpeg", "screenshot"), (OUTPUT, SHELL_OUTPUT_MIME_TYPE, "output_attachment")],
+)
 @pytest.mark.asyncio
-async def test_upload_rejects_a_content_uri_that_receivers_would_refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_upload_rejects_a_content_uri_that_receivers_would_refuse(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+    mime_type: str,
+    kind: str,
+) -> None:
     """The bridge validates its upload with the receiver's parser, so a non-mxc reference never leaves it."""
 
     async def upload(*_args: object, **_kwargs: object) -> nio.UploadResponse:
-        return nio.UploadResponse("https://example.org/shell-output")
+        return nio.UploadResponse("https://example.org/media")
 
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", upload)
 
-    with pytest.raises(DesktopMediaError, match=r"output_attachment\.url must be an mxc:// URI"):
+    with pytest.raises(
+        DesktopMediaError,
+        match=rf"^Matrix media upload returned an invalid media reference: {kind}\.url must be an mxc:// URI",
+    ):
         await upload_encrypted_media(
             AsyncMock(spec=nio.AsyncClient),
-            OUTPUT,
-            mime_type=SHELL_OUTPUT_MIME_TYPE,
-            filename="shell.txt",
+            payload,
+            mime_type=mime_type,
+            filename="media",
             timeout_seconds=1,
         )
 

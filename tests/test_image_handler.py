@@ -130,7 +130,7 @@ class TestPrepareMediaUpload:
     """Test shared upload preparation and the matching decryption."""
 
     def test_encrypted_upload_round_trips_through_shared_decryption(self) -> None:
-        """Prepared ciphertext decrypts only with its own authenticated metadata."""
+        """Prepared ciphertext decrypts with its own metadata, and a ciphertext SHA-256 mismatch raises."""
         prepared = prepare_media_upload(b"payload", filename="note.txt", mimetype="text/plain", encrypt=True)
         file_content = prepared.encrypted_file_content(url="mxc://server/note")
 

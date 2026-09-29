@@ -366,7 +366,11 @@ def extract_media_caption(
 
 
 def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:
-    """Authenticate and decrypt one Matrix encrypted file, raising when its SHA-256, key, or IV does not match."""
+    """Verify the ciphertext SHA-256, then decrypt with the given key and IV.
+
+    Raises ``EncryptionError`` on a digest mismatch or an undecodable key or IV.
+    A well-formed wrong key or IV yields garbage, so callers must validate the plaintext.
+    """
     return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
 
 

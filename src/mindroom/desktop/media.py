@@ -110,7 +110,7 @@ def _media_kind(mime_type: str) -> DesktopMediaKind:
 
 
 def _max_bytes(mime_type: str) -> int:
-    return MAX_SHELL_OUTPUT_BYTES if mime_type == SHELL_OUTPUT_MIME_TYPE else MAX_SCREENSHOT_BYTES
+    return MAX_SHELL_OUTPUT_BYTES if _media_kind(mime_type) == "output_attachment" else MAX_SCREENSHOT_BYTES
 
 
 def _validate_payload(payload: bytes, *, mime_type: str) -> None:
