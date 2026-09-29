@@ -499,9 +499,25 @@ def _debt_key(request: RefreshRequest) -> _DebtKey:
 
 @dataclass(frozen=True, slots=True)
 class _DeferredSidecar:
-    # The refetched revision's unresolved content, whose sidecar reference says when a retry could succeed.
+    """The refetched revision of a debt whose sidecar this bot could not read, kept to serve its marked preview."""
+
+    revision_event_id: str
+    revision_ts: int
+    # The unresolved content, whose sidecar reference says when a retry could succeed.
     content: Mapping[str, object]
-    preview: VisibleMessage
+
+    def preview(self, request: RefreshRequest) -> VisibleMessage:
+        """Return the marked preview that stands in for this revision in one read."""
+        return VisibleMessage(
+            logical_event_id=request.logical_event_id,
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            sender=request.sender,
+            created_ts=request.created_ts,
+            revision_event_id=self.revision_event_id,
+            revision_ts=self.revision_ts,
+            content=unavailable_sidecar_content(self.content),
+        )
 
 
 @dataclass
@@ -1247,9 +1263,16 @@ class ConversationHydrator:
         """
         deferred = self._deferred_sidecars.get(_debt_key(request))
         if deferred is not None and sidecar_retry_pending(deferred.content):
-            refresh_pass.unavailable_previews[request.logical_event_id] = deferred.preview
+            refresh_pass.unavailable_previews[request.logical_event_id] = deferred.preview(request)
             return
         await self.refresh(request, refresh_pass)
+
+    def _remember_deferred(self, request: RefreshRequest, deferred: _DeferredSidecar) -> None:
+        key = _debt_key(request)
+        self._deferred_sidecars[key] = deferred
+        self._deferred_sidecars.move_to_end(key)
+        while len(self._deferred_sidecars) > _DEFERRED_SIDECAR_MEMORY_SIZE:
+            self._deferred_sidecars.popitem(last=False)
 
     async def _resolved_content(
         self,
@@ -1280,41 +1303,39 @@ class ConversationHydrator:
         and the refresh token stays for the next.
 
         The marked preview is recorded before the download starts, so a read
-        whose time runs out while it waits still has it, and later reads find
-        it while the sidecar is downloading or pausing after a failure.
+        whose time runs out while it waits still has it. A revision whose
+        download failed transiently, or outlived the read, is remembered, so
+        later reads serve that preview while the sidecar is downloading or
+        pausing after a failure; a download that is merely in progress when no
+        attempt has failed is joined instead, since it usually succeeds.
         """
         content = revision.content
         if not holds_unresolved_sidecar(content):
             return content
-        preview = VisibleMessage(
-            logical_event_id=request.logical_event_id,
-            room_id=request.room_id,
-            thread_id=request.thread_id,
-            sender=request.sender,
-            created_ts=request.created_ts,
+        deferred = _DeferredSidecar(
             revision_event_id=revision.event_id,
             revision_ts=revision.origin_server_ts,
-            content=unavailable_sidecar_content(content),
+            content=content,
         )
-        refresh_pass.unavailable_previews[request.logical_event_id] = preview
-        key = _debt_key(request)
-        self._deferred_sidecars[key] = _DeferredSidecar(content=content, preview=preview)
-        self._deferred_sidecars.move_to_end(key)
-        while len(self._deferred_sidecars) > _DEFERRED_SIDECAR_MEMORY_SIZE:
-            self._deferred_sidecars.popitem(last=False)
-        async with refresh_pass.sidecar_downloads:
-            if refresh_pass.failed_downloads_remaining <= 0:
-                logger.info("conversation_refresh_sidecar_deferred", event_id=revision.event_id)
-                return None
-            sidecar: SidecarResolution = await resolve_sidecar_content(content, self._client())
+        refresh_pass.unavailable_previews[request.logical_event_id] = deferred.preview(request)
+        try:
+            async with refresh_pass.sidecar_downloads:
+                if refresh_pass.failed_downloads_remaining <= 0:
+                    logger.info("conversation_refresh_sidecar_deferred", event_id=revision.event_id)
+                    return None
+                sidecar: SidecarResolution = await resolve_sidecar_content(content, self._client())
+        except asyncio.CancelledError:
+            self._remember_deferred(request, deferred)
+            raise
         if sidecar.failed_download:
             refresh_pass.failed_downloads_remaining -= 1
         if not holds_unresolved_sidecar(sidecar.content):
             return sidecar.content
         if sidecar.permanently_unavailable:
             logger.info("conversation_refresh_sidecar_unavailable", event_id=revision.event_id)
-            return preview.content
+            return unavailable_sidecar_content(content)
         logger.info("conversation_refresh_sidecar_unresolved", event_id=revision.event_id)
+        self._remember_deferred(request, deferred)
         return None
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> dict[str, VisibleMessage]:

@@ -182,6 +182,9 @@ class FakeClient:
     # Media whose download never answers until released, and then times out.
     hanging_sidecars: set[str] = field(default_factory=set)
     release_hanging: asyncio.Event = field(default_factory=asyncio.Event)
+    # When set, every other download waits for this before it is answered.
+    sidecar_gate: asyncio.Event | None = None
+    download_started: asyncio.Event = field(default_factory=asyncio.Event)
     event_reads: int = 0
     access_token: str = TEST_ACCESS_TOKEN
     # Whether this device has crypto set up at all. nio only attempts
@@ -214,9 +217,12 @@ class FakeClient:
         assert method == "GET"
         mxc = requested_mxc(path)
         self.downloads.append(mxc)
+        self.download_started.set()
         if mxc in self.hanging_sidecars:
             await self.release_hanging.wait()
             raise TimeoutError
+        if self.sidecar_gate is not None:
+            await self.sidecar_gate.wait()
         if mxc in self.sidecar_statuses:
             return FakeMediaResponse(status=self.sidecar_statuses[mxc])
         payload = self.sidecars.get(mxc)
@@ -2001,6 +2007,32 @@ class TestSidecarResolution:
         assert (client.event_reads, len(client.downloads)) == requests_before_pending_reads
         stored = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
         assert len(stored.refresh_pending) == count
+
+    async def test_a_second_read_joins_a_download_in_progress_rather_than_serving_the_preview(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A read arriving while another read's download runs, with no failure behind it, waits for the text."""
+        source = self._sidecar_source("$long", "preview [continues]", "mxc://s/slow")
+        await admit_all(alice, [source])
+        gate = asyncio.Event()
+        client = FakeClient(
+            events={"$long": source},
+            sidecars={"mxc://s/slow": self._payload("the whole answer")},
+            sidecar_gate=gate,
+        )
+        reader = await self._reader(alice, client)
+
+        first = asyncio.create_task(reader.read_strict(room_id=ROOM, thread_id=None, limit=10))
+        await asyncio.wait_for(client.download_started.wait(), timeout=5)
+        second = asyncio.create_task(reader.read_strict(room_id=ROOM, thread_id=None, limit=10))
+        _done, pending = await asyncio.wait({second}, timeout=0.2)
+        gate.set()
+        pages = await asyncio.gather(first, second)
+
+        assert pending == {second}
+        assert [[message.content["body"] for message in page.messages] for page in pages] == [["the whole answer"]] * 2
+        assert client.downloads == ["mxc://s/slow"]
 
     async def test_an_edit_after_an_unavailable_attachment_resolves_normally(self, alice: PrincipalStore) -> None:
         """Settling one revision with its preview does not stop a later edit from replacing it."""
