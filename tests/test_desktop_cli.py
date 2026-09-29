@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 from pathlib import Path
@@ -855,6 +856,43 @@ async def test_cli_drains_native_work_before_releasing_owner(
 
 
 @pytest.mark.asyncio
+async def test_app_only_bridge_loads_no_posix_only_shell_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Screenshot-only runs, the Windows target, never import terminal approval or login-shell capture."""
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+
+    class FinishedBridge(DesktopBridge):
+        async def run(self) -> None:
+            return
+
+    class Source:
+        async def wait_for_work(self) -> None:
+            await asyncio.Event().wait()
+
+    owner = SimpleNamespace(client=client, source=Source(), close=client.close)
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.shell_prompt", None)
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
+    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
+    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
+    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
+    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", FinishedBridge)
+
+    await desktop_cli._run_bridge(
+        runtime_paths=SimpleNamespace(storage_root=tmp_path),
+        session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
+        config=_run_config(apps=("primary-screen",)),
+        allow_control=False,
+        lease_minutes=15,
+    )
+
+    assert client.to_device_callbacks == []
+
+
+@pytest.mark.asyncio
 async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_stop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -888,7 +926,7 @@ async def test_folder_and_shell_bridge_needs_no_gui_and_revokes_shell_access_on_
     monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden)
     monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", forbidden)
     monkeypatch.setattr(
-        "mindroom.desktop.bridge_components.capture_login_environment",
+        "mindroom.desktop.login_environment.capture_login_environment",
         AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
     )
     monkeypatch.setattr(desktop_cli, "_terminal_input_fd", lambda: None)

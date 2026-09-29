@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -27,7 +28,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _config(root: Path, *, apps: tuple[str, ...] = (), browser: bool = False) -> NativeDesktopConfig:
+def _config(
+    *roots: Path,
+    apps: tuple[str, ...] = (),
+    browser: bool = False,
+    shell: bool = True,
+) -> NativeDesktopConfig:
     return NativeDesktopConfig(
         revision=3,
         enabled=True,
@@ -37,8 +43,8 @@ def _config(root: Path, *, apps: tuple[str, ...] = (), browser: bool = False) ->
         allowed_app_ids=apps,
         capture=NativeCaptureConfig(),
         browser=NativeBrowserConfig(enabled=browser),
-        files=NativeFilesConfig((root,)),
-        shell=NativeShellConfig(enabled=True),
+        files=NativeFilesConfig(roots),
+        shell=NativeShellConfig(enabled=shell),
     )
 
 
@@ -58,7 +64,7 @@ def selected_root(tmp_path: Path) -> Path:
 def login_environment(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Replace the account login-shell capture with a fixed environment."""
     capture = AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"})
-    monkeypatch.setattr("mindroom.desktop.bridge_components.capture_login_environment", capture)
+    monkeypatch.setattr("mindroom.desktop.login_environment.capture_login_environment", capture)
     return capture
 
 
@@ -149,6 +155,69 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
         result = await components.shell.execute(request)
         assert result.output.read() == b"from-login-shell"
         result.output.release()
+    finally:
+        await bridge.stop()
+        bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("folders", "shell"), [(True, False), (False, True), (True, True)])
+async def test_windows_refuses_folder_and_shell_access_before_building_anything(
+    tmp_path: Path,
+    selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    folders: bool,
+    shell: bool,
+) -> None:
+    """Folder and shell access need POSIX, so Windows names the fix instead of failing inside a provider."""
+
+    def forbidden(**_kwargs: object) -> None:
+        pytest.fail("Windows built a provider for a run it must refuse")
+
+    for name in ("DesktopBridge", "DesktopFilesystem", "DesktopShell", "PyAutoGuiDesktopProvider"):
+        monkeypatch.setattr(f"mindroom.desktop.bridge_components.{name}", forbidden)
+    roots = (selected_root,) if folders else ()
+    config = _config(*roots, apps=("primary-screen",), shell=shell)
+
+    with monkeypatch.context() as windows:
+        windows.setattr(sys, "platform", "win32")
+        with pytest.raises(ValueError, match="need macOS or Linux") as refused:
+            await build_desktop_bridge(config, client=object(), runtime_paths=_runtime_paths(tmp_path))
+
+    assert "`mindroom desktop access --clear-folders --no-shell`" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_windows_builds_screenshot_only_app_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Screenshot-only app observation is the Windows target and loads no POSIX-only shell module."""
+    provider = object()
+    provider_options: list[dict[str, object]] = []
+
+    def gui_provider(**kwargs: object) -> object:
+        provider_options.append(kwargs)
+        return provider
+
+    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", gui_provider)
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
+
+    with monkeypatch.context() as windows:
+        windows.setattr(sys, "platform", "win32")
+        components = await build_desktop_bridge(
+            _config(apps=("primary-screen",), shell=False),
+            client=object(),
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    bridge = components.bridge
+    try:
+        assert bridge.provider is provider
+        assert provider_options[0]["allowed_app_ids"] == frozenset({"primary-screen"})
+        assert (components.filesystem, components.shell, components.browser) == (None, None, None)
+        assert (bridge.policy.allowed_file_roots, bridge.policy.shell_enabled) == ((), False)
+        assert bridge.policy.allow_control is False
     finally:
         await bridge.stop()
         bridge.close()

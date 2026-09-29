@@ -1021,7 +1021,7 @@ def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _FakeOwner:
     monkeypatch.setattr("mindroom.desktop.transport.DesktopTransport", _IdleTransport)
     monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden_gui_provider)
     monkeypatch.setattr(
-        "mindroom.desktop.bridge_components.capture_login_environment",
+        "mindroom.desktop.login_environment.capture_login_environment",
         AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"}),
     )
     return owner
