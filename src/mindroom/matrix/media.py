@@ -201,11 +201,20 @@ def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
 class _PreparedMediaUpload:
     """Upload bytes and metadata after the caller has resolved room encryption."""
 
+    media_bytes: bytes
+    mimetype: str
     data: bytes
     content_type: str
     filename: str
-    info: dict[str, Any]
     encryption_keys: dict[str, Any] | None
+
+    def info(self) -> dict[str, Any]:
+        """Build Matrix event info, decoding image dimensions only for callers that send it."""
+        return {
+            "size": len(self.media_bytes),
+            "mimetype": self.mimetype,
+            **_image_dimensions(self.media_bytes, self.mimetype),
+        }
 
     def encrypted_file_content(self) -> dict[str, Any] | None:
         """Build encrypted metadata separately so callers retain their error boundaries."""
@@ -216,8 +225,8 @@ class _PreparedMediaUpload:
             key=self.encryption_keys["key"],
             iv=self.encryption_keys["iv"],
             hashes=self.encryption_keys["hashes"],
-            mime_type=self.info["mimetype"],
-            size=self.info["size"],
+            mime_type=self.mimetype,
+            size=len(self.media_bytes),
         )
 
 
@@ -251,10 +260,11 @@ def prepare_media_upload(
         crypto.attachments.encrypt_attachment(media_bytes) if encrypt else (media_bytes, None)
     )
     return _PreparedMediaUpload(
+        media_bytes=media_bytes,
+        mimetype=mimetype,
         data=upload_bytes,
         content_type="application/octet-stream" if encrypt else mimetype,
         filename=f"{filename}.enc" if encrypt else filename,
-        info={"size": len(media_bytes), "mimetype": mimetype, **_image_dimensions(media_bytes, mimetype)},
         encryption_keys=encryption_keys,
     )
 

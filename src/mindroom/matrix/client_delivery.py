@@ -628,6 +628,7 @@ async def _upload_media_bytes_as_mxc(
         return None, None
     try:
         prepared = prepare_media_upload(media_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
+        info = prepared.info()
     except Exception:
         logger.exception("Failed to encrypt Matrix media upload", filename=filename)
         return None, None
@@ -649,7 +650,7 @@ async def _upload_media_bytes_as_mxc(
         logger.error("Failed Matrix media upload response", filename=filename, response=str(upload_response))
         return None, None
 
-    upload_payload: dict[str, Any] = {"info": prepared.info}
+    upload_payload: dict[str, Any] = {"info": info}
     if encrypted_file_payload is not None:
         encrypted_file_payload["url"] = mxc_uri
         upload_payload["file"] = encrypted_file_payload

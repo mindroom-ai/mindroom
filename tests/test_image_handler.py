@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
+from PIL import Image as PILImage
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix import image_handler
@@ -15,6 +17,7 @@ from mindroom.matrix.media import (
     _sniff_image_mime_type,
     download_media_bytes,
     extract_media_caption,
+    prepare_media_upload,
     resolve_image_mime_type,
     upload_content_uri,
     upload_media_bytes,
@@ -119,6 +122,29 @@ class TestUploadMediaBytes:
         assert upload_call.kwargs["filename"] == "message.txt"
         assert upload_call.kwargs["filesize"] == 7
         assert upload_call.kwargs["data_provider"](None, None).read() == b"payload"
+
+
+class TestPrepareMediaUpload:
+    """Test shared upload preparation."""
+
+    def test_image_dimensions_are_probed_only_when_event_info_is_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Callers that never send Matrix image info do not pay for decoding the image."""
+        png = io.BytesIO()
+        PILImage.new("RGB", (16, 9), "white").save(png, format="PNG")
+        opened: list[object] = []
+        original_open = PILImage.open
+
+        def tracking_open(fp: io.BytesIO) -> PILImage.Image:
+            opened.append(fp)
+            return original_open(fp)
+
+        monkeypatch.setattr("PIL.Image.open", tracking_open)
+        prepared = prepare_media_upload(png.getvalue(), filename="chart.png", mimetype="image/png", encrypt=True)
+
+        assert prepared.encrypted_file_content() is not None
+        assert opened == []
+        assert prepared.info() == {"size": len(png.getvalue()), "mimetype": "image/png", "w": 16, "h": 9}
+        assert len(opened) == 1
 
 
 class TestDownloadImage:

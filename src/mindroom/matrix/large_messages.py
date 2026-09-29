@@ -609,7 +609,7 @@ async def _upload_text_as_mxc(
 
     try:
         prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
-        file_info = prepared.encrypted_file_content() or prepared.info
+        file_info = prepared.encrypted_file_content() or prepared.info()
     except Exception:
         logger.exception("Failed to encrypt attachment")
         return None, None
