@@ -668,7 +668,10 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """CLI attaches durable admission before the transport runs and closes both owners."""
+    """CLI attaches durable admission before the transport runs and closes both owners.
+
+    This app-only run is the Windows target, so it must not load the POSIX-only shell modules.
+    """
     client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
     lifecycle = []
     admitted = asyncio.Event()
@@ -742,6 +745,8 @@ async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C
         bridge_options.update(kwargs)
         return Bridge()
 
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.shell_prompt", None)
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
@@ -853,43 +858,6 @@ async def test_cli_drains_native_work_before_releasing_owner(
     finally:
         release_native.set()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_app_only_bridge_loads_no_posix_only_shell_module(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Screenshot-only runs, the Windows target, never import terminal approval or login-shell capture."""
-    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
-
-    class FinishedBridge(DesktopBridge):
-        async def run(self) -> None:
-            return
-
-    class Source:
-        async def wait_for_work(self) -> None:
-            await asyncio.Event().wait()
-
-    owner = SimpleNamespace(client=client, source=Source(), close=client.close)
-    monkeypatch.setitem(sys.modules, "mindroom.desktop.shell_prompt", None)
-    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
-    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
-    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
-    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
-    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
-    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", FinishedBridge)
-
-    await desktop_cli._run_bridge(
-        runtime_paths=SimpleNamespace(storage_root=tmp_path),
-        session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
-        config=_run_config(apps=("primary-screen",)),
-        allow_control=False,
-        lease_minutes=15,
-    )
-
-    assert client.to_device_callbacks == []
 
 
 @pytest.mark.asyncio

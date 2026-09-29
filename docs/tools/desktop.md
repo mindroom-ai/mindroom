@@ -270,7 +270,7 @@ When `mindroom desktop run` starts from a terminal, macOS attributes both permis
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Windows supports the local `mindroom desktop` commands for screenshot-only observation through the explicit `primary-screen` app ID.
-Coordinate input during a control lease is not a supported Windows target.
+Coordinate input during a control lease uses the same PyAutoGUI path but has not been verified on Windows.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.

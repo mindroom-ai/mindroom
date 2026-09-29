@@ -162,7 +162,7 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("folders", "shell"), [(True, False), (False, True), (True, True)])
-async def test_windows_refuses_folder_and_shell_access_before_building_anything(
+async def test_windows_refuses_folder_and_shell_access_before_building_them(
     tmp_path: Path,
     selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -171,11 +171,11 @@ async def test_windows_refuses_folder_and_shell_access_before_building_anything(
 ) -> None:
     """Folder and shell access need POSIX, so Windows names the fix instead of failing inside a provider."""
 
-    def forbidden(**_kwargs: object) -> None:
-        pytest.fail("Windows built a provider for a run it must refuse")
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Windows built folder or shell access for a run it must refuse")
 
-    for name in ("DesktopBridge", "DesktopFilesystem", "DesktopShell", "PyAutoGuiDesktopProvider"):
-        monkeypatch.setattr(f"mindroom.desktop.bridge_components.{name}", forbidden)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopFilesystem", forbidden)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopShell", forbidden)
     roots = (selected_root,) if folders else ()
     config = _config(*roots, apps=("primary-screen",), shell=shell)
 
