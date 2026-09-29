@@ -10,6 +10,16 @@ Review the pull request with a **zero-tolerance standard**. Every issue you find
 - ❌ **CHANGES REQUIRED** — Issues found. List every one. All must be fixed before re-review.
 
 Never approve with suggestions. Never say "looks good overall but...". If there's a "but", it's CHANGES REQUIRED.
+The one exception is **Non-blocking notes**, which list out-of-scope findings as defined below and never change the verdict.
+
+## What blocks
+
+Zero tolerance applies to what the PR adds or changes, as the [Review Scope Policy](../../../CLAUDE.md#review-scope-policy) defines:
+
+- A finding blocks only when it shows a defect that a normal user or deployment hits in behavior the PR adds or changes, or a security-posture violation with material impact, such as a crash of the primary, cross-agent or cross-tenant access, or data loss.
+- Hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, or a few seconds of work, and problems in code the PR does not change, go under **Non-blocking notes**, each with the lines a fix would add.
+- Scope creep in the PR itself is a blocker: code, tests, or docs beyond what the change needs, including hardening that earlier review rounds added.
+- For every blocker, name the smallest fix, and prefer one that removes code.
 
 ## Scope and Refactor Standard
 
@@ -32,6 +42,7 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **Organization**: Is everything in the right place?
 - **Consistency**: Is it in the same style as other parts of the codebase?
 - **Simplicity**: Is it not over-engineered? Remember KISS and YAGNI. No dead code paths and NO defensive programming. No unnecessary try-excepts.
+- **Scope**: Does the PR add only what its change needs, without hardening or fixing unrelated behavior on main?
 - **No pointless wrappers**: Identify functions/methods that just call another function and return its result. Callers should call the underlying function directly instead of going through unnecessary indirection.
 - **Functional style**: Does it prefer functions over classes where appropriate? Are dataclasses used instead of raw dicts?
 - **Imports**: Are imports at file top, with function imports used to avoid cycles or defer heavy/optional dependencies until first use, as required by [CLAUDE.md](../../../CLAUDE.md#1-core-philosophy)?

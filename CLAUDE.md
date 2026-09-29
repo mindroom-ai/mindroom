@@ -487,13 +487,20 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - Default to putting new behavior in focused modules or collaborators, then wire it into `bot.py` or `orchestrator.py` through a small public method or dependency.
 - A PR that adds substantial code to `bot.py` or `orchestrator.py` must explain why the code truly belongs at that lifecycle boundary and why a focused module would be worse.
 - During PR review, flag growth in `bot.py` or `orchestrator.py` as a design smell unless it is limited to routing, lifecycle coordination, dependency wiring, or calls into extracted collaborators.
-- Every 3 review rounds, if reviews still show many issues or new major bug classes, stop patching and reconsider the design before another patch round.
 - Use larger refactors when they provide clear immediate maintenance ROI, not hypothetical future value.
 - A larger refactor is justified only if it:
   - Removes active duplication in current code paths.
   - Creates a clear source of truth without adding unnecessary abstraction layers.
   - Reduces net complexity (simpler call flow, fewer special cases).
   - Is covered by tests in the same PR.
+
+### Review Scope Policy
+
+- A feature PR adds what its feature needs; hardening or fixing behavior that already exists on main belongs in its own PR.
+- A review finding blocks a PR only when it shows a defect that a normal user or deployment hits in behavior the PR adds or changes, or a security-posture violation with material impact, such as a crash of the primary, cross-agent or cross-tenant access, or data loss.
+- Other findings, such as hardening against hand-edited or hostile input whose worst case is a warning, a skipped item, or a few seconds of work, and problems in code the PR does not change, are non-blocking notes: record the lines a fix would add, and do not act on them without the user's agreement.
+- Prefer fixes that remove code; a fix that adds a new mechanism, such as a budget, cache, limit, fallback, or retry path, must name the concrete failure it prevents.
+- Every 3 review rounds, compare the PR's size with where the rounds started: if the rounds mostly fix problems that earlier fixes introduced, the PR keeps growing, or new major bug classes keep appearing, stop patching, reconsider the design, and ask the user before another round.
 
 ### Migration Policy
 

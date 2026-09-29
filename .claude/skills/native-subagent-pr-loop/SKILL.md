@@ -38,12 +38,13 @@ After each fix, use fresh read-only reviewers with neutral prompts.
    Use read-only prompts, attach `pr-review` when reviewing merge readiness, and tell them not to edit, commit, push, or inspect CI if the user excluded CI.
 5. Treat findings as claims.
    Verify each finding against current code before editing.
-   Fix only real, in-scope issues in the main thread.
+   Fix only real, in-scope issues in the main thread, as the Review Scope Policy in `CLAUDE.md` defines them.
+   Do not act on non-blocking notes without the user's agreement.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.
-   After every third review round that still finds many issues or a new major bug class, stop patching and reconsider the design before another patch round.
-7. Stop only when both fresh reviewers approve the same head.
+   After every third review round, compare the PR's size with where the rounds started; if the rounds mostly fix problems that earlier fixes introduced, the PR keeps growing, or a new major bug class appears, stop and ask the user before another round.
+7. Stop when both fresh reviewers approve the same head, or when step 6 calls for the user.
    Confirm the worktree is clean and the remote branch matches the local head.
 
 ## Bias Firewall
