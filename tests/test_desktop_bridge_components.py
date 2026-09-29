@@ -11,12 +11,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.desktop import native_config
 from mindroom.desktop.bridge_components import build_desktop_bridge
 from mindroom.desktop.command_journal import DesktopCommandJournalError
 from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
+    NativeConfigError,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -162,7 +164,7 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("folders", "shell"), [(True, False), (False, True), (True, True)])
-async def test_windows_refuses_folder_and_shell_access_before_building_them(
+async def test_without_posix_folder_and_shell_access_are_refused_before_building_them(
     tmp_path: Path,
     selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -172,23 +174,25 @@ async def test_windows_refuses_folder_and_shell_access_before_building_them(
     """Folder and shell access need POSIX, so Windows names the fix instead of failing inside a provider."""
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Windows built folder or shell access for a run it must refuse")
+        pytest.fail("Built folder or shell access for a run that must be refused")
 
     monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopFilesystem", forbidden)
     monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopShell", forbidden)
+    monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
     roots = (selected_root,) if folders else ()
-    config = _config(*roots, apps=("primary-screen",), shell=shell)
 
-    with monkeypatch.context() as windows:
-        windows.setattr(sys, "platform", "win32")
-        with pytest.raises(ValueError, match="need macOS or Linux") as refused:
-            await build_desktop_bridge(config, client=object(), runtime_paths=_runtime_paths(tmp_path))
+    with pytest.raises(NativeConfigError, match="need macOS or Linux") as refused:
+        await build_desktop_bridge(
+            _config(*roots, apps=("primary-screen",), shell=shell),
+            client=object(),
+            runtime_paths=_runtime_paths(tmp_path),
+        )
 
     assert "`mindroom desktop access --clear-folders --no-shell`" in str(refused.value)
 
 
 @pytest.mark.asyncio
-async def test_windows_builds_screenshot_only_app_observation(
+async def test_without_posix_screenshot_only_app_observation_still_builds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,15 +205,14 @@ async def test_windows_builds_screenshot_only_app_observation(
         return provider
 
     monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", gui_provider)
+    monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
     monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
 
-    with monkeypatch.context() as windows:
-        windows.setattr(sys, "platform", "win32")
-        components = await build_desktop_bridge(
-            _config(apps=("primary-screen",), shell=False),
-            client=object(),
-            runtime_paths=_runtime_paths(tmp_path),
-        )
+    components = await build_desktop_bridge(
+        _config(apps=("primary-screen",), shell=False),
+        client=object(),
+        runtime_paths=_runtime_paths(tmp_path),
+    )
 
     bridge = components.bridge
     try:

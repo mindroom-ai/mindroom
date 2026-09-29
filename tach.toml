@@ -3443,6 +3443,7 @@ depends_on = [
     "mindroom.desktop.bridge",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.login_environment",
+    "mindroom.desktop.native_config",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
     "mindroom.desktop.shell",

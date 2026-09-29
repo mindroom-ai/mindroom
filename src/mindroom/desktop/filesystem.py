@@ -22,9 +22,6 @@ class DesktopFilesystem:
     """Read only below pinned, caller-authorized folder descriptors."""
 
     def __init__(self, roots: tuple[Path, ...]) -> None:
-        if not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")):
-            message = "This platform cannot confine local file access safely."
-            raise DesktopFilesystemError(message)
         self._roots: dict[str, tuple[Path, int]] = {}
         self._closed = False
         try:

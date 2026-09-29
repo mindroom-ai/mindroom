@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
 from mindroom.desktop.filesystem import DesktopFilesystem
+from mindroom.desktop.native_config import require_supported_local_access
 from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 from mindroom.desktop.provider import PyAutoGuiDesktopProvider
 from mindroom.desktop.shell import DesktopShell
@@ -17,12 +17,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.native_config import NativeDesktopConfig
-
-_POSIX_ONLY_ACCESS = (
-    "Read-only folders and shell commands need macOS or Linux; on Windows, MindRoom Desktop supports only "
-    "screenshot observation of the `primary-screen` app. Turn them off with "
-    "`mindroom desktop access --clear-folders --no-shell`, then start again."
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,11 +40,9 @@ async def build_desktop_bridge(
 
     Only selected apps construct the GUI provider, so folder, shell, and browser runs need no GUI
     runtime. A control lease expiry grants app input from the start; without one the bridge is observe-only.
-    Windows refuses folder and shell access before building anything: both rely on POSIX descriptors,
-    process groups, and account lookup.
+    Folder and shell access are refused before anything is built on a computer without POSIX.
     """
-    if sys.platform == "win32" and (config.files.roots or config.shell.enabled):
-        raise ValueError(_POSIX_ONLY_ACCESS)
+    require_supported_local_access(config)
     browser = None
     filesystem = None
     shell = None

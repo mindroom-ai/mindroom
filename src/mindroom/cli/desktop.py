@@ -631,6 +631,7 @@ def desktop_access(
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeConfigError,
         native_config_path,
+        require_supported_local_access,
         save_native_config,
     )
 
@@ -643,6 +644,7 @@ def desktop_access(
     try:
         config = _saved_enabled_config(path)
         edited = _edited_local_access(config, allow_folder, clear_folders=clear_folders, shell=shell)
+        require_supported_local_access(edited)
         if edited != config:
             config = save_native_config(path, edited, expected_revision=config.revision)
             changed = True
