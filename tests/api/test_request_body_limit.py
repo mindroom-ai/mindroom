@@ -20,6 +20,11 @@ def test_request_bodies_over_the_limit_are_refused_before_routes_read_them(
     json_headers = {"content-type": "application/json"}
 
     declared = test_client.post("/api/auth/session", content=b"{" + b" " * 2048 + b"}", headers=json_headers)
+    huge_declared = test_client.post(
+        "/api/auth/session",
+        content=b"{}",
+        headers={**json_headers, "content-length": "9" * 5000},
+    )
     streamed = test_client.post("/api/auth/session", content=iter([b" " * 600] * 4), headers=json_headers)
     within = test_client.post("/api/auth/session", json={"api_key": "key"})
     upload = test_client.post(
@@ -27,7 +32,7 @@ def test_request_bodies_over_the_limit_are_refused_before_routes_read_them(
         files={"files": ("notes.txt", b"x" * 4096, "text/plain")},
     )
 
-    assert (declared.status_code, streamed.status_code) == (413, 413)
+    assert (declared.status_code, huge_declared.status_code, streamed.status_code) == (413, 413, 413)
     assert declared.json() == {"detail": request_body_limit._TOO_LARGE_DETAIL}
     # Both reach their routes, which then refuse them for unrelated reasons in this test runtime.
     assert within.json() == {"detail": "Dashboard auth is not enabled"}

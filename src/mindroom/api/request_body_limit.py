@@ -29,7 +29,12 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         declared = next((value for name, value in scope["headers"] if name == b"content-length"), b"")
-        if declared.isdigit() and int(declared) > _MAX_REQUEST_BODY_BYTES:
+        # A length with more significant digits than the limit is over it, and converting it could exceed
+        # Python's integer-string digit limit.
+        significant = declared.lstrip(b"0")
+        if declared.isdigit() and (
+            len(significant) > len(str(_MAX_REQUEST_BODY_BYTES)) or int(significant or b"0") > _MAX_REQUEST_BODY_BYTES
+        ):
             await JSONResponse({"detail": _TOO_LARGE_DETAIL}, status_code=413)(scope, receive, send)
             return
         received = 0
