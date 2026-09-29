@@ -282,13 +282,13 @@ macOS screenshots require macOS 14 or newer and Screen Recording permission.
 When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
-Windows supports the local `mindroom desktop` commands for screenshot-only observation through the explicit `primary-screen` app ID.
-Coordinate input during a control lease uses the same PyAutoGUI path but has not been verified on Windows.
+On Windows, the terminal commands `mindroom desktop login`, `pair`, `setup`, `access`, and `run` target screenshot-only observation through the explicit `primary-screen` app ID, which has not yet been verified on a real Windows computer.
+Coordinate input during a control lease uses the same PyAutoGUI path and is also unverified on Windows.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.
 They require macOS or Linux.
-On Windows, `mindroom desktop run` refuses to start while either is saved and names `mindroom desktop access --clear-folders --no-shell` to turn them off.
+On Windows, `mindroom desktop access` refuses to save them, and `mindroom desktop run` refuses to start while either is saved; both name `mindroom desktop access --clear-folders --no-shell` to turn them off.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
 Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
 
@@ -712,7 +712,7 @@ Native semantic accessibility is implemented only for macOS in this version.
 Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
 On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
 ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
-Linux pixel operations currently target the primary display.
+Linux and Windows pixel operations currently target the primary display.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
