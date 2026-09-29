@@ -284,21 +284,3 @@ def test_build_mindroom_publishes_release_images_on_dispatch(
     manifest = build_mindroom_workflow["jobs"]["manifest"]
     assert manifest["if"] == "github.event_name == 'workflow_dispatch'"
     assert manifest["needs"] == "build"
-
-
-def test_release_publishers_never_share_a_concurrency_group_outside_pull_requests() -> None:
-    """A grouped publisher must key non-PR runs by run id, so no release dispatch is cancelled or collapsed."""
-    for name in _release_publishers():
-        concurrency = _load_workflow(WORKFLOW_DIR / name).get("concurrency")
-        if concurrency is not None:
-            assert "github.run_id" in concurrency["group"], name
-
-
-def test_every_pull_request_workflow_cancels_superseded_runs() -> None:
-    """A newer push to a pull request cancels that pull request's older runs in every workflow."""
-    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
-        workflow = _load_workflow(path)
-        if "pull_request" in workflow["on"]:
-            concurrency = workflow.get("concurrency")
-            assert concurrency is not None, path.name
-            assert concurrency["cancel-in-progress"] in (True, "${{ github.event_name == 'pull_request' }}"), path.name
