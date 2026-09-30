@@ -11,7 +11,11 @@ import pytest
 
 import mindroom.constants as constants_mod
 import mindroom.credentials as credentials_module
-from mindroom.api.credentials_target import RequestCredentialsTarget
+from mindroom.api.credentials_target import (
+    RequestCredentialsTarget,
+    load_credentials_for_target,
+    save_credentials_for_target,
+)
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     CredentialsManager,
@@ -1925,69 +1929,112 @@ class TestSharedIntegrationCredentialTagging:
         assert not (worker_root / "workers").exists()
 
 
-@pytest.mark.parametrize(
-    ("service", "url_field", "token_field"),
-    [
-        ("github", "base_url", "access_token"),
-        ("browserbase", "base_url", "api_key"),
-        ("daytona", "api_url", "api_key"),
-        ("composio", "base_url", "api_key"),
-    ],
-)
-def test_primary_tool_config_stays_isolated_per_shared_agent(
-    credentials_manager: CredentialsManager,
-    service: str,
-    url_field: str,
-    token_field: str,
-) -> None:
-    """Shared agents keep independent primary settings and ignore worker documents."""
+def test_primary_built_tool_settings_stay_isolated_per_shared_agent(credentials_manager: CredentialsManager) -> None:
+    """Shared agents keep independent primary settings for primary-built tools and ignore worker documents."""
     manager = credentials_manager
     alpha = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
     beta = resolve_worker_target("shared", "beta", None, tenant_id="test-tenant")
-    unscoped_config = {token_field: "unscoped-token"}
-    alpha_config = {token_field: "alpha-token", url_field: "https://primary.example.test"}
-    beta_config = {token_field: "beta-token"}
-    manager.save_credentials(service, unscoped_config)
+    unscoped_config = {"access_token": "unscoped-token"}
+    alpha_config = {"access_token": "alpha-token", "base_url": "https://primary.example.test"}
+    beta_config = {"access_token": "beta-token"}
+    manager.save_credentials("github", unscoped_config)
     for target, config in ((alpha, alpha_config), (beta, beta_config)):
-        save_scoped_credentials(service, config, credentials_manager=manager, worker_target=target)
+        save_scoped_credentials(
+            "github",
+            config,
+            credentials_manager=manager,
+            worker_target=target,
+            primary_built_tool=True,
+        )
         assert target.worker_key is not None
-        manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
+        manager.for_worker(target.worker_key).save_credentials("github", {"base_url": "https://worker.example.test"})
 
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) == alpha_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
-    delete_scoped_credentials(service, credentials_manager=manager, worker_target=alpha)
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=alpha) is None
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=beta) == beta_config
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=None) == unscoped_config
+    def load(target: ResolvedWorkerTarget | None) -> dict[str, object] | None:
+        return load_scoped_credentials(
+            "github",
+            credentials_manager=manager,
+            worker_target=target,
+            primary_built_tool=True,
+        )
+
+    assert load(alpha) == alpha_config
+    assert load(beta) == beta_config
+    assert load(None) == unscoped_config
+    delete_scoped_credentials("github", credentials_manager=manager, worker_target=alpha, primary_built_tool=True)
+    assert load(alpha) is None
+    assert load(beta) == beta_config
+    assert load(None) == unscoped_config
+    # A tool that runs in the worker still reads the worker's own settings.
+    assert load_scoped_credentials("github", credentials_manager=manager, worker_target=alpha) == {
+        "base_url": "https://worker.example.test",
+    }
 
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-@pytest.mark.parametrize(
-    ("service", "url_field"),
-    [("browserbase", "base_url"), ("daytona", "api_url"), ("composio", "base_url")],
-)
-def test_primary_tool_config_ignores_requester_worker_document(
+def test_primary_built_tool_settings_ignore_requester_worker_document(
     credentials_manager: CredentialsManager,
     worker_scope: str,
-    service: str,
-    url_field: str,
 ) -> None:
-    """Requester settings come from the primary store even when a worker file exists."""
+    """Requester settings of a primary-built tool come from the primary store, never the worker file."""
     manager = credentials_manager
     identity = ToolExecutionIdentity("matrix", "general", "@alice:example.test", None, None, None, None)
     target = _worker_target(worker_scope, "general", identity)
-    primary_config = {"api_key": "primary-key", url_field: "https://primary.example.test"}
-    save_scoped_credentials(service, primary_config, credentials_manager=manager, worker_target=target)
+    primary_config = {"api_key": "primary-key", "base_url": "https://primary.example.test"}
+    save_scoped_credentials(
+        "browserbase",
+        primary_config,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+    )
     assert target.worker_key is not None
-    manager.for_worker(target.worker_key).save_credentials(service, {url_field: "https://worker.example.test"})
+    manager.for_worker(target.worker_key).save_credentials("browserbase", {"base_url": "https://worker.example.test"})
 
-    assert load_scoped_credentials(service, credentials_manager=manager, worker_target=target) == primary_config
+    assert (
+        load_scoped_credentials(
+            "browserbase",
+            credentials_manager=manager,
+            worker_target=target,
+            primary_built_tool=True,
+        )
+        == primary_config
+    )
+
+
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+def test_primary_built_tool_without_requester_uses_only_shared_settings(
+    credentials_manager: CredentialsManager,
+    worker_scope: str,
+) -> None:
+    """Without a requester there is no requester store: loads use shared settings and saves are refused."""
+    manager = credentials_manager
+    target = _worker_target(worker_scope, "general", None)
+    shared_config = {"api_key": "shared-key", "_source": "ui"}
+    manager.shared_manager().save_credentials("browserbase", shared_config)
+
+    assert (
+        load_scoped_credentials(
+            "browserbase",
+            credentials_manager=manager,
+            worker_target=target,
+            allowed_shared_services=frozenset({"browserbase"}),
+            primary_built_tool=True,
+        )
+        == shared_config
+    )
+    with pytest.raises(ValueError, match="requester identity"):
+        save_scoped_credentials(
+            "browserbase",
+            {"api_key": "k"},
+            credentials_manager=manager,
+            worker_target=target,
+            primary_built_tool=True,
+        )
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
 @pytest.mark.parametrize("shared_layer", ["grant", "denied", "mirror", "mirror_disabled"])
-def test_primary_tool_config_preserves_shared_layer(
+def test_primary_built_tool_settings_preserve_shared_layer(
     tmp_path: Path,
     worker_scope: str,
     shared_layer: str,
@@ -2011,9 +2058,43 @@ def test_primary_tool_config_preserves_shared_layer(
         "worker_target": target,
         "allowed_shared_services": allowed,
         "allow_shared_mirror": shared_layer != "mirror_disabled",
+        "primary_built_tool": True,
     }
     expected = shared_config if shared_layer in {"grant", "mirror"} else None
     assert load_scoped_credentials("browserbase", **kwargs) == expected
     primary_config = {"api_key": "scoped-key"}
-    save_scoped_credentials("browserbase", primary_config, credentials_manager=manager, worker_target=target)
+    save_scoped_credentials(
+        "browserbase",
+        primary_config,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+    )
     assert load_scoped_credentials("browserbase", **kwargs) == {**(expected or {}), **primary_config}
+
+
+def test_dashboard_saves_primary_built_tool_settings_where_the_runtime_reads_them(tmp_path: Path) -> None:
+    """Dashboard writes for a tool the primary builds go to the agent's primary store, not its worker store."""
+    runtime_paths = constants_mod.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    manager = CredentialsManager(tmp_path / "credentials")
+    worker_target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert worker_target.worker_key is not None
+    worker_manager = manager.for_worker(worker_target.worker_key)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=worker_manager,
+        worker_scope="shared",
+        agent_name="alpha",
+        execution_identity=None,
+    )
+    settings = {"access_token": "alpha-token"}
+
+    save_credentials_for_target("github", settings, target)
+    worker_manager.save_credentials("github", {"base_url": "https://worker.example.test"})
+
+    assert manager.for_primary_runtime_agent_scope("alpha").load_credentials("github") == settings
+    assert load_credentials_for_target("github", target) == settings

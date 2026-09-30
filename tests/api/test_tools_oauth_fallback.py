@@ -88,6 +88,7 @@ async def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(
         {"access_token": manual_secret, "base_url": "https://api.github.com"},
         credentials_manager=manager,
         worker_target=alice_target,
+        primary_built_tool=True,
     )
     alice_tool = _github_tool()
     bob_tool = _github_tool()
@@ -112,6 +113,7 @@ async def test_blank_manual_oauth_fallback_does_not_mark_tool_available(tmp_path
         {"access_token": "   ", "base_url": "https://api.github.com"},
         credentials_manager=manager,
         worker_target=target,
+        primary_built_tool=True,
     )
     tool = _github_tool()
 

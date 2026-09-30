@@ -942,12 +942,9 @@ def resolve_runtime_worker_tools(
     tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
-    agent_config = config.get_agent(agent_name)
-    configured = agent_config.worker_tools
-    if configured is None:
-        configured = config.defaults.worker_tools
+    configured = config.get_agent_worker_tools(agent_name)
     if configured is not None:
-        return config.expand_tool_names(list(configured))
+        return configured
 
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)

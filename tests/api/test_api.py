@@ -2155,6 +2155,7 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
         {"access_token": manual_secret, "base_url": "https://api.github.com"},
         credentials_manager=manager,
         worker_target=alice_target,
+        primary_built_tool=True,
     )
     tools = [
         {

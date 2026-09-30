@@ -39,7 +39,7 @@ from mindroom.tool_system.registry_state import (
     scoped_plugin_registration_owner,
     scoped_plugin_registration_store,
 )
-from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
+from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy, tool_builds_in_primary
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
@@ -738,6 +738,12 @@ def _build_tool_instance(
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
+            primary_built_tool=tool_builds_in_primary(
+                tool_name,
+                runtime_paths=runtime_paths,
+                worker_tools_override=worker_tools_override,
+                disable_sandbox_proxy=disable_sandbox_proxy,
+            ),
         )
         if resolved_credentials_manager is not None
         else {}

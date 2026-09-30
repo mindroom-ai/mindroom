@@ -1726,6 +1726,7 @@ def _sandbox_proxy_test_metadata(
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     consumes_workspace_paths: bool = False,
     requires_primary_runtime: bool = False,
+    requires_room_context: bool = False,
 ) -> ToolMetadata:
     return ToolMetadata(
         name=name,
@@ -1736,6 +1737,7 @@ def _sandbox_proxy_test_metadata(
         default_execution_target=default_execution_target,
         consumes_workspace_paths=consumes_workspace_paths,
         requires_primary_runtime=requires_primary_runtime,
+        requires_room_context=requires_room_context,
     )
 
 
@@ -1784,6 +1786,52 @@ def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: 
             worker_tools_override=[tool_name],
         )
         is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("requires_primary_runtime", "requires_room_context", "worker_tools", "flags", "expected"),
+    [
+        pytest.param(True, False, ["routing_test"], {}, True, id="primary-runtime"),
+        pytest.param(False, True, ["routing_test"], {}, True, id="room-context"),
+        pytest.param(False, False, [], {}, True, id="not-routed"),
+        pytest.param(False, False, ["routing_test"], {"disable_sandbox_proxy": True}, True, id="proxy-disabled"),
+        pytest.param(False, False, ["routing_test"], {}, False, id="routed"),
+        pytest.param(False, False, [], {"runner_mode": True}, False, id="inside-worker"),
+    ],
+)
+def test_tool_builds_in_primary_follows_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    requires_primary_runtime: bool,
+    requires_room_context: bool,
+    worker_tools: list[str],
+    flags: dict[str, bool],
+    expected: bool,
+) -> None:
+    """Only the primary process building a tool itself marks its settings as primary-built."""
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        "routing_test",
+        _sandbox_proxy_test_metadata(
+            "routing_test",
+            requires_primary_runtime=requires_primary_runtime,
+            requires_room_context=requires_room_context,
+        ),
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        runner_mode=flags.get("runner_mode", False),
+    )
+
+    assert (
+        sandbox_proxy_module.tool_builds_in_primary(
+            "routing_test",
+            runtime_paths=runtime_paths,
+            worker_tools_override=worker_tools,
+            disable_sandbox_proxy=flags.get("disable_sandbox_proxy", False),
+        )
+        is expected
     )
 
 
@@ -2041,6 +2089,44 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
     assert tool.location == "us-central1"
     assert captured["project"] == "demo-project"
     assert captured["credentials"] is None
+
+
+def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A tool the primary builds for an agent reads that agent's primary settings, never its worker store."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8765", "MINDROOM_SANDBOX_PROXY_TOKEN": "token"},
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert target.worker_key is not None
+    settings = {"dataset": "demo_dataset", "location": "us-central1"}
+    credentials_manager.for_primary_runtime_agent_scope("alpha").save_credentials(
+        "google_bigquery",
+        {**settings, "project": "primary-project"},
+    )
+    credentials_manager.for_worker(target.worker_key).save_credentials(
+        "google_bigquery",
+        {**settings, "project": "worker-project"},
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeGoogleBigQueryTools:
+        def __init__(self, *, project: str, **_: object) -> None:
+            captured["project"] = project
+
+    monkeypatch.setitem(TOOL_REGISTRY, "google_bigquery", lambda: _FakeGoogleBigQueryTools)
+
+    get_tool_by_name(
+        "google_bigquery",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_tools_override=[],
+        worker_target=target,
+    )
+
+    assert captured["project"] == "primary-project"
 
 
 def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> None:

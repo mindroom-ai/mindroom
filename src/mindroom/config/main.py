@@ -1340,6 +1340,13 @@ class Config(BaseModel):
             )
         }
 
+    def get_agent_worker_tools(self, agent_name: str) -> list[str] | None:
+        """Return one agent's configured worker-routed tools, or None for the built-in routing policy."""
+        configured = self.get_agent(agent_name).worker_tools
+        if configured is None:
+            configured = self.defaults.worker_tools
+        return None if configured is None else self.expand_tool_names(list(configured))
+
     def get_worker_grantable_credentials(self) -> frozenset[str]:
         """Return shared credential service names allowed inside isolated workers."""
         configured = self.defaults.worker_grantable_credentials

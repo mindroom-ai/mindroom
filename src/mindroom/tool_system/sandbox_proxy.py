@@ -912,6 +912,23 @@ def sandbox_proxy_enabled_for_tool(
     )
 
 
+def tool_builds_in_primary(
+    tool_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+    worker_tools_override: list[str] | None = None,
+    disable_sandbox_proxy: bool = False,
+) -> bool:
+    """Return whether the primary process builds and runs this registered tool itself instead of a worker."""
+    if tool_name not in TOOL_METADATA or sandbox_proxy_config(runtime_paths).runner_mode:
+        return False
+    return disable_sandbox_proxy or not sandbox_proxy_enabled_for_tool(
+        tool_name,
+        runtime_paths=runtime_paths,
+        worker_tools_override=worker_tools_override,
+    )
+
+
 def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
