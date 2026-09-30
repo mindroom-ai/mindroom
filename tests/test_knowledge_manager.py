@@ -5657,6 +5657,53 @@ async def test_refresh_scheduled_during_a_turn_does_not_retain_the_turn_context(
 
 
 @pytest.mark.asyncio
+async def test_refresh_deferred_behind_a_direct_refresh_does_not_retain_the_turn_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim retries while a direct refresh runs must not keep the scheduling turn's Agent alive."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        started.set()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+
+    class _TurnAgent:
+        pass
+
+    agent = _TurnAgent()
+    agent_ref = weakref.ref(agent)
+    knowledge_refresh_locks.mark_refresh_active(refresh_target)
+    direct_claim_active = True
+    token = _TURN_OWNER.set(agent)
+    try:
+        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        _TURN_OWNER.reset(token)
+    del agent
+
+    try:
+        # Let a few claim retries run while the direct refresh still holds the claim.
+        await asyncio.sleep(3 * knowledge_refresh_scheduler._REFRESH_CLAIM_RETRY_SECONDS)
+        assert not started.is_set()
+        gc.collect()
+        assert agent_ref() is None
+        knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        direct_claim_active = False
+        await asyncio.wait_for(started.wait(), timeout=1)
+    finally:
+        if direct_claim_active:
+            knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

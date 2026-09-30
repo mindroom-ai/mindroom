@@ -176,6 +176,34 @@ class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
 
 @dataclass
+class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose connect blocks and, like the SDK, disconnects slowly when that connect is interrupted."""
+
+    instances: ClassVar[list[_SlowCleanupFakeClaudeSDKClient]] = []
+    connect_started: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.disconnect_started = asyncio.Event()
+        self.disconnected = False
+        _SlowCleanupFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        assert type(self).connect_started is not None
+        type(self).connect_started.set()
+        try:
+            await asyncio.Event().wait()
+        except BaseException:
+            await self.disconnect()
+            raise
+
+    async def disconnect(self) -> None:
+        self.disconnect_started.set()
+        await asyncio.sleep(0.05)
+        self.disconnected = True
+
+
+@dataclass
 class _GatewayProbeClaudeSDKClient:
     """Gateway probe client that sends Anthropic-compatible requests to a local stub server."""
 
@@ -683,6 +711,31 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     await asyncio.create_task(tools.claude_end_session(run_context=run_context, agent=agent))
     assert client.disconnect_task is client.connect_task
     assert client.reader.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled start-up returns only after the SDK disconnects, even when cancelled again meanwhile."""
+    _SlowCleanupFakeClaudeSDKClient.instances = []
+    _SlowCleanupFakeClaudeSDKClient.connect_started = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    await _SlowCleanupFakeClaudeSDKClient.connect_started.wait()
+    client = _SlowCleanupFakeClaudeSDKClient.instances[0]
+
+    start.cancel()
+    await client.disconnect_started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert client.disconnected is True
 
 
 @pytest.mark.asyncio

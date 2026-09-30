@@ -229,10 +229,12 @@ class KnowledgeRefreshScheduler:
     ) -> None:
         if key in self._claim_retry_handles:
             return
+        # Each retry reschedules from the last one, so a copy of the scheduling turn's context would live on.
         self._claim_retry_handles[key] = loop.call_later(
             _REFRESH_CLAIM_RETRY_SECONDS,
             self._retry_pending_claim,
             key,
+            context=Context(),
         )
 
     def _retry_pending_claim(self, key: KnowledgeRefreshTarget) -> None:

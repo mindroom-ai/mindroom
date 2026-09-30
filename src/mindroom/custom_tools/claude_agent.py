@@ -22,6 +22,8 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from mindroom.background_tasks import wait_for_future_until_complete
+
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
     "default",
@@ -255,6 +257,11 @@ class _ClaudeSessionManager:
             await asyncio.shield(connected)
         except BaseException:
             owner.cancel()
+            # Nothing tracks this session yet, so the caller drains the SDK's disconnect, even when cancelled again.
+            with suppress(asyncio.CancelledError):
+                await wait_for_future_until_complete(owner)
+            if connected.done() and not connected.cancelled():
+                connected.exception()
             raise
         return owner
 
