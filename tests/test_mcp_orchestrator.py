@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +12,7 @@ import yaml
 
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
@@ -1367,6 +1369,30 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
     assert ROUTER_AGENT_NAME not in orchestrator.agent_bots
     assert external_trigger_runtime_bound is False
     assert order == ["unbind", "reconcile", "cleanup"]
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_mcp_catalog_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_mcp_catalog_change_reported_during_a_turn_restarts_outside_the_turn_context(tmp_path: Path) -> None:
+    """A tool call can report the change, and the restarted bots' sync tasks must not hold its turn's Agent."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.running = True
+    observed: list[object | None] = []
+
+    async def restart(_server_id: str) -> None:
+        observed.append(_TURN_OWNER.get())
+
+    token = _TURN_OWNER.set(object())
+    try:
+        with patch.object(orchestrator, "_handle_mcp_catalog_change", new=restart):
+            await orchestrator._notify_mcp_catalog_change("demo")
+    finally:
+        _TURN_OWNER.reset(token)
+    assert await wait_for_background_tasks(timeout=1, owner=orchestrator._mcp_catalog_change_task_owner)
+
+    assert observed == [None]
 
 
 @pytest.mark.asyncio

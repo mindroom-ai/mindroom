@@ -7,6 +7,7 @@ import signal
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
+from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
@@ -1995,6 +1996,8 @@ class _MultiAgentOrchestrator:
             self._handle_mcp_catalog_change(server_id),
             name=f"mcp_catalog_change:{server_id}",
             owner=self._mcp_catalog_change_task_owner,
+            # A tool call can report the change, and the bots this restarts must not inherit its turn's context.
+            context=Context(),
         )
 
     async def _apply_mcp_catalog_change(self, server_id: str) -> None:

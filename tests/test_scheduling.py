@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -464,6 +465,50 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync(tmp_p
     assert all(call.kwargs["matrix_admin"] is not None for call in mock_start.call_args_list)
     mock_sleep.assert_awaited_once_with(scheduling._DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
     assert len(scheduling._deferred_overdue_tasks) == 0
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_schedule_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schedule_type", ["once", "cron"])
+async def test_task_scheduled_during_a_turn_does_not_inherit_the_turn_context(
+    schedule_type: str,
+    tmp_path: Path,
+) -> None:
+    """A schedule outlives the turn that creates it, whose contextvars hold the turn's Agent and tools."""
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type=schedule_type,
+        execute_at=datetime.now(UTC) + timedelta(hours=1) if schedule_type == "once" else None,
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+        if schedule_type == "cron"
+        else None,
+        message="reminder",
+        description="reminder",
+        room_id="!test:server",
+    )
+    observed: list[object | None] = []
+
+    async def runner(*_args: object, **_kwargs: object) -> None:
+        observed.append(_TURN_OWNER.get())
+
+    token = _TURN_OWNER.set(object())
+    try:
+        with patch.object(scheduling, "_run_once_task", runner), patch.object(scheduling, "_run_cron_task", runner):
+            assert scheduling._start_scheduled_task(
+                AsyncMock(),
+                "task_from_turn",
+                workflow,
+                MagicMock(),
+                _test_runtime_paths(tmp_path),
+                _conversation_reader(),
+            )
+    finally:
+        _TURN_OWNER.reset(token)
+    await scheduling._running_tasks.pop("task_from_turn")
+
+    assert observed == [None]
 
 
 @pytest.mark.asyncio

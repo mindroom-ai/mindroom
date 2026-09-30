@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -154,6 +155,26 @@ def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
 
     assert config.tool_approval.timeout_days == 7.0
     assert config.tool_approval.rules[0].timeout_days == 3.0
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_approval_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_deadline_sweep_started_by_a_turn_does_not_inherit_the_turn_context(tmp_path: Path) -> None:
+    """A turn can request an approval before startup recovery starts the sweep, which never ends."""
+    manager = ApprovalManager(test_runtime_paths(tmp_path))
+    token = _TURN_OWNER.set(object())
+    try:
+        manager._ensure_deadline_sweep()
+    finally:
+        _TURN_OWNER.reset(token)
+
+    try:
+        assert manager._deadline_task is not None
+        assert _TURN_OWNER not in manager._deadline_task.get_context()
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

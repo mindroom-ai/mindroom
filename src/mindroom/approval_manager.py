@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, suppress
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -953,7 +954,12 @@ class ApprovalManager:
 
     def _ensure_deadline_sweep(self) -> None:
         if self._deadline_task is None or self._deadline_task.done():
-            self._deadline_task = asyncio.create_task(self._run_deadline_sweep(), name="approval_deadline_sweep")
+            # A turn's approval request can start the never-ending sweep, which must not keep that turn's Agent.
+            self._deadline_task = asyncio.create_task(
+                self._run_deadline_sweep(),
+                name="approval_deadline_sweep",
+                context=Context(),
+            )
         self._deadline_wakeup.set()
 
     async def _run_deadline_sweep(self) -> None:

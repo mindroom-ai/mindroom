@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from contextlib import suppress
 from dataclasses import dataclass
@@ -147,6 +148,31 @@ class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
                 type(self).blocked_query_started.set()
             if type(self).release_blocked_query is not None:
                 await type(self).release_blocked_query.wait()
+
+
+@dataclass
+class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that, like the SDK, starts a reader task on connect and stops it on disconnect."""
+
+    instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.reader: asyncio.Task[None] | None = None
+        self.connect_task: asyncio.Task[Any] | None = None
+        self.disconnect_task: asyncio.Task[Any] | None = None
+        _ReaderTaskFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        self.connect_task = asyncio.current_task()
+        self.reader = asyncio.create_task(asyncio.Event().wait())
+
+    async def disconnect(self) -> None:
+        self.disconnect_task = asyncio.current_task()
+        assert self.reader is not None
+        self.reader.cancel()
+        await super().disconnect()
 
 
 @dataclass
@@ -626,6 +652,37 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
     assert "Interrupt sent" in interrupt
     assert _FakeClaudeSDKClient.instances[0].interrupted is True
     assert "Closed Claude session" in end
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_claude_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
+    _ReaderTaskFakeClaudeSDKClient.instances = []
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ReaderTaskFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    token = _TURN_OWNER.set(object())
+    try:
+        await tools.claude_start_session(run_context=run_context, agent=agent)
+    finally:
+        _TURN_OWNER.reset(token)
+
+    client = _ReaderTaskFakeClaudeSDKClient.instances[0]
+    assert client.reader is not None
+    assert _TURN_OWNER not in client.reader.get_context()
+
+    # A later turn ends the session; the SDK's task group must still exit where it was entered.
+    await asyncio.create_task(tools.claude_end_session(run_context=run_context, agent=agent))
+    assert client.disconnect_task is client.connect_task
+    assert client.reader.cancelled()
 
 
 @pytest.mark.asyncio

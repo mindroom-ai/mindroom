@@ -7,6 +7,7 @@ import json
 import typing
 import uuid
 from collections import deque
+from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -538,6 +539,7 @@ def _start_scheduled_task(
             logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
             return False
 
+    # A schedule outlives the tool call or command that creates it, and a turn's contextvars hold its Agent and tools.
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
             _run_once_task(
@@ -550,6 +552,7 @@ def _start_scheduled_task(
                 matrix_admin,
                 config_provider=config_provider,
             ),
+            context=Context(),
         )
     else:
         task = asyncio.create_task(
@@ -564,6 +567,7 @@ def _start_scheduled_task(
                 matrix_admin,
                 config_provider=config_provider,
             ),
+            context=Context(),
         )
     _running_tasks[task_id] = task
     return True

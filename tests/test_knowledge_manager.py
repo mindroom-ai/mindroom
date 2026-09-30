@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
+import gc
 import json
 import os
 import signal
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import weakref
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -5608,6 +5611,49 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     assert any(key.base_id == "a" for key in scheduler._tasks)
     release["a"].set()
     await scheduler.shutdown()
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_refresh_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduled_during_a_turn_does_not_retain_the_turn_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh can outlive the tool call that schedules it, whose turn context holds the turn's Agent."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+
+    class _TurnAgent:
+        pass
+
+    agent = _TurnAgent()
+    agent_ref = weakref.ref(agent)
+    token = _TURN_OWNER.set(agent)
+    try:
+        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        _TURN_OWNER.reset(token)
+    del agent
+    await asyncio.wait_for(started.wait(), timeout=5)
+    gc.collect()
+
+    try:
+        assert agent_ref() is None
+    finally:
+        release.set()
+        await scheduler.shutdown()
 
 
 @pytest.mark.asyncio
