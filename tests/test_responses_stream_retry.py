@@ -14,7 +14,7 @@ from openai import OpenAI
 
 from mindroom import provider_stream_retry
 from mindroom.error_handling import IncompleteResponsesStreamError
-from tests.test_openai_responses_stream import _created, _event, _response
+from tests.test_openai_responses_stream import _created, _event, _response, _tool_stream
 from tests.test_provider_stream_retry import _model, _Provider
 from tests.test_provider_stream_retry import retry_delays as retry_delays  # noqa: PLC0414 - expose shared fixture
 
@@ -278,3 +278,70 @@ async def test_transient_failure_retries_before_visible_output(
     assert len(provider.requests) == 2
     assert provider.requests[0] == provider.requests[1]
     assert len(retry_delays) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "prefix",
+    ["", _created(), _REASONING_DONE, _MESSAGE_STARTED],
+    ids=["no-events", "created", "reasoning-done", "message-started"],
+)
+async def test_stream_ended_before_visible_output_retries(
+    prefix: str,
+    *,
+    sync: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_delays: list[float],
+) -> None:
+    """A stream closed without response.completed or output is replayed like a dropped connection."""
+    provider = _Provider([prefix, _answer("Recovered")])
+    monkeypatch.setattr(provider_stream_retry.time, "sleep", retry_delays.append)
+    async with _model(provider, tmp_path, api="responses") as model:
+        with OpenAI(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(provider.respond)),
+        ) as client:
+            model.client = client
+            chunks = (
+                list(model.invoke_stream([], Message(role="assistant")))
+                if sync
+                else [chunk async for chunk in model.ainvoke_stream([], Message(role="assistant"))]
+            )
+
+    assert "".join(chunk.content or "" for chunk in chunks) == "Recovered"
+    assert len(provider.requests) == 2
+    assert provider.requests[0] == provider.requests[1]
+    assert len(retry_delays) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        _answer("Partial", complete=False),
+        _tool_stream().split("event: response.output_item.done")[0],
+        _created() + _event("response.web_search_call.in_progress", item_id="ws_search", output_index=0),
+        _REASONING_DONE
+        + _event(
+            "response.incomplete",
+            response={**_response("resp_answer", "incomplete"), "incomplete_details": {"reason": "max_output_tokens"}},
+        ),
+    ],
+    ids=["partial-text", "tool-started", "hosted-tool-started", "incomplete"],
+)
+async def test_stream_ended_after_output_cannot_replay(
+    prefix: str,
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
+    """An early end after text, a tool call, hosted-tool work, or response.incomplete stays final."""
+    provider = _Provider([prefix, _answer("Must not run")])
+    async with _model(provider, tmp_path, api="responses") as model:
+        with pytest.raises(IncompleteResponsesStreamError, match=r"response\.completed"):
+            _ = [chunk async for chunk in model.ainvoke_stream([], Message(role="assistant"))]
+
+    assert len(provider.requests) == 1
+    assert not retry_delays

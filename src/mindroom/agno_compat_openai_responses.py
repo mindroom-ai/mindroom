@@ -80,7 +80,9 @@ _RESPONSES_FILE_MIME_TYPES = {
 # reuse caller-visible partial assistant or tool state.
 # Coverage: tests/test_openai_responses_stream.py::test_agent_does_not_retry_incomplete_stream;
 # tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors;
-# tests/test_responses_stream_retry.py::test_transient_failure_retries_before_visible_output.
+# tests/test_responses_stream_retry.py::test_transient_failure_retries_before_visible_output;
+# tests/test_responses_stream_retry.py::test_stream_ended_before_visible_output_retries;
+# tests/test_responses_stream_retry.py::test_stream_ended_after_output_cannot_replay.
 
 # AGNO_COMPAT: Responses continuation depends on hard-coded model names.
 # Reason: Agno 3.0.9 gates Responses continuation behind a hard-coded model-name
@@ -254,6 +256,14 @@ class OpenAIResponsesProviderCompat:
         message = error.message if isinstance(error, APIStatusError) else str(error)
         return error_type(message=message, status_code=status, model_name=self.name, model_id=self.id)
 
+    def _missing_completion_error(self, *, yielded: bool) -> ModelProviderError:
+        """Leave an early end retryable only while the attempt exposed nothing to replay."""
+        msg = "OpenAI Responses stream ended without response.completed"
+        if yielded:
+            return IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+        # Classify it like a pre-output connection drop on the committed 200 stream.
+        return ModelProviderError(message=msg, status_code=200, model_name=self.name, model_id=self.id)
+
     def invoke_stream(
         self,
         messages: list[Message],
@@ -306,8 +316,7 @@ class OpenAIResponsesProviderCompat:
                 self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+            raise self._missing_completion_error(yielded=yielded)
 
     async def ainvoke_stream(
         self,
@@ -361,8 +370,7 @@ class OpenAIResponsesProviderCompat:
                 self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+            raise self._missing_completion_error(yielded=yielded)
 
     # AGNO_COMPAT: A successful stream retry replaces earlier failed-attempt usage.
     # Reason: Agno replaces assistant metrics with only the successful stream's
