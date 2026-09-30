@@ -280,6 +280,11 @@ A Chat deployment on that host must point its computer origin at the actual runt
 
 ## Watch, take control, and resume
 
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/63868e17-6824-4073-8904-e1b7abc4b173#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cc079b2f-6dbf-4509-9fdc-4ec21da85d7a#t=0.1" type="video/mp4">
+</video>
+
 - **Watch** opens the existing computer without input rights.
   The worker rejects viewer input even if someone changes noVNC's frontend view-only setting.
 - **Take control** waits for an active browser operation to settle and grants input to one connected viewer.

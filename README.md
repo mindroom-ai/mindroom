@@ -23,6 +23,8 @@ Self-host the whole stack, or run only the MindRoom backend locally and pair it 
 
 https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
 
+See the [showcase](https://docs.mindroom.chat/showcase/) for more recordings.
+
 ## Features
 
 - **Multi-agent orchestration** — define specialist agents and teams in `config.yaml`; a built-in router picks the responder when you don't @-mention one, and mentioning several agents makes them collaborate in a thread.

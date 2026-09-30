@@ -2,6 +2,11 @@
 
 Use these tools to inspect and edit local files, run shell commands or Python, work in a code-aware workspace, manage Docker resources, and generate local artifacts such as exports and charts.
 
+<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/1bc1dc4d-742f-490b-a177-3679ae412ec2#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ac87d6b3-a82a-491d-ae5c-7d114f55539f#t=0.1" type="video/mp4">
+</video>
+
 ## What This Page Covers
 
 This page documents the built-in tools in the `execution-and-coding` group.

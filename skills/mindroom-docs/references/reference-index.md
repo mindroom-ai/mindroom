@@ -12,6 +12,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Title | Source page | Built markdown | Reference file |
 | --- | --- | --- | --- |
 | Home | `index.md` | `index.md` | `page__index.md` |
+| Showcase | `showcase.md` | `showcase/index.md` | `page__showcase__index.md` |
 | Overview | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
 | iOS Beta | `ios-beta.md` | `ios-beta/index.md` | `page__ios-beta__index.md` |
 | Dashboard | `dashboard.md` | `dashboard/index.md` | `page__dashboard__index.md` |

@@ -11,6 +11,11 @@ The scheduler checks membership every 30 seconds while waiting and again before 
 A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
 Membership checks use the runtime's current applied configuration, so revoking a human alias takes effect on the next check without recreating the runner.
 
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/cfbbac8e-6942-4bac-a920-ac3946951174#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a3bacdb7-7d59-42d2-8d0f-33f391c412b2#t=0.1" type="video/mp4">
+</video>
+
 ## Commands
 
 ### Schedule a Task

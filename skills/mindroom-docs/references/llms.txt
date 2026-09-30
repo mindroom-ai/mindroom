@@ -5,6 +5,7 @@
 ## MindRoom Docs
 
 - [Home](https://docs.mindroom.chat/)
+- [Showcase](https://docs.mindroom.chat/showcase/)
 - [Overview](https://docs.mindroom.chat/getting-started/)
 - [iOS Beta](https://docs.mindroom.chat/ios-beta/)
 - [Dashboard](https://docs.mindroom.chat/dashboard/)

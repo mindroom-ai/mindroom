@@ -1,0 +1,5 @@
+/* Films with light and dark recordings: show the one matching the page palette. */
+[data-md-color-scheme="slate"] video.only-light,
+[data-md-color-scheme="default"] video.only-dark {
+  display: none;
+}

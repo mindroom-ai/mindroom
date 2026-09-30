@@ -27,6 +27,11 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 ## [`google_calendar`]
 
+<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/4fea9538-5d22-43b4-9147-7e8b496400a8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ba40bcb7-19aa-4085-9c28-e99f1d171320#t=0.1" type="video/mp4">
+</video>
+
 `google_calendar` wraps Agno's Google Calendar toolkit with MindRoom-scoped Google OAuth credentials.
 
 ### What It Does
@@ -177,6 +182,11 @@ get_upcoming_bookings(email="alex@example.com")
 - All current requests go to `https://api.cal.com/v2`.
 
 ## [`scheduler`]
+
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
+</video>
 
 `scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent or team work.
 

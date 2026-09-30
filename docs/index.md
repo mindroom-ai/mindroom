@@ -11,6 +11,8 @@ AI agents that live in Matrix and work everywhere via bridges.
   <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
 </video>
 
+See the [Showcase](showcase.md) for more recordings.
+
 ## What is MindRoom?
 
 MindRoom is an AI agent orchestration system with Matrix integration. It provides:

@@ -174,6 +174,11 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ## [`homeassistant`]
 
+<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/ae8bf099-0f11-4097-8de1-de17efbb7bc8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/01e6b9c7-db21-49e9-897c-d03ced90ee14#t=0.1" type="video/mp4">
+</video>
+
 `homeassistant` is MindRoom's custom Home Assistant toolkit for entity state queries, device control, scenes, automations, and generic service calls.
 
 ### What It Does

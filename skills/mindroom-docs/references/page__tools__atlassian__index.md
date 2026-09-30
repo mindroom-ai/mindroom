@@ -5,6 +5,11 @@ Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so 
 MindRoom owns the OAuth state, callback, token refresh, and credential storage through its [OAuth framework](https://docs.mindroom.chat/oauth-framework/).
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
 
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+</video>
+
 ## What It Does
 
 | Function | Product | Changes data | Purpose |

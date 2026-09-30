@@ -2,6 +2,11 @@
 
 MindRoom keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
 
+<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/a98cf35e-9c3d-40b8-9827-7f5d2a4dbc28#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/6ac07018-9961-465a-b38d-a3a34eba75b6#t=0.1" type="video/mp4">
+</video>
+
 ## Authority at a glance
 
 MindRoom answers six authority questions independently.

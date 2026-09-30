@@ -433,6 +433,11 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ## [`google_drive`]
 
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/b8f28170-351a-4c6a-b49a-f5b6bd2a3df1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
+</video>
+
 `google_drive` is the Google Drive toolkit for listing, searching, reading, downloading, uploading, and organizing files in the connected user's Drive account.
 
 ### What It Does

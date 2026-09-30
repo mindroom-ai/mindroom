@@ -6,6 +6,8 @@ site_name = "MindRoom"
 site_description = "AI agents that live in Matrix and work everywhere via bridges"
 site_author = "MindRoom Team"
 site_url = "https://docs.mindroom.chat/"
+extra_css = ["assets/themed-video.css"]
+extra_javascript = ["assets/themed-video.js"]
 copyright = "Copyright &copy; 2025 MindRoom Team"
 
 repo_url = "https://github.com/mindroom-ai/mindroom"
@@ -14,6 +16,7 @@ edit_uri = "edit/main/docs"
 
 nav = [
   { "Home" = "index.md" },
+  { "Showcase" = "showcase.md" },
   { "Getting Started" = [
     { "Overview" = "getting-started.md" },
     { "iOS Beta" = "ios-beta.md" },
