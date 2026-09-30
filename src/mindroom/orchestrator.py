@@ -3053,6 +3053,8 @@ def _start_auxiliary_tasks(
     shutdown_requested: asyncio.Event,
 ) -> list[asyncio.Task]:
     """Start the non-critical background tasks that run beside the orchestrator."""
+    # First, so an invalid probe interval fails before any task exists that shutdown could not cancel.
+    heap_probe = start_heap_type_probe(runtime_paths)
     auxiliary_specs = [
         (
             "config watcher",
@@ -3076,7 +3078,6 @@ def _start_auxiliary_tasks(
     # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
     # create_background_task logs an unexpected failure as soon as it happens.
     tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
-    heap_probe = start_heap_type_probe(runtime_paths)
     if heap_probe is not None:
         tasks.append(heap_probe)
     return tasks

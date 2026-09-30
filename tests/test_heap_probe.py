@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import handled_turns, heap_probe
+from mindroom import heap_probe
 from mindroom.constants import RuntimePaths
 from mindroom.heap_probe import (
     _HEAP_PROBE_INTERVAL_ENV,
@@ -65,14 +65,11 @@ async def test_start_is_a_no_op_when_disabled() -> None:
     assert asyncio.all_tasks() == tasks_before
 
 
-def test_probe_logs_bounded_type_histogram_rss_and_ledger_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One probe logs total tracked objects, the most common types, RSS, walk time, and ledger sizes."""
+def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One probe logs total tracked objects, the most common types, RSS, and walk time."""
     heap = [_ProbeMarker(), _ProbeMarker(), _ProbeMarker(), {}, {}, []]
     monkeypatch.setattr(heap_probe.gc, "get_objects", lambda: list(heap))
     monkeypatch.setattr(heap_probe, "_TOP_TYPE_COUNT", 2)
-    ledger_state = handled_turns._LedgerState()
-    ledger_state.responses.update({"$first": object(), "$second": object()})
-    monkeypatch.setattr(handled_turns, "_LEDGER_STATES", {"store\x00general": ledger_state})
 
     with capture_logs() as logs:
         _log_heap_type_probe()
@@ -91,8 +88,6 @@ def test_probe_logs_bounded_type_histogram_rss_and_ledger_sizes(monkeypatch: pyt
         assert probe["rss_bytes"] > 0
     else:
         assert probe["rss_bytes"] is None
-    assert probe["handled_turn_ledger_states"] == 1
-    assert probe["handled_turn_ledger_responses"] == 2
 
 
 @pytest.mark.asyncio

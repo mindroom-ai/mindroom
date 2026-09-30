@@ -1526,6 +1526,36 @@ class TestAgentBot(AgentBotTestBase):
             assert probe.cancelled()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_rejects_invalid_heap_probe_before_starting_auxiliary_tasks(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An invalid probe interval fails startup before any watcher or heartbeat task exists to leak."""
+        reset_runtime_state()
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={"MINDROOM_HEAP_PROBE_INTERVAL_SECONDS": "30"},
+        )
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.stop = AsyncMock()
+        run_auxiliary = AsyncMock()
+        heartbeat = AsyncMock()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=run_auxiliary),
+            patch("mindroom.orchestrator.run_provisioning_heartbeat", new=heartbeat),
+            pytest.raises(ValueError, match="MINDROOM_HEAP_PROBE_INTERVAL_SECONDS"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        run_auxiliary.assert_not_called()
+        heartbeat.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_cleanup_survives_failed_heartbeat(self, tmp_path: Path) -> None:
         """A failed heartbeat is logged when it dies, then neither skips cleanup nor replaces the runtime's error."""
         reset_runtime_state()

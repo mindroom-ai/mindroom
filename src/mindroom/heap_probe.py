@@ -24,7 +24,6 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom import handled_turns
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
 
@@ -75,7 +74,6 @@ def _log_heap_type_probe() -> None:
     started = time.perf_counter()
     counts = Counter(map(type, gc.get_objects()))
     walk_seconds = time.perf_counter() - started
-    ledger_states = list(handled_turns._LEDGER_STATES.values())
     logger.info(
         "heap_type_probe",
         tracked_objects=counts.total(),
@@ -85,8 +83,6 @@ def _log_heap_type_probe() -> None:
         ],
         rss_bytes=_rss_bytes(),
         walk_seconds=round(walk_seconds, 3),
-        handled_turn_ledger_states=len(ledger_states),
-        handled_turn_ledger_responses=sum(len(state.responses) for state in ledger_states),
     )
 
 
