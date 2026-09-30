@@ -118,7 +118,8 @@ export async function proxy(request: NextRequest) {
     `connect-src ${Array.from(connectSrc).join(' ')}`,
     "frame-src 'self' https://js.stripe.com https://hooks.stripe.com",
     "form-action 'self'",
-    "media-src 'self'",
+    // Matches next.config: the landing page's product film is a GitHub attachment.
+    "media-src 'self' https://github.com https://github-production-user-asset-6210df.s3.amazonaws.com",
     "worker-src 'self' blob:",
     isDev ? '' : 'upgrade-insecure-requests',
     'report-uri /api/csp-report',
