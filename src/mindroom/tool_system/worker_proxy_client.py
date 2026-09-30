@@ -227,8 +227,12 @@ def execute_worker_proxy_request(
     worker_handle: WorkerHandle | None,
     worker_manager: WorkerBackend,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
+    primary_built_service: Callable[[str], bool] | None = None,
 ) -> object:
-    """Execute one tool call through the sandbox proxy or selected dedicated worker."""
+    """Execute one tool call through the sandbox proxy or selected dedicated worker.
+
+    ``primary_built_service`` names leased services whose settings live in primary stores.
+    """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
@@ -255,6 +259,7 @@ def execute_worker_proxy_request(
                 tool_name=tool_name,
                 function_name=function_name,
                 worker_target=worker_target,
+                primary_built_service=primary_built_service,
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
@@ -309,6 +314,7 @@ def _create_credential_lease(
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
+    primary_built_service: Callable[[str], bool] | None = None,
 ) -> str | None:
     credential_overrides = _collect_credential_overrides(
         tool_name,
@@ -316,6 +322,7 @@ def _create_credential_lease(
         config=config,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
+        primary_built_service=primary_built_service,
     )
     if not credential_overrides:
         return None
@@ -344,6 +351,7 @@ def _collect_credential_overrides(
     config: WorkerProxyClientConfig,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
+    primary_built_service: Callable[[str], bool] | None = None,
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
@@ -364,6 +372,7 @@ def _collect_credential_overrides(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
+            primary_built_tool=primary_built_service is not None and primary_built_service(service),
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))

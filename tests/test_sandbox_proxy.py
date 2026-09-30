@@ -47,7 +47,7 @@ from mindroom.constants import (
     shell_extra_env_values,
     subprocess_path_with_prepends,
 )
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
@@ -1284,6 +1284,45 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     assert execute_payload["lease_id"] == "lease-123"
 
 
+def test_proxy_leases_primary_built_service_settings_from_the_primary_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A leased service of a tool the primary builds comes from the store the dashboard saves it to."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="all",
+        credential_policy={"calculator.add": ("github",)},
+    )
+    manager = CredentialsManager(tmp_path / "credentials")
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert target.worker_key is not None
+    manager.for_primary_runtime_agent_scope("alpha").save_credentials("github", {"access_token": "primary-token"})
+    manager.for_worker(target.worker_key).save_credentials("github", {"access_token": "worker-token"})
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
+
+    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=manager, worker_target=target)
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+    assert entrypoint(1, 2) == "proxied"
+
+    lease_url, lease_payload = captured_calls[0]
+    assert lease_url.endswith("/leases")
+    assert lease_payload["credential_overrides"] == {"access_token": "primary-token"}
+
+
 @pytest.mark.parametrize(
     ("credential_policy", "expected_overrides"),
     [
@@ -1795,12 +1834,11 @@ def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: 
         pytest.param(True, False, ["routing_test"], {}, True, id="primary-runtime"),
         pytest.param(False, True, ["routing_test"], {}, True, id="room-context"),
         pytest.param(False, False, [], {}, True, id="not-routed"),
-        pytest.param(False, False, ["routing_test"], {"disable_sandbox_proxy": True}, True, id="proxy-disabled"),
         pytest.param(False, False, ["routing_test"], {}, False, id="routed"),
         pytest.param(False, False, [], {"runner_mode": True}, False, id="inside-worker"),
     ],
 )
-def test_tool_builds_in_primary_follows_routing(
+def test_primary_owns_tool_settings_follows_routing(
     monkeypatch: pytest.MonkeyPatch,
     requires_primary_runtime: bool,
     requires_room_context: bool,
@@ -1825,13 +1863,24 @@ def test_tool_builds_in_primary_follows_routing(
     )
 
     assert (
-        sandbox_proxy_module.tool_builds_in_primary(
+        sandbox_proxy_module.primary_owns_tool_settings(
             "routing_test",
             runtime_paths=runtime_paths,
             worker_tools_override=worker_tools,
-            disable_sandbox_proxy=flags.get("disable_sandbox_proxy", False),
         )
         is expected
+    )
+
+
+def test_model_provider_services_keep_their_settings_placement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider services double as worker-read provider keys, so an unrouted same-named tool does not move them."""
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765")
+
+    assert "openai" in TOOL_METADATA
+    assert not sandbox_proxy_module.primary_owns_tool_settings(
+        "openai",
+        runtime_paths=runtime_paths,
+        worker_tools_override=[],
     )
 
 

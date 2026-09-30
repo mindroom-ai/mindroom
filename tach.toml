@@ -1764,6 +1764,7 @@ depends_on = [
     "mindroom.credential_policy",
     "mindroom.credentials",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -1788,6 +1789,7 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -4579,7 +4581,6 @@ depends_on = [
     "mindroom.tool_system.bootstrap",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.metadata",
-    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
@@ -5962,7 +5963,6 @@ expose = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
-    "agent_tool_builds_in_primary",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
@@ -6485,7 +6485,7 @@ expose = [
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
-    "tool_builds_in_primary",
+    "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",
 ]

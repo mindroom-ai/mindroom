@@ -11,8 +11,11 @@ import pytest
 
 import mindroom.constants as constants_mod
 import mindroom.credentials as credentials_module
+from mindroom.api.credentials import _DashboardCredentialAccess
+from mindroom.api.credentials_oauth_policy import OAuthCredentialServices
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
+    delete_credentials_for_target,
     load_credentials_for_target,
     save_credentials_for_target,
 )
@@ -2073,11 +2076,17 @@ def test_primary_built_tool_settings_preserve_shared_layer(
     assert load_scoped_credentials("browserbase", **kwargs) == {**(expected or {}), **primary_config}
 
 
-def test_dashboard_saves_primary_built_tool_settings_where_the_runtime_reads_them(tmp_path: Path) -> None:
-    """Dashboard writes for a tool the primary builds go to the agent's primary store, not its worker store."""
-    runtime_paths = constants_mod.resolve_primary_runtime_paths(
+@pytest.mark.parametrize(("worker_tools", "primary_store"), [([], True), (["google_bigquery"], False)])
+def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(
+    tmp_path: Path,
+    worker_tools: list[str],
+    primary_store: bool,
+) -> None:
+    """Dashboard writes follow the agent's routing: primary-built tools use the primary store, routed tools the worker's."""
+    runtime_paths = constants_mod.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8765", "MINDROOM_SANDBOX_PROXY_TOKEN": "token"},
     )
     manager = CredentialsManager(tmp_path / "credentials")
     worker_target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
@@ -2090,11 +2099,20 @@ def test_dashboard_saves_primary_built_tool_settings_where_the_runtime_reads_the
         worker_scope="shared",
         agent_name="alpha",
         execution_identity=None,
+        worker_tools=worker_tools,
     )
-    settings = {"access_token": "alpha-token"}
+    settings = {"project": "alpha-project", "dataset": "demo", "location": "us-central1"}
 
-    save_credentials_for_target("github", settings, target)
-    worker_manager.save_credentials("github", {"base_url": "https://worker.example.test"})
+    save_credentials_for_target("google_bigquery", settings, target)
 
-    assert manager.for_primary_runtime_agent_scope("alpha").load_credentials("github") == settings
-    assert load_credentials_for_target("github", target) == settings
+    primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("google_bigquery")
+    worker_settings = worker_manager.load_credentials("google_bigquery")
+    assert (primary_settings, worker_settings) == ((settings, None) if primary_store else (None, settings))
+    assert load_credentials_for_target("google_bigquery", target) == settings
+    access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
+    assert "google_bigquery" in access.list_services()
+    if primary_store:
+        # A worker copy of a primary-built tool's settings is ignored, so it is not listed either.
+        delete_credentials_for_target("google_bigquery", target)
+        worker_manager.save_credentials("google_bigquery", {"project": "planted"})
+        assert "google_bigquery" not in access.list_services()

@@ -190,6 +190,7 @@ def _tool(
             {"api_key": stored_key},
             credentials_manager=credentials,
             worker_target=worker_target,
+            primary_built_tool=True,
         )
     return cast(
         "AgentQLTools",

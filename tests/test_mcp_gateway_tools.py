@@ -822,6 +822,7 @@ async def test_native_credentials_follow_authored_agent_scope(
             {"account_name": account},
             credentials_manager=credentials,
             worker_target=user.worker_target,
+            primary_built_tool=True,
         )
         result = await gateway.invoke_tool(user, toolkit="calculator", function="account", arguments={})
         assert result == {"result": account}

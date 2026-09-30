@@ -33,7 +33,7 @@ from mindroom.api.credentials_target import (
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
     save_credentials_for_target,
-    target_tool_builds_in_primary,
+    target_primary_owns_tool_settings,
 )
 from mindroom.credential_policy import credential_service_policy, is_oauth_token_service
 from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
@@ -211,7 +211,7 @@ class _DashboardCredentialAccess:
         worker_services = {
             service
             for service in self.target.target_manager.list_services()
-            if not target_tool_builds_in_primary(service, self.target)
+            if not target_primary_owns_tool_settings(service, self.target)
         }
         primary_runtime_global_services = {
             service

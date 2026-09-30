@@ -815,6 +815,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
                 {"api_key": secret},
                 credentials_manager=get_runtime_credentials_manager(base.runtime_paths),
                 worker_target=target,
+                primary_built_tool=True,
             )
             provider = ScriptedProvider()
             provider.steps = [
