@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from time import process_time
+from time import thread_time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -24,9 +24,10 @@ def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest
     monkeypatch.setattr(interactive.re, "fullmatch", guarded_fullmatch)
     for line in (" " * 20_000, "```" + " " * 20_000):
         text = f"Before.\n{line}\n```interactive\n{{"
-        started = process_time()
+        # Only this thread's CPU counts, so other threads busy in the same test worker cannot exceed the budget.
+        started = thread_time()
         shown = interactive.hide_unfinished_interactive(text)
-        assert process_time() - started < 0.5
+        assert thread_time() - started < 0.5
         assert shown == ("Before." if not line.startswith("`") else text)
 
 

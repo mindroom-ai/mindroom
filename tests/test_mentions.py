@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from time import process_time
+from time import thread_time
 from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
@@ -31,18 +31,19 @@ def test_bulk_mentions_bound_overlap_and_deduplication_work() -> None:
         ([*distinct_user_ids, *distinct_user_ids[:2]], distinct_user_ids),
     ):
         text = " ".join(user_ids) + " "
-        started = process_time()
+        # Only this thread's CPU counts, so other threads busy in the same test worker cannot exceed the budget.
+        started = thread_time()
         tokens = mentions_module._scan_mention_tokens(text)
-        assert process_time() - started < 0.5
+        assert thread_time() - started < 0.5
         assert [token.explicit_user_id for token in tokens] == user_ids
 
         replacements = [
             mentions_module._MentionReplacement(start=0, end=0, plain_text="", markdown_text="", user_id=user_id)
             for user_id in user_ids
         ]
-        started = process_time()
+        started = thread_time()
         mentioned_user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
-        assert process_time() - started < 0.5
+        assert thread_time() - started < 0.5
         assert mentioned_user_ids == expected_user_ids
 
 
