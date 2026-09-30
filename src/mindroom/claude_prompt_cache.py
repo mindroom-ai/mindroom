@@ -396,7 +396,9 @@ def _replay_safe_tool_search_result(
             changed = True
             continue
         available_references.append(reference)
-    if not available_references:
+    # A search that matched nothing references no stale tool and stays; dropping
+    # its pair would change a signed turn whose blocks surround it.
+    if tool_references and not available_references:
         return None, True
     if len(available_references) == len(tool_references):
         return prepared_block, changed

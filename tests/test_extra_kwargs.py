@@ -1592,6 +1592,32 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
     assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
 
 
+def test_replay_safe_tool_search_results_keeps_empty_search_between_signed_thinking() -> None:
+    """A search that matched nothing must stay, or the tool loop's two thinking blocks become adjacent."""
+    request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "What is the weather?"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig-before-search"},
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    {
+                        **_TOOL_SEARCH_RESULT_BLOCK,
+                        "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+                    },
+                    {"type": "thinking", "thinking": "", "signature": "sig-after-search"},
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "sunny"}]},
+        ],
+    }
+
+    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+
+
 @pytest.mark.asyncio
 async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay() -> None:
     """Mixed client/server tool history must remain valid on the next streamed request."""
