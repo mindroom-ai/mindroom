@@ -197,9 +197,6 @@ def generate() -> dict[str, bytes]:
     outputs["logo-transparent.svg"] = serialize(transparent)
     outputs["logo-transparent.png"] = render(transparent)
     outputs["logo-mark.svg"] = framed_mark(outputs["logo-transparent.svg"])
-    movable_cube = deepcopy(transparent)
-    open_frame_under_cube(movable_cube)
-    outputs["logo-mark-movable-cube.svg"] = framed_mark(serialize(movable_cube))
     for appearance in ("light", "dark"):
         outputs[f"app-icon-{appearance}.svg"] = serialize(app_icon_document(transparent, dark=appearance == "dark"))
     animated = animated_document(root)
@@ -211,6 +208,10 @@ def generate() -> dict[str, bytes]:
     for name, content in list(outputs.items()):
         if name.endswith(".svg"):
             outputs[name.removesuffix(".svg") + ".svgz"] = gzip.compress(content, mtime=0)
+    # MindRoom Chat copies this mark as plain SVG, and Git stores it as a small delta of logo-mark.svg; an SVGZ would not delta.
+    movable_cube = deepcopy(transparent)
+    open_frame_under_cube(movable_cube)
+    outputs["logo-mark-movable-cube.svg"] = framed_mark(serialize(movable_cube))
     return outputs
 
 

@@ -19,7 +19,7 @@ If your checkout contains pointer files, fetch the images with `git lfs pull` fi
 
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
 It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
-Each SVG also has a losslessly compressed `.svgz` copy.
+Each SVG except `logo-mark-movable-cube.svg` also has a losslessly compressed `.svgz` copy.
 It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background.
 The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the static and animated M for small icons and the README.
 The `logo-mark-movable-cube.svg` export is the static framed mark with an opening in the frame under the central cube, for animations that move the cube.
