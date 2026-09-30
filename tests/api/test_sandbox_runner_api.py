@@ -7469,6 +7469,12 @@ def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
         primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
         manager = CredentialsManager(tmp_path / "primary-credentials")
         manager.for_primary_runtime_agent_scope("alpha").save_credentials(tool_name, {"greeting": "primary"})
+        # The runner's own store holds a conflicting value; the lease must win.
+        runner_paths = resolve_runtime_paths(
+            config_path=Path(os.environ["MINDROOM_CONFIG_PATH"]),
+            storage_path=Path(os.environ["MINDROOM_STORAGE_PATH"]),
+        )
+        get_runtime_credentials_manager(runner_paths).save_credentials(tool_name, {"greeting": "worker"})
 
         result = execute_worker_proxy_request(
             config=WorkerProxyClientConfig(

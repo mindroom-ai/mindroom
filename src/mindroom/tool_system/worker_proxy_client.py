@@ -356,8 +356,19 @@ def _collect_credential_overrides(
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
-    scoped = worker_target is not None and worker_target.worker_scope is not None
-    services = _credential_services_for_call(tool_name, function_name, config=config, lease_tool_settings=scoped)
+    # Scoped calls lease the settings the primary owns; provider-key tools keep the worker's own store.
+    lease_tool_settings = (
+        worker_target is not None
+        and worker_target.worker_scope is not None
+        and primary_built_service is not None
+        and primary_built_service(tool_name)
+    )
+    services = _credential_services_for_call(
+        tool_name,
+        function_name,
+        config=config,
+        lease_tool_settings=lease_tool_settings,
+    )
     if not services:
         return {}
     allowed_shared_services: frozenset[str] | None = None

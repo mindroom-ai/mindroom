@@ -626,6 +626,8 @@ Only fields declared by the receiving toolkit are applied as constructor configu
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
 Scoped calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, because the primary owns scoped tool settings; values in the worker's own credential store apply only where the lease sets nothing.
+Unscoped dedicated workers keep reading tool settings from their own worker credential stores.
+Settings saved in a worker credential store before the primary owned them stay there and still apply where a lease sets nothing, so clear worker credential stores after upgrading if those values should stop applying.
 Services selected by the policy override those values.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
@@ -799,7 +801,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
   The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
   GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
-  Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
+  Tools without a scoped OAuth provider take `user` and `user_agent` settings only from authored config or granted shared settings; values in a worker's own credential store apply only inside that worker.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.
   Use `user_agent` for per-agent isolation.
 

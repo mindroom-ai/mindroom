@@ -1416,9 +1416,23 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
     assert config.lease_tool_credentials is expected
 
 
-@pytest.mark.parametrize("scoped", [False, True])
-def test_dedicated_worker_calls_lease_tool_settings_only_when_scoped(tmp_path: Path, scoped: bool) -> None:
-    """Scoped dedicated-worker calls lease the primary-owned tool settings; unscoped calls keep the worker's own."""
+@pytest.mark.parametrize(
+    ("worker_scope", "requester_id", "expected_key"),
+    [
+        (None, "@alice:example.org", None),
+        ("shared", "@alice:example.org", "alpha-key"),
+        ("user", "@alice:example.org", "alice-key"),
+        ("user_agent", "@alice:example.org", "alice-alpha-key"),
+        ("user", "@bob:example.org", None),
+    ],
+)
+def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
+    tmp_path: Path,
+    worker_scope: str | None,
+    requester_id: str,
+    expected_key: str | None,
+) -> None:
+    """Scoped dedicated-worker calls lease only their own scope's primary settings; unscoped calls lease nothing."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     handle = WorkerHandle(
         worker_id="worker-1",
@@ -1434,7 +1448,20 @@ def test_dedicated_worker_calls_lease_tool_settings_only_when_scoped(tmp_path: P
     manager = CredentialsManager(tmp_path / "credentials")
     manager.save_credentials("calculator", {"api_key": "global-key"})
     manager.for_primary_runtime_agent_scope("alpha").save_credentials("calculator", {"api_key": "alpha-key"})
-    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant") if scoped else None
+    manager.for_primary_runtime_scope("@alice:example.org", None).save_credentials(
+        "calculator",
+        {"api_key": "alice-key"},
+    )
+    manager.for_primary_runtime_scope("@alice:example.org", "alpha").save_credentials(
+        "calculator",
+        {"api_key": "alice-alpha-key"},
+    )
+    identity = ToolExecutionIdentity("matrix", "alpha", requester_id, None, None, None, None)
+    target = (
+        resolve_worker_target(worker_scope, "alpha", identity, tenant_id="test-tenant")
+        if worker_scope is not None
+        else None
+    )
 
     result = execute_worker_proxy_request(
         config=WorkerProxyClientConfig(
@@ -1467,12 +1494,12 @@ def test_dedicated_worker_calls_lease_tool_settings_only_when_scoped(tmp_path: P
     )
 
     assert result == "sandbox-result"
-    if scoped:
-        assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
-        assert captured_calls[0][1]["credential_overrides"] == {"api_key": "alpha-key"}
-    else:
+    if expected_key is None:
         assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
         assert "lease_id" not in captured_calls[0][1]
+    else:
+        assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
+        assert captured_calls[0][1]["credential_overrides"] == {"api_key": expected_key}
 
 
 def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
