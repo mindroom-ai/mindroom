@@ -2082,6 +2082,17 @@ class FakeCredentialsManager:
         """Return the shared credential layer for this fake manager."""
         return self
 
+    def for_primary_runtime_agent_scope(self, agent_name: str) -> "FakeCredentialsManager":
+        """Return an empty primary agent-scoped store."""
+        return FakeCredentialsManager({}, storage_root=self.storage_root / "primary" / agent_name)
+
+    def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> "FakeCredentialsManager":
+        """Return an empty primary requester-scoped store."""
+        return FakeCredentialsManager(
+            {},
+            storage_root=self.storage_root / "primary" / requester_id / (agent_name or ""),
+        )
+
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""

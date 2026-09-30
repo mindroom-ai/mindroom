@@ -347,8 +347,8 @@ def test_selection_checks_effective_shell_permissions(
         execution_identity=identity,
         runtime_paths=paths,
     )
-    # Save scoped settings where the dashboard would for this agent's routing.
-    primary_built = primary_owns_tool_settings("shell", runtime_paths=paths, worker_tools_override=worker_tools)
+    # Save scoped settings where the dashboard would.
+    primary_built = primary_owns_tool_settings("shell", runtime_paths=paths)
     save_scoped_credentials(
         "shell",
         restriction,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import functools
 import hashlib
 import io
 import json
@@ -15,8 +16,8 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from typing import TYPE_CHECKING, Any, Self, cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.tools import Toolkit
@@ -70,6 +71,8 @@ from mindroom.tool_system.metadata import (
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
+from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -7415,3 +7418,86 @@ def test_workspace_env_hook_rejects_symlink_escape(
     assert payload["ok"] is False
     assert payload["failure_kind"] == "tool"
     assert "resolves outside" in payload["error"]
+
+
+def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A scoped call leases the primary-owned tool settings, and the runner builds the tool with them."""
+    _set_sandbox_token(monkeypatch)
+    tool_name = "lease_settings_echo"
+
+    class _EchoToolkit(Toolkit):
+        def __init__(self, greeting: str = "unset") -> None:
+            self.greeting = greeting
+            super().__init__(name=tool_name, tools=[self.echo])
+
+        def echo(self) -> str:
+            return self.greeting
+
+    class _RunnerClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
+            return runner_client.post(url, json=json, headers=headers)
+
+    original_registry = metadata_module.TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
+    registration_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name="Lease Settings Echo",
+            description="Test-only lease coverage.",
+            category=ToolCategory.DEVELOPMENT,
+            config_fields=[ConfigField(name="greeting", label="Greeting")],
+            factory=lambda: _EchoToolkit,
+        ),
+    )
+    try:
+        primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
+        manager = CredentialsManager(tmp_path / "primary-credentials")
+        manager.for_primary_runtime_agent_scope("alpha").save_credentials(tool_name, {"greeting": "primary"})
+
+        result = execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url="http://testserver",
+                proxy_token=SANDBOX_TOKEN,
+                proxy_timeout_seconds=30.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={"tool_name": tool_name, "function_name": "echo", "args": [], "kwargs": {}},
+            credentials_manager=manager,
+            tool_name=tool_name,
+            function_name="echo",
+            worker_target=resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant"),
+            worker_handle=None,
+            worker_manager=MagicMock(),
+            client_factory=_RunnerClient,
+            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+        )
+
+        assert result == "primary"
+    finally:
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        _refresh_runner_app_from_env()

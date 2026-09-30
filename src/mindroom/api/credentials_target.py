@@ -55,7 +55,6 @@ class RequestCredentialsTarget:
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
     allowed_shared_services: frozenset[str] | None = None
-    worker_tools: list[str] | None = None
 
 
 def loaded_runtime_config_for_credentials_request(
@@ -226,7 +225,6 @@ def resolve_request_credentials_target(
         agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
         allowed_shared_services=config.get_worker_grantable_credentials(),
-        worker_tools=config.get_agent_worker_tools(scope_request.agent_name),
     )
 
 
@@ -301,15 +299,11 @@ def _service_uses_primary_runtime_global_store(service: str, target: RequestCred
 
 
 def target_primary_owns_tool_settings(service: str, target: RequestCredentialsTarget) -> bool:
-    """Return whether the target agent's primary process builds the tool that this service configures."""
+    """Return whether the primary owns the scoped settings of the tool that this service configures."""
     if target.worker_scope is None or target.agent_name is None:
         return False
     ensure_tool_registry_loaded(target.runtime_paths)
-    return primary_owns_tool_settings(
-        service,
-        runtime_paths=target.runtime_paths,
-        worker_tools_override=target.worker_tools,
-    )
+    return primary_owns_tool_settings(service, runtime_paths=target.runtime_paths)
 
 
 def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:

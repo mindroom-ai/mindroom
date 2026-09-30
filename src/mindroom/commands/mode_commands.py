@@ -48,7 +48,6 @@ def _minimal_mode_unavailable_reason(  # noqa: PLR0911 - independent deployment 
             allowed_shared_services=(
                 config.get_worker_grantable_credentials() if worker_target.worker_scope is not None else None
             ),
-            worker_tools_override=config.get_agent_worker_tools(agent_name),
             disable_sandbox_proxy=True,
         )
     except (ImportError, ValueError):

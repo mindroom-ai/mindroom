@@ -625,8 +625,8 @@ Selected services follow the call's scoped credential policy and, where applicab
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
+Scoped calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, because the primary owns scoped tool settings; values in the worker's own credential store apply only where the lease sets nothing.
 Services selected by the policy override those values.
-Dedicated Docker and Kubernetes workers keep reading tool settings from their own worker credential stores.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
 For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.

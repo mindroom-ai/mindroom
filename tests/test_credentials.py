@@ -2076,13 +2076,8 @@ def test_primary_built_tool_settings_preserve_shared_layer(
     assert load_scoped_credentials("browserbase", **kwargs) == {**(expected or {}), **primary_config}
 
 
-@pytest.mark.parametrize(("worker_tools", "primary_store"), [([], True), (["google_bigquery"], False)])
-def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(
-    tmp_path: Path,
-    worker_tools: list[str],
-    primary_store: bool,
-) -> None:
-    """Dashboard writes follow the agent's routing: primary-built tools use the primary store, routed tools the worker's."""
+def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Path) -> None:
+    """Dashboard writes of scoped tool settings go to the agent's primary store, wherever the tool's calls run."""
     runtime_paths = constants_mod.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -2099,7 +2094,6 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(
         worker_scope="shared",
         agent_name="alpha",
         execution_identity=None,
-        worker_tools=worker_tools,
     )
     settings = {"project": "alpha-project", "dataset": "demo", "location": "us-central1"}
 
@@ -2107,12 +2101,12 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(
 
     primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("google_bigquery")
     worker_settings = worker_manager.load_credentials("google_bigquery")
-    assert (primary_settings, worker_settings) == ((settings, None) if primary_store else (None, settings))
+    assert (primary_settings, worker_settings) == (settings, None)
     assert load_credentials_for_target("google_bigquery", target) == settings
     access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
     assert "google_bigquery" in access.list_services()
-    if primary_store:
-        # A worker copy of a primary-built tool's settings is ignored, so it is not listed either.
-        delete_credentials_for_target("google_bigquery", target)
-        worker_manager.save_credentials("google_bigquery", {"project": "planted"})
-        assert "google_bigquery" not in access.list_services()
+    # A worker copy of a tool's settings is ignored, so it is not listed either.
+    delete_credentials_for_target("google_bigquery", target)
+    worker_manager.save_credentials("google_bigquery", {"project": "planted"})
+    assert load_credentials_for_target("google_bigquery", target) is None
+    assert "google_bigquery" not in access.list_services()

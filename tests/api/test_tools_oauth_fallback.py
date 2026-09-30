@@ -144,15 +144,7 @@ async def test_environment_oauth_fallback_status_is_available_and_secret_free(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("worker_tools", "expected_status"),
-    [([], "available"), (["google_bigquery"], "requires_config")],
-)
-async def test_tool_status_reads_settings_from_where_the_tool_runs(
-    tmp_path: Path,
-    worker_tools: list[str],
-    expected_status: str,
-) -> None:
+async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) -> None:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
@@ -161,8 +153,7 @@ async def test_tool_status_reads_settings_from_where_the_tool_runs(
     manager = get_runtime_credentials_manager(runtime_paths)
     target = resolve_worker_target("shared", "code", execution_identity=None, tenant_id="test-tenant")
     assert target.worker_key is not None
-    manager.for_primary_runtime_agent_scope("code").save_credentials("google_bigquery", {"project": "primary"})
-    manager.for_worker(target.worker_key).save_credentials("google_bigquery", {"dataset": "worker-only"})
+    manager.for_worker(target.worker_key).save_credentials("google_bigquery", {"project": "worker-planted"})
     tool = {
         "name": "google_bigquery",
         "status": "requires_config",
@@ -178,9 +169,11 @@ async def test_tool_status_reads_settings_from_where_the_tool_runs(
         auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=runtime_paths,
-        worker_tools=worker_tools,
     )
 
     await tools_api._update_tools_statuses([tool], context)
+    assert tool["status"] == "requires_config"
 
-    assert tool["status"] == expected_status
+    manager.for_primary_runtime_agent_scope("code").save_credentials("google_bigquery", {"project": "primary"})
+    await tools_api._update_tools_statuses([tool], context)
+    assert tool["status"] == "available"

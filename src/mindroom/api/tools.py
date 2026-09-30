@@ -73,7 +73,6 @@ class _ResolvedToolAvailabilityContext:
     oauth_providers: dict[str, OAuthProvider]
     runtime_paths: RuntimePaths
     oauth_config: Config | None = None
-    worker_tools: list[str] | None = None
 
 
 def _effective_allowed_shared_services(
@@ -304,9 +303,6 @@ def _resolve_tool_availability_context(
         oauth_providers=oauth_providers,
         runtime_paths=runtime_paths,
         oauth_config=config,
-        worker_tools=(
-            config.get_agent_worker_tools(scope_request.agent_name) if scope_request.agent_name is not None else None
-        ),
     )
 
 
@@ -368,11 +364,7 @@ async def _update_tools_statuses(
                     allowed_shared_services=allowed_shared_services,
                     primary_built_tool=worker_target is not None
                     and worker_target.routing_agent_name is not None
-                    and primary_owns_tool_settings(
-                        service,
-                        runtime_paths=context.runtime_paths,
-                        worker_tools_override=context.worker_tools,
-                    ),
+                    and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
                 )
             else:
                 credentials_cache[cache_key] = _load_shared_preview_credentials(

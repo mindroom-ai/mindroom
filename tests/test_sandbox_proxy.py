@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import functools
 import hashlib
 import json
 import os
@@ -1285,27 +1286,29 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
 
 
 @pytest.mark.parametrize(
-    ("leased_service", "authored_worker_tools", "expected_token"),
+    ("leased_service", "expected_token"),
     [
-        ("github", None, "primary"),
-        ("google_bigquery", None, "worker"),
-        ("google_bigquery", ["calculator"], "primary"),
+        # The called tool itself: a scoped call leases its primary-owned settings on every backend.
+        ("calculator", "primary"),
+        ("github", "primary"),
+        ("google_bigquery", "primary"),
+        # Model provider keys stay where workers read them.
+        ("openai", "worker"),
     ],
 )
-def test_proxy_leases_service_settings_from_the_store_the_dashboard_uses(
+def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     leased_service: str,
-    authored_worker_tools: list[str] | None,
     expected_token: str,
 ) -> None:
-    """A leased service follows its own routing: primary-built tools from primary stores, routed ones from the worker."""
+    """Scoped routed calls receive primary-owned tool settings, never the worker-writable copies."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
         execution_mode="all",
-        credential_policy={"calculator.add": (leased_service,)},
+        credential_policy={} if leased_service == "calculator" else {"calculator.add": (leased_service,)},
     )
     manager = CredentialsManager(tmp_path / "credentials")
     target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
@@ -1324,15 +1327,10 @@ def test_proxy_leases_service_settings_from_the_store_the_dashboard_uses(
         ),
     )
 
-    # Construction passes the agent's resolved worker tools; leases must still route by the authored setting.
     tool = get_tool_by_name(
         "calculator",
         runtime_paths,
         credentials_manager=manager,
-        runtime_config=Config(
-            agents={"alpha": AgentConfig(display_name="Alpha", worker_tools=authored_worker_tools)},
-            models={},
-        ),
         worker_tools_override=["calculator"],
         worker_target=target,
     )
@@ -1418,8 +1416,9 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
     assert config.lease_tool_credentials is expected
 
 
-def test_worker_proxy_client_skips_tool_own_lease_when_not_requested() -> None:
-    """Without the static-runner flag or a matching policy, saved settings stay out of the request."""
+@pytest.mark.parametrize("scoped", [False, True])
+def test_dedicated_worker_calls_lease_tool_settings_only_when_scoped(tmp_path: Path, scoped: bool) -> None:
+    """Scoped dedicated-worker calls lease the primary-owned tool settings; unscoped calls keep the worker's own."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     handle = WorkerHandle(
         worker_id="worker-1",
@@ -1431,6 +1430,11 @@ def test_worker_proxy_client_skips_tool_own_lease_when_not_requested() -> None:
         last_used_at=0.0,
         created_at=0.0,
     )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    manager = CredentialsManager(tmp_path / "credentials")
+    manager.save_credentials("calculator", {"api_key": "global-key"})
+    manager.for_primary_runtime_agent_scope("alpha").save_credentials("calculator", {"api_key": "alpha-key"})
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant") if scoped else None
 
     result = execute_worker_proxy_request(
         config=WorkerProxyClientConfig(
@@ -1442,18 +1446,33 @@ def test_worker_proxy_client_skips_tool_own_lease_when_not_requested() -> None:
             lease_tool_credentials=False,
         ),
         payload={"tool_name": "calculator", "function_name": "add"},
-        credentials_manager=FakeCredentialsManager({"calculator": {"api_key": "saved-key"}}),
+        credentials_manager=manager,
         tool_name="calculator",
         function_name="add",
-        worker_target=None,
+        worker_target=target,
         worker_handle=handle,
         worker_manager=_TrackingWorkerManager(),
-        client_factory=_recording_client_class(captured_calls=captured_calls),
+        client_factory=_recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "sandbox-result"}
+            ),
+        ),
+        primary_built_service=functools.partial(
+            sandbox_proxy_module.primary_owns_tool_settings,
+            runtime_paths=runtime_paths,
+        ),
     )
 
     assert result == "sandbox-result"
-    assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
-    assert "lease_id" not in captured_calls[0][1]
+    if scoped:
+        assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
+        assert captured_calls[0][1]["credential_overrides"] == {"api_key": "alpha-key"}
+    else:
+        assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
+        assert "lease_id" not in captured_calls[0][1]
 
 
 def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
@@ -1851,59 +1870,43 @@ def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: 
 
 
 @pytest.mark.parametrize(
-    ("requires_primary_runtime", "requires_room_context", "worker_tools", "flags", "expected"),
+    ("requires_primary_runtime", "requires_room_context", "runner_mode", "expected"),
     [
-        pytest.param(True, False, ["routing_test"], {}, True, id="primary-runtime"),
-        pytest.param(False, True, ["routing_test"], {}, True, id="room-context"),
-        pytest.param(False, False, [], {}, True, id="not-routed"),
-        pytest.param(False, False, ["routing_test"], {}, False, id="routed"),
-        pytest.param(False, False, [], {"runner_mode": True}, False, id="inside-worker"),
+        pytest.param(True, False, False, True, id="primary-runtime"),
+        pytest.param(False, True, False, True, id="room-context"),
+        pytest.param(False, False, False, True, id="worker-routable"),
+        pytest.param(False, False, True, False, id="inside-worker"),
     ],
 )
-def test_primary_owns_tool_settings_follows_routing(
+def test_primary_owns_settings_of_every_registered_tool(
     monkeypatch: pytest.MonkeyPatch,
     requires_primary_runtime: bool,
     requires_room_context: bool,
-    worker_tools: list[str],
-    flags: dict[str, bool],
+    runner_mode: bool,
     expected: bool,
 ) -> None:
-    """Only the primary process building a tool itself marks its settings as primary-built."""
+    """The primary owns every tool's settings, wherever its calls run; a worker runtime owns its own."""
     monkeypatch.setitem(
         TOOL_METADATA,
-        "routing_test",
+        "ownership_test",
         _sandbox_proxy_test_metadata(
-            "routing_test",
+            "ownership_test",
             requires_primary_runtime=requires_primary_runtime,
             requires_room_context=requires_room_context,
         ),
     )
-    runtime_paths = _configure_proxy_runtime(
-        monkeypatch,
-        proxy_url="http://sandbox:8765",
-        runner_mode=flags.get("runner_mode", False),
-    )
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765", runner_mode=runner_mode)
 
-    assert (
-        sandbox_proxy_module.primary_owns_tool_settings(
-            "routing_test",
-            runtime_paths=runtime_paths,
-            worker_tools_override=worker_tools,
-        )
-        is expected
-    )
+    assert sandbox_proxy_module.primary_owns_tool_settings("ownership_test", runtime_paths=runtime_paths) is expected
+    assert not sandbox_proxy_module.primary_owns_tool_settings("unregistered_test", runtime_paths=runtime_paths)
 
 
 def test_model_provider_services_keep_their_settings_placement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provider services double as worker-read provider keys, so an unrouted same-named tool does not move them."""
+    """Provider services double as worker-read provider keys, so a same-named tool does not move them."""
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765")
 
     assert "openai" in TOOL_METADATA
-    assert not sandbox_proxy_module.primary_owns_tool_settings(
-        "openai",
-        runtime_paths=runtime_paths,
-        worker_tools_override=[],
-    )
+    assert not sandbox_proxy_module.primary_owns_tool_settings("openai", runtime_paths=runtime_paths)
 
 
 def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2198,6 +2201,39 @@ def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.
     )
 
     assert captured["project"] == "primary-project"
+
+
+def test_routed_browser_ignores_worker_planted_desktop_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A worker-routed browser still runs desktop calls in the primary, so worker settings must not configure it."""
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765", execution_mode="all")
+    manager = CredentialsManager(tmp_path / "credentials")
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials(
+        "browser",
+        {
+            "default_target": "desktop",
+            "device_user_id": "@attacker:example.test",
+            "device_id": "PLANTED",
+            "device_ed25519": "planted-key",
+        },
+    )
+
+    tool = get_tool_by_name(
+        "browser",
+        runtime_paths,
+        credentials_manager=manager,
+        worker_tools_override=["browser"],
+        worker_target=target,
+    )
+
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+        "browser",
+        runtime_paths=runtime_paths,
+        worker_tools_override=["browser"],
+    )
+    assert tool._default_target == "host"
+    assert tool._desktop_target is None
 
 
 def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> None:

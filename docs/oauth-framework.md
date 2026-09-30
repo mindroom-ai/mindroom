@@ -72,8 +72,8 @@ Only agents with no private, per-agent, or inherited scope use the global creden
 Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
-Tools the primary process builds for an agent read their settings from primary stores, never worker credential stores, with OAuth token and existing local-only service rules unchanged.
-That covers tools that declare `requires_primary_runtime` or `requires_room_context` and any tool the agent does not route to its worker; their settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, while explicit shared grants and shared mirrors still apply.
+Scoped tool settings are read from primary stores, never worker credential stores, with OAuth token, existing local-only, and model-provider service rules unchanged.
+The primary builds every tool and leases a worker-routed tool's settings to the worker per call; settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, while explicit shared grants and shared mirrors still apply.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.

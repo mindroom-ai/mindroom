@@ -60,6 +60,7 @@ class WorkerProxyClientConfig:
     credential_lease_ttl_seconds: int
     credential_policy: Mapping[str, tuple[str, ...]]
     # The shared static runner has no credential store, so every call leases the tool's own saved settings.
+    # Scoped calls always lease them too, because the primary owns scoped tool settings.
     lease_tool_credentials: bool
 
 
@@ -355,7 +356,8 @@ def _collect_credential_overrides(
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
-    services = _credential_services_for_call(tool_name, function_name, config=config)
+    scoped = worker_target is not None and worker_target.worker_scope is not None
+    services = _credential_services_for_call(tool_name, function_name, config=config, lease_tool_settings=scoped)
     if not services:
         return {}
     allowed_shared_services: frozenset[str] | None = None
@@ -372,10 +374,7 @@ def _collect_credential_overrides(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
-            # The called tool runs in the worker, so only other leased services can be primary-owned.
-            primary_built_tool=service != tool_name
-            and primary_built_service is not None
-            and primary_built_service(service),
+            primary_built_tool=primary_built_service is not None and primary_built_service(service),
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))
@@ -387,9 +386,10 @@ def _credential_services_for_call(
     function_name: str,
     *,
     config: WorkerProxyClientConfig,
+    lease_tool_settings: bool,
 ) -> list[str]:
     selectors = ("*", tool_name, f"{tool_name}.{function_name}")
-    services: list[str] = [tool_name] if config.lease_tool_credentials else []
+    services: list[str] = [tool_name] if config.lease_tool_credentials or lease_tool_settings else []
     for selector in selectors:
         for service in config.credential_policy.get(selector, ()):
             if service not in services:
