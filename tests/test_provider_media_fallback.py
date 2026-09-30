@@ -904,6 +904,51 @@ async def test_successful_retry_after_non_capability_failure_does_not_teach_rout
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 400 - [{'error': {'code': 400, 'message': "
+        "'The message size (74029796 bytes) exceeds 30.000MB limit.', 'status': 'FAILED_PRECONDITION'}}]",
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': "
+        "\"messages.4.content.3.document.source.base64.media_type: Input should be 'application/pdf'\"}}",
+        "Invalid file data: 'input[7].content[1].file_data'. Expected a base64-encoded data URL with a valid "
+        "file MIME type, but got unsupported MIME type 'application/zip'.",
+    ],
+    ids=["request_size", "claude_document_type", "openai_file_type"],
+)
+async def test_one_rejected_file_does_not_strip_later_pdfs_for_the_route(tmp_path: Path, message: str) -> None:
+    """A rejection naming one file's size or type cannot prove the route rejects every file."""
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                ModelProviderError(message=message, status_code=400),
+                ModelResponse(content="recovered"),
+                ModelResponse(content="read the pdf"),
+            ],
+        ),
+        tmp_path,
+    )
+    archive_turn = Message(
+        role="user",
+        content='Unpack this.\n[attachments: att_zip (file, "bundle.zip")]',
+        files=[File(content=b"PK\x03\x04", mime_type="application/zip", filename="bundle.zip")],
+    )
+    pdf_turn = Message(
+        role="user",
+        content='Summarize this.\n[attachments: att_pdf (file, "report.pdf")]',
+        files=[File(content=b"%PDF-1.4", mime_type="application/pdf", filename="report.pdf")],
+    )
+
+    await model.ainvoke(messages=[archive_turn])
+    await model.ainvoke(messages=[pdf_turn])
+
+    assert model.blocking_calls[1][0].files is None
+    pdf_call = model.blocking_calls[2]
+    assert pdf_call[0].files
+    assert len(pdf_call) == 1
+
+
+@pytest.mark.asyncio
 async def test_untyped_failure_retries_once_and_teaches_after_success(tmp_path: Path) -> None:
     """Fallback does not depend on provider-specific error wording or exception type."""
     model = _load(

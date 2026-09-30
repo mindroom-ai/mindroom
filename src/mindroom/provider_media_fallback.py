@@ -48,6 +48,9 @@ _PAYLOAD_TOO_LARGE_STATUS = 413
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
 _MAX_LOGGED_ERROR_CHARS = 500
+# Rejections that name one input's size or media type prove only that this input
+# failed, not that the route rejects the whole media kind.
+_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
 _ACTIVE_MODELS: ContextVar[frozenset[int]] = ContextVar(
     "mindroom_active_provider_media_fallback_models",
     default=frozenset(),
@@ -582,9 +585,8 @@ def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
     ):
         return False
     lowered_error_text = str(error).lower()
-    if (
-        f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text
-        or "request entity too large" in lowered_error_text
+    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text or any(
+        marker in lowered_error_text for marker in _INPUT_SPECIFIC_ERROR_MARKERS
     ):
         return False
     return not any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
