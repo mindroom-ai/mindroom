@@ -9,6 +9,7 @@ import hashlib
 import json
 import threading
 import time
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -46,6 +47,7 @@ from mindroom.mcp.manager import (
     _discovery_retry_delay_seconds,
     _MCPAuthorizationChangedError,
     _MCPConfigurationChangedError,
+    _MCPFunctionValidationError,
 )
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
@@ -3545,6 +3547,61 @@ async def test_mcp_manager_enforces_startup_timeout(
     assert isinstance(state.last_error, MCPTimeoutError)
     assert "startup timed out" in str(state.last_error)
     assert state.refresh_task is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_reraises_recorded_failure_without_growing_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each read of a failed server raises a fresh chained error, leaving the stored traceback untouched."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.initialize_delay_seconds = 0.05
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {"demo": MCPServerConfig(transport="stdio", command="npx", startup_timeout_seconds=0.01)},
+    )
+    await manager.sync_servers(config)
+    stored_error = manager._states["demo"].last_error
+    assert isinstance(stored_error, MCPTimeoutError)
+    stored_traceback_depth = len(traceback.extract_tb(stored_error.__traceback__))
+
+    for _ in range(3):
+        with pytest.raises(MCPTimeoutError) as exc_info:
+            manager.get_catalog("demo")
+        assert exc_info.value is not stored_error
+        assert exc_info.value.__cause__ is stored_error
+        assert str(exc_info.value) == str(stored_error)
+        assert exc_info.value.server_id == "demo"
+
+    assert len(traceback.extract_tb(stored_error.__traceback__)) == stored_traceback_depth
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_reraised_recorded_failure_keeps_subclass_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fresh re-raises preserve recorded error subclasses whose constructors take extra fields."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    state = manager._states["demo"]
+    stored_error = _MCPFunctionValidationError("demo", "function name collision", (state,))
+    state.last_error = stored_error
+
+    with pytest.raises(_MCPFunctionValidationError) as exc_info:
+        manager.get_catalog("demo")
+
+    assert exc_info.value is not stored_error
+    assert exc_info.value.__cause__ is stored_error
+    assert str(exc_info.value) == "function name collision"
+    assert exc_info.value.server_id == "demo"
+    assert exc_info.value.invalid_states == (state,)
+    assert stored_error.__traceback__ is None
     await manager.shutdown()
 
 

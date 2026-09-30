@@ -101,6 +101,16 @@ def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
     )
 
 
+def _fresh_recorded_error(error: MCPError) -> MCPError:
+    """Return a same-type copy of one recorded failure for raising again.
+
+    Re-raising the stored instance would append every raise site's frames to its traceback.
+    """
+    fresh = type(error).__new__(type(error), *error.args)
+    fresh.__dict__.update(error.__dict__)
+    return fresh
+
+
 @dataclass(frozen=True)
 class _MCPOAuthScopeKey:
     """Provider and credential scope shared across server config generations."""
@@ -252,7 +262,7 @@ class MCPServerManager:
         """Return the cached catalog for one server."""
         state = self._require_state(server_id)
         if state.last_error is not None:
-            raise state.last_error
+            raise _fresh_recorded_error(state.last_error) from state.last_error
         if state.catalog is not None:
             return state.catalog
         msg = f"MCP server '{server_id}' is not connected"
@@ -809,7 +819,7 @@ class MCPServerManager:
             msg = f"MCP server '{server_id}' is not OAuth-backed"
             raise MCPConnectionError(server_id, msg)
         if base_state.last_error is not None:
-            raise base_state.last_error
+            raise _fresh_recorded_error(base_state.last_error) from base_state.last_error
         credential_context = self._oauth_credential_context(
             base_state,
             worker_target=worker_target,
@@ -1050,7 +1060,7 @@ class MCPServerManager:
                 self._require_desired_oauth_lease(state, authorization_lease)
                 self._require_active_state(state)
                 if state.last_error is not None:
-                    raise state.last_error  # noqa: TRY301 - record failure at the owning call boundary
+                    raise _fresh_recorded_error(state.last_error) from state.last_error  # noqa: TRY301 - record failure at the owning call boundary
                 if before_dispatch is not None:
                     await before_dispatch()
                 await self._validate_authoritative_oauth_lease(state, authorization_lease)
@@ -1134,7 +1144,7 @@ class MCPServerManager:
             self._require_desired_oauth_lease(state, authorization_lease)
             self._require_active_state(state)
             if state.last_error is not None:
-                raise state.last_error
+                raise _fresh_recorded_error(state.last_error) from state.last_error
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
             self._require_session_oauth_lease(state, authorization_lease)
             if state.catalog is not None and state.connected:
