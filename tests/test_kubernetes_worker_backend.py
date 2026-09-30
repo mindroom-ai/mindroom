@@ -17,6 +17,7 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 from structlog.testing import capture_logs
@@ -63,7 +64,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
-from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import WorkerReadyProgress, WorkerSpec, process_worker_key
 from mindroom.workers.runtime import (
     primary_worker_backend_available,
     primary_worker_backend_name,
@@ -631,6 +632,15 @@ def test_script_recovery_contract_rejects_changed_grantable_credentials() -> Non
     assert backend.script_recovery_signature() != initial
 
 
+def test_script_recovery_contract_ignores_user_resource_overrides() -> None:
+    """Per-user main-worker resources are pod resources, not script recovery authority."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial = backend.script_recovery_signature()
+    backend.config = replace(backend.config, user_resources={"@alice:example.org": {"limits": {"memory": "4Gi"}}})
+
+    assert backend.script_recovery_signature() == initial
+
+
 def test_script_recovery_resources_track_only_the_selected_profile() -> None:
     """Recovery compares the run's pod resources without binding unrelated profiles."""
     profiles = {
@@ -704,6 +714,7 @@ def _backend(
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
     tmp_size_limit: str | None = None,
+    user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -739,6 +750,7 @@ def _backend(
         runtime_class_name=runtime_class_name,
         agent_vault=agent_vault,
         tmp_size_limit=tmp_size_limit,
+        user_resources=user_resources or {},
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -1896,6 +1908,7 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
     assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
     assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
     assert config.tmp_size_limit is None
+    assert config.user_resources == {}
     assert config.enable_service_links is False
 
 
@@ -1956,6 +1969,62 @@ def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(tmp_
         KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
 
 
+def test_kubernetes_backend_config_reads_user_resource_overrides(tmp_path: Path) -> None:
+    """Per-user overrides may set any subset of cpu and memory requests and limits."""
+    overrides = {
+        "@alice:example.org": {"limits": {"memory": "4Gi"}},
+        "@bob:example.org": {"requests": {"cpu": "1"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON": json.dumps(overrides),
+        },
+    )
+
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.user_resources == overrides
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("[]", "must contain a JSON object"),
+        ('{"alice": {"limits": {"memory": "4Gi"}}}', "keys must be Matrix user IDs"),
+        ('{"@alice:example.org": {"limit": {"memory": "4Gi"}}}', "must define requests, limits, or both"),
+        ('{"@alice:example.org": {}}', "must define requests, limits, or both"),
+        ('{"@alice:example.org": {"limits": {"ephemeral-storage": "4Gi"}}}', "non-empty cpu or memory"),
+        ('{"@alice:example.org": {"limits": {"memory": 4}}}', "non-empty cpu or memory"),
+    ],
+)
+def test_kubernetes_backend_config_rejects_invalid_user_resource_overrides(
+    tmp_path: Path,
+    raw: str,
+    message: str,
+) -> None:
+    """Overrides stay as strict as the script resource profiles."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+            "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON": raw,
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match=message):
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
 def test_kubernetes_backend_config_allows_service_links_override(tmp_path: Path) -> None:
     """Worker service-link env injection remains opt-in."""
     config_dir = tmp_path / "cfg"
@@ -1998,6 +2067,52 @@ def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp
     container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
     assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_worker_user_resources_apply_only_to_that_requesters_workers(tmp_path: Path) -> None:
+    """A listed requester's workers merge its overrides; other workers and script runs keep their resources."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault=_test_agent_vault_config(),
+        user_resources={"@alice:example.org": {"requests": {"memory": "1Gi"}, "limits": {"memory": "4Gi"}}},
+    )
+    alice_user_agent_key = "v1:tenant-123:user_agent:~@alice:example.org:code"
+    alice_resources = {"requests": {"memory": "1Gi", "cpu": "100m"}, "limits": {"memory": "4Gi", "cpu": "500m"}}
+    global_resources = {"requests": {"memory": "256Mi", "cpu": "100m"}, "limits": {"memory": "1Gi", "cpu": "500m"}}
+    cli_turn_key = process_worker_key(alice_user_agent_key, purpose="agent-turn", process_id=UUID(int=1))
+    script_key = script_worker_key_for_run(alice_user_agent_key, f"script-{'a' * 32}")
+    cases = [
+        (WorkerSpec("v1:tenant-123:user:~@alice:example.org"), alice_resources),
+        (WorkerSpec(alice_user_agent_key, private_agent_names=frozenset()), alice_resources),
+        (
+            WorkerSpec(cli_turn_key, private_agent_names=frozenset(), state_scope_worker_key=alice_user_agent_key),
+            alice_resources,
+        ),
+        (WorkerSpec("v1:tenant-123:user:~@bob:example.org"), global_resources),
+        (WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), global_resources),
+        (
+            WorkerSpec(
+                script_key,
+                private_agent_names=frozenset(),
+                state_scope_worker_key=alice_user_agent_key,
+                resource_profile="large",
+            ),
+            backend.config.script_resource_profiles["large"],
+        ),
+    ]
+
+    for spec, expected in cases:
+        handle = backend.ensure_worker(spec, now=10.0)
+        deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
+        template_spec = deployment["spec"]["template"]["spec"]
+        assert template_spec["containers"][0]["resources"] == expected, spec.worker_key
+        # The Agent Vault init container must keep matching the worker so the pod stays memory-bounded.
+        init_resources = [container["resources"] for container in template_spec.get("initContainers", [])]
+        assert init_resources == ([] if spec.state_scope_worker_key else [expected]), spec.worker_key
 
 
 def test_kubernetes_script_worker_uses_selected_bounded_resource_profile(tmp_path: Path) -> None:

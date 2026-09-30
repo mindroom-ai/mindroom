@@ -348,6 +348,7 @@ class KubernetesWorkerBackend:
         config.pop("resource_requests")
         config.pop("resource_limits")
         config.pop("tmp_size_limit")
+        config.pop("user_resources")
         return {
             "config": config,
             "owner": self.cleanup_locator,

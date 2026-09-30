@@ -383,6 +383,28 @@ def test_kubernetes_tmp_size_limit_changes_cache_identity_only_when_configured(t
     assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
 
 
+def test_kubernetes_user_resources_change_cache_identity_only_when_configured(tmp_path: Path) -> None:
+    """Unset per-user resources keep the existing identity; configured values extend and track it."""
+    env_name = "MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON"
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    empty = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, env_name: " "})
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, env_name: '{"@alice:example.org": {"limits": {"memory": "4Gi"}}}'},
+    )
+    changed = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, env_name: '{"@alice:example.org": {"limits": {"memory": "8Gi"}}}'},
+    )
+
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    configured_signature = kubernetes_backend_config_signature(configured, auth_token=None)
+    assert kubernetes_backend_config_signature(empty, auth_token=None) == base_signature
+    assert configured_signature[: len(base_signature)] == base_signature
+    assert len(configured_signature) == len(base_signature) + 1
+    assert kubernetes_backend_config_signature(changed, auth_token=None) != configured_signature
+
+
 @pytest.mark.parametrize(
     ("env_name", "changed_value"),
     [

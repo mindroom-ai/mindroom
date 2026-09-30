@@ -1361,13 +1361,18 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
     ) -> dict[str, object]:
-        resource_requests, resource_limits = self.config.resources_for_profile(resource_profile)
+        resolved_state_scope_worker_key = resolve_state_scope_worker_key(worker_key, state_scope_worker_key)
+        # Per-user overrides follow the owning scope, so a CLI turn gets its requester's resources.
+        resource_requests, resource_limits = self.config.resources_for_profile(
+            resource_profile,
+            worker_key=resolved_state_scope_worker_key,
+        )
         if self.config.tmp_size_limit is not None:
             # kubelet also counts /tmp against the pod's summed container ephemeral-storage
             # limits, and some clusters (GKE Autopilot) inject a 1 GiB default when unset.
             resource_requests["ephemeral-storage"] = self.config.tmp_size_limit
             resource_limits["ephemeral-storage"] = self.config.tmp_size_limit
-        owns_state_scope = resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key
+        owns_state_scope = resolved_state_scope_worker_key == worker_key
         include_agent_vault = self.config.agent_vault is not None and owns_state_scope
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         template_annotations = dict(self.config.extra_annotations)
