@@ -22,7 +22,7 @@ from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.tool_system.metadata import TOOL_METADATA
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator, Callable, Iterator
 
 
 @dataclass
@@ -201,6 +201,33 @@ class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
         self.disconnect_started.set()
         await asyncio.sleep(0.05)
         self.disconnected = True
+
+
+@dataclass
+class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose first start is cancelled as its connect succeeds, and whose cleanup then fails or sticks."""
+
+    instances: ClassVar[list[_CancelledStartFakeClaudeSDKClient]] = []
+    on_connected: ClassVar[list[Callable[[], object]]] = []
+    stuck_cleanup: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _CancelledStartFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        if self is type(self).instances[0]:
+            for callback in type(self).on_connected:
+                callback()
+
+    async def disconnect(self) -> None:
+        if self is type(self).instances[0]:
+            if type(self).stuck_cleanup is None:
+                msg = "disconnect failed"
+                raise RuntimeError(msg)
+            await type(self).stuck_cleanup.wait()
+        await super().disconnect()
 
 
 @dataclass
@@ -736,6 +763,61 @@ async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
         await start
 
     assert client.disconnected is True
+
+
+@pytest.fixture
+def cancelled_start_client(monkeypatch: pytest.MonkeyPatch) -> type[_CancelledStartFakeClaudeSDKClient]:
+    """Install the cancelled-start fake with fresh class state."""
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "instances", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "on_connected", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "stuck_cleanup", None)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _CancelledStartFakeClaudeSDKClient)
+    return _CancelledStartFakeClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_stays_cancelled_when_its_cleanup_fails(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+) -> None:
+    """A disconnect that raises while draining a cancelled start must not replace the cancellation."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+
+@pytest.mark.asyncio
+async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnect that never finishes holds a cancelled start, and the manager lock, only until the deadline."""
+    monkeypatch.setattr(claude_agent_module, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    stuck_cleanup = asyncio.Event()
+    cancelled_start_client.stuck_cleanup = stuck_cleanup
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    start = asyncio.create_task(tools.claude_start_session(session_label="first", run_context=run_context, agent=None))
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    try:
+        done, _pending = await asyncio.wait({start}, timeout=1)
+        assert start in done
+        assert start.cancelled()
+        second = await asyncio.wait_for(
+            tools.claude_start_session(session_label="second", run_context=run_context, agent=None),
+            timeout=1,
+        )
+        assert second.startswith("Started")
+    finally:
+        stuck_cleanup.set()
+        await asyncio.gather(start, return_exceptions=True)
 
 
 @pytest.mark.asyncio

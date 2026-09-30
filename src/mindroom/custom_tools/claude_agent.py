@@ -22,7 +22,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.logging_config import get_logger
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
@@ -36,6 +36,9 @@ _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
 _MAX_STDERR_LINES = 12
+_START_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+logger = get_logger(__name__)
 
 
 @runtime_checkable
@@ -257,9 +260,7 @@ class _ClaudeSessionManager:
             await asyncio.shield(connected)
         except BaseException:
             owner.cancel()
-            # Nothing tracks this session yet, so the caller drains the SDK's disconnect, even when cancelled again.
-            with suppress(asyncio.CancelledError):
-                await wait_for_future_until_complete(owner)
+            await _drain_failed_start(owner)
             if connected.done() and not connected.cancelled():
                 connected.exception()
             raise
@@ -274,6 +275,23 @@ class _ClaudeSessionManager:
     async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
         for session in sessions:
             await self._disconnect(session)
+
+
+async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
+    """Give the SDK a bounded chance to disconnect a start that nothing tracks yet, even when cancelled again.
+
+    The caller holds the session manager's lock and re-raises what interrupted the start, so a failing or stuck
+    disconnect is only logged.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _START_CLEANUP_TIMEOUT_SECONDS
+    while not owner.done() and (remaining := deadline - loop.time()) > 0:
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait({owner}, timeout=remaining)
+    if not owner.done():
+        logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
+    elif not owner.cancelled() and (error := owner.exception()) is not None:
+        logger.warning("Claude session cleanup failed", error=str(error))
 
 
 class ClaudeAgentTools(Toolkit):
