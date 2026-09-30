@@ -1502,6 +1502,52 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
         assert captured_calls[0][1]["credential_overrides"] == {"api_key": expected_key}
 
 
+@pytest.mark.parametrize("tool_name", ["openai", "unregistered_tool"])
+def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: Path, tool_name: str) -> None:
+    """Provider-key tools and unknown names keep the worker's own store, so no lease is sent back to it."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    manager = CredentialsManager(tmp_path / "credentials")
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert target.worker_key is not None
+    manager.for_worker(target.worker_key).save_credentials(tool_name, {"api_key": "worker-planted"})
+
+    execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url=None,
+            proxy_token=None,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+            lease_tool_credentials=False,
+        ),
+        payload={"tool_name": tool_name, "function_name": "run"},
+        credentials_manager=manager,
+        tool_name=tool_name,
+        function_name="run",
+        worker_target=target,
+        worker_handle=handle,
+        worker_manager=_TrackingWorkerManager(),
+        client_factory=_recording_client_class(captured_calls=captured_calls),
+        primary_built_service=functools.partial(
+            sandbox_proxy_module.primary_owns_tool_settings,
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+    assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
+
+
 def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
