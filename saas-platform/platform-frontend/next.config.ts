@@ -17,7 +17,8 @@ const securityHeaders = [
       "connect-src 'self' https: wss:",
       "frame-src 'self' https://js.stripe.com https://hooks.stripe.com",
       "form-action 'self'",
-      "media-src 'self'",
+      // The landing page's product film is a GitHub attachment, which redirects to GitHub's asset bucket.
+      "media-src 'self' https://github.com https://github-production-user-asset-6210df.s3.amazonaws.com",
       "worker-src 'self' blob:",
       'upgrade-insecure-requests',
       'report-uri /api/csp-report',
