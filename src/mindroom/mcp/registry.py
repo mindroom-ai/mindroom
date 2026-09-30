@@ -20,7 +20,7 @@ from mindroom.tool_system.catalog import (
     ToolMetadata,
     ToolStatus,
 )
-from mindroom.tool_system.registry_state import TOOL_REGISTRY, reconcile_dynamic_tool_state
+from mindroom.tool_system.registry_state import MCP_TOOL_FACTORY_MARKER, TOOL_REGISTRY, reconcile_dynamic_tool_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,7 +39,6 @@ logger = get_logger(__name__)
 
 _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
-_MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
 # MindRoomMCPToolkit declares these constructor args for every MCP tool; metadata
 # mirrors that contract even though credentials are used only by OAuth-backed servers.
 _MCP_MANAGED_INIT_ARGS = (
@@ -59,7 +58,7 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     if not tool_name.startswith(_MCP_TOOL_PREFIX):
         return None
     factory = TOOL_REGISTRY.get(tool_name)
-    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
+    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, MCP_TOOL_FACTORY_MARKER, False):
         return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
     return server_id or None
@@ -72,7 +71,7 @@ def _registered_mcp_tool_names() -> set[str]:
         *(
             tool_name
             for tool_name, factory in TOOL_REGISTRY.items()
-            if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
+            if getattr(factory, MCP_TOOL_FACTORY_MARKER, False)
         ),
     }
 
@@ -215,7 +214,7 @@ def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[]
         BoundMindRoomMCPToolkit.__name__ = f"MindRoomMCPToolkit_{server_id}"
         return BoundMindRoomMCPToolkit
 
-    setattr(factory, _MCP_TOOL_FACTORY_MARKER, True)
+    setattr(factory, MCP_TOOL_FACTORY_MARKER, True)
     return factory
 
 

@@ -5988,6 +5988,7 @@ expose = [
     "BUILTIN_TOOL_METADATA",
     "BUILTIN_TOOL_REGISTRY",
     "PLUGIN_MODULE_PREFIX",
+    "MCP_TOOL_FACTORY_MARKER",
     "PLUGIN_REGISTRATION_SCOPE",
     "TOOL_REGISTRY",
     "capture_tool_registry_snapshot",
