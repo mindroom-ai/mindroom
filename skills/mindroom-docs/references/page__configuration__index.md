@@ -1064,6 +1064,13 @@ Credential-bearing fields such as tokens, cookies, passwords, API keys, and auth
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
 Leave the flag disabled unless you are actively debugging.
 
+To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERVAL_SECONDS` to a number of seconds in the process environment or the config-adjacent `.env`.
+The primary then logs one `heap_type_probe` event per interval, starting one interval after startup, with the number of objects tracked by Python's garbage collector, the 25 most common object types and their counts, resident memory (`rss_bytes`, where `/proc` is available), the walk duration, and the handled-turn ledger's in-memory size.
+Compare successive events to see which object types grow along with memory.
+Only garbage-collected container objects are counted; strings, bytes, and numbers are not, and the event carries no object contents.
+Each walk pauses the event loop for about as long as a full garbage-collection pass and briefly allocates one pointer per tracked object, so prefer intervals of several minutes or more on large processes.
+Unset or `0` disables the probe, which is the default; any other value below `60` fails startup.
+
 ## Built-In Prompt Overrides
 
 MindRoom keeps built-in prompt defaults as uppercase globals in `src/mindroom/prompts.py`.

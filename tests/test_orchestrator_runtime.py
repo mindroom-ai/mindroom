@@ -52,6 +52,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
     ConfigReloadedContext,
     HookRegistry,
@@ -1481,6 +1482,48 @@ class TestAgentBot(AgentBotTestBase):
 
         assert heartbeat_paths == [runtime_paths]
         assert heartbeat_cancelled.is_set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("interval", [None, "60"])
+    async def test_orchestrator_main_starts_opt_in_heap_probe_and_cancels_it_at_shutdown(
+        self,
+        tmp_path: Path,
+        interval: str | None,
+    ) -> None:
+        """Only an opted-in primary runs the heap probe, and runtime cleanup cancels it."""
+        reset_runtime_state()
+        process_env = {} if interval is None else {"MINDROOM_HEAP_PROBE_INTERVAL_SECONDS": interval}
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=process_env,
+        )
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after auxiliary start"))
+        mock_orchestrator.stop = AsyncMock()
+        started_probes: list[asyncio.Task[None] | None] = []
+
+        def _start_probe(paths: RuntimePaths) -> asyncio.Task[None] | None:
+            probe = start_heap_type_probe(paths)
+            started_probes.append(probe)
+            return probe
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
+            patch("mindroom.orchestrator.start_heap_type_probe", side_effect=_start_probe),
+            pytest.raises(RuntimeError, match="stop after auxiliary start"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        [probe] = started_probes
+        if interval is None:
+            assert probe is None
+        else:
+            assert probe is not None
+            assert probe.cancelled()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_cleanup_survives_failed_heartbeat(self, tmp_path: Path) -> None:
