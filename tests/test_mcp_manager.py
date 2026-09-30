@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import hashlib
 import json
 import threading
@@ -766,6 +767,37 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
     assert [tool.remote_name for tool in catalog.tools] == ["echo"]
     assert result.content == "pong"
     assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
+
+
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_mcp_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_requester_mcp_session_opened_during_a_turn_does_not_inherit_the_turn_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A lazily opened requester session outlives its turn, whose contextvars hold the turn's Agent and tools."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    token = _TURN_OWNER.set(object())
+    try:
+        await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=worker_target)
+    finally:
+        _TURN_OWNER.reset(token)
+
+    session_task = _FakeClientSession.sessions[-1].entered_task
+    assert session_task is not None
+    assert not session_task.done()
+    assert _TURN_OWNER not in session_task.get_context()
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio

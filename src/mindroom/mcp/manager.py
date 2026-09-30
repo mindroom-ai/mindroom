@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
@@ -1425,7 +1426,8 @@ class MCPServerManager:
             finally:
                 await exit_stack.aclose()
 
-        owner_task = asyncio.create_task(session_owner(), name=f"mcp_session:{state.server_id}")
+        # The session outlives the tool call that opens it, and a turn's contextvars hold its Agent and tools.
+        owner_task = asyncio.create_task(session_owner(), name=f"mcp_session:{state.server_id}", context=Context())
 
         try:
             session, catalog = await asyncio.wait_for(
@@ -1585,7 +1587,12 @@ class MCPServerManager:
                     if state.stale and not cancelled:
                         self._schedule_refresh_task(state)
 
-        state.refresh_task = asyncio.create_task(refresh(), name=f"mcp_catalog_refresh:{state.server_id}")
+        # A retry can be scheduled from inside a turn and must not keep that turn alive while it waits.
+        state.refresh_task = asyncio.create_task(
+            refresh(),
+            name=f"mcp_catalog_refresh:{state.server_id}",
+            context=Context(),
+        )
 
     async def _drain_retired_states(self, states: tuple[MCPServerState, ...]) -> None:
         """Close atomically detached config generations outside the lifecycle mutex."""
