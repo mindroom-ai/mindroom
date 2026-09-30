@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import signal
 import time
 from collections.abc import Awaitable, Callable
@@ -200,6 +201,11 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
+_GC_TUNING_ENV = "MINDROOM_GC_TUNING"
+# Python 3.13 collects the young generation every 2,000 net new containers, so on a busy primary an
+# object that outlives a fraction of a second is promoted toward full collections. The middle
+# threshold stays at 10: a middle pass walks up to ten young generations, so its pause grows with both.
+_GC_YOUNG_THRESHOLD = 50_000
 
 
 async def _gather_periodic_shutdown_phase(
@@ -3047,6 +3053,22 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
+async def _tune_gc_once_ready(runtime_ready: asyncio.Event) -> None:
+    """Keep the startup heap out of later full collections once the runtime first reports ready.
+
+    A full collection walks every tracked object while holding the GIL, so its loop pause grows with the heap.
+    Freezing moves everything that survives startup out of later collections. CPython starts a full
+    collection once objects promoted since the last one reach a quarter of the unfrozen old generation,
+    so freezing alone would make full collections more frequent; the larger young threshold lets
+    short-lived turn objects die before promotion instead.
+    """
+    await runtime_ready.wait()
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(_GC_YOUNG_THRESHOLD)
+    logger.info("gc_startup_heap_frozen", frozen_objects=gc.get_freeze_count(), thresholds=list(gc.get_threshold()))
+
+
 def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
@@ -3080,6 +3102,8 @@ def _start_auxiliary_tasks(
     tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
     if heap_probe is not None:
         tasks.append(heap_probe)
+    if runtime_paths.env_flag(_GC_TUNING_ENV, default=True):
+        tasks.append(create_background_task(_tune_gc_once_ready(orchestrator._runtime_ready_event), name="gc_tuning"))
     return tasks
 
 
