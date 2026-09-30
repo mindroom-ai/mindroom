@@ -203,6 +203,9 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 5_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
+# Startup recovery prunes the handled-turn ledger once. A running bot repeats
+# that pass this often so its in-memory records stay near the retention bound.
+_HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
 _SYNC_FILTER: dict[str, object] = {
@@ -359,6 +362,7 @@ class AgentBot:
     _delivery_recovery_wake: asyncio.Event
     _delivery_projection_progress: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
+    _next_handled_turn_cleanup_at: float
     _ingestion_session: DurableSync | None
 
     # Shared runtime state and extracted collaborators
@@ -449,6 +453,7 @@ class AgentBot:
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_projection_progress = asyncio.Event()
         self._delivery_recovery_task = None
+        self._next_handled_turn_cleanup_at = time.monotonic() + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS
         self._ingestion_session = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_join_lock = asyncio.Lock()
@@ -1604,6 +1609,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         await self._refresh_agent_reply_memberships_if_needed()
         self._schedule_delivery_recovery()
+        self._schedule_handled_turn_cleanup()
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
         self._personal_room_lifecycle.schedule_reconciliation()
@@ -1949,8 +1955,26 @@ class AgentBot:
         """Drain fleet-dependent turn replay after the responder startup pass."""
         self.release_pending_turn_journal_replay()
         await self._journal_dispatcher.drain_once()
+        await self._cleanup_handled_turns()
+
+    async def _cleanup_handled_turns(self) -> None:
+        """Apply handled-turn retention to every source dispatch no longer owns."""
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
+        )
+
+    def _schedule_handled_turn_cleanup(self) -> None:
+        """Start one retention pass per interval so records do not wait for a restart."""
+        now = time.monotonic()
+        if self._sync_shutting_down or now < self._next_handled_turn_cleanup_at:
+            return
+        self._next_handled_turn_cleanup_at = now + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS
+        create_background_task(
+            self._cleanup_handled_turns(),
+            name=f"handled_turn_cleanup_{self.agent_name}",
+            owner=self._runtime_view,
+            # The pass covers every room's records, so it must not inherit the sync frame's context.
+            context=Context(),
         )
 
     def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:

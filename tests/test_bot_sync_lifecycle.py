@@ -9,6 +9,7 @@ only ever happened to share a sync callback with.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -23,7 +24,8 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_AGENT_STARTED, HookRegistry, hook
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, ShutdownBudget
+from mindroom.turn_record import TurnRecord
 from tests.journal_helpers import admit_dispatch_event
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
@@ -285,6 +287,65 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await bot._on_redaction(room, redaction_event)
 
         mark_source_redacted.assert_called_once_with("$source:localhost", room_id="!test:localhost")
+
+    @pytest.mark.asyncio
+    async def test_running_bot_prunes_stale_handled_turns_without_a_restart(self, bot: AgentBot) -> None:
+        """Ledger retention must keep applying while sync runs, not only at startup."""
+        await bot._turn_store.warm()
+        ledger = bot._turn_store._ledger
+        now = time.time()
+        await ledger.record_handled_turn(TurnRecord.create(["$old:localhost"], timestamp=now - 40 * 24 * 60 * 60))
+        await ledger.record_handled_turn(TurnRecord.create(["$recent:localhost"], timestamp=now))
+
+        async def publish_frame() -> None:
+            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        with (
+            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
+            patch.object(bot, "_schedule_delivery_recovery"),
+        ):
+            await publish_frame()
+            assert bot._turn_store.get_turn_record("$old:localhost") is not None
+
+            bot._next_handled_turn_cleanup_at = 0.0
+            await publish_frame()
+
+        assert bot._turn_store.get_turn_record("$old:localhost") is None
+        assert bot._turn_store.get_turn_record("$recent:localhost") is not None
+
+    @pytest.mark.asyncio
+    async def test_handled_turn_cleanup_stops_at_sync_shutdown(self, bot: AgentBot) -> None:
+        """Shutdown cancels a running retention pass and schedules no further ones."""
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_cleanup(**_kwargs: object) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        with (
+            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
+            patch.object(bot, "_schedule_delivery_recovery"),
+            patch.object(bot._turn_store, "cleanup", side_effect=blocked_cleanup) as cleanup,
+        ):
+            bot._next_handled_turn_cleanup_at = 0.0
+            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+            bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+            await asyncio.wait_for(bot.prepare_for_sync_shutdown(), timeout=2.0)
+            assert cancelled.is_set()
+
+            bot._next_handled_turn_cleanup_at = 0.0
+            await bot._run_sync_response_side_effects(first_sync_response=False)
+            assert await wait_for_background_tasks(timeout=0.2, owner=bot._runtime_view)
+
+        assert cleanup.await_count == 1
 
     @pytest.mark.asyncio
     async def test_wait_for_background_tasks_owner_scope_isolated(self, bot: AgentBot) -> None:
