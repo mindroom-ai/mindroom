@@ -11,11 +11,13 @@ from agno.utils.log import log_warning
 from openai import APIStatusError
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
     ResponseCreatedEvent,
     ResponseErrorEvent,
     ResponseFailedEvent,
     ResponseIncompleteEvent,
     ResponseInProgressEvent,
+    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
 )
 
@@ -77,7 +79,8 @@ _RESPONSES_FILE_MIME_TYPES = {
 # Remove when: The pinned Agno retry path proves that restarted streams cannot
 # reuse caller-visible partial assistant or tool state.
 # Coverage: tests/test_openai_responses_stream.py::test_agent_does_not_retry_incomplete_stream;
-# tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors.
+# tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors;
+# tests/test_responses_stream_retry.py::test_transient_failure_retries_before_visible_output.
 
 # AGNO_COMPAT: Responses continuation depends on hard-coded model names.
 # Reason: Agno 3.0.9 gates Responses continuation behind a hard-coded model-name
@@ -109,6 +112,23 @@ _RESPONSES_FILE_MIME_TYPES = {
 # on stream failure or cancellation without counting successful streams twice.
 # Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_stream_failure;
 # tests/test_openai_responses_stream.py::test_codex_blocking_usage_is_not_counted_twice.
+
+
+def _exposes_no_output(stream_event: ResponseStreamEvent) -> bool:
+    """Return whether an event only frames output that a replay regenerates unseen.
+
+    Reasoning models open and close reasoning items long before any text, so
+    treating those boundaries as output would make every mid-thinking provider
+    failure final. Tool calls and hosted tools stay excluded: they may already
+    have been started or executed.
+    """
+    if isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent)):
+        return not stream_event.response.output
+    if isinstance(stream_event, ResponseOutputItemAddedEvent):
+        return stream_event.item.type in {"message", "reasoning"}
+    if isinstance(stream_event, ResponseOutputItemDoneEvent):
+        return stream_event.item.type == "reasoning"
+    return isinstance(stream_event, ResponseContentPartAddedEvent)
 
 
 def _stream_error_types(error: BaseException) -> str:
@@ -413,9 +433,8 @@ class OpenAIResponsesProviderCompat:
         if response_items:
             tool_use[_RESPONSE_ITEMS_BUFFER_KEY] = response_items
         if (
-            isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent))
-            and not stream_event.response.output
-            and not tool_use
+            _exposes_no_output(stream_event)
+            and not any(key != _RESPONSE_ITEMS_BUFFER_KEY for key in tool_use)
             and not any(
                 value for name, value in vars(model_response).items() if name not in {"created_at", "event", "role"}
             )

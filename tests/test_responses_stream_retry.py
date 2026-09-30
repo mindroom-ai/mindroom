@@ -225,3 +225,56 @@ async def test_native_failure_after_output_cannot_replay(
     assert "".join(chunk.content or "" for chunk in chunks) == "Partial"
     assert len(provider.requests) == 1
     assert not retry_delays
+
+
+_REASONING = {"type": "reasoning", "id": "rs_think", "summary": []}
+_MESSAGE = {"type": "message", "id": "msg_answer", "role": "assistant", "status": "in_progress", "content": []}
+_REASONING_STARTED = _created() + _event("response.output_item.added", output_index=0, item=_REASONING)
+_REASONING_DONE = _REASONING_STARTED + _event(
+    "response.output_item.done",
+    output_index=0,
+    item={**_REASONING, "encrypted_content": "opaque"},
+)
+_MESSAGE_STARTED = (
+    _REASONING_DONE
+    + _event("response.output_item.added", output_index=1, item=_MESSAGE)
+    + _event(
+        "response.content_part.added",
+        item_id="msg_answer",
+        output_index=1,
+        content_index=0,
+        part={"type": "output_text", "text": "", "annotations": []},
+    )
+)
+_PROXY_SERVER_ERROR = (
+    'data: {"error": {"message": "litellm.APIError: An error occurred while processing the request.", '
+    '"type": null, "param": null, "code": "500"}}\n\n'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store", [True, False], ids=["stored", "stateless"])
+@pytest.mark.parametrize("failure", [_PROXY_SERVER_ERROR, _failure("error")], ids=["proxy-error", "native-error"])
+@pytest.mark.parametrize(
+    "prefix",
+    [_REASONING_STARTED, _REASONING_DONE, _MESSAGE_STARTED],
+    ids=["reasoning-started", "reasoning-done", "message-started"],
+)
+async def test_transient_failure_retries_before_visible_output(
+    prefix: str,
+    failure: str,
+    *,
+    store: bool,
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
+    """Reasoning and empty message boundaries expose nothing a replay could duplicate."""
+    provider = _Provider([prefix + failure, _answer("Recovered")])
+    async with _model(provider, tmp_path, api="responses") as model:
+        model.store = store
+        chunks = [chunk async for chunk in model.ainvoke_stream([], Message(role="assistant"))]
+
+    assert "".join(chunk.content or "" for chunk in chunks) == "Recovered"
+    assert len(provider.requests) == 2
+    assert provider.requests[0] == provider.requests[1]
+    assert len(retry_delays) == 1
