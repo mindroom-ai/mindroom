@@ -21,6 +21,7 @@ from mindroom.redaction import (
     redact_sensitive_data,
     redact_sensitive_text,
 )
+from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -132,13 +133,10 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
 def test_url_redaction_does_not_rescan_every_suffix_of_non_url_text(run: str) -> None:
     """A long scheme-like run before a real URL must not occupy the GIL for seconds."""
     value = f"{run} https://example.test/path?token=synthetic-secret"
-    # Exclude time when a loaded runner deschedules this thread.
-    start = time.thread_time()
+    with cpu_budget(1.0):
+        redacted = redact_sensitive_data({"content": value})
 
-    assert redact_sensitive_data({"content": value}) == {
-        "content": f"{run} https://example.test/path?token={REDACTED}",
-    }
-    assert time.thread_time() - start < 1.0
+    assert redacted == {"content": f"{run} https://example.test/path?token={REDACTED}"}
 
 
 def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:

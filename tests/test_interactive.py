@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from time import thread_time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -11,6 +10,7 @@ import pytest
 
 from mindroom import interactive
 from tests.conftest import make_matrix_client_mock
+from tests.cpu_budget_helpers import cpu_budget
 
 
 def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -24,10 +24,8 @@ def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest
     monkeypatch.setattr(interactive.re, "fullmatch", guarded_fullmatch)
     for line in (" " * 20_000, "```" + " " * 20_000):
         text = f"Before.\n{line}\n```interactive\n{{"
-        # Only this thread's CPU counts, so other threads busy in the same test worker cannot exceed the budget.
-        started = thread_time()
-        shown = interactive.hide_unfinished_interactive(text)
-        assert thread_time() - started < 0.5
+        with cpu_budget(0.5):
+            shown = interactive.hide_unfinished_interactive(text)
         assert shown == ("Before." if not line.startswith("`") else text)
 
 

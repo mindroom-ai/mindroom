@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from time import thread_time
 from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
@@ -18,6 +17,7 @@ from mindroom.matrix import mentions as mentions_module
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
+from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
@@ -31,19 +31,16 @@ def test_bulk_mentions_bound_overlap_and_deduplication_work() -> None:
         ([*distinct_user_ids, *distinct_user_ids[:2]], distinct_user_ids),
     ):
         text = " ".join(user_ids) + " "
-        # Only this thread's CPU counts, so other threads busy in the same test worker cannot exceed the budget.
-        started = thread_time()
-        tokens = mentions_module._scan_mention_tokens(text)
-        assert thread_time() - started < 0.5
+        with cpu_budget(0.5):
+            tokens = mentions_module._scan_mention_tokens(text)
         assert [token.explicit_user_id for token in tokens] == user_ids
 
         replacements = [
             mentions_module._MentionReplacement(start=0, end=0, plain_text="", markdown_text="", user_id=user_id)
             for user_id in user_ids
         ]
-        started = thread_time()
-        mentioned_user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
-        assert thread_time() - started < 0.5
+        with cpu_budget(0.5):
+            mentioned_user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
         assert mentioned_user_ids == expected_user_ids
 
 
