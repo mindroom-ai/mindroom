@@ -10,6 +10,11 @@ If STT is unavailable, disabled, or fails after media registration succeeds, the
 If media download itself fails, dispatch continues with that text-only fallback and no attachment metadata.
 If optional transcript cleanup fails or times out, MindRoom uses the recognized transcript without additional normalization.
 
+<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/8abba58e-790f-4c80-a57d-62ab683ea18c#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/7bf1bb2f-31c7-4ef4-ac07-4ec1b22b2da1#t=0.1" type="video/mp4">
+</video>
+
 ## Overview
 
 When a voice message is received:

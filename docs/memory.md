@@ -24,6 +24,11 @@ OpenClaw compatibility uses this same backend selection; there is no separate Op
 Optional:
 - `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
 
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/75a32c85-7528-4b72-b268-0de8ec17f794#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c4b6f6e3-03a9-40fd-808b-0d18abdaf263#t=0.1" type="video/mp4">
+</video>
+
 ## Memory Scopes
 
 | Scope | User ID Format | Description |

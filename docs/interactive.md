@@ -7,6 +7,11 @@ icon: lucide/mouse-pointer-click
 MindRoom agents can present clickable multiple-choice questions to users using Matrix reactions.
 When an agent's response contains a specially formatted JSON block, MindRoom automatically renders it as a numbered list with emoji reactions that users can click to respond.
 
+<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/14da1dfa-9892-4ce8-a2ed-ad67673ea4b5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9cef359e-15d0-4f0a-810a-ec34811cf561#t=0.1" type="video/mp4">
+</video>
+
 ## How It Works
 
 1. An agent includes an `interactive` code block in its response.

@@ -6,6 +6,11 @@ icon: lucide/bot
 
 AI agents that live in Matrix and work everywhere via bridges.
 
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
+</video>
+
 ## What is MindRoom?
 
 MindRoom is an AI agent orchestration system with Matrix integration. It provides:

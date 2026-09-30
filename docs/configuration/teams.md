@@ -6,6 +6,11 @@ icon: lucide/users
 
 Teams allow multiple agents to collaborate on tasks. MindRoom supports two collaboration modes.
 
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/b6ea7dff-8542-409f-823a-0cd3590a9555#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/3c28159d-4d3e-4e47-bc5e-07e4e0c5eed1#t=0.1" type="video/mp4">
+</video>
+
 ## Team Modes
 
 ### Coordinate Mode

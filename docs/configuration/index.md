@@ -354,6 +354,11 @@ See [MCP](../mcp.md) for transport-specific config, tool naming, examples, and a
 
 ## Tool Approval
 
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
+</video>
+
 Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
 Rules are evaluated in order and the first matching rule wins.
 `match` is a case-sensitive glob over exposed function names, not toolkit identifiers.

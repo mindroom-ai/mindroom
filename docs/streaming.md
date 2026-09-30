@@ -7,6 +7,11 @@ icon: lucide/radio
 MindRoom streams agent responses to Matrix by progressively editing a single message.
 Instead of waiting for the full response, users see text appear in real time as the model generates it.
 
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
+</video>
+
 ## How It Works
 
 1. Agent starts generating a response.

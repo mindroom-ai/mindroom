@@ -31,6 +31,11 @@ matrix_message(action="react", event_id="$message", message="✅")
 
 ## Agent conversations
 
+<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/845b92f1-fa94-4aab-af0c-381d3cab5fb1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/b9b9cb8d-e334-4319-8b33-d6a885d11580#t=0.1" type="video/mp4">
+</video>
+
 Discover available recipients with `matrix_room(action="agents")`.
 Each result includes `name`, `matrix_user_id`, `description`, and `thread_mode`.
 Pass the `name` as `recipient`; no manual Matrix mention or dispatch flag is needed.
