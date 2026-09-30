@@ -5185,6 +5185,9 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
 
     main = template_spec["containers"][0]
+    # Without its own limits the init container would leave the pod without a memory limit.
+    assert mint["resources"] == main["resources"]
+    assert "memory" in mint["resources"]["limits"]
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}

@@ -1019,7 +1019,7 @@ class KubernetesResourceManager:
             return None
         return descriptive_worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
 
-    def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
+    def _agent_vault_init_container(self, *, worker_key: str, resources: dict[str, object]) -> dict[str, object]:
         cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
         vault = self._agent_vault_vault_name(worker_key)
         if cfg is None or vault is None:
@@ -1048,6 +1048,10 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             ],
+            # kubelet sets no pod-level memory limit unless every container, init containers
+            # included, declares one, and sandboxed runtimes such as gVisor enforce memory only
+            # at that pod level, so an init container without limits leaves the worker unbounded.
+            "resources": resources,
             "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         }
 
@@ -1454,7 +1458,12 @@ class KubernetesResourceManager:
             field_name="extra_containers",
         )
         if include_agent_vault:
-            template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
+            template_spec["initContainers"] = [
+                self._agent_vault_init_container(
+                    worker_key=worker_key,
+                    resources={"requests": dict(resource_requests), "limits": dict(resource_limits)},
+                ),
+            ]
         if self.config.runtime_class_name is not None:
             template_spec["runtimeClassName"] = self.config.runtime_class_name
         node_name = self._worker_node_name_or_none()
