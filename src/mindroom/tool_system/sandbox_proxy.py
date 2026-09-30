@@ -950,7 +950,6 @@ def _call_proxy_sync(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
-    worker_tools_override: list[str] | None = None,
 ) -> object:
     from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
 
@@ -1012,6 +1011,13 @@ def _call_proxy_sync(
         )
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
+        runtime_config = manager_context.runtime_config
+        agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        authored_worker_tools = (
+            runtime_config.get_agent_worker_tools(agent_name)
+            if runtime_config is not None and agent_name in runtime_config.agents
+            else None
+        )
         result = execute_worker_proxy_request(
             config=_worker_proxy_client_config(proxy_config, runtime_paths),
             payload=payload,
@@ -1022,11 +1028,11 @@ def _call_proxy_sync(
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             client_factory=httpx.Client,
-            # Leased settings of tools the primary builds live where the dashboard saves them.
+            # Leased settings of other tools the primary builds live where the dashboard saves them.
             primary_built_service=functools.partial(
                 primary_owns_tool_settings,
                 runtime_paths=runtime_paths,
-                worker_tools_override=worker_tools_override,
+                worker_tools_override=authored_worker_tools,
             ),
         )
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -1061,7 +1067,6 @@ def _wrap_sync_function(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
-    worker_tools_override: list[str] | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
@@ -1088,7 +1093,6 @@ def _wrap_sync_function(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
-            worker_tools_override=worker_tools_override,
         )
 
     declare_tool_schema_source(proxy_entrypoint, entrypoint)
@@ -1110,7 +1114,6 @@ def _wrap_async_function(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
-    worker_tools_override: list[str] | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
@@ -1138,7 +1141,6 @@ def _wrap_async_function(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
-            worker_tools_override=worker_tools_override,
         )
         return await _run_in_worker_proxy_executor(call)
 
@@ -1194,7 +1196,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
             primary_placement=primary_placement,
-            worker_tools_override=worker_tools_override,
         )
         for function_name, function in original_functions.items()
     }
@@ -1212,7 +1213,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
             primary_placement=primary_placement,
-            worker_tools_override=worker_tools_override,
         )
         for function_name, function in original_async_functions.items()
     }

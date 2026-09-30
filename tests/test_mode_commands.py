@@ -21,6 +21,7 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock, unwrap_extracted_collaborator
@@ -307,11 +308,13 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         {"exclude_tools": ["kill_shell_command"]},
     ],
 )
+@pytest.mark.parametrize("worker_tools", [None, []])
 def test_selection_checks_effective_shell_permissions(
     tmp_path: Path,
     settings_scope: str,
     restore: bool,
     restriction: dict[str, object],
+    worker_tools: list[str] | None,
 ) -> None:
 
     context = _runtime_context(tmp_path)
@@ -326,6 +329,7 @@ def test_selection_checks_effective_shell_permissions(
         memory_backend="file",
         tools=[{"shell": restored}] if restore else ["shell"],
         worker_scope=None if settings_scope == "global" else "user",
+        worker_tools=worker_tools,
     )
     context.config.defaults.worker_grantable_credentials = (
         ["shell"] if settings_scope in {"inherited_allowed", "scoped_override"} else []
@@ -343,11 +347,14 @@ def test_selection_checks_effective_shell_permissions(
         execution_identity=identity,
         runtime_paths=paths,
     )
+    # Save scoped settings where the dashboard would for this agent's routing.
+    primary_built = primary_owns_tool_settings("shell", runtime_paths=paths, worker_tools_override=worker_tools)
     save_scoped_credentials(
         "shell",
         restriction,
         credentials_manager=get_runtime_credentials_manager(paths),
         worker_target=target if settings_scope == "scoped" else None,
+        primary_built_tool=primary_built,
     )
     if settings_scope == "scoped_override":
         save_scoped_credentials(
@@ -355,6 +362,7 @@ def test_selection_checks_effective_shell_permissions(
             restored,
             credentials_manager=get_runtime_credentials_manager(paths),
             worker_target=target,
+            primary_built_tool=primary_built,
         )
     set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
     prior_choice = (storage.state_root / "agent_modes.json").read_bytes()

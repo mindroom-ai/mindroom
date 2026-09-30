@@ -1284,23 +1284,26 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     assert execute_payload["lease_id"] == "lease-123"
 
 
-def test_proxy_leases_primary_built_service_settings_from_the_primary_store(
+@pytest.mark.parametrize(("leased_service", "expected_token"), [("github", "primary"), ("google_bigquery", "worker")])
+def test_proxy_leases_service_settings_from_the_store_the_dashboard_uses(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    leased_service: str,
+    expected_token: str,
 ) -> None:
-    """A leased service of a tool the primary builds comes from the store the dashboard saves it to."""
+    """A leased service follows its own routing: primary-built tools from primary stores, routed ones from the worker."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
         execution_mode="all",
-        credential_policy={"calculator.add": ("github",)},
+        credential_policy={"calculator.add": (leased_service,)},
     )
     manager = CredentialsManager(tmp_path / "credentials")
     target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
     assert target.worker_key is not None
-    manager.for_primary_runtime_agent_scope("alpha").save_credentials("github", {"access_token": "primary-token"})
-    manager.for_worker(target.worker_key).save_credentials("github", {"access_token": "worker-token"})
+    manager.for_primary_runtime_agent_scope("alpha").save_credentials(leased_service, {"access_token": "primary"})
+    manager.for_worker(target.worker_key).save_credentials(leased_service, {"access_token": "worker"})
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -1313,14 +1316,21 @@ def test_proxy_leases_primary_built_service_settings_from_the_primary_store(
         ),
     )
 
-    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=manager, worker_target=target)
+    # Construction passes the agent's resolved worker tools; leases must still route by the authored setting.
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        credentials_manager=manager,
+        worker_tools_override=["calculator"],
+        worker_target=target,
+    )
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     assert entrypoint(1, 2) == "proxied"
 
     lease_url, lease_payload = captured_calls[0]
     assert lease_url.endswith("/leases")
-    assert lease_payload["credential_overrides"] == {"access_token": "primary-token"}
+    assert lease_payload["credential_overrides"] == {"access_token": expected_token}
 
 
 @pytest.mark.parametrize(

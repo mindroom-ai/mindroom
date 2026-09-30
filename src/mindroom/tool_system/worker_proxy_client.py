@@ -372,7 +372,10 @@ def _collect_credential_overrides(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
-            primary_built_tool=primary_built_service is not None and primary_built_service(service),
+            # The called tool runs in the worker, so only other leased services can be primary-owned.
+            primary_built_tool=service != tool_name
+            and primary_built_service is not None
+            and primary_built_service(service),
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))
