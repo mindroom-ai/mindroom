@@ -807,6 +807,11 @@ def _build_tool_instance(
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
         worker_target=worker_target,
+        authored_worker_tools=(
+            runtime_config.get_agent_worker_tools(routing_agent_name)
+            if runtime_config is not None and routing_agent_name in runtime_config.agents
+            else None
+        ),
     )
 
 

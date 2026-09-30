@@ -1284,11 +1284,19 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     assert execute_payload["lease_id"] == "lease-123"
 
 
-@pytest.mark.parametrize(("leased_service", "expected_token"), [("github", "primary"), ("google_bigquery", "worker")])
+@pytest.mark.parametrize(
+    ("leased_service", "authored_worker_tools", "expected_token"),
+    [
+        ("github", None, "primary"),
+        ("google_bigquery", None, "worker"),
+        ("google_bigquery", ["calculator"], "primary"),
+    ],
+)
 def test_proxy_leases_service_settings_from_the_store_the_dashboard_uses(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     leased_service: str,
+    authored_worker_tools: list[str] | None,
     expected_token: str,
 ) -> None:
     """A leased service follows its own routing: primary-built tools from primary stores, routed ones from the worker."""
@@ -1321,6 +1329,10 @@ def test_proxy_leases_service_settings_from_the_store_the_dashboard_uses(
         "calculator",
         runtime_paths,
         credentials_manager=manager,
+        runtime_config=Config(
+            agents={"alpha": AgentConfig(display_name="Alpha", worker_tools=authored_worker_tools)},
+            models={},
+        ),
         worker_tools_override=["calculator"],
         worker_target=target,
     )
