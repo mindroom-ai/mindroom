@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 from animation import animated_document
 from app_icons import app_icon_document
-from artwork import SVG, XLINK, Network, build_document, group, polygon
+from artwork import SVG, XLINK, Network, build_document, group, open_frame_under_cube, polygon
 from geometry import joined_polygons, subtract
 from lxml import etree
 from optimize import compact_xml, optimize_document
@@ -197,6 +197,9 @@ def generate() -> dict[str, bytes]:
     outputs["logo-transparent.svg"] = serialize(transparent)
     outputs["logo-transparent.png"] = render(transparent)
     outputs["logo-mark.svg"] = framed_mark(outputs["logo-transparent.svg"])
+    movable_cube = deepcopy(transparent)
+    open_frame_under_cube(movable_cube)
+    outputs["logo-mark-movable-cube.svg"] = framed_mark(serialize(movable_cube))
     for appearance in ("light", "dark"):
         outputs[f"app-icon-{appearance}.svg"] = serialize(app_icon_document(transparent, dark=appearance == "dark"))
     animated = animated_document(root)

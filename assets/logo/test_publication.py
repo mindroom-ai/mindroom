@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from artwork import SVG
 from lxml import etree
 from shading import pixels, render
 
@@ -46,3 +47,27 @@ def test_framed_mark_only_removes_empty_canvas(name: str) -> None:
     mark.set("width", "1024")
     mark.set("height", "1024")
     assert np.array_equal(pixels(render(mark)), original)
+
+
+def test_movable_cube_mark_opens_only_the_frame_under_the_cube() -> None:
+    """The movable-cube mark differs from the mark only by an opening where the cube sits."""
+    mark = etree.parse(str(ROOT / "logo-mark.svg")).getroot()
+    movable = etree.parse(str(ROOT / "logo-mark-movable-cube.svg")).getroot()
+    frame = f".//{SVG}path[@id='structural-frame']"
+    assert movable.find(frame).get("fill-rule") == "evenodd"
+    for document in (mark, movable):
+        cube = document.find(f".//{SVG}g[@id='central-cube']")
+        cube.getparent().remove(cube)
+    # With the cube moved away, the page shows through the opening instead of the frame's fill.
+    left, top, width, _ = map(int, mark.get("viewBox").split())
+    x, y = 512 - left, 454 - top
+    closed = pixels(render(mark, width))[y - 40 : y + 40, x - 40 : x + 40, 3]
+    opened = pixels(render(movable, width))[y - 40 : y + 40, x - 40 : x + 40, 3]
+    assert (closed == 255).all()
+    assert (opened == 0).all()
+    # The frame gains one subpath, and everything else, including the viewport and paint, is unchanged.
+    opened_frame, closed_frame = movable.find(frame), mark.find(frame)
+    assert opened_frame.get("d").startswith(closed_frame.get("d") + " M ")
+    opened_frame.set("d", closed_frame.get("d"))
+    del opened_frame.attrib["fill-rule"]
+    assert etree.tostring(movable) == etree.tostring(mark)

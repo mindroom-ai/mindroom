@@ -14,6 +14,7 @@ from PIL import Image
         "logo",
         "logo-transparent",
         "logo-mark",
+        "logo-mark-movable-cube",
         "logo-mark-animated",
         "logo-animated",
         "logo-animated-transparent",

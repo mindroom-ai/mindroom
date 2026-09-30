@@ -15,6 +15,17 @@ from lxml import etree
 
 SVG = "{http://www.w3.org/2000/svg}"
 XLINK = "{http://www.w3.org/1999/xlink}"
+# The central cube's outline clips its highlights and shapes the frame opening behind it.
+CUBE_SILHOUETTE: list[Point] = [
+    (512.0, 265.0),
+    (666.0, 361.0),
+    (666.0, 546.0),
+    (512.0, 643.0),
+    (358.0, 546.0),
+    (358.0, 361.0),
+]
+# The opening is inset toward the cube's center, so the cube still overlaps the frame's edge.
+CUBE_OPENING_SCALE = 0.98
 
 
 @dataclass
@@ -273,8 +284,20 @@ def build_document() -> tuple[etree._Element, list[Network]]:
         *chain("frame-front-rim", "left front right", 1.6),
         Edge("frame-center", "front", "bottom", 4),
     ]
-    center_boundary = [(512.0, 265.0), (666.0, 361.0), (666.0, 546.0), (512.0, 643.0), (358.0, 546.0), (358.0, 361.0)]
     networks.append(
-        Network("cube-top-highlights", center, top, top_edges, {"bottom": (1.0, 0.0)}, silhouette=center_boundary),
+        Network("cube-top-highlights", center, top, top_edges, {"bottom": (1.0, 0.0)}, silhouette=CUBE_SILHOUETTE),
     )
     return root, networks
+
+
+def open_frame_under_cube(root: etree._Element) -> None:
+    """Cut the cube's outline out of the frame, so a cube that turns shows the page behind it, not the frame's fill."""
+    frame = root.find(f".//{SVG}path[@id='structural-frame']")
+    xs, ys = zip(*CUBE_SILHOUETTE, strict=True)
+    center_x, center_y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    opening = [
+        (center_x + (x - center_x) * CUBE_OPENING_SCALE, center_y + (y - center_y) * CUBE_OPENING_SCALE)
+        for x, y in CUBE_SILHOUETTE
+    ]
+    frame.set("d", f"{frame.get('d')} {polygon(opening)}")
+    frame.set("fill-rule", "evenodd")

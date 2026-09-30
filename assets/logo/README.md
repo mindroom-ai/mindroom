@@ -22,6 +22,7 @@ It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus
 Each SVG also has a losslessly compressed `.svgz` copy.
 It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background.
 The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the static and animated M for small icons and the README.
+The `logo-mark-movable-cube.svg` export is the static framed mark with an opening in the frame under the central cube, for animations that move the cube.
 
 | File | Purpose |
 | --- | --- |
@@ -99,6 +100,12 @@ The transparent PNG matches the SVG render, and every opaque pixel matches the b
 The compact `logo-mark.svg` and `logo-mark-animated.svg` change only the viewport, keeping the original vector geometry and paint definitions intact.
 Both use the same 720-pixel square viewport with a small border, so the M fills more of its displayed area without jumping when the motion preference changes.
 Their regression tests check that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
+
+The frame is one filled polygon that also covers the area under the central cube, so a cube turned edge-on by an animation would reveal a navy slab.
+`logo-mark-movable-cube.svg` cuts the cube's outline out of the frame with an even-odd fill, inset 2% toward the cube's center so the cube still overlaps the frame's edge.
+MindRoom Chat's thinking marker turns the cube and copies this file verbatim.
+At rest the cube covers the opening, but a few antialiased pixels along the cube's thin inner seams show the page instead of the frame.
+The published icons keep the closed frame, so they are unaffected.
 
 Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
 The macOS appearance variants use `app-icon-light.svg` and `app-icon-dark.svg`, rendered to `macos/MindRoom/Resources/MindRoom.icon/Assets/` as 1024-pixel PNGs.
