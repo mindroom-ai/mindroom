@@ -67,6 +67,8 @@ import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.agno_compat_claude import (
+    BEDROCK_MAX_INLINE_MEDIA_BYTES,
+    MAX_INLINE_MEDIA_BYTES,
     request_kwargs_with_leading_tool_results,
     request_kwargs_with_supported_inline_media,
     request_kwargs_without_replayed_citations,
@@ -699,7 +701,14 @@ def prepare_claude_request_kwargs(
     prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
     prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_leading_tool_results(prepared_kwargs)
-    prepared_kwargs = request_kwargs_with_supported_inline_media(prepared_kwargs)
+    prepared_kwargs = request_kwargs_with_supported_inline_media(
+        prepared_kwargs,
+        max_inline_bytes=(
+            BEDROCK_MAX_INLINE_MEDIA_BYTES
+            if isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS)
+            else MAX_INLINE_MEDIA_BYTES
+        ),
+    )
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
         _model_deferred_tool_names(model),

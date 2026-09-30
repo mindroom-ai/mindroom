@@ -181,26 +181,33 @@ def request_kwargs_with_leading_tool_results(request_kwargs: dict[str, Any]) -> 
 # or .zip attachment fails the whole request with HTTP 400 ("document.source.
 # base64.media_type: Input should be 'application/pdf'") on every tool round.
 # Agno also never checks inline media against the provider's request body limit
-# (Vertex rejects Claude requests over 30 MB).
+# (Vertex rejects Claude requests over 30 MB, Bedrock over 20 MB).
 # Upstream issue: No matching issue identified; unsupported Claude document types are untracked.
 # Upstream PR: None identified.
 # Remove when: The pinned Agno Claude formatter keeps files Claude cannot read
 # inline out of document blocks; keep the size budget, which is a provider limit.
 # Coverage: tests/test_claude_inline_media.py::test_unsupported_documents_become_text_notes_while_pdf_stays_inline;
 # tests/test_claude_inline_media.py::test_vertex_claude_request_payload_describes_unsupported_documents;
-# tests/test_claude_inline_media.py::test_inline_media_past_the_request_size_budget_becomes_a_text_note.
+# tests/test_claude_inline_media.py::test_inline_media_past_the_request_size_budget_becomes_a_text_note;
+# tests/test_claude_inline_media.py::test_bedrock_uses_a_smaller_inline_media_budget_than_vertex.
 _BASE64_DOCUMENT_MEDIA_TYPE = "application/pdf"
-# Vertex rejects Claude requests over 30 MB and the direct API over 32 MB. Leave
-# room for the text, tools, and history around the inline base64 media.
-_MAX_INLINE_MEDIA_BYTES = 24_000_000
+# Vertex rejects Claude requests over 30 MB, the direct API over 32 MB, and
+# Bedrock over 20 MB. Leave room for the text, tools, and history around the
+# inline base64 media.
+MAX_INLINE_MEDIA_BYTES = 24_000_000
+BEDROCK_MAX_INLINE_MEDIA_BYTES = 16_000_000
 
 
-def request_kwargs_with_supported_inline_media(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+def request_kwargs_with_supported_inline_media(
+    request_kwargs: dict[str, Any],
+    *,
+    max_inline_bytes: int,
+) -> dict[str, Any]:
     """Replace inline media Claude would reject with a short text note.
 
     Base64 documents other than PDF are always replaced. Base64 images and PDFs
-    that would push the request's inline media past ``_MAX_INLINE_MEDIA_BYTES``
-    are replaced too, keeping earlier blocks. The input structure is never mutated.
+    that would push the request's inline media past ``max_inline_bytes`` are
+    replaced too, keeping earlier blocks. The input structure is never mutated.
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
@@ -214,7 +221,11 @@ def request_kwargs_with_supported_inline_media(request_kwargs: dict[str, Any]) -
         content = message_dict.get("content")
         if not isinstance(content, list):
             continue
-        prepared_content, inline_bytes = _content_with_supported_inline_media(content, inline_bytes)
+        prepared_content, inline_bytes = _content_with_supported_inline_media(
+            content,
+            inline_bytes,
+            max_inline_bytes,
+        )
         if prepared_content is None:
             continue
         if prepared_messages is None:
@@ -225,11 +236,15 @@ def request_kwargs_with_supported_inline_media(request_kwargs: dict[str, Any]) -
     return {**request_kwargs, "messages": prepared_messages}
 
 
-def _content_with_supported_inline_media(content: list[Any], inline_bytes: int) -> tuple[list[Any] | None, int]:
+def _content_with_supported_inline_media(
+    content: list[Any],
+    inline_bytes: int,
+    max_inline_bytes: int,
+) -> tuple[list[Any] | None, int]:
     """Return one turn's content with notes in place of rejected media, or None when unchanged."""
     prepared_content: list[Any] | None = None
     for block_index, block in enumerate(content):
-        note, inline_bytes = _inline_media_note(block, inline_bytes)
+        note, inline_bytes = _inline_media_note(block, inline_bytes, max_inline_bytes)
         if note is None:
             continue
         if prepared_content is None:
@@ -238,7 +253,11 @@ def _content_with_supported_inline_media(content: list[Any], inline_bytes: int) 
     return prepared_content, inline_bytes
 
 
-def _inline_media_note(block: object, inline_bytes: int) -> tuple[dict[str, str] | None, int]:
+def _inline_media_note(
+    block: object,
+    inline_bytes: int,
+    max_inline_bytes: int,
+) -> tuple[dict[str, str] | None, int]:
     """Return a note replacing one base64 media block, or the request's new inline byte total."""
     block_dict = _as_dict(block)
     source = _as_dict(block_dict.get("source")) if block_dict is not None else None
@@ -249,7 +268,7 @@ def _inline_media_note(block: object, inline_bytes: int) -> tuple[dict[str, str]
     data_bytes = len(source.get("data") or "")
     if kind == "document" and media_type != _BASE64_DOCUMENT_MEDIA_TYPE:
         reason = f"Claude reads only PDF and plain-text documents inline, not {media_type}"
-    elif inline_bytes + data_bytes > _MAX_INLINE_MEDIA_BYTES:
+    elif inline_bytes + data_bytes > max_inline_bytes:
         reason = (
             f"its {data_bytes / 1_000_000:.1f} MB inline payload would push the request past the provider's size limit"
         )
