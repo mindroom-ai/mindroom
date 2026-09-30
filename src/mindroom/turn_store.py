@@ -53,6 +53,9 @@ if TYPE_CHECKING:
     from mindroom.turn_policy import ResponseAction
 
 logger = get_logger(__name__)
+# Reconciliation compares every retained record on the event loop; hand the loop
+# back between batches so a large ledger does not stall other work.
+_RECONCILE_YIELD_EVERY = 256
 
 
 @dataclass(frozen=True)
@@ -163,7 +166,9 @@ class TurnStore:
 
     async def _reconcile_revision_tombstones(self, records: Iterable[TurnRecord]) -> None:
         """Close registration/tombstone crash windows for the relevant owners."""
-        for record in records:
+        for index, record in enumerate(records, start=1):
+            if index % _RECONCILE_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
             if self._sanitize_candidate(record) == record:
                 continue
             await self._ledger.update_handled_turn(
@@ -172,7 +177,9 @@ class TurnStore:
                     *(record.revision_replay or {}),
                     *(revision[1] for revision in (record.source_event_revisions or {}).values()),
                 ),
-                lambda existing, source=record.source_event_ids[0]: self._sanitize_candidate(existing[source]),
+                lambda existing, source=record.source_event_ids[0]: (
+                    self._sanitize_candidate(existing[source]) if source in existing else None
+                ),
             )
 
     def prepared_voice_for_source(self, source_event_id: str) -> PreparedVoiceSource | None:
@@ -209,8 +216,11 @@ class TurnStore:
         if self.get_turn_record(source_event_id) is None:
             return None
 
-        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord:
-            owner = existing[source_event_id]
+        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord | None:
+            # Retention may have evicted the owner while this waited for the write lock.
+            owner = existing.get(source_event_id)
+            if owner is None:
+                return None
             replay = dict(owner.revision_replay or {})
             replay.setdefault(
                 revision[1],
@@ -237,8 +247,10 @@ class TurnStore:
         if not replay or self.get_turn_record(source_event_id) is None:
             return
 
-        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord:
-            owner = existing[source_event_id]
+        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord | None:
+            owner = existing.get(source_event_id)
+            if owner is None:
+                return None
             return self._sanitize_candidate(
                 canonicalize_turn_record(
                     owner,

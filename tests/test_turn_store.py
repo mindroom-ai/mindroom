@@ -6,6 +6,7 @@ import ast
 import asyncio
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -801,6 +802,76 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
     assert record.response_owner == "agent"
     assert record.conversation_target == target
     assert record.history_scope is None
+
+
+@pytest.mark.asyncio
+async def test_edit_registration_behind_cleanup_treats_the_evicted_record_as_missing(
+    journal_store: EventJournalStore,
+) -> None:
+    """An edit that saw a record before cleanup evicted it must take the missing-record path."""
+    store = await _store(journal_store)
+    ledger = store._ledger
+    await ledger.record_handled_turn(TurnRecord.create(["$old"], timestamp=time.time() - 40 * 24 * 60 * 60))
+    forgetting = asyncio.Event()
+    release = asyncio.Event()
+    forget = TurnRecordStore.forget
+
+    async def held_forget(records: TurnRecordStore, **kwargs: Sequence[str]) -> None:
+        forgetting.set()
+        await release.wait()
+        await forget(records, **kwargs)
+
+    with patch.object(TurnRecordStore, "forget", held_forget):
+        cleanup = asyncio.create_task(store.cleanup())
+        await asyncio.wait_for(forgetting.wait(), timeout=1.0)
+        registration = asyncio.create_task(store.register_edit_revision("$old", (20, "$edit")))
+        await asyncio.sleep(0)
+        assert not registration.done(), "the edit saw the record and now waits behind cleanup"
+        release.set()
+        await cleanup
+
+    assert await registration is None
+    assert store.get_turn_record("$old") is None
+
+
+@pytest.mark.asyncio
+async def test_tombstone_reconciliation_skips_a_record_evicted_since_its_snapshot(
+    journal_store: EventJournalStore,
+) -> None:
+    """Reconciliation works from a snapshot, so an owner may be gone by the time it holds the lock."""
+    store = await _store(journal_store)
+    evicted = TurnRecord.create(["$evicted"])
+
+    with patch.object(store, "_sanitize_candidate", side_effect=lambda candidate: replace(candidate, timestamp=1.0)):
+        await store._reconcile_revision_tombstones((evicted,))
+
+    assert store.get_turn_record("$evicted") is None
+
+
+@pytest.mark.asyncio
+async def test_tombstone_reconciliation_yields_to_the_event_loop(journal_store: EventJournalStore) -> None:
+    """Reconciling a large ledger must not hold the event loop for the whole pass."""
+    store = await _store(journal_store)
+    records = tuple(TurnRecord.create([f"$source{index}"]) for index in range(2_000))
+    probe_ran = False
+    probe_seen_by_last_record: list[bool] = []
+    sanitize = store._sanitize_candidate
+
+    async def probe() -> None:
+        nonlocal probe_ran
+        probe_ran = True
+
+    def observed_sanitize(candidate: TurnRecord, authority: TurnRecord | None = None) -> TurnRecord:
+        if candidate is records[-1]:
+            probe_seen_by_last_record.append(probe_ran)
+        return sanitize(candidate, authority)
+
+    probe_task = asyncio.create_task(probe())
+    with patch.object(store, "_sanitize_candidate", side_effect=observed_sanitize):
+        await store._reconcile_revision_tombstones(records)
+    await probe_task
+
+    assert probe_seen_by_last_record == [True]
 
 
 @pytest.mark.asyncio

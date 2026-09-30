@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from contextvars import Context
 from dataclasses import replace
@@ -453,7 +454,10 @@ class AgentBot:
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_projection_progress = asyncio.Event()
         self._delivery_recovery_task = None
-        self._next_handled_turn_cleanup_at = time.monotonic() + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS
+        # Jitter the first pass so bots started together do not all prune at once.
+        self._next_handled_turn_cleanup_at = time.monotonic() + _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS * (
+            1.0 + random.random()  # noqa: S311
+        )
         self._ingestion_session = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_join_lock = asyncio.Lock()
