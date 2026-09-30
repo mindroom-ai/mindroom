@@ -5,7 +5,7 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 ## CRITICAL Initialization
 
 1. Read README (agent rules, threading, commands).
-2. Read the development guide (`CLAUDE.md`).
+2. Read the development guide (`AGENTS.md`).
 3. Inspect the active config (`config.yaml` or equivalent).
 4. Activate the venv and confirm the chat client can list rooms/users.
 

@@ -204,55 +204,6 @@ def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
     assert runtime_paths.storage_root == storage_path.resolve()
 
 
-def test_ensure_config_agent_docs_copies_when_symlinks_unavailable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without symlink support, CLAUDE.md becomes a plain copy of AGENTS.md."""
-
-    def _unsupported_symlink(*_args: object, **_kwargs: object) -> None:
-        message = "symlinks unsupported"
-        raise OSError(message)
-
-    monkeypatch.setattr(Path, "symlink_to", _unsupported_symlink)
-    created = ensure_config_agent_docs(
-        tmp_path,
-        config_path=tmp_path / "config.yaml",
-        storage_root=tmp_path / "mindroom_data",
-    )
-
-    claude_doc = tmp_path / "CLAUDE.md"
-    assert not claude_doc.is_symlink()
-    assert claude_doc.read_text(encoding="utf-8") == (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
-    assert created == [tmp_path / "AGENTS.md", claude_doc]
-
-
-def test_ensure_config_agent_docs_copy_mirrors_preserved_agents_doc(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The no-symlink fallback copies preserved user AGENTS.md content, not the template."""
-
-    def _unsupported_symlink(*_args: object, **_kwargs: object) -> None:
-        message = "symlinks unsupported"
-        raise OSError(message)
-
-    monkeypatch.setattr(Path, "symlink_to", _unsupported_symlink)
-    agents_doc = tmp_path / "AGENTS.md"
-    agents_doc.write_text("custom agents notes\n", encoding="utf-8")
-
-    created = ensure_config_agent_docs(
-        tmp_path,
-        config_path=tmp_path / "config.yaml",
-        storage_root=tmp_path / "mindroom_data",
-    )
-
-    claude_doc = tmp_path / "CLAUDE.md"
-    assert agents_doc.read_text(encoding="utf-8") == "custom agents notes\n"
-    assert claude_doc.read_text(encoding="utf-8") == "custom agents notes\n"
-    assert created == [claude_doc]
-
-
 def test_ensure_config_agent_docs_force_replaces_agents_symlink_without_clobbering_target(
     tmp_path: Path,
 ) -> None:
@@ -413,16 +364,14 @@ class TestConfigInit:
         assert f"- Active config file: {json.dumps(str(target.resolve()))}" in tools_notes
 
     def test_init_creates_agent_rescue_docs(self, tmp_path: Path) -> None:
-        """Config init seeds AGENTS.md plus a CLAUDE.md symlink for repair agents."""
+        """Config init seeds AGENTS.md for repair agents."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
 
         agents_doc = tmp_path / "AGENTS.md"
-        claude_doc = tmp_path / "CLAUDE.md"
         assert agents_doc.is_file()
-        assert claude_doc.is_symlink()
-        assert claude_doc.readlink() == Path("AGENTS.md")
+        assert not (tmp_path / "CLAUDE.md").exists()
 
         content = agents_doc.read_text(encoding="utf-8")
         assert "https://docs.mindroom.chat/" in content
@@ -439,47 +388,37 @@ class TestConfigInit:
         assert "mindroom service restart" in content
         assert "`config.yaml`" in content
         assert str((tmp_path / "mindroom_data").resolve()) in content
-        assert claude_doc.read_text(encoding="utf-8") == content
         assert "Agent docs created" in normalize_console_output(result.output)
 
     def test_init_preserves_existing_agent_docs_without_force(self, tmp_path: Path) -> None:
-        """Config init must not clobber user-authored AGENTS.md or CLAUDE.md."""
+        """Config init must not clobber a user-authored AGENTS.md."""
         target = tmp_path / "config.yaml"
         agents_doc = tmp_path / "AGENTS.md"
-        claude_doc = tmp_path / "CLAUDE.md"
         agents_doc.write_text("custom agents notes\n", encoding="utf-8")
-        claude_doc.write_text("custom claude notes\n", encoding="utf-8")
 
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
         assert agents_doc.read_text(encoding="utf-8") == "custom agents notes\n"
-        assert claude_doc.read_text(encoding="utf-8") == "custom claude notes\n"
-        assert not claude_doc.is_symlink()
 
     def test_init_force_replaces_agent_docs(self, tmp_path: Path) -> None:
-        """Config init --force regenerates the agent docs and restores the symlink."""
+        """Config init --force regenerates the agent docs."""
         target = tmp_path / "config.yaml"
         agents_doc = tmp_path / "AGENTS.md"
-        claude_doc = tmp_path / "CLAUDE.md"
         agents_doc.write_text("stale\n", encoding="utf-8")
-        claude_doc.write_text("stale\n", encoding="utf-8")
 
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai", "--force"])
         assert result.exit_code == 0
         assert "# MindRoom Configuration" in agents_doc.read_text(encoding="utf-8")
-        assert claude_doc.is_symlink()
-        assert claude_doc.readlink() == Path("AGENTS.md")
 
-    def test_init_rerun_keeps_agent_docs_symlink(self, tmp_path: Path) -> None:
-        """A second config init leaves the seeded docs and symlink in place."""
+    def test_init_rerun_keeps_agent_docs(self, tmp_path: Path) -> None:
+        """A second config init leaves the seeded docs in place."""
         target = tmp_path / "config.yaml"
         first = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert first.exit_code == 0
 
         second = runner.invoke(app, ["config", "init", "--path", str(target), "--no-input"])
         assert second.exit_code == 0
-        claude_doc = tmp_path / "CLAUDE.md"
-        assert claude_doc.is_symlink()
+        assert (tmp_path / "AGENTS.md").is_file()
         assert "Agent docs created" not in normalize_console_output(second.output)
 
     def test_init_respects_storage_path_override(

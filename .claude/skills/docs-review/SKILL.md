@@ -63,7 +63,7 @@ Check:
 git ls-files "src/mindroom/**/*.py"
 ```
 
-Check `docs/architecture/` and the Architecture section of `CLAUDE.md`:
+Check `docs/architecture/` and the Architecture section of `AGENTS.md`:
 - Listed modules exist and descriptions match what the code does
 - No source modules are missing from the listings
 - Both locations can drift independently — check both
@@ -90,9 +90,9 @@ For examples in any doc:
 
 ### 6. Cross-Reference Consistency
 
-The same info appears in multiple places. Check for conflicts between README.md, `docs/`, and `CLAUDE.md`.
+The same info appears in multiple places. Check for conflicts between README.md, `docs/`, and `AGENTS.md`.
 
-Also verify that script paths and file references in CLAUDE.md and `docs/deployment/` match the actual filesystem layout.
+Also verify that script paths and file references in AGENTS.md and `docs/deployment/` match the actual filesystem layout.
 
 ### 6b. Verify Deployment Docs
 

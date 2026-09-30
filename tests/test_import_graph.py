@@ -9,7 +9,7 @@ Two guards keep import-time regressions from creeping back:
    mcp SDK, which the primary runtime genuinely needs at boot.
 2. A third-party allowlist: each slim entry point may only load the
    third-party packages it loads today. Any new package in the graph fails
-   loudly — either defer the import (see the CLAUDE.md import rule) or extend
+   loudly — either defer the import (see the AGENTS.md import rule) or extend
    the allowlist as a conscious, reviewed decision. The orchestrator uses the
    narrower heavy-optional-dependency ban because its core boot graph is large.
 
@@ -238,7 +238,7 @@ def test_slim_entry_point_import_contract(module: str) -> None:
     unexpected = sorted(third_party - _ALLOWED_THIRD_PARTY_ROOTS[module])
     assert not unexpected, (
         f"importing {module} now loads third-party packages not in its allowlist: {unexpected}. "
-        "Defer the import to first use (see the CLAUDE.md function-level import rule), "
+        "Defer the import to first use (see the AGENTS.md function-level import rule), "
         "or extend the allowlist here if the dependency is genuinely needed at import time."
     )
 

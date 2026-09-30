@@ -319,7 +319,7 @@ The `saas-platform/` directory contains infrastructure specific to running MindR
 ## Contributing
 
 We welcome contributions!
-See [CLAUDE.md](CLAUDE.md) for the current development workflow and quality checks.
+See [AGENTS.md](AGENTS.md) for the current development workflow and quality checks.
 
 ## License
 

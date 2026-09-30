@@ -5,7 +5,7 @@ For each weakness, connect the observed behavior, an upstream issue or PR, local
 Focused `agno_compat_<subject>.py` modules help isolate substantive workarounds; small adaptations can stay beside their owners when that makes the upstream gap clearer.
 Each workaround documents its reason, verified upstream issue/PR or explicit tracking gap, removal condition, and behavioral tests in source comments.
 Each comment starts with `# AGNO_COMPAT: <short description of the upstream weakness>`, once per independently removable workaround, including small adaptations kept beside their owners.
-The maintenance policy lives in `AGENTS.md` through its `CLAUDE.md` target.
+The maintenance policy lives in `AGENTS.md`.
 
 Find all documented workarounds and their summaries:
 

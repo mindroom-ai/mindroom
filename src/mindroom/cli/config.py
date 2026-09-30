@@ -638,14 +638,14 @@ def _write_starter_setup(
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), config_path=target, force=force)
 
-    created_docs = ensure_config_agent_docs(
+    created_doc = ensure_config_agent_docs(
         target.parent,
         config_path=target,
         storage_root=storage_root,
         force=force,
     )
-    if created_docs:
-        console.print(f"[green]Agent docs created:[/green] {', '.join(doc.name for doc in created_docs)}")
+    if created_doc is not None:
+        console.print(f"[green]Agent docs created:[/green] {created_doc.name}")
 
     if keep_existing_config:
         console.print(f"[green]Config unchanged:[/green] {target}")

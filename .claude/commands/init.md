@@ -37,7 +37,7 @@ Read and understand the MindRoom project structure:
 
 1. **Read Core Documentation**
    - Full README.md for project purpose and architecture
-   - CLAUDE.md for development guidelines and workflow
+   - AGENTS.md for development guidelines and workflow
 
 2. **Code Structure**
    - Main bot: `src/mindroom/bot.py`
@@ -68,7 +68,7 @@ Read and understand the MindRoom project structure:
      - Use dataclasses over dictionaries
      - Keep it DRY - aggressively remove unused code
      - Don't wrap in try-except unless necessary
-     - Keep imports at file top; function imports may avoid cycles or defer heavy/optional dependencies until first use, following [CLAUDE.md](../../CLAUDE.md#1-core-philosophy)
+     - Keep imports at file top; function imports may avoid cycles or defer heavy/optional dependencies until first use, following [AGENTS.md](../../AGENTS.md#1-core-philosophy)
      - Keep deferred imports explicit (`from x import Y`) with `# noqa: PLC0415` where needed, and preserve the `tests/test_import_graph.py` contract
 
 4. **Architecture**
@@ -99,4 +99,4 @@ Read and understand the MindRoom project structure:
    - Check `!thread_mode show` and configured `thread_mode` / `room_thread_modes`, then inspect replies and continue in the matching room or thread
    - The room override wins over configured modes; inspect actual event relations for per-turn and trusted automation exceptions
    - Use @mentions to get agent attention
-   - See CLAUDE.md section 4 for detailed Matty usage
+   - See AGENTS.md section 4 for detailed Matty usage

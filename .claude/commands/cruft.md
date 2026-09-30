@@ -18,13 +18,13 @@ argument-hint: [file_or_directory]
 - Leave all other code untouched, even if it has cruft
 
 ## Review Target
-Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy from CLAUDE.md:
+Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy from AGENTS.md:
 
 ## MANDATORY Principles to Enforce:
 
 ### 1. Remove Obsolete Compatibility
 - Remove unjustified fallback paths, compatibility shims, version checks, and deprecated methods
-- Preserve required boundaries under the [Legacy Compatibility Policy](../../CLAUDE.md#legacy-compatibility-policy) and [Agno Compatibility Policy](../../CLAUDE.md#agno-compatibility-policy)
+- Preserve required boundaries under the [Legacy Compatibility Policy](../../AGENTS.md#legacy-compatibility-policy) and [Agno Compatibility Policy](../../AGENTS.md#agno-compatibility-policy)
 - Check documented provenance, removal criteria, and regression coverage before deleting a boundary; remove Agno workarounds only when the relevant behavioral tests pass without them
 - One way to do things, not multiple
 
@@ -35,7 +35,7 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 - **No defensive programming**: Assume correct usage - no redundant checks
 
 ### 3. Code Hygiene
-- **Imports at the top**: Function imports may avoid cycles or defer heavy/optional dependencies until first use, as required by [CLAUDE.md](../../CLAUDE.md#1-core-philosophy)
+- **Imports at the top**: Function imports may avoid cycles or defer heavy/optional dependencies until first use, as required by [AGENTS.md](../../AGENTS.md#1-core-philosophy)
 - Keep deferred imports explicit (`from x import Y`) with `# noqa: PLC0415` where needed, and preserve the `tests/test_import_graph.py` contract
 - **No unnecessary try-except**: Only catch what can actually fail
 - **Remove unused code**: Functions, imports, variables - delete ruthlessly
@@ -64,7 +64,7 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 ## Action Items (ONLY for files in the current diff):
 
 1. **Check scope first** - Is this file in `git diff origin/main`? If NO, STOP.
-2. Read and apply ALL principles from CLAUDE.md
+2. Read and apply ALL principles from AGENTS.md
 3. Identify cruft ONLY in the current feature's code
 4. Propose deletions, not additions
 5. Simplify complex patterns to basic functions

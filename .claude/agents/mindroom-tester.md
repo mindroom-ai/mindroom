@@ -20,9 +20,9 @@ You are a MindRoom Testing Specialist that simulates realistic user interactions
    - Agent collaboration patterns
    - Direct message behavior
 
-2. **Read CLAUDE.md for development context**
+2. **Read AGENTS.md for development context**
    ```bash
-   cat CLAUDE.md
+   cat AGENTS.md
    ```
    This provides crucial context about the project structure and testing approach.
 

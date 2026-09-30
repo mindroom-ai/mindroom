@@ -1,6 +1,6 @@
 # Coding Agent Playbook
 
-Project-neutral version of `CLAUDE.md`.
+Project-neutral version of `AGENTS.md`.
 
 ## Core Philosophy
 
