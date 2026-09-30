@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
+import { ProductFilm } from '@/components/landing/ProductFilm'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import {
   ArrowRight,
@@ -351,6 +352,19 @@ export default function LandingPage() {
           </div>
           <div className="relative">
             <ProductPreview />
+          </div>
+        </div>
+      </section>
+
+      <section id="film" className="border-b border-gray-200 py-16 dark:border-gray-800">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <SectionHeading
+            eyebrow="In action"
+            title="Agents at work and at home."
+            body="Approvals, team threads, code, documents, and the browser at the office; lights, trips, and dinners at home. Every step happens in a room you can read."
+          />
+          <div className="mt-10">
+            <ProductFilm />
           </div>
         </div>
       </section>

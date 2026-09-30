@@ -9,6 +9,10 @@ jest.mock('@/components/DarkModeToggle', () => ({
   DarkModeToggle: () => <button type="button">Toggle dark mode</button>,
 }))
 
+jest.mock('@/hooks/useDarkMode', () => ({
+  useDarkMode: () => ({ isDarkMode: false }),
+}))
+
 describe('LandingPage', () => {
   it('links to the public documentation', () => {
     render(<LandingPage />)
@@ -30,5 +34,12 @@ describe('LandingPage', () => {
     expect(screen.getByText('$15 included monthly AI usage')).toBeInTheDocument()
     expect(screen.getByText('$150 included monthly AI usage')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Teams' })).not.toBeInTheDocument()
+  })
+
+  it('shows the product film below the hero', () => {
+    render(<LandingPage />)
+
+    expect(screen.getByRole('heading', { name: 'Agents at work and at home.' })).toBeInTheDocument()
+    expect(screen.getByLabelText('MindRoom product film')).toHaveAttribute('controls')
   })
 })

@@ -21,7 +21,7 @@ You define agents in a YAML file or in the web dashboard; MindRoom gives each on
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
 
-https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
+https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
 
 ## Features
 
