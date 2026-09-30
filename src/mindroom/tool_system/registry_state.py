@@ -171,8 +171,8 @@ def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
         active_plugins,
         _PLUGIN_TOOL_METADATA_BY_MODULE,
     )
-    # The MCP registry reconciles its own entries. Keep them here so lookups
-    # running in other threads never see a registry without MCP tools.
+    # The MCP registry reconciles its own entries. Keep them here so plugin sync
+    # never leaves lookups in other threads without MCP tools.
     for tool_name, factory in TOOL_REGISTRY.copy().items():
         if getattr(factory, MCP_TOOL_FACTORY_MARKER, False) and tool_name not in desired_metadata:
             desired_registry[tool_name] = factory
